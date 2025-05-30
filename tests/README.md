@@ -7,7 +7,7 @@ This directory contains async unit tests for the Routstr proxy FastAPI applicati
 First, ensure you have the development dependencies installed:
 
 ```bash
-uv pip install -e ".[dev]"
+'uv pip install --group dev'
 ```
 
 ## Running Tests

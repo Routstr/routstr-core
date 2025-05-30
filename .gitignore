@@ -1,11 +1,24 @@
+# Python cache
 __pycache__
+
+# Environment file
 .env
+
+# Databases
 keys.db
 wallet.sqlite3
 
-# Development 
+## Development artifacts
 .notes
+.coverage
+
+# Ignore backup/temporary DB files
 .*keys.db
 .*wallet.sqlite3
 .*models.json
+
+# Docker override file (local dev only)
 compose.override.yml
+
+# Metadata directory for editable Python installs
+*.egg-info/
