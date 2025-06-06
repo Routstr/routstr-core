@@ -3,6 +3,7 @@ import hashlib
 import os
 import json
 from typing import Optional
+import logging
 
 
 from fastapi import HTTPException, Request
@@ -10,6 +11,8 @@ from fastapi import HTTPException, Request
 from .cashu import credit_balance, pay_out
 from .db import ApiKey, AsyncSession
 from .models import MODELS
+
+logger = logging.getLogger(__name__)
 
 COST_PER_REQUEST = (
     int(os.environ.get("COST_PER_REQUEST", "1")) * 1000
@@ -76,7 +79,7 @@ async def validate_bearer_key(
             await session.refresh(new_key)
             return new_key
         except Exception as e:
-            print(f"Redemption failed: {e}")
+            logger.error("Redemption failed: %s", e)
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -173,7 +176,7 @@ async def adjust_payment_for_tokens(
 
     # Check if we have usage data
     if "usage" not in response_data or response_data["usage"] is None:
-        print("No usage data in response, using base cost only")
+        logger.info("No usage data in response, using base cost only")
         return cost_data
 
     # Default to configured pricing
@@ -235,8 +238,9 @@ async def adjust_payment_for_tokens(
     if cost_difference > 0:
         # Need to charge more
         if key.balance < cost_difference:
-            print(
-                f"Warning: Insufficient balance for token-based pricing adjustment: {key.hashed_key[:10]}..."
+            logger.warning(
+                "Insufficient balance for token-based pricing adjustment: %s...",
+                key.hashed_key[:10],
             )
             # Still proceed but log the issue - we already provided the service
             # Add information about insufficient balance to cost data

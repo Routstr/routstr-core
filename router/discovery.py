@@ -7,8 +7,11 @@ import string
 import re
 import httpx
 import os
+import logging
 
 providers_router = APIRouter(prefix="/v1/providers")
+
+logger = logging.getLogger(__name__)
 
 
 def generate_subscription_id() -> str:
@@ -68,7 +71,7 @@ async def query_nostr_relay_with_search(
 
     try:
         async with websockets.connect(relay_url, timeout=timeout) as websocket:
-            print(f"Connected to relay, sending request with filter: {filter_obj}")
+            logger.info("Connected to relay, sending request with filter: %s", filter_obj)
             await websocket.send(req_message)
 
             while True:
@@ -80,36 +83,36 @@ async def query_nostr_relay_with_search(
                         # For tag-based search, also check content
                         if search_term.startswith("nostr:npub"):
                             if search_term.lower() in data[2]["content"].lower():
-                                print(f"Found matching event: {data[2]['id']}")
+                                logger.info("Found matching event: %s", data[2]['id'])
                                 events.append(data[2])
                         else:
-                            print(f"Found matching event: {data[2]['id']}")
+                            logger.info("Found matching event: %s", data[2]['id'])
                             events.append(data[2])
                     elif data[0] == "EOSE" and data[1] == sub_id:
-                        print("Received EOSE message")
+                        logger.info("Received EOSE message")
                         break
                     elif data[0] == "NOTICE":
-                        print(f"Relay notice: {data[1]}")
+                        logger.info("Relay notice: %s", data[1])
                         # If search not supported, could break and try different approach
                         if "unrecognised filter item" in data[1] and "search" in str(
                             filter_obj
                         ):
-                            print("Search not supported on this relay")
+                            logger.info("Search not supported on this relay")
                             break
 
                 except asyncio.TimeoutError:
-                    print("Timeout waiting for message")
+                    logger.warning("Timeout waiting for message")
                     break
                 except json.JSONDecodeError:
-                    print("Failed to decode message as JSON")
+                    logger.error("Failed to decode message as JSON")
                     continue
 
             await websocket.send(json.dumps(["CLOSE", sub_id]))
 
     except Exception as e:
-        print(f"Query failed: {e}")
+        logger.error("Query failed: %s", e)
 
-    print(f"Query complete. Found {len(events)} matching events")
+    logger.info("Query complete. Found %s matching events", len(events))
     return events
 
 
@@ -157,7 +160,7 @@ async def get_providers(include_json: bool = False):
 
     # Try multiple relays
     for relay_url in search_relays:
-        print(f"\nTrying relay: {relay_url}")
+        logger.info("\nTrying relay: %s", relay_url)
         try:
             events = await query_nostr_relay_with_search(
                 search_term=search_term,
@@ -172,17 +175,17 @@ async def get_providers(include_json: bool = False):
                     event_ids.add(event["id"])
                     all_events.append(event)
 
-            print(f"Got {len(events)} events from {relay_url}")
+            logger.info("Got %s events from %s", len(events), relay_url)
 
             # If we have enough events, we can stop
             if len(all_events) >= 100:
                 break
 
         except Exception as e:
-            print(f"Failed to query {relay_url}: {e}")
+            logger.error("Failed to query %s: %s", relay_url, e)
             continue
 
-    print(f"Found {len(all_events)} total unique events mentioning routstr")
+    logger.info("Found %s total unique events mentioning routstr", len(all_events))
 
     providers = []
     for event in all_events:
@@ -191,8 +194,8 @@ async def get_providers(include_json: bool = False):
 
     unique_providers = list(set(providers))
 
-    print(f"Found {len(unique_providers)} unique onion URLs")
-    print(unique_providers)
+    logger.info("Found %s unique onion URLs", len(unique_providers))
+    logger.info("%s", unique_providers)
 
     healthy_providers: list[dict | str] = []
     for provider in unique_providers:

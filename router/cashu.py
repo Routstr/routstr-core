@@ -1,10 +1,13 @@
 import os
 import asyncio
 import time
+import logging
 
 from sixty_nuts import Wallet
 from sqlmodel import select, func, col
 from .db import ApiKey, AsyncSession, get_session
+
+logger = logging.getLogger(__name__)
 
 
 RECEIVE_LN_ADDRESS = os.environ["RECEIVE_LN_ADDRESS"]
@@ -48,8 +51,10 @@ async def pay_out() -> None:
 
             # Handle edge cases more gracefully
             if wallet_balance_sats < user_balance_sats:
-                print(
-                    f"Warning: Wallet balance ({wallet_balance_sats} sats) is less than user balance ({user_balance_sats} sats). Skipping payout."
+                logger.warning(
+                    "Wallet balance (%s sats) is less than user balance (%s sats). Skipping payout.",
+                    wallet_balance_sats,
+                    user_balance_sats,
                 )
                 return
 
@@ -66,7 +71,7 @@ async def pay_out() -> None:
 
     except Exception as e:
         # Log the error but don't crash - payouts can be retried later
-        print(f"Error in pay_out: {e}")
+        logger.error("Error in pay_out: %s", e)
 
 
 async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -> int:
@@ -89,7 +94,7 @@ async def check_for_refunds() -> None:
     """
     # Setting REFUND_PROCESSING_INTERVAL to 0 disables it
     if REFUND_PROCESSING_INTERVAL == 0:
-        print("Automatic refund processing is disabled.")
+        logger.info("Automatic refund processing is disabled.")
         return
 
     while True:
@@ -105,16 +110,18 @@ async def check_for_refunds() -> None:
                         and key.key_expiry_time
                         and key.key_expiry_time < current_time
                     ):
-                        print(
-                            f"       DEBUG   Refunding key {key.hashed_key[:3] + '[...]' + key.hashed_key[-3:]}, Current Time: {current_time}, Expirary Time: {key.key_expiry_time}",
-                            flush=True,
+                        logger.info(
+                            "       DEBUG   Refunding key %s, Current Time: %s, Expirary Time: %s",
+                            key.hashed_key[:3] + "[...]" + key.hashed_key[-3:],
+                            current_time,
+                            key.key_expiry_time,
                         )
                         await refund_balance(key.balance, key, session)
 
             # Sleep for the specified interval before checking again
             await asyncio.sleep(REFUND_PROCESSING_INTERVAL)
         except Exception as e:
-            print(f"Error during refund check: {e}")
+            logger.error("Error during refund check: %s", e)
 
 
 async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) -> int:

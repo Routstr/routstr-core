@@ -1,8 +1,11 @@
 import asyncio
 import json
+import logging
 from pydantic.v1 import BaseModel
 
 from .price import sats_usd_ask_price
+
+logger = logging.getLogger(__name__)
 
 
 class Architecture(BaseModel):
@@ -68,5 +71,5 @@ async def update_sats_pricing() -> None:
                     ir = model.sats_pricing.internal_reasoning * 100
                     model.sats_pricing.max_cost = p + c + r + i + w + ir
         except Exception as e:
-            print(e)
+            logger.error("%s", e)
         await asyncio.sleep(10)

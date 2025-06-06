@@ -169,16 +169,7 @@ async def test_update_sats_pricing_handles_errors():
     with patch("router.models.sats_usd_ask_price", new_callable=AsyncMock) as mock_price:
         mock_price.side_effect = Exception("API Error")
         
-        error_printed = False
-        original_print = print
-        
-        def mock_print(*args, **kwargs):
-            nonlocal error_printed
-            if args and isinstance(args[0], Exception) and str(args[0]) == "API Error":
-                error_printed = True
-            original_print(*args, **kwargs)
-        
-        with patch("builtins.print", side_effect=mock_print):
+        with patch("router.models.logger.error") as mock_log_error:
             sleep_called = asyncio.Event()
             
             async def mock_sleep(duration):
@@ -190,8 +181,8 @@ async def test_update_sats_pricing_handles_errors():
                     task = asyncio.create_task(update_sats_pricing())
                     await sleep_called.wait()
                     
-                    # Verify error was printed
-                    assert error_printed
+                    # Verify error was logged
+                    mock_log_error.assert_called()
                     
                     # Cancel and await the task
                     task.cancel()

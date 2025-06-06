@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from fastapi.responses import Response, StreamingResponse
 import httpx
@@ -9,6 +10,8 @@ from .cashu import pay_out
 
 from .auth import validate_bearer_key, pay_for_request, adjust_payment_for_tokens
 from .db import AsyncSession, get_session
+
+logger = logging.getLogger(__name__)
 
 UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
@@ -194,7 +197,7 @@ async def proxy(
                                     continue
 
                         except Exception as e:
-                            print(f"Error processing streaming response for cost: {e}")
+                            logger.error("Error processing streaming response for cost: %s", e)
 
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
@@ -229,9 +232,9 @@ async def proxy(
                         media_type="application/json",
                     )
                 except json.JSONDecodeError as e:
-                    print(f"Failed to parse JSON from upstream response: {e}")
+                    logger.error("Failed to parse JSON from upstream response: %s", e)
                 except Exception as e:
-                    print(f"Error adjusting payment for tokens: {e}")
+                    logger.error("Error adjusting payment for tokens: %s", e)
                 finally:
                     await response.aclose()
                     await client.aclose()
@@ -253,10 +256,15 @@ async def proxy(
         await client.aclose()
         error_type = type(exc).__name__
         error_details = str(exc)
-        print(
-            f"Error forwarding request to upstream: {error_type}: {error_details}\n"
-            f"Request details: method={request.method}, url={url}, headers={headers}, "
-            f"path={path}, query_params={dict(request.query_params)}"
+        logger.error(
+            "Error forwarding request to upstream: %s: %s\nRequest details: method=%s, url=%s, headers=%s, path=%s, query_params=%s",
+            error_type,
+            error_details,
+            request.method,
+            url,
+            headers,
+            path,
+            dict(request.query_params),
         )
 
         # Provide more specific error messages based on the error type
@@ -287,11 +295,15 @@ async def proxy(
         import traceback
 
         tb = traceback.format_exc()
-        print(
-            f"Unexpected error: {exc}\n"
-            f"Request details: method={request.method}, url={url}, headers={headers}, "
-            f"path={path}, query_params={dict(request.query_params)}\n"
-            f"Traceback:\n{tb}"
+        logger.error(
+            "Unexpected error: %s\nRequest details: method=%s, url=%s, headers=%s, path=%s, query_params=%s\nTraceback:\n%s",
+            exc,
+            request.method,
+            url,
+            headers,
+            path,
+            dict(request.query_params),
+            tb,
         )
         return Response(
             content=json.dumps(
