@@ -168,7 +168,7 @@ async def test_update_sats_pricing_handles_errors():
     """Test that update_sats_pricing handles errors gracefully."""
     with patch("router.models.sats_usd_ask_price", new_callable=AsyncMock) as mock_price:
         mock_price.side_effect = Exception("API Error")
-        
+
         with patch("router.models.logger.error") as mock_log_error:
             sleep_called = asyncio.Event()
             

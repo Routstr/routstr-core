@@ -71,5 +71,5 @@ async def update_sats_pricing() -> None:
                     ir = model.sats_pricing.internal_reasoning * 100
                     model.sats_pricing.max_cost = p + c + r + i + w + ir
         except Exception as e:
-            logger.error("%s", e)
+            logger.error("Error updating sats pricing: %s", e)
         await asyncio.sleep(10)
