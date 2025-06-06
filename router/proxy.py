@@ -3,7 +3,6 @@ import json
 from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from fastapi.responses import Response, StreamingResponse
 import httpx
-import re
 
 from .cashu import pay_out
 
