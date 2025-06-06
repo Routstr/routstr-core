@@ -207,6 +207,16 @@ async def test_proxy_streaming_response(
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/event-stream"
 
+        # Verify a cost event was appended
+        events = [e for e in response.content.split(b"\n\n") if e]
+        assert len(events) == len(stream_chunks) + 1
+
+        cost_event = events[-1]
+        assert cost_event.startswith(b"data: ")
+        cost_payload = json.loads(cost_event[len(b"data: ") :])
+        assert "cost" in cost_payload
+        assert cost_payload["cost"]["total_msats"] >= 0
+
 
 @pytest.mark.asyncio
 async def test_proxy_handles_upstream_errors(

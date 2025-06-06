@@ -145,56 +145,58 @@ async def proxy(
             is_streaming = "text/event-stream" in content_type
 
             if is_streaming and response.status_code == 200:
-                # Process streaming response and extract cost from the last chunk
+                # Process streaming response and extract cost incrementally
                 async def stream_with_cost():
-                    # Store all chunks to analyze
-                    stored_chunks = []
+                    # Buffer for partial SSE events
+                    buffer = b""
+                    cost_event: bytes | None = None
 
                     async for chunk in response.aiter_bytes():
-                        # Store chunk for later analysis
-                        stored_chunks.append(chunk)
+                        buffer += chunk
+
+                        # Parse complete SSE events from buffer
+                        while b"\n\n" in buffer:
+                            event, buffer = buffer.split(b"\n\n", 1)
+                            event_stripped = event.strip()
+
+                            if (
+                                not event_stripped
+                                or event_stripped == b"data: [DONE]"
+                                or cost_event is not None
+                            ):
+                                continue
+
+                            if event_stripped.startswith(b"data:"):
+                                event_data = event_stripped[len(b"data:") :].strip()
+                            else:
+                                event_data = event_stripped
+
+                            try:
+                                data = json.loads(event_data)
+                            except json.JSONDecodeError:
+                                continue
+
+                            if (
+                                "usage" in data
+                                and data["usage"] is not None
+                                and isinstance(data["usage"], dict)
+                            ):
+                                try:
+                                    cost_data = await adjust_payment_for_tokens(
+                                        key, data, session
+                                    )
+                                    cost_json = json.dumps({"cost": cost_data})
+                                    cost_event = f"data: {cost_json}\n\n".encode()
+                                except Exception as e:  # pragma: no cover - log issues only
+                                    print(
+                                        f"Error processing streaming response for cost: {e}"
+                                    )
 
                         # Pass through each chunk to client
                         yield chunk
 
-                    # Process stored chunks to find usage data
-                    # Start from the end and work backwards
-                    for i in range(len(stored_chunks) - 1, -1, -1):
-                        chunk = stored_chunks[i]
-                        if not chunk or chunk == b"":
-                            continue
-
-                        try:
-                            # Split by "data: " to get individual SSE events
-                            events = re.split(b"data: ", chunk)
-                            for event_data in events:
-                                if (
-                                    not event_data
-                                    or event_data.strip() == b"[DONE]"
-                                    or event_data.strip() == b""
-                                ):
-                                    continue
-
-                                try:
-                                    data = json.loads(event_data)
-                                    if (
-                                        "usage" in data
-                                        and data["usage"] is not None
-                                        and isinstance(data["usage"], dict)
-                                    ):
-                                        # Found usage data, calculate cost
-                                        cost_data = await adjust_payment_for_tokens(
-                                            key, data, session
-                                        )
-                                        # Format as SSE and yield
-                                        cost_json = json.dumps({"cost": cost_data})
-                                        yield f"data: {cost_json}\n\n".encode()
-                                        break
-                                except json.JSONDecodeError:
-                                    continue
-
-                        except Exception as e:
-                            print(f"Error processing streaming response for cost: {e}")
+                    if cost_event is not None:
+                        yield cost_event
 
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
