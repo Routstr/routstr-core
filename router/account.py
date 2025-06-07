@@ -20,13 +20,6 @@ async def get_key_from_header(
         detail="Invalid authorization. Use 'Bearer <cashu-token>' or 'Bearer <api-key>'",
     )
 
-# TODO: remove this endpoint when frontend is updated
-@wallet_router.get("/")
-async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
-    return {
-        "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-    }
 
 @wallet_router.get("/info")
 async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:

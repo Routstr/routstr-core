@@ -40,7 +40,8 @@ async def test_account_info_with_valid_key(
 ):
     """Test getting account info with a valid API key."""
     response = await async_client.get(
-        "/v1/wallet/", headers={"Authorization": f"Bearer sk-{test_api_key.hashed_key}"}
+        "/v1/wallet/info",
+        headers={"Authorization": f"Bearer sk-{test_api_key.hashed_key}"},
     )
 
     assert response.status_code == 200
@@ -53,7 +54,7 @@ async def test_account_info_with_valid_key(
 @pytest.mark.asyncio
 async def test_account_info_without_auth(async_client: AsyncClient):
     """Test that account info requires authentication."""
-    response = await async_client.get("/v1/wallet/")
+    response = await async_client.get("/v1/wallet/info")
 
     assert response.status_code == 422  # Missing required header
 
@@ -62,7 +63,8 @@ async def test_account_info_without_auth(async_client: AsyncClient):
 async def test_account_info_with_invalid_key(async_client: AsyncClient):
     """Test account info with an invalid API key."""
     response = await async_client.get(
-        "/v1/wallet/", headers={"Authorization": "Bearer invalid-key"}
+        "/v1/wallet/info",
+        headers={"Authorization": "Bearer invalid-key"},
     )
 
     assert response.status_code == 401
@@ -194,7 +196,8 @@ async def test_account_with_cashu_token(
         side_effect=mock_credit_balance,
     ):
         response = await async_client.get(
-            "/v1/wallet/", headers={"Authorization": f"Bearer {cashu_token}"}
+            "/v1/wallet/info",
+            headers={"Authorization": f"Bearer {cashu_token}"},
         )
 
         assert response.status_code == 200
