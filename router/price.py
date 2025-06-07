@@ -1,9 +1,8 @@
-import os
 import httpx
 import asyncio
 
 # artifical spread to cover conversion fees
-EXCHANGE_FEE = float(os.environ.get("EXCHANGE_FEE", "1.005"))  # 0.5% default
+from .settings import EXCHANGE_FEE
 
 
 async def kraken_btc_usd(client: httpx.AsyncClient) -> float:

@@ -1,19 +1,20 @@
-import os
 import asyncio
 import time
 
 from sixty_nuts import Wallet
 from sqlmodel import select, func, col
 from .db import ApiKey, AsyncSession, get_session
+from .settings import (
+    RECEIVE_LN_ADDRESS,
+    MINT,
+    MINIMUM_PAYOUT,
+    REFUND_PROCESSING_INTERVAL,
+    DEV_LN_ADDRESS,
+    DEVS_DONATION_RATE,
+    NSEC,
+)
 
 
-RECEIVE_LN_ADDRESS = os.environ["RECEIVE_LN_ADDRESS"]
-MINT = os.environ.get("MINT", "https://mint.minibits.cash/Bitcoin")
-MINIMUM_PAYOUT = int(os.environ.get("MINIMUM_PAYOUT", 100))
-REFUND_PROCESSING_INTERVAL = int(os.environ.get("REFUND_PROCESSING_INTERVAL", 3600))
-DEV_LN_ADDRESS = "routstr@minibits.cash"
-DEVS_DONATION_RATE = float(os.environ.get("DEVS_DONATION_RATE", 0.021))  # 2.1%
-NSEC = os.environ["NSEC"]  # Nostr private key for the wallet
 
 WALLET = Wallet(nsec=NSEC, mint_urls=[MINT])
 

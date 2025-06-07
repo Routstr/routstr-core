@@ -1,4 +1,3 @@
-import os
 import json
 from fastapi import APIRouter, Request, BackgroundTasks, Depends
 from fastapi.responses import Response, StreamingResponse
@@ -9,9 +8,7 @@ from .cashu import pay_out
 
 from .auth import validate_bearer_key, pay_for_request, adjust_payment_for_tokens
 from .db import AsyncSession, get_session
-
-UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
-UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
+from .settings import UPSTREAM_BASE_URL, UPSTREAM_API_KEY
 
 proxy_router = APIRouter()
 

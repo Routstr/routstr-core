@@ -1,8 +1,8 @@
-import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
+from .settings import ADMIN_PASSWORD
 from sqlmodel import select
 
 from .db import ApiKey, create_session
@@ -81,7 +81,7 @@ def info(content: str) -> str:
 
 
 def admin_auth() -> str:
-    if os.getenv("ADMIN_PASSWORD", "") == "":
+    if ADMIN_PASSWORD == "":
         return info("Please set a secure ADMIN_PASSWORD= in your ENV variables.")
     else:
         return login_form()
@@ -156,6 +156,6 @@ async def dashboard(request: Request) -> str:
 @admin_router.get("/", response_class=HTMLResponse)
 async def admin(request: Request):
     admin_cookie = request.cookies.get("admin_password")
-    if admin_cookie and admin_cookie == os.getenv("ADMIN_PASSWORD"):
+    if admin_cookie and admin_cookie == ADMIN_PASSWORD:
         return await dashboard(request)
     return admin_auth()

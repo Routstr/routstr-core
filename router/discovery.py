@@ -6,7 +6,6 @@ import random
 import string
 import re
 import httpx
-import os
 
 providers_router = APIRouter(prefix="/v1/providers")
 
@@ -121,7 +120,8 @@ async def fetch_onion(provider: str) -> dict:
     """Check if an onion service is healthy by making a GET request to its root."""
     try:
         # Get Tor proxy URL from environment variable, default to local Tor SOCKS5 proxy
-        tor_proxy = os.getenv("TOR_PROXY_URL", "socks5://127.0.0.1:9050")
+        from .settings import TOR_PROXY_URL
+        tor_proxy = TOR_PROXY_URL
 
         # Configure httpx to use Tor SOCKS5 proxy
         async with httpx.AsyncClient(

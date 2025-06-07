@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import os
 import json
 from typing import Optional
 
@@ -10,17 +9,12 @@ from fastapi import HTTPException, Request
 from .cashu import credit_balance, pay_out
 from .db import ApiKey, AsyncSession
 from .models import MODELS
-
-COST_PER_REQUEST = (
-    int(os.environ.get("COST_PER_REQUEST", "1")) * 1000
-)  # Convert to msats
-COST_PER_1K_INPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_INPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-COST_PER_1K_OUTPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_OUTPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-MODEL_BASED_PRICING = os.environ.get("MODEL_BASED_PRICING", "false").lower() == "true"
+from .settings import (
+    COST_PER_REQUEST,
+    COST_PER_1K_INPUT_TOKENS,
+    COST_PER_1K_OUTPUT_TOKENS,
+    MODEL_BASED_PRICING,
+)
 
 
 async def validate_bearer_key(

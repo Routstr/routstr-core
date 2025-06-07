@@ -1,9 +1,9 @@
-import os
 import openai
+from router.settings import require_env, get_env
 
 client = openai.OpenAI(
-    api_key=os.environ["CASHU_TOKEN"],
-    base_url=os.environ.get("ROUTSTR_API_URL", "https://api.routstr.com/v1"),
+    api_key=require_env("CASHU_TOKEN"),
+    base_url=get_env("ROUTSTR_API_URL", "https://api.routstr.com/v1"),
     # base_url="http://roustrjfsdgfiueghsklchg.onion/v1",
     # client=httpx.AsyncClient(
     #     proxies={"http": "socks5://localhost:9050"},
@@ -19,7 +19,7 @@ def chat():
         ai_msg = {"role": "assistant", "content": ""}
 
         for chunk in client.chat.completions.create(
-            model=os.environ.get("MODEL", "openai/gpt-4o-mini"),
+            model=get_env("MODEL", "openai/gpt-4o-mini"),
             messages=history,
             stream=True,
         ):

@@ -1,12 +1,11 @@
 from contextlib import asynccontextmanager
-import os
 from typing import AsyncGenerator
 from sqlmodel import Field, SQLModel
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
+from .settings import DATABASE_URL
 
 
 engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL

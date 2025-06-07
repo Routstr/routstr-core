@@ -3,12 +3,25 @@ import os
 import pytest
 import pytest_asyncio
 from typing import AsyncGenerator, Generator
-from fastapi.testclient import TestClient
+import httpx
 from httpx import AsyncClient, ASGITransport
+import inspect
+from fastapi.testclient import TestClient
 from sqlmodel import SQLModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
 from unittest.mock import patch, MagicMock, AsyncMock
+
+# Allow fastapi.testclient.TestClient to work with httpx>=0.28
+if 'app' not in inspect.signature(httpx.Client.__init__).parameters:
+    _orig_init = httpx.Client.__init__
+
+    def _patched_init(self, *args, app=None, transport=None, **kwargs):
+        if app is not None and transport is None:
+            transport = ASGITransport(app=app)
+        _orig_init(self, *args, transport=transport, **kwargs)
+
+    httpx.Client.__init__ = _patched_init
 
 # Save original environment variables
 ORIGINAL_ENV = os.environ.copy()

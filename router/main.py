@@ -1,6 +1,5 @@
 import asyncio
 from contextlib import asynccontextmanager
-import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -11,6 +10,15 @@ from .account import wallet_router
 from .models import MODELS, update_sats_pricing
 from .cashu import check_for_refunds, init_wallet, close_wallet
 from .discovery import providers_router
+from .settings import (
+    NAME,
+    DESCRIPTION,
+    NPUB,
+    CORS_ORIGINS,
+    HTTP_URL,
+    ONION_URL,
+    MINT,
+)
 
 __version__ = "0.0.1"
 
@@ -28,16 +36,16 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     version=__version__,
-    title=os.environ.get("NAME", "ARoutstrNode" + __version__),
-    description=os.environ.get("DESCRIPTION", "A Routstr Node"),
-    contact={"name": os.environ.get("NAME", ""), "npub": os.environ.get("NPUB", "")},
+    title=NAME + __version__ if NAME == "ARoutstrNode" else NAME,
+    description=DESCRIPTION,
+    contact={"name": NAME, "npub": NPUB},
     lifespan=lifespan,
 )
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=CORS_ORIGINS.split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,10 +58,10 @@ async def info():
         "name": app.title,
         "description": app.description,
         "version": __version__,
-        "npub": os.environ.get("NPUB", ""),
-        "mint": os.environ.get("MINT", ""),
-        "http_url": os.environ.get("HTTP_URL", ""),
-        "onion_url": os.environ.get("ONION_URL", ""),
+        "npub": NPUB,
+        "mint": MINT,
+        "http_url": HTTP_URL,
+        "onion_url": ONION_URL,
         "models": MODELS,
     }
 
