@@ -7,6 +7,12 @@ import string
 import re
 import httpx
 import os
+import time
+
+
+# Cache configuration (in-memory only)
+CACHE_TTL = int(os.getenv("PROVIDER_CACHE_TTL", "3600"))  # seconds
+PROVIDERS_CACHE: dict[str, list[str] | float] = {"timestamp": 0.0, "providers": []}
 
 providers_router = APIRouter(prefix="/v1/providers")
 
@@ -113,8 +119,20 @@ async def query_nostr_relay_with_search(
     return events
 
 
-async def get_cache() -> list[dict]:
-    return []  # TODO: Implement cache
+async def get_cache() -> list[str]:
+    """Return cached provider data if available and not expired."""
+    ts = PROVIDERS_CACHE.get("timestamp", 0)
+    if time.time() - ts < CACHE_TTL:
+        providers = PROVIDERS_CACHE.get("providers", [])
+        if isinstance(providers, list):
+            return providers
+    return []
+
+
+async def write_cache(providers: list[str]) -> None:
+    """Store provider data in the in-memory cache with timestamp."""
+    PROVIDERS_CACHE["timestamp"] = time.time()
+    PROVIDERS_CACHE["providers"] = providers
 
 
 async def fetch_onion(provider: str) -> dict:
@@ -139,6 +157,17 @@ async def fetch_onion(provider: str) -> dict:
 
 @providers_router.get("/")
 async def get_providers(include_json: bool = False):
+    # Return cached providers if available
+    cached = await get_cache()
+    if cached:
+        if include_json:
+            results: list[dict | str] = []
+            for url in cached:
+                resp = await fetch_onion(url)
+                results.append({url: resp["json"]})
+            return {"providers": results}
+        return {"providers": cached}
+
     npub = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s"
 
     # Relays that support NIP-50 text search
@@ -202,5 +231,8 @@ async def get_providers(include_json: bool = False):
             healthy_providers.append({provider: response["json"]})
         else:
             healthy_providers.append(provider)
+
+    # Cache healthy provider URLs (without JSON details)
+    await write_cache([p if isinstance(p, str) else list(p.keys())[0] for p in healthy_providers])
 
     return {"providers": healthy_providers}
