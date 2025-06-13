@@ -51,9 +51,8 @@ async def test_cors_headers(async_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_startup_event_initializes_properly(test_client):
+async def test_startup_event_initializes_properly(async_client: AsyncClient):
     """Test that the startup event runs without errors."""
-    # The test_client fixture already triggers the startup event
-    # This test ensures no exceptions are raised during startup
-    response = test_client.get("/")
-    assert response.status_code == 200 
+    # The async_client fixture triggers the startup event
+    response = await async_client.get("/")
+    assert response.status_code == 200

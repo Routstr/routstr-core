@@ -3,8 +3,7 @@ import os
 import pytest
 import pytest_asyncio
 from typing import AsyncGenerator, Generator
-from fastapi.testclient import TestClient
-from httpx import AsyncClient, ASGITransport
+from httpx import AsyncClient, ASGITransport, Client
 from sqlmodel import SQLModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -49,7 +48,7 @@ with patch("sixty_nuts.Wallet") as mock_wallet_class:
 
     # Mock other wallet methods
     mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-    mock_wallet.redeem = AsyncMock(return_value=None)
+    mock_wallet.redeem = AsyncMock(return_value=1)
     mock_wallet.send = AsyncMock(return_value="cashu:token123")
 
     # Make the Wallet class return our mock when instantiated
@@ -94,7 +93,7 @@ async def test_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest.fixture
-def test_client() -> Generator[TestClient, None, None]:
+def test_client() -> Generator[Client, None, None]:
     """Create a test client for the FastAPI app."""
     with patch.dict(os.environ, TEST_ENV, clear=True):
         with patch("sixty_nuts.Wallet") as mock_wallet_class:
@@ -110,7 +109,7 @@ def test_client() -> Generator[TestClient, None, None]:
 
             # Mock other wallet methods
             mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-            mock_wallet.redeem = AsyncMock(return_value=None)
+            mock_wallet.redeem = AsyncMock(return_value=1)
             mock_wallet.send = AsyncMock(return_value="cashu:token123")
 
             # Make the Wallet class return our mock when instantiated
@@ -118,7 +117,7 @@ def test_client() -> Generator[TestClient, None, None]:
 
             with patch("router.models.update_sats_pricing") as mock_update:
                 mock_update.return_value = None
-                yield TestClient(app)
+                yield Client(transport=ASGITransport(app=app), base_url="http://test")
 
 
 @pytest_asyncio.fixture
@@ -145,7 +144,7 @@ async def async_client(test_session) -> AsyncGenerator[AsyncClient, None]:
 
             # Mock other wallet methods
             mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-            mock_wallet.redeem = AsyncMock(return_value=None)
+            mock_wallet.redeem = AsyncMock(return_value=1)
             mock_wallet.send = AsyncMock(return_value="cashu:token123")
 
             # Make the Wallet class return our mock when instantiated

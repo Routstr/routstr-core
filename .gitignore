@@ -10,3 +10,6 @@ wallet.sqlite3
 *models.json
 
 compose.override.yml
+
+# Coverage
+.coverage

@@ -73,9 +73,9 @@ async def test_refund_balance_with_address(
     async_client: AsyncClient, test_api_key: ApiKey, test_session: AsyncSession
 ):
     """Test refunding balance when refund address is set."""
-    # Need to patch the refund_balance at the module level to intercept the call
-    with patch("router.account.refund_balance", new_callable=AsyncMock) as mock_refund:
-        mock_refund.return_value = 1000000
+    # Patch the wallet's send_to_lnurl method used in refund_balance
+    with patch("router.cashu.WALLET.send_to_lnurl", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = 1000000
 
         response = await async_client.post(
             "/v1/wallet/refund",
@@ -92,8 +92,10 @@ async def test_refund_balance_with_address(
         await test_session.refresh(test_api_key)
         assert test_api_key.balance == 0
 
-        # Verify refund_balance was called
-        mock_refund.assert_called_once()
+        # Verify LNURL send was called with sats amount
+        mock_send.assert_called_once_with(
+            "test@lightning.address", amount=1000
+        )
 
 
 @pytest.mark.asyncio
@@ -203,3 +205,5 @@ async def test_account_with_cashu_token(
         # Check that a new key was created with the hashed token
         assert data["api_key"].startswith("sk-")
         assert data["balance"] >= 0  # Balance should be set after credit_balance
+
+

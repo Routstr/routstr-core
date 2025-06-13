@@ -51,12 +51,12 @@ async def refund_wallet_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     remaining_balance_msats = key.balance
-    
+
     if remaining_balance_msats == 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
-    
-    # Perform refund operation first, before modifying balance
+
     if key.refund_address:
+        # refund_balance handles balance deduction and commit
         await refund_balance(remaining_balance_msats, key, session)
         result = {"recipient": key.refund_address, "msats": remaining_balance_msats}
     else:
@@ -64,15 +64,16 @@ async def refund_wallet_endpoint(
         remaining_balance_sats = remaining_balance_msats // 1000
         if remaining_balance_sats == 0:
             raise HTTPException(status_code=400, detail="Balance too small to refund (less than 1 sat)")
-        
+
         token = await WALLET.send(remaining_balance_sats)
         result = {"msats": remaining_balance_msats, "recipient": None, "token": token}
-    
-    # Only after successful refund, zero out the balance
-    key.balance = 0
-    session.add(key)
-    await session.commit()
-    
+
+    if not key.refund_address:
+        # For token refunds update balance after sending
+        key.balance = 0
+        session.add(key)
+        await session.commit()
+
     return result
 
 
