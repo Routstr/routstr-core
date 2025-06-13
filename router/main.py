@@ -22,13 +22,17 @@ async def lifespan(_: FastAPI):
     logger.info("Starting up application")
     await init_db()
     await init_wallet()
-    asyncio.create_task(update_sats_pricing())
-    asyncio.create_task(check_for_refunds())
-    
-    yield
-    
-    await close_wallet()
-    logger.info("Shutdown complete")
+    pricing_task = asyncio.create_task(update_sats_pricing())
+    refund_task = asyncio.create_task(check_for_refunds())
+
+    try:
+        yield
+    finally:
+        refund_task.cancel()
+        pricing_task.cancel()
+        await asyncio.gather(pricing_task, refund_task, return_exceptions=True)
+        await close_wallet()
+        logger.info("Shutdown complete")
 
 
 app = FastAPI(

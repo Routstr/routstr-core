@@ -4,23 +4,35 @@ import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
-    price = float((await client.get(api)).json()["result"]["XXBTZUSD"]["c"][0])
-    logger.debug("Kraken price %s", price)
-    return price
-
-    price = float((await client.get(api)).json()["data"]["amount"])
-    logger.debug("Coinbase price %s", price)
-    return price
-    price = float((await client.get(api)).json()["price"])
-    logger.debug("Binance price %s", price)
-    return price
-
-
+async def kraken_btc_usd(client: httpx.AsyncClient) -> float | None:
+    try:
+        price = float((await client.get(api)).json()["result"]["XXBTZUSD"]["c"][0])
+        logger.debug("Kraken price %s", price)
+        return price
+    except (httpx.RequestError, KeyError) as e:
+        logger.warning("Kraken API error: %s", e)
+        return None
+async def coinbase_btc_usd(client: httpx.AsyncClient) -> float | None:
+    try:
+        price = float((await client.get(api)).json()["data"]["amount"])
+        logger.debug("Coinbase price %s", price)
+        return price
+    except (httpx.RequestError, KeyError) as e:
+        logger.warning("Coinbase API error: %s", e)
+        return None
+async def binance_btc_usdt(client: httpx.AsyncClient) -> float | None:
+    try:
+        price = float((await client.get(api)).json()["price"])
+        logger.debug("Binance price %s", price)
+        return price
+    except (httpx.RequestError, KeyError) as e:
+        logger.warning("Binance API error: %s", e)
+        return None
         prices = await asyncio.gather(
             kraken_btc_usd(client),
             coinbase_btc_usd(client),
             binance_btc_usdt(client),
-        best_price = max(prices)
+        best_price = max(p for p in prices if p is not None)
         ask = best_price * EXCHANGE_FEE
         logger.debug("Best BTC price %s, ask %s", best_price, ask)
         return ask

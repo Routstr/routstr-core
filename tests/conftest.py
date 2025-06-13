@@ -49,7 +49,7 @@ with patch("sixty_nuts.Wallet") as mock_wallet_class:
 
     # Mock other wallet methods
     mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-    mock_wallet.redeem = AsyncMock(return_value=None)
+    mock_wallet.redeem = AsyncMock(return_value=1)
     mock_wallet.send = AsyncMock(return_value="cashu:token123")
 
     # Make the Wallet class return our mock when instantiated
@@ -110,7 +110,7 @@ def test_client() -> Generator[TestClient, None, None]:
 
             # Mock other wallet methods
             mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-            mock_wallet.redeem = AsyncMock(return_value=None)
+            mock_wallet.redeem = AsyncMock(return_value=1)
             mock_wallet.send = AsyncMock(return_value="cashu:token123")
 
             # Make the Wallet class return our mock when instantiated
@@ -145,7 +145,7 @@ async def async_client(test_session) -> AsyncGenerator[AsyncClient, None]:
 
             # Mock other wallet methods
             mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-            mock_wallet.redeem = AsyncMock(return_value=None)
+            mock_wallet.redeem = AsyncMock(return_value=1)
             mock_wallet.send = AsyncMock(return_value="cashu:token123")
 
             # Make the Wallet class return our mock when instantiated

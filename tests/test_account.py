@@ -203,3 +203,5 @@ async def test_account_with_cashu_token(
         # Check that a new key was created with the hashed token
         assert data["api_key"].startswith("sk-")
         assert data["balance"] >= 0  # Balance should be set after credit_balance
+
+

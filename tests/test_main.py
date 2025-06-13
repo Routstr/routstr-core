@@ -56,4 +56,4 @@ async def test_startup_event_initializes_properly(test_client):
     # The test_client fixture already triggers the startup event
     # This test ensures no exceptions are raised during startup
     response = test_client.get("/")
-    assert response.status_code == 200 
+    assert response.status_code == 200
