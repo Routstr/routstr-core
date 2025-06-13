@@ -174,7 +174,8 @@ async def test_update_sats_pricing_handles_errors():
         
         def mock_print(*args, **kwargs):
             nonlocal error_printed
-            if args and isinstance(args[0], Exception) and str(args[0]) == "API Error":
+            message = " ".join(str(a) for a in args)
+            if "API Error" in message and "Error updating sats pricing" in message:
                 error_printed = True
             original_print(*args, **kwargs)
         
