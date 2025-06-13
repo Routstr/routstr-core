@@ -6,6 +6,7 @@ from typing import Optional
 
 
 from fastapi import HTTPException, Request
+from sqlmodel import update, col
 
 from .cashu import credit_balance, pay_out
 from .db import ApiKey, AsyncSession
@@ -149,12 +150,31 @@ async def pay_for_request(
             },
         )
 
-    # Charge the base cost for the request
-    key.balance -= COST_PER_REQUEST
-    key.total_spent += COST_PER_REQUEST
-    key.total_requests += 1
-    session.add(key)
+    # Charge the base cost for the request atomically to avoid race conditions
+    stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.balance) >= COST_PER_REQUEST)
+        .values(
+            balance=col(ApiKey.balance) - COST_PER_REQUEST,
+            total_spent=col(ApiKey.total_spent) + COST_PER_REQUEST,
+            total_requests=col(ApiKey.total_requests) + 1,
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
+    if result.rowcount == 0:
+        # Another concurrent request spent the balance first
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": {
+                    "message": f"Insufficient balance: {COST_PER_REQUEST} mSats required. {key.balance} available.",
+                    "type": "insufficient_quota",
+                    "code": "insufficient_balance",
+                }
+            },
+        )
     await session.refresh(key)
 
 
@@ -232,6 +252,7 @@ async def adjust_payment_for_tokens(
     cost_difference = token_based_cost - COST_PER_REQUEST
 
     if cost_difference == 0:
+        await session.commit()
         return cost_data  # No adjustment needed
 
     if cost_difference > 0:
@@ -240,23 +261,39 @@ async def adjust_payment_for_tokens(
             print(
                 f"Warning: Insufficient balance for token-based pricing adjustment: {key.hashed_key[:10]}..."
             )
-            # Still proceed but log the issue - we already provided the service
-            # Add information about insufficient balance to cost data
             cost_data["warning"] = "Insufficient balance for full token-based pricing"
             cost_data["balance_shortage_msats"] = cost_difference - key.balance
+            await session.commit()
         else:
-            key.balance -= cost_difference
-            key.total_spent += cost_difference
-            cost_data["total_msats"] = COST_PER_REQUEST + cost_difference
+            charge_stmt = (
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == key.hashed_key)
+                .where(col(ApiKey.balance) >= cost_difference)
+                .values(
+                    balance=col(ApiKey.balance) - cost_difference,
+                    total_spent=col(ApiKey.total_spent) + cost_difference,
+                )
+            )
+            result = await session.exec(charge_stmt)  # type: ignore[call-overload]
+            await session.commit()
+            if result.rowcount:
+                cost_data["total_msats"] = COST_PER_REQUEST + cost_difference
+                await session.refresh(key)
     else:
         # Refund some of the base cost
         refund = abs(cost_difference)
-        key.balance += refund
-        key.total_spent -= refund
+        refund_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .values(
+                balance=col(ApiKey.balance) + refund,
+                total_spent=col(ApiKey.total_spent) - refund,
+            )
+        )
+        await session.exec(refund_stmt)  # type: ignore[call-overload]
+        await session.commit()
         cost_data["total_msats"] = COST_PER_REQUEST - refund
-
-    session.add(key)
-    await session.commit()
+        await session.refresh(key)
 
     asyncio.create_task(pay_out())
 

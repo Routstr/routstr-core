@@ -38,7 +38,7 @@ async def test_background_tasks_cancel_on_shutdown():
         mock_state.balance = 1000
         mock_wallet.fetch_wallet_state = AsyncMock(return_value=mock_state)
         mock_wallet.send_to_lnurl = AsyncMock(return_value=100)
-        mock_wallet.redeem = AsyncMock(return_value=None)
+        mock_wallet.redeem = AsyncMock(return_value=1)
         mock_wallet.send = AsyncMock(return_value='cashu:token123')
 
         with patch('router.cashu.Wallet.create', AsyncMock(return_value=mock_wallet)), \
