@@ -72,24 +72,19 @@ async def pay_out() -> None:
         print(f"Error in pay_out: {e}")
 
 async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -> int:
-    """Redeem a Cashu token and credit the API key balance in millisatoshis."""
-    state_before = await WALLET.fetch_wallet_state()
+    """Redeem a Cashu token and credit the amount to the API key balance."""
     try:
         amount_sats = await WALLET.redeem(cashu_token)
     except Exception:
         # Ensure the balance cannot become negative if redeem fails
         return 0
 
-    if amount_sats is None:
-        # Fallback to wallet state difference for compatibility
-        state_after = await WALLET.fetch_wallet_state()
-        amount_sats = state_after.balance - state_before.balance
-
     if amount_sats <= 0:
         return 0
 
     amount_msats = amount_sats * 1000
     key.balance += amount_msats
+
     session.add(key)
     await session.flush()
 
@@ -102,8 +97,8 @@ async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -
     )
     await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
-    return amount_msats
 
+    return amount_msats
 
 
 async def check_for_refunds() -> None:
