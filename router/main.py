@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import os
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,10 +13,13 @@ from .models import MODELS, update_sats_pricing
 from .cashu import check_for_refunds, init_wallet, close_wallet
 from .discovery import providers_router
 
+logger = logging.getLogger(__name__)
+
 __version__ = "0.0.1"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logger.info("Starting up application")
     await init_db()
     await init_wallet()
     asyncio.create_task(update_sats_pricing())
@@ -24,6 +28,7 @@ async def lifespan(_: FastAPI):
     yield
     
     await close_wallet()
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(

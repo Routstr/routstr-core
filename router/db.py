@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import os
 from typing import AsyncGenerator
+import logging
 from sqlmodel import Field, SQLModel
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -8,6 +9,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
+
+logger = logging.getLogger(__name__)
 
 engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
 
@@ -33,8 +36,10 @@ class ApiKey(SQLModel, table=True):  # type: ignore
 
 async def init_db() -> None:
     """Initializes the database and creates tables if they don't exist."""
+    logger.info("Initializing database at %s", DATABASE_URL)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+    logger.info("Database initialized")
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

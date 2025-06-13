@@ -1,9 +1,12 @@
 from typing import Annotated
+import logging
 from fastapi import APIRouter, Header, HTTPException, Depends
 
 from .auth import validate_bearer_key
 from .cashu import refund_balance, credit_balance, WALLET
 from .db import ApiKey, AsyncSession, get_session
+
+logger = logging.getLogger(__name__)
 
 wallet_router = APIRouter(prefix="/v1/wallet")
 
@@ -42,7 +45,13 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ):
-    return await credit_balance(cashu_token, key, session)
+    logger.info("Topup requested for key %s...", key.hashed_key[:10])
+    result = await credit_balance(cashu_token, key, session)
+    if isinstance(result, int):
+        logger.info("Credited %s msats to key %s...", result, key.hashed_key[:10])
+    else:
+        logger.info("Topup result for key %s: %s", key.hashed_key[:10], result)
+    return result
 
 
 @wallet_router.post("/refund")
@@ -51,6 +60,11 @@ async def refund_wallet_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     remaining_balance_msats = key.balance
+    logger.info(
+        "Refund requested for key %s... balance %s msats",
+        key.hashed_key[:10],
+        remaining_balance_msats,
+    )
     
     if remaining_balance_msats == 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
@@ -72,7 +86,10 @@ async def refund_wallet_endpoint(
     key.balance = 0
     session.add(key)
     await session.commit()
-    
+
+    logger.info(
+        "Refunded %s msats from key %s...", remaining_balance_msats, key.hashed_key[:10]
+    )
     return result
 
 

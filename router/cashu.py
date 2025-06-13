@@ -33,6 +33,7 @@ async def pay_out() -> None:
     Calculates the pay-out amount based on the spent balance, profit, and donation rate.
     """
     try:
+        logger.info("Initiating payout")
         from .db import create_session
 
         async with create_session() as session:
@@ -68,6 +69,9 @@ async def pay_out() -> None:
             # Send payouts
             await WALLET.send_to_lnurl(RECEIVE_LN_ADDRESS, owners_draw)
             await WALLET.send_to_lnurl(DEV_LN_ADDRESS, devs_donation)
+            logger.info(
+                "Payout sent: owners %s sats, devs %s sats", owners_draw, devs_donation
+            )
 
     except Exception as e:
         # Log the error but don't crash - payouts can be retried later
@@ -75,6 +79,7 @@ async def pay_out() -> None:
 
 
 async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -> int:
+    logger.info("Redeeming token for key %s...", key.hashed_key[:10])
     state_before = await WALLET.fetch_wallet_state()
     await WALLET.redeem(cashu_token)
     state_after = await WALLET.fetch_wallet_state()
@@ -82,6 +87,7 @@ async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -
     key.balance += amount
     session.add(key)
     await session.commit()
+    logger.info("Credited %s msats to key %s", amount, key.hashed_key[:10])
     return amount
 
 
@@ -138,20 +144,30 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
     key.balance -= amount_msats
     session.add(key)
     await session.commit()
+    logger.info(
+        "Refunding %s msats from key %s to %s",
+        amount_msats,
+        key.hashed_key[:10],
+        key.refund_address,
+    )
 
     if key.refund_address is None:
         raise ValueError("Refund address not set.")
 
-    return await WALLET.send_to_lnurl(
+    result = await WALLET.send_to_lnurl(
         key.refund_address,
         amount=amount_sats,
     )
+    logger.info("Refund sent: %s", result)
+    return result
 
 
 async def redeem(cashu_token: str, lnurl: str) -> int:
+    logger.info("Redeeming token for lnurl %s", lnurl)
     state_before = await WALLET.fetch_wallet_state()
     await WALLET.redeem(cashu_token)
     state_after = await WALLET.fetch_wallet_state()
     amount = state_after.balance - state_before.balance
     await WALLET.send_to_lnurl(lnurl, amount=amount)
+    logger.info("Redeemed %s sats", amount)
     return amount

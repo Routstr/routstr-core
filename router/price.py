@@ -3,20 +3,30 @@ import httpx
 import asyncio
 import logging
 
-# artifical spread to cover conversion fees
-EXCHANGE_FEE = float(os.environ.get("EXCHANGE_FEE", "1.005"))  # 0.5% default
+logger = logging.getLogger(__name__)
+    price = float((await client.get(api)).json()["result"]["XXBTZUSD"]["c"][0])
+    logger.debug("Kraken price %s", price)
+    return price
+
+    price = float((await client.get(api)).json()["data"]["amount"])
+    logger.debug("Coinbase price %s", price)
+    return price
+    price = float((await client.get(api)).json()["price"])
+    logger.debug("Binance price %s", price)
+    return price
 
 
-async def kraken_btc_usd(client: httpx.AsyncClient) -> float | None:
-    api = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"
-    try:
-        return float((await client.get(api)).json()["result"]["XXBTZUSD"]["c"][0])
-    except (httpx.RequestError, KeyError) as e:
-        logging.warning(f"Kraken API error: {e}")
-        return None
-
-
-async def coinbase_btc_usd(client: httpx.AsyncClient) -> float | None:
+        prices = await asyncio.gather(
+            kraken_btc_usd(client),
+            coinbase_btc_usd(client),
+            binance_btc_usdt(client),
+        best_price = max(prices)
+        ask = best_price * EXCHANGE_FEE
+        logger.debug("Best BTC price %s, ask %s", best_price, ask)
+        return ask
+    price = (await btc_usd_ask_price()) / 100_000_000
+    logger.debug("Sats/USD ask price %s", price)
+    return price
     api = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     try:
         return float((await client.get(api)).json()["data"]["amount"])
