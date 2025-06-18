@@ -1,11 +1,11 @@
-import os
 import asyncio
+import os
 import time
 
 from sixty_nuts import Wallet
-from sqlmodel import select, func, col, update
-from .db import ApiKey, AsyncSession, get_session
+from sqlmodel import col, func, select, update
 
+from .db import ApiKey, AsyncSession, get_session
 
 RECEIVE_LN_ADDRESS = os.environ["RECEIVE_LN_ADDRESS"]
 MINT = os.environ.get("MINT", "https://mint.minibits.cash/Bitcoin")
@@ -18,12 +18,19 @@ NSEC = os.environ["NSEC"]  # Nostr private key for the wallet
 WALLET = Wallet(nsec=NSEC, mint_urls=[MINT])
 
 
-async def init_wallet():
+async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None:
+    """Delete the given API key if its balance is zero."""
+    if key.balance == 0:
+        await session.delete(key)
+        await session.commit()
+
+
+async def init_wallet() -> None:
     global WALLET
     WALLET = await Wallet.create(nsec=NSEC, mint_urls=[MINT])
 
 
-async def close_wallet():
+async def close_wallet() -> None:
     global WALLET
     await WALLET.aclose()
 
@@ -36,12 +43,11 @@ async def pay_out() -> None:
         from .db import create_session
 
         async with create_session() as session:
-            balance = (
-                await session.exec(
-                    select(func.sum(col(ApiKey.balance))).where(ApiKey.balance > 0)
-                )
-            ).one()
-            if balance is None or balance == 0:
+            result = await session.exec(
+                select(func.sum(col(ApiKey.balance))).where(ApiKey.balance > 0)
+            )
+            balance = result.one_or_none()
+            if not balance:
                 # No balance to pay out - this is OK, not an error
                 return
 
@@ -75,7 +81,7 @@ async def pay_out() -> None:
 async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -> int:
     """Redeem a Cashu token and credit the amount to the API key balance."""
     try:
-        amount_sats = await WALLET.redeem(cashu_token)
+        amount_sats, _ = await WALLET.redeem(cashu_token)
     except Exception:
         # Ensure the balance cannot become negative if redeem fails
         return 0
@@ -84,10 +90,6 @@ async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -
         return 0
 
     amount_msats = amount_sats * 1000
-    key.balance += amount_msats
-
-    session.add(key)
-    await session.flush()
 
     # Apply the balance change atomically to avoid race conditions when topping
     # up the same key concurrently.
@@ -98,6 +100,7 @@ async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -
     )
     await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
+    await session.refresh(key)
 
     return amount_msats
 
@@ -132,6 +135,7 @@ async def check_for_refunds() -> None:
                             flush=True,
                         )
                         await refund_balance(key.balance, key, session)
+                        await delete_key_if_zero_balance(key, session)
 
             # Sleep for the specified interval before checking again
             await asyncio.sleep(REFUND_PROCESSING_INTERVAL)
@@ -163,6 +167,7 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
     if result.rowcount == 0:
         raise ValueError("Insufficient balance.")
     await session.refresh(key)
+    await delete_key_if_zero_balance(key, session)
 
     if key.refund_address is None:
         raise ValueError("Refund address not set.")
@@ -174,9 +179,6 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
 
 
 async def redeem(cashu_token: str, lnurl: str) -> int:
-    state_before = await WALLET.fetch_wallet_state()
-    await WALLET.redeem(cashu_token)
-    state_after = await WALLET.fetch_wallet_state()
-    amount = state_after.balance - state_before.balance
-    await WALLET.send_to_lnurl(lnurl, amount=amount)
-    return amount
+    amount_sats, _ = await WALLET.redeem(cashu_token)
+    await WALLET.send_to_lnurl(lnurl, amount=amount_sats)
+    return amount_sats

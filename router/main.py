@@ -1,21 +1,24 @@
 import asyncio
-from contextlib import asynccontextmanager
 import os
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .db import init_db
-from .admin import admin_router
-from .proxy import proxy_router
 from .account import wallet_router
-from .models import MODELS, update_sats_pricing
-from .cashu import check_for_refunds, init_wallet, close_wallet
+from .admin import admin_router
+from .cashu import check_for_refunds, close_wallet, init_wallet
+from .db import init_db
 from .discovery import providers_router
+from .models import MODELS, update_sats_pricing
+from .proxy import proxy_router
 
 __version__ = "0.0.1"
 
+
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     await init_wallet()
     pricing_task = asyncio.create_task(update_sats_pricing())
@@ -49,7 +52,7 @@ app.add_middleware(
 
 
 @app.get("/")
-async def info():
+async def info() -> dict:
     return {
         "name": app.title,
         "description": app.description,

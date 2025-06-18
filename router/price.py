@@ -1,7 +1,8 @@
-import os
-import httpx
 import asyncio
 import logging
+import os
+
+import httpx
 
 # artifical spread to cover conversion fees
 EXCHANGE_FEE = float(os.environ.get("EXCHANGE_FEE", "1.005"))  # 0.5% default

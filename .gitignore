@@ -8,6 +8,7 @@ wallet.sqlite3
 .*keys.db
 .*wallet.sqlite3
 *models.json
+.cashu
 
 compose.override.yml
 

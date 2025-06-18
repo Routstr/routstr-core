@@ -5,8 +5,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from sqlmodel import select
 
-from .db import ApiKey, create_session
 from .cashu import WALLET
+from .db import ApiKey, create_session
 
 admin_router = APIRouter(prefix="/admin")
 
@@ -155,7 +155,7 @@ async def dashboard(request: Request) -> str:
 
 
 @admin_router.get("/", response_class=HTMLResponse)
-async def admin(request: Request):
+async def admin(request: Request) -> str:
     admin_cookie = request.cookies.get("admin_password")
     if admin_cookie and admin_cookie == os.getenv("ADMIN_PASSWORD"):
         return await dashboard(request)

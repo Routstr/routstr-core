@@ -892,7 +892,7 @@ requires-dist = [
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115" },
     { name = "greenlet", specifier = ">=3.2.1" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.25.2" },
-    { name = "sixty-nuts", specifier = ">=0.0.3" },
+    { name = "sixty-nuts", specifier = ">=0.0.7" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
 ]
 
@@ -943,7 +943,7 @@ wheels = [
 
 [[package]]
 name = "sixty-nuts"
-version = "0.0.3"
+version = "0.0.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bech32" },
@@ -953,9 +953,9 @@ dependencies = [
     { name = "httpx" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a0/ab/b55441b5255cb3d0349f17ff9c31847cd27056ffce18f681e9c8b8be578d/sixty_nuts-0.0.3.tar.gz", hash = "sha256:c1e2395574289d8c8e098abfa6a21bbd4bd1c10845660c6eb405aa19772ff0ab", size = 86506, upload-time = "2025-06-04T14:24:26.528Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/e5/4ab8e3da458137635f4cd59d2955576a0495e9e808b68e6f7b0ef85a1ac2/sixty_nuts-0.0.7.tar.gz", hash = "sha256:aa83c3e5abcd4f9d668a824536b740a2c4f5623762dc0e55b0ab995e0deef71a", size = 89648, upload-time = "2025-06-18T12:54:58.273Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/90/4e/a150c108b79d32ca861e3d0805388388797fa0eebb00858aa8595fa75ff0/sixty_nuts-0.0.3-py3-none-any.whl", hash = "sha256:988585a1554acfb09fc4225929d7b2e0db98610dcd90baa0b8494e8531d91a68", size = 29817, upload-time = "2025-06-04T14:24:25.016Z" },
+    { url = "https://files.pythonhosted.org/packages/07/29/96787cd9ee2d975233de866045bb1c87abe352ca40e85e7457e1bbdcc577/sixty_nuts-0.0.7-py3-none-any.whl", hash = "sha256:4b8f7b2f6930deb551bd1e81e19f495044bf5d5ca70be322150a23ea1bfaf596", size = 42178, upload-time = "2025-06-18T12:54:56.894Z" },
 ]
 
 [[package]]

@@ -1,14 +1,15 @@
-import os
 import json
-from fastapi import APIRouter, Request, BackgroundTasks, Depends
-from fastapi.responses import Response, StreamingResponse
-import httpx
+import os
 import re
+from typing import AsyncGenerator
 
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi.responses import Response, StreamingResponse
+
+from .auth import adjust_payment_for_tokens, pay_for_request, validate_bearer_key
 from .cashu import pay_out
-
-from .auth import validate_bearer_key, pay_for_request, adjust_payment_for_tokens
-from .db import AsyncSession, get_session
+from .db import AsyncSession, create_session, get_session
 
 UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
@@ -16,12 +17,10 @@ UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 proxy_router = APIRouter()
 
 
-@proxy_router.api_route(
-    "/{path:path}", methods=["GET", "POST"]
-)
+@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
-):
+) -> Response | StreamingResponse:
     auth = request.headers.get("Authorization", "")
     bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
     refund_address = request.headers.get("Refund-LNURL", None)
@@ -146,7 +145,7 @@ async def proxy(
 
             if is_streaming and response.status_code == 200:
                 # Process streaming response and extract cost from the last chunk
-                async def stream_with_cost():
+                async def stream_with_cost() -> AsyncGenerator[bytes, None]:
                     # Store all chunks to analyze
                     stored_chunks = []
 
@@ -183,12 +182,17 @@ async def proxy(
                                         and isinstance(data["usage"], dict)
                                     ):
                                         # Found usage data, calculate cost
-                                        cost_data = await adjust_payment_for_tokens(
-                                            key, data, session
-                                        )
-                                        # Format as SSE and yield
-                                        cost_json = json.dumps({"cost": cost_data})
-                                        yield f"data: {cost_json}\n\n".encode()
+                                        # Create a new session for this operation
+                                        async with create_session() as new_session:
+                                            # Re-fetch the key in the new session
+                                            fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                                            if fresh_key:
+                                                cost_data = await adjust_payment_for_tokens(
+                                                    fresh_key, data, new_session
+                                                )
+                                                # Format as SSE and yield
+                                                cost_json = json.dumps({"cost": cost_data})
+                                                yield f"data: {cost_json}\n\n".encode()
                                         break
                                 except json.JSONDecodeError:
                                     continue

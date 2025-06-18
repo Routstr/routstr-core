@@ -1,9 +1,11 @@
-import pytest
-import pytest_asyncio
 import hashlib
 import uuid
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
+
+import pytest
+import pytest_asyncio
 from httpx import AsyncClient
+
 from router.db import ApiKey, AsyncSession
 
 
@@ -37,7 +39,7 @@ async def test_api_key(test_session: AsyncSession) -> ApiKey:
 @pytest.mark.asyncio
 async def test_account_info_with_valid_key(
     async_client: AsyncClient, test_api_key: ApiKey
-):
+) -> None:
     """Test getting account info with a valid API key."""
     response = await async_client.get(
         "/v1/wallet/info",
@@ -52,7 +54,7 @@ async def test_account_info_with_valid_key(
 
 
 @pytest.mark.asyncio
-async def test_account_info_without_auth(async_client: AsyncClient):
+async def test_account_info_without_auth(async_client: AsyncClient) -> None:
     """Test that account info requires authentication."""
     response = await async_client.get("/v1/wallet/info")
 
@@ -60,7 +62,7 @@ async def test_account_info_without_auth(async_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_account_info_with_invalid_key(async_client: AsyncClient):
+async def test_account_info_with_invalid_key(async_client: AsyncClient) -> None:
     """Test account info with an invalid API key."""
     response = await async_client.get(
         "/v1/wallet/info",
@@ -73,7 +75,7 @@ async def test_account_info_with_invalid_key(async_client: AsyncClient):
 @pytest.mark.asyncio
 async def test_refund_balance_with_address(
     async_client: AsyncClient, test_api_key: ApiKey, test_session: AsyncSession
-):
+) -> None:
     """Test refunding balance when refund address is set."""
     # Need to patch the refund_balance at the module level to intercept the call
     with patch("router.account.refund_balance", new_callable=AsyncMock) as mock_refund:
@@ -90,9 +92,9 @@ async def test_refund_balance_with_address(
         assert data["recipient"] == "test@lightning.address"
         assert data["msats"] == 1000000
 
-        # Verify balance was zeroed
-        await test_session.refresh(test_api_key)
-        assert test_api_key.balance == 0
+        # Verify the API key was deleted after refund
+        deleted_key = await test_session.get(ApiKey, test_api_key.hashed_key)
+        assert deleted_key is None
 
         # Verify refund_balance was called
         mock_refund.assert_called_once()
@@ -101,7 +103,7 @@ async def test_refund_balance_with_address(
 @pytest.mark.asyncio
 async def test_refund_balance_without_address(
     async_client: AsyncClient, test_session: AsyncSession
-):
+) -> None:
     """Test refunding balance when no refund address is set."""
     # Create key without refund address - with unique ID
     unique_id = str(uuid.uuid4())[:8]
@@ -136,15 +138,19 @@ async def test_refund_balance_without_address(
         # Verify wallet.send was called with the correct amount (msats converted to sats)
         mock_wallet.send.assert_called_once_with(500)
 
+        # Verify the API key was deleted after refund
+        deleted = await test_session.get(ApiKey, api_key)
+        assert deleted is None
+
 
 @pytest.mark.asyncio
 async def test_topup_balance_endpoint(
     async_client: AsyncClient, test_api_key: ApiKey, test_session: AsyncSession
-):
+) -> None:
     """Test topping up balance with a cashu token."""
     # Mock at the router.account module level to intercept the import
     with patch("router.account.credit_balance", new_callable=AsyncMock) as mock_credit:
-        mock_credit.return_value = {"msats": 500000}
+        mock_credit.return_value = 500000  # Return integer msats value
 
         response = await async_client.post(
             "/v1/wallet/topup?cashu_token=cashuBqQSEQ...",
@@ -162,7 +168,7 @@ async def test_topup_balance_endpoint(
 @pytest.mark.asyncio
 async def test_topup_balance_requires_cashu_token(
     async_client: AsyncClient, test_api_key: ApiKey
-):
+) -> None:
     """Test that topup endpoint requires a cashu token."""
     response = await async_client.post(
         "/v1/wallet/topup",
@@ -176,7 +182,7 @@ async def test_topup_balance_requires_cashu_token(
 @pytest.mark.asyncio
 async def test_account_with_cashu_token(
     async_client: AsyncClient, test_session: AsyncSession
-):
+) -> None:
     """Test authentication with a cashu token creates a new account."""
     cashu_token = "cashuBqQSEQ123456"
 
@@ -208,3 +214,17 @@ async def test_account_with_cashu_token(
         assert data["balance"] >= 0  # Balance should be set after credit_balance
 
 
+@pytest.mark.asyncio
+async def test_account_with_invalid_cashu_token(async_client: AsyncClient) -> None:
+    """Test authentication with an invalid cashu token returns 401."""
+
+    with patch("router.auth.credit_balance", new_callable=AsyncMock) as mock_credit:
+        mock_credit.return_value = 0
+
+        response = await async_client.get(
+            "/v1/wallet/info", headers={"Authorization": "Bearer cashuInvalid"}
+        )
+
+        assert response.status_code == 401
+        error = response.json()
+        assert error["detail"]["error"]["code"] == "invalid_api_key"

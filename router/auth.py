@@ -1,12 +1,11 @@
 import asyncio
 import hashlib
-import os
 import json
+import os
 from typing import Optional
 
-
 from fastapi import HTTPException, Request
-from sqlmodel import update, col
+from sqlmodel import col, update
 
 from .cashu import credit_balance, pay_out
 from .db import ApiKey, AsyncSession
@@ -71,12 +70,13 @@ async def validate_bearer_key(
                 refund_address=refund_address,
                 key_expiry_time=key_expiry_time,
             )
-            await credit_balance(
-                bearer_key,
-                new_key,
-                session,
-            )
+            session.add(new_key)
+            await session.flush()  # Ensure the key is in the database before updating balance
+            msats = await credit_balance(bearer_key, new_key, session)
+            if msats <= 0:
+                raise Exception("Token redemption failed")
             await session.refresh(new_key)
+            await session.commit()
             return new_key
         except Exception as e:
             print(f"Redemption failed: {e}")

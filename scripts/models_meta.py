@@ -1,7 +1,8 @@
-import httpx
-import json
 import asyncio
+import json
 from typing import TypedDict
+
+import httpx
 
 
 class ModelArchitecture(TypedDict):
@@ -53,6 +54,9 @@ async def fetch_openrouter_models() -> list[Model]:
                 "(free)" in model.get("name", "")
                 or model.get("id") == "openrouter/auto"
             ):
+                continue
+            # Skip free Gemini 2.5 Pro Exp
+            if model.get("id") == "google/gemini-2.5-pro-exp-03-25":
                 continue
 
             models_data.append(model)

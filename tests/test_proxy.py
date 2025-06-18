@@ -1,10 +1,13 @@
-import pytest
-import pytest_asyncio
 import json
 import os
 import uuid
+from typing import AsyncGenerator
 from unittest.mock import AsyncMock, patch
+
+import pytest
+import pytest_asyncio
 from httpx import AsyncClient
+
 from router.db import ApiKey, AsyncSession
 
 
@@ -26,7 +29,7 @@ async def api_key_with_balance(test_session: AsyncSession) -> ApiKey:
 
 
 @pytest.mark.asyncio
-async def test_proxy_requires_authentication(async_client: AsyncClient):
+async def test_proxy_requires_authentication(async_client: AsyncClient) -> None:
     """Test that proxy endpoints require authentication."""
     response = await async_client.post("/v1/chat/completions")
 
@@ -40,7 +43,7 @@ async def test_proxy_requires_authentication(async_client: AsyncClient):
 @pytest.mark.asyncio
 async def test_proxy_with_insufficient_balance(
     async_client: AsyncClient, test_session: AsyncSession
-):
+) -> None:
     """Test proxy request with insufficient balance."""
     # Create key with minimal balance
     unique_id = str(uuid.uuid4())[:8]
@@ -69,7 +72,7 @@ async def test_proxy_with_insufficient_balance(
 @pytest.mark.asyncio
 async def test_proxy_invalid_json_body(
     async_client: AsyncClient, api_key_with_balance: ApiKey
-):
+) -> None:
     """Test proxy request with invalid JSON body."""
     response = await async_client.post(
         "/v1/chat/completions",
@@ -89,7 +92,7 @@ async def test_proxy_invalid_json_body(
 @pytest.mark.asyncio
 async def test_proxy_successful_request_mock(
     async_client: AsyncClient, api_key_with_balance: ApiKey, test_session: AsyncSession
-):
+) -> None:
     """Test successful proxy request with mocked upstream."""
     mock_response_data = {
         "id": "chatcmpl-123",
@@ -160,7 +163,7 @@ async def test_proxy_successful_request_mock(
 @pytest.mark.asyncio
 async def test_proxy_streaming_response(
     async_client: AsyncClient, api_key_with_balance: ApiKey
-):
+) -> None:
     """Test proxy request with streaming response."""
     # Mock SSE stream chunks
     stream_chunks = [
@@ -170,7 +173,7 @@ async def test_proxy_streaming_response(
         b"data: [DONE]\n\n",
     ]
 
-    async def mock_aiter_bytes():
+    async def mock_aiter_bytes() -> AsyncGenerator[bytes, None]:
         for chunk in stream_chunks:
             yield chunk
 
@@ -211,7 +214,7 @@ async def test_proxy_streaming_response(
 @pytest.mark.asyncio
 async def test_proxy_handles_upstream_errors(
     async_client: AsyncClient, api_key_with_balance: ApiKey
-):
+) -> None:
     """Test proxy handles upstream connection errors gracefully."""
     with patch("httpx.AsyncClient") as mock_client_class:
         mock_client = AsyncMock()
@@ -243,7 +246,7 @@ async def test_proxy_handles_upstream_errors(
 @pytest.mark.asyncio
 async def test_proxy_with_model_based_pricing(
     async_client: AsyncClient, test_session: AsyncSession
-):
+) -> None:
     """Test proxy with model-based pricing enabled."""
     # Create API key with sufficient balance
     unique_id = str(uuid.uuid4())[:8]
@@ -260,7 +263,7 @@ async def test_proxy_with_model_based_pricing(
     with patch.dict(os.environ, {"MODEL_BASED_PRICING": "true"}):
         with patch("os.path.exists", return_value=True):
             # Mock a model with pricing
-            from router.models import MODELS, Model, Pricing, Architecture, TopProvider
+            from router.models import MODELS, Architecture, Model, Pricing, TopProvider
 
             test_model = Model(
                 id="gpt-4",
