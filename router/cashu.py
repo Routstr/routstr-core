@@ -203,6 +203,14 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
         )
 
 
+async def x_cashu_refund(key: ApiKey, session: AsyncSession) -> str:
+    async with WALLET_LOCK:
+        refund_token = await WALLET.send(key.balance)
+    await session.delete(key)
+    await session.commit()
+    return refund_token
+
+
 async def redeem(cashu_token: str, lnurl: str) -> int:
     async with WALLET_LOCK:
         amount_sats, _ = await WALLET.redeem(cashu_token)
