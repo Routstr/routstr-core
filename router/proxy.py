@@ -1,7 +1,6 @@
 import json
 import os
 import re
-from hashlib import sha256
 from typing import AsyncGenerator
 
 import httpx
@@ -192,6 +191,10 @@ async def handle_non_streaming_chat_completion(
         if "transfer-encoding" in response_headers:
             del response_headers["transfer-encoding"]
 
+        # Remove Content-Encoding header since we're sending uncompressed JSON
+        if "content-encoding" in response_headers:
+            del response_headers["content-encoding"]
+
         return Response(
             content=json.dumps(response_json).encode(),
             status_code=response.status_code,
@@ -328,13 +331,13 @@ async def forward_to_upstream(
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
 ) -> Response | StreamingResponse:
-    # Check for X-Cashu header first
-    if x_cashu := request.headers.get("X-Cashu", None):
-        key = await validate_bearer_key(
-            sha256(x_cashu.encode()).hexdigest(), session, "X-CASHU"
-        )
+    # todo check token balance without claiming and raise 402 or 413 if not enough
+    # check_token_balance(request, session)
 
-    if auth := request.headers.get("Authorization", None):
+    if x_cashu := request.headers.get("X-Cashu", None):
+        key = await validate_bearer_key(x_cashu, session, "X-CASHU")
+
+    elif auth := request.headers.get("Authorization", None):
         key = await get_bearer_token_key(request, path, session, auth)
 
     else:
@@ -356,7 +359,7 @@ async def proxy(
 
     if key.refund_address == "X-CASHU":
         refund_token = await x_cashu_refund(key, session)
-        response.headers["X-Cashu-Refund"] = refund_token
+        response.headers["X-Cashu"] = refund_token
 
     return response
 
