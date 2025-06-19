@@ -11,11 +11,14 @@ RECEIVE_LN_ADDRESS = os.environ["RECEIVE_LN_ADDRESS"]
 MINT = os.environ.get("MINT", "https://mint.minibits.cash/Bitcoin")
 MINIMUM_PAYOUT = int(os.environ.get("MINIMUM_PAYOUT", 100))
 REFUND_PROCESSING_INTERVAL = int(os.environ.get("REFUND_PROCESSING_INTERVAL", 3600))
+PAYOUT_INTERVAL = int(os.environ.get("PAYOUT_INTERVAL", 300))  # Default 5 minutes
 DEV_LN_ADDRESS = "routstr@minibits.cash"
 DEVS_DONATION_RATE = float(os.environ.get("DEVS_DONATION_RATE", 0.021))  # 2.1%
 NSEC = os.environ["NSEC"]  # Nostr private key for the wallet
 
 WALLET = Wallet(nsec=NSEC, mint_urls=[MINT])
+PAY_OUT_LOCK = asyncio.Lock()
+WALLET_LOCK = asyncio.Lock()
 
 
 async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None:
@@ -27,62 +30,83 @@ async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None
 
 async def init_wallet() -> None:
     global WALLET
-    WALLET = await Wallet.create(nsec=NSEC, mint_urls=[MINT])
+    async with WALLET_LOCK:
+        WALLET = await Wallet.create(nsec=NSEC, mint_urls=[MINT])
 
 
 async def close_wallet() -> None:
     global WALLET
-    await WALLET.aclose()
+    async with WALLET_LOCK:
+        await WALLET.aclose()
 
 
 async def pay_out() -> None:
     """
     Calculates the pay-out amount based on the spent balance, profit, and donation rate.
     """
-    try:
-        from .db import create_session
+    async with PAY_OUT_LOCK:
+        try:
+            from .db import create_session
 
-        async with create_session() as session:
-            result = await session.exec(
-                select(func.sum(col(ApiKey.balance))).where(ApiKey.balance > 0)
-            )
-            balance = result.one_or_none()
-            if not balance:
-                # No balance to pay out - this is OK, not an error
-                return
-
-            user_balance_sats = balance // 1000
-            state = await WALLET.fetch_wallet_state()
-            wallet_balance_sats = state.balance
-
-            # Handle edge cases more gracefully
-            if wallet_balance_sats < user_balance_sats:
-                print(
-                    f"Warning: Wallet balance ({wallet_balance_sats} sats) is less than user balance ({user_balance_sats} sats). Skipping payout."
+            async with create_session() as session:
+                result = await session.exec(
+                    select(func.sum(col(ApiKey.balance))).where(ApiKey.balance > 0)
                 )
-                return
+                balance = result.one_or_none()
+                if not balance:
+                    # No balance to pay out - this is OK, not an error
+                    return
 
-            if (revenue := wallet_balance_sats - user_balance_sats) <= MINIMUM_PAYOUT:
-                # Not enough revenue yet - this is OK
-                return
+                user_balance_sats = balance // 1000
+                async with WALLET_LOCK:
+                    state = await WALLET.fetch_wallet_state()
+                wallet_balance_sats = state.balance
 
-            devs_donation = int(revenue * DEVS_DONATION_RATE)
-            owners_draw = revenue - devs_donation
+                # Handle edge cases more gracefully
+                if wallet_balance_sats < user_balance_sats:
+                    print(
+                        f"Warning: Wallet balance ({wallet_balance_sats} sats) is less than user balance ({user_balance_sats} sats). Skipping payout."
+                    )
+                    return
 
-            # Send payouts
-            await WALLET.send_to_lnurl(RECEIVE_LN_ADDRESS, owners_draw)
-            await WALLET.send_to_lnurl(DEV_LN_ADDRESS, devs_donation)
+                if (
+                    revenue := wallet_balance_sats - user_balance_sats
+                ) <= MINIMUM_PAYOUT:
+                    # Not enough revenue yet - this is OK
+                    return
 
-    except Exception as e:
-        # Log the error but don't crash - payouts can be retried later
-        print(f"Error in pay_out: {e}")
+                devs_donation = int(revenue * DEVS_DONATION_RATE)
+                owners_draw = revenue - devs_donation
+
+                # Send payouts
+                async with WALLET_LOCK:
+                    await WALLET.send_to_lnurl(RECEIVE_LN_ADDRESS, owners_draw)
+                    await WALLET.send_to_lnurl(DEV_LN_ADDRESS, devs_donation)
+
+        except Exception as e:
+            print(f"Error in pay_out: {e}")
+
+
+# Periodic payout task
+async def periodic_payout() -> None:
+    while True:
+        try:
+            await asyncio.sleep(300)  # Run every 5 minutes
+            await pay_out()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Error in periodic payout: {e}")
+            # Continue running even if payout fails
 
 
 async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -> int:
     """Redeem a Cashu token and credit the amount to the API key balance."""
     try:
-        amount_sats, _ = await WALLET.redeem(cashu_token)
-    except Exception:
+        async with WALLET_LOCK:
+            amount_sats, _ = await WALLET.redeem(cashu_token)
+    except Exception as e:
+        print(f"Error in credit_balance: {e}")
         # Ensure the balance cannot become negative if redeem fails
         return 0
 
@@ -172,13 +196,15 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
     if key.refund_address is None:
         raise ValueError("Refund address not set.")
 
-    return await WALLET.send_to_lnurl(
-        key.refund_address,
-        amount=amount_sats,
-    )
+    async with WALLET_LOCK:
+        return await WALLET.send_to_lnurl(
+            key.refund_address,
+            amount=amount_sats,
+        )
 
 
 async def redeem(cashu_token: str, lnurl: str) -> int:
-    amount_sats, _ = await WALLET.redeem(cashu_token)
-    await WALLET.send_to_lnurl(lnurl, amount=amount_sats)
+    async with WALLET_LOCK:
+        amount_sats, _ = await WALLET.redeem(cashu_token)
+        await WALLET.send_to_lnurl(lnurl, amount=amount_sats)
     return amount_sats

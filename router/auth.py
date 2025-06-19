@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import json
 import os
@@ -7,7 +6,7 @@ from typing import Optional
 from fastapi import HTTPException, Request
 from sqlmodel import col, update
 
-from .cashu import credit_balance, pay_out
+from .cashu import credit_balance
 from .db import ApiKey, AsyncSession
 from .models import MODELS
 
@@ -71,7 +70,7 @@ async def validate_bearer_key(
                 key_expiry_time=key_expiry_time,
             )
             session.add(new_key)
-            await session.flush()  # Ensure the key is in the database before updating balance
+            await session.flush()
             msats = await credit_balance(bearer_key, new_key, session)
             if msats <= 0:
                 raise Exception("Token redemption failed")
@@ -301,7 +300,5 @@ async def adjust_payment_for_tokens(
         await session.commit()
         cost_data["total_msats"] = COST_PER_REQUEST - refund
         await session.refresh(key)
-
-    asyncio.create_task(pay_out())
 
     return cost_data

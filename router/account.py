@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from .auth import validate_bearer_key
 from .cashu import (
     WALLET,
+    WALLET_LOCK,
     credit_balance,
     delete_key_if_zero_balance,
     refund_balance,
@@ -76,7 +77,8 @@ async def refund_wallet_endpoint(
                 status_code=400, detail="Balance too small to refund (less than 1 sat)"
             )
 
-        token = await WALLET.send(remaining_balance_sats)
+        async with WALLET_LOCK:
+            token = await WALLET.send(remaining_balance_sats)
         result = {"msats": remaining_balance_msats, "recipient": None, "token": token}
 
     # Only after successful refund, zero out the balance
