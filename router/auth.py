@@ -109,10 +109,17 @@ async def pay_for_request(
     request_body: bytes | None = None,
 ) -> None:
     if MODEL_BASED_PRICING and MODELS:
-        if request_body:
-            body = json.loads(request_body)
-        else:
-            body = await request.json()  # type: ignore
+        try:
+            if request_body:
+                body = json.loads(request_body)
+            else:
+                body = await request.json()  # type: ignore
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            print(request)
+            # If we can't parse the request body as JSON, skip model validation
+            # This can happen with empty bodies or non-JSON requests
+            return
+            
         if request_model := body.get("model"):
             if request_model not in [model.id for model in MODELS]:
                 raise HTTPException(
