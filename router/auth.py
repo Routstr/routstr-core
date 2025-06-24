@@ -114,7 +114,6 @@ async def pay_for_request(
             else:
                 body = await request.json()  # type: ignore
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
-            print(request)
             # If we can't parse the request body as JSON, skip model validation
             # This can happen with empty bodies or non-JSON requests
             return
