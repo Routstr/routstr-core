@@ -7,8 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .account import wallet_router
-from .cashu import (check_for_refunds, close_wallet, init_wallet,
-                    periodic_payout)
+from .cashu import check_for_refunds, close_wallet, init_wallet, periodic_payout
 from .db import init_db
 from .discovery import providers_router
 from .models import MODELS, update_sats_pricing
