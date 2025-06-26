@@ -1,14 +1,11 @@
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import Request
 from sqlmodel import select
 
 from .cashu import WALLET
 from .db import ApiKey, create_session
-
-admin_router = APIRouter(prefix="/admin")
 
 
 def login_form() -> str:
@@ -154,7 +151,6 @@ async def dashboard(request: Request) -> str:
     """
 
 
-@admin_router.get("/", response_class=HTMLResponse)
 async def admin(request: Request) -> str:
     admin_cookie = request.cookies.get("admin_password")
     if admin_cookie and admin_cookie == os.getenv("ADMIN_PASSWORD"):

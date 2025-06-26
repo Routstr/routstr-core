@@ -6,8 +6,10 @@ from typing import AsyncGenerator
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from .auth import adjust_payment_for_tokens, pay_for_request, validate_bearer_key
+from router.admin import admin
 from .cashu import pay_out
 from .db import AsyncSession, create_session, get_session
 
@@ -20,7 +22,11 @@ proxy_router = APIRouter()
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
-) -> Response | StreamingResponse:
+) -> Response | StreamingResponse | HTMLResponse:
+    if path.startswith("admin"):
+        html_content = await admin(request)
+        return HTMLResponse(content=html_content)
+
     auth = request.headers.get("Authorization", "")
     bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
     refund_address = request.headers.get("Refund-LNURL", None)

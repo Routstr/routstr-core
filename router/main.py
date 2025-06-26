@@ -7,8 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .account import wallet_router
-from .admin import admin_router
-from .cashu import check_for_refunds, close_wallet, init_wallet, periodic_payout
+from .cashu import (check_for_refunds, close_wallet, init_wallet,
+                    periodic_payout)
 from .db import init_db
 from .discovery import providers_router
 from .models import MODELS, update_sats_pricing
@@ -69,7 +69,6 @@ async def info() -> dict:
     }
 
 
-app.include_router(admin_router)
 app.include_router(wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)
