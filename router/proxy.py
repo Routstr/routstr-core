@@ -87,7 +87,8 @@ async def proxy(
                 media_type="application/json",
             )
 
-    await pay_for_request(key, session, request, request_body)
+    if request.method not in ["GET"]:
+        await pay_for_request(key, session, request, request_body)
 
     # Prepare headers, removing sensitive/problematic ones
     headers = dict(request.headers)
