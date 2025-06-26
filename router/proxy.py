@@ -191,13 +191,19 @@ async def proxy(
                                         # Create a new session for this operation
                                         async with create_session() as new_session:
                                             # Re-fetch the key in the new session
-                                            fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                                            fresh_key = await new_session.get(
+                                                key.__class__, key.hashed_key
+                                            )
                                             if fresh_key:
-                                                cost_data = await adjust_payment_for_tokens(
-                                                    fresh_key, data, new_session
+                                                cost_data = (
+                                                    await adjust_payment_for_tokens(
+                                                        fresh_key, data, new_session
+                                                    )
                                                 )
                                                 # Format as SSE and yield
-                                                cost_json = json.dumps({"cost": cost_data})
+                                                cost_json = json.dumps(
+                                                    {"cost": cost_data}
+                                                )
                                                 yield f"data: {cost_json}\n\n".encode()
                                         break
                                 except json.JSONDecodeError:
