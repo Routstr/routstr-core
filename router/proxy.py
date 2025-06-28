@@ -168,7 +168,7 @@ async def forward_to_upstream(
     path: str,
     headers: dict,
     request_body: bytes | None,
-    key: ApiKey,
+    key: ApiKey | None,
     session: AsyncSession,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
@@ -313,14 +313,16 @@ async def proxy(
         key = await get_bearer_token_key(headers, path, session, auth)
 
     else:
-        return Response(
-            content=json.dumps({"detail": "Unauthorized"}),
-            status_code=401,
-            media_type="application/json",
-        )
+        key = None
+        if request.method not in ["GET"]:
+            return Response(
+                content=json.dumps({"detail": "Unauthorized"}),
+                status_code=401,
+                media_type="application/json",
+            )
 
     # Only pay for request if we have request body data (for completions endpoints)
-    if request_body_dict:
+    if request_body_dict and key is not None:
         await pay_for_request(key, session, request_body_dict)
 
     # Prepare headers for upstream
@@ -331,7 +333,7 @@ async def proxy(
         request, path, headers, request_body, key, session
     )
 
-    if response.status_code != 200 and key.refund_address == "X-CASHU":
+    if response.status_code != 200 and (key is not None and key.refund_address == "X-CASHU"):
         refund_token = await x_cashu_refund(key, session)
         response = Response(
             content=json.dumps(
@@ -350,7 +352,7 @@ async def proxy(
         response.headers["X-Cashu"] = refund_token
         return response
 
-    if key.refund_address == "X-CASHU":
+    if key is not None and key.refund_address == "X-CASHU":
         refund_token = await x_cashu_refund(key, session)
         response.headers["X-Cashu"] = refund_token
 
