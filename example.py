@@ -1,4 +1,5 @@
 import os
+
 import openai
 
 client = openai.OpenAI(
@@ -12,7 +13,7 @@ client = openai.OpenAI(
 history: list = []
 
 
-def chat():
+def chat() -> None:
     while True:
         user_msg = {"role": "user", "content": input("\nYou: ")}
         history.append(user_msg)
@@ -24,8 +25,10 @@ def chat():
             stream=True,
         ):
             if len(chunk.choices) > 0:
-                ai_msg["content"] += chunk.choices[0].delta.content
-                print(chunk.choices[0].delta.content, end="", flush=True)
+                content = chunk.choices[0].delta.content
+                if content is not None:
+                    ai_msg["content"] += content
+                    print(content, end="", flush=True)
         print()
         history.append(ai_msg)
 

@@ -3,10 +3,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
+from sqlmodel import select
 
-from .cashu import _initialize_wallet
+from .cashu import WALLET
+from .db import ApiKey, create_session
 
 admin_router = APIRouter(prefix="/admin")
+
 
 def login_form() -> str:
     return """<!DOCTYPE html>
@@ -76,6 +79,7 @@ def info(content: str) -> str:
     </html>
     """
 
+
 def admin_auth() -> str:
     if os.getenv("ADMIN_PASSWORD", "") == "":
         return info("Please set a secure ADMIN_PASSWORD= in your ENV variables.")
@@ -83,11 +87,7 @@ def admin_auth() -> str:
         return login_form()
 
 
-from sqlmodel import select
-from .db import ApiKey, create_session
-
 async def dashboard(request: Request) -> str:
-
     # fetch cashu / api-key data from database
     async with create_session() as session:
         result = await session.exec(select(ApiKey))
@@ -95,22 +95,25 @@ async def dashboard(request: Request) -> str:
 
     api_keys_table_rows = []
     for key in api_keys:
-        expiry_time_utc = datetime.fromtimestamp(key.key_expiry_time, tz=timezone.utc) if key.key_expiry_time is not None else None
-        expiry_time_human_readable = expiry_time_utc.strftime('%Y-%m-%d %H:%M:%S') if expiry_time_utc else ""
+        expiry_time_utc = (
+            datetime.fromtimestamp(key.key_expiry_time, tz=timezone.utc)
+            if key.key_expiry_time is not None
+            else None
+        )
+        expiry_time_human_readable = (
+            expiry_time_utc.strftime("%Y-%m-%d %H:%M:%S") if expiry_time_utc else ""
+        )
 
         api_keys_table_rows.append(
             f"<tr><td>{key.hashed_key}</td><td>{key.balance}</td><td>{key.total_spent}</td><td>{key.total_requests}</td><td>{key.refund_address}</td><td>{'{} ({} UTC)'.format(key.key_expiry_time, expiry_time_human_readable) if key.key_expiry_time else key.key_expiry_time}</td></tr>"
         )
 
-    api_keys_table_rows = "".join(api_keys_table_rows)
-
-    # Calculate the total balance of all API keys
-    total_user_balance = int(sum(key.balance / 1000 for key in api_keys))
+    # Calculate the total balance of all API keys using integer arithmetic to
+    # avoid rounding issues.
+    total_user_balance = sum(key.balance for key in api_keys) // 1000
     # Fetch balance from cashu
-    wallet = await _initialize_wallet()
-    wallet_balance = wallet.balance
-    # calculate owner balance
-    owner_balance = wallet_balance - total_user_balance
+    current_balance = (await WALLET.fetch_wallet_state()).balance
+    owner_balance = current_balance - total_user_balance
 
     return f"""<!DOCTYPE html>
     <html>
@@ -132,7 +135,7 @@ async def dashboard(request: Request) -> str:
             <h2>Current Cashu Balance</h2>
             <p>Your Balance: {owner_balance} sats</p>
             <p>The balance is calculated by subtracting the combined user balance from the total Cashu wallet balance.</p>
-            <p>Total Cashu Balance: {wallet_balance} sats</p>
+            <p>Total Cashu Balance: {current_balance} sats</p>
             <p>User Balance: {total_user_balance} sats</p>
             <h2>User's API Keys</h2>
             <table>
@@ -144,16 +147,16 @@ async def dashboard(request: Request) -> str:
                     <th>Refund Address</th>
                     <th>Refund Time</th>
                 </tr>
-                {api_keys_table_rows}
+                {"".join(api_keys_table_rows)}
             </table>
         </body>
     </html>
     """
 
+
 @admin_router.get("/", response_class=HTMLResponse)
-async def admin(request: Request):
+async def admin(request: Request) -> str:
     admin_cookie = request.cookies.get("admin_password")
     if admin_cookie and admin_cookie == os.getenv("ADMIN_PASSWORD"):
         return await dashboard(request)
     return admin_auth()
-

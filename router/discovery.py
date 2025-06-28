@@ -1,12 +1,13 @@
-from fastapi import APIRouter
 import asyncio
 import json
-import websockets
-import random
-import string
-import re
-import httpx
 import os
+import random
+import re
+import string
+
+import httpx
+import websockets
+from fastapi import APIRouter
 
 providers_router = APIRouter(prefix="/v1/providers")
 
@@ -49,7 +50,7 @@ async def query_nostr_relay_with_search(
                 "limit": limit,
                 "#p": [npub],  # Posts that tag this pubkey
             }
-        except:
+        except Exception:
             # If conversion fails, try regular search
             filter_obj = {
                 "kinds": kinds,
@@ -125,7 +126,7 @@ async def fetch_onion(provider: str) -> dict:
 
         # Configure httpx to use Tor SOCKS5 proxy
         async with httpx.AsyncClient(
-            proxies={"http://": tor_proxy, "https://": tor_proxy},
+            proxies={"http://": tor_proxy, "https://": tor_proxy},  # type: ignore
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
         ) as client:
@@ -138,7 +139,7 @@ async def fetch_onion(provider: str) -> dict:
 
 
 @providers_router.get("/")
-async def get_providers(include_json: bool = False):
+async def get_providers(include_json: bool = False) -> dict[str, list[dict | str]]:
     npub = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s"
 
     # Relays that support NIP-50 text search

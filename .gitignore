@@ -7,6 +7,10 @@ wallet.sqlite3
 .notes
 .*keys.db
 .*wallet.sqlite3
-.*models.json
+*models.json
+.cashu
 
 compose.override.yml
+
+# Coverage
+.coverage

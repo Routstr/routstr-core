@@ -5,13 +5,55 @@ description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "aiosqlite>=0.20",
-    "cashu>=0.16",
     "fastapi[standard]>=0.115",
+    "aiosqlite>=0.20",
+    "sixty-nuts>=0.1.0",
     "sqlmodel>=0.0.24",
-    "marshmallow<4.0",
     "httpx[socks]>=0.25.2",
+    "greenlet>=3.2.1",
 ]
 
 [dependency-groups]
-dev = ["mypy>=1.15.0", "ruff>=0.11.6", "openai>=1.76.0", "pytest>=8.0.0", "pytest-asyncio>=0.24.0", "httpx>=0.25.2"]
+dev = [
+    "mypy>=1.15.0",
+    "ruff>=0.11.6",
+    "openai>=1.76.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.1.1",
+    "httpx>=0.25.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+    "-p",
+    "no:warnings",
+]
+markers = [
+    "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+disallow_untyped_calls = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true

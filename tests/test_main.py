@@ -1,10 +1,12 @@
-import pytest
-from httpx import AsyncClient
 from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+from httpx import AsyncClient
 
 
 @pytest.mark.asyncio
-async def test_root_endpoint(async_client: AsyncClient):
+async def test_root_endpoint(async_client: AsyncClient) -> None:
     """Test the root endpoint returns expected information."""
     # Mock the environment variables for this specific test
     env_vars = {
@@ -15,13 +17,13 @@ async def test_root_endpoint(async_client: AsyncClient):
         "HTTP_URL": "http://test.example.com",
         "ONION_URL": "http://test.onion",
     }
-    
+
     with patch.dict("os.environ", env_vars, clear=False):
         response = await async_client.get("/")
-        
+
         assert response.status_code == 200
         data = response.json()
-        
+
         # The app reads from env vars during import, so check what we actually get
         assert "name" in data
         assert "description" in data
@@ -34,16 +36,16 @@ async def test_root_endpoint(async_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_cors_headers(async_client: AsyncClient):
+async def test_cors_headers(async_client: AsyncClient) -> None:
     """Test that CORS headers are properly set."""
     response = await async_client.options(
         "/",
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
-        }
+        },
     )
-    
+
     assert response.status_code == 200
     # Check that CORS is working (might be * or specific origin)
     assert "access-control-allow-origin" in response.headers
@@ -51,9 +53,9 @@ async def test_cors_headers(async_client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_startup_event_initializes_properly(test_client):
+async def test_startup_event_initializes_properly(test_client: TestClient) -> None:
     """Test that the startup event runs without errors."""
     # The test_client fixture already triggers the startup event
     # This test ensures no exceptions are raised during startup
     response = test_client.get("/")
-    assert response.status_code == 200 
+    assert response.status_code == 200

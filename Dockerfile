@@ -4,7 +4,6 @@ FROM ghcr.io/astral-sh/uv:python3.11-alpine
 RUN apk add --no-cache \
     pkgconf \
     build-base \
-    libsecp256k1-dev \
     automake \
     autoconf \
     libtool \
@@ -14,8 +13,7 @@ RUN apk add git
 
 COPY uv.lock pyproject.toml ./
 
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
-# RUN uv sync
+RUN uv sync
 
 WORKDIR /app
 
