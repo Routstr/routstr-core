@@ -3,7 +3,7 @@ import json
 import os
 from typing import Optional
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
 from sqlmodel import col, update
 
 from .cashu import credit_balance
@@ -101,48 +101,85 @@ async def validate_bearer_key(
     )
 
 
+def base64_token_json(cashu_token: str) -> dict:
+    import base64
+
+    # Version 3 - JSON format
+    encoded = cashu_token[6:]  # Remove "cashuA"
+    # Add correct padding – (-len) % 4 equals 0,1,2,3
+    encoded += "=" * ((-len(encoded)) % 4)
+
+    decoded = base64.urlsafe_b64decode(encoded).decode()
+    token_data = json.loads(decoded)
+
+    return token_data
+
+
+def base64_token_cbor(cashu_token: str) -> dict:
+    import base64
+
+    import cbor2
+
+    encoded = cashu_token[6:]  # Remove "cashuB"
+    encoded += "=" * ((-len(encoded)) % 4)
+    decoded_bytes = base64.urlsafe_b64decode(encoded)
+    token_data = cbor2.loads(decoded_bytes)
+    return token_data
+
+
+def check_token_balance(headers: dict, body: dict) -> None:
+    if x_cashu := headers.get("x-cashu", None):
+        cashu_token = x_cashu
+    elif auth := headers.get("authorization", None):
+        cashu_token = auth.split(" ")[1]
+    else:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    COST_PER_REQUEST = get_max_cost_for_model(model=body["model"])
+    if cashu_token.startswith("cashuA"):
+        _token = base64_token_json(cashu_token)
+        amount = sum(p["amount"] for t in _token["token"] for p in t["proofs"])
+        unit = _token["unit"]
+        if unit == "sat":
+            amount *= 1000
+        if amount < COST_PER_REQUEST:
+            raise HTTPException(status_code=413, detail="Insufficient balance")
+    elif cashu_token.startswith("cashuB"):
+        _token = base64_token_cbor(cashu_token)
+        amount = sum(p["a"] for t in _token["t"] for p in t["p"])
+        unit = _token["u"]
+        if unit == "sat":
+            amount *= 1000
+        if amount < COST_PER_REQUEST:
+            raise HTTPException(status_code=413, detail="Insufficient balance")
+    else:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def get_max_cost_for_model(model: str) -> int:
+    if model not in [model.id for model in MODELS]:
+        return COST_PER_REQUEST
+    for m in MODELS:
+        if m.id == model:
+            return m.sats_pricing.max_cost * 1000  # type: ignore
+    return COST_PER_REQUEST
+
+
 async def pay_for_request(
     key: ApiKey,
     session: AsyncSession,
-    request: Request | None,
-    request_body: bytes | None = None,
+    body: dict,
 ) -> None:
+    # Use global COST_PER_REQUEST as default, override if model-based pricing is enabled
+    cost_per_request = COST_PER_REQUEST
     if MODEL_BASED_PRICING and MODELS:
-        if request_body:
-            body = json.loads(request_body)
-        else:
-            body = await request.json()  # type: ignore
-        if request_model := body.get("model"):
-            if request_model not in [model.id for model in MODELS]:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": {
-                            "message": f"Invalid model: {request_model}",
-                            "type": "invalid_request_error",
-                            "code": "model_not_found",
-                        }
-                    },
-                )
-            model = next(model for model in MODELS if model.id == request_model)
-            if key.balance < model.sats_pricing.max_cost * 1000:  # type: ignore
-                raise HTTPException(
-                    status_code=413,
-                    detail={
-                        "error": {
-                            "message": f"This model requires a minimum balance of {model.sats_pricing.max_cost} sats",  # type: ignore
-                            "type": "insufficient_quota",
-                            "code": "insufficient_balance",
-                        }
-                    },
-                )
+        cost_per_request = get_max_cost_for_model(model=body["model"])
 
-    if key.balance < COST_PER_REQUEST:
+    if key.balance < cost_per_request:
         raise HTTPException(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {COST_PER_REQUEST} mSats required. {key.balance} available.",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {key.balance} available.",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
                 }
@@ -153,10 +190,10 @@ async def pay_for_request(
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
-        .where(col(ApiKey.balance) >= COST_PER_REQUEST)
+        .where(col(ApiKey.balance) >= cost_per_request)
         .values(
-            balance=col(ApiKey.balance) - COST_PER_REQUEST,
-            total_spent=col(ApiKey.total_spent) + COST_PER_REQUEST,
+            balance=col(ApiKey.balance) - cost_per_request,
+            total_spent=col(ApiKey.total_spent) + cost_per_request,
             total_requests=col(ApiKey.total_requests) + 1,
         )
     )
@@ -168,7 +205,7 @@ async def pay_for_request(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {COST_PER_REQUEST} mSats required. {key.balance} available.",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {key.balance} available.",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
                 }

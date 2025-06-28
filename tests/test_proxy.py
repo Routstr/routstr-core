@@ -34,6 +34,17 @@ async def test_proxy_requires_authentication(async_client: AsyncClient) -> None:
     response = await async_client.post("/v1/chat/completions")
 
     assert response.status_code == 401
+    assert response.json()["detail"] == "Unauthorized"
+
+
+@pytest.mark.asyncio
+async def test_proxy_empty_bearer_token(async_client: AsyncClient) -> None:
+    """Test that proxy endpoints return structured error for empty bearer token."""
+    response = await async_client.post(
+        "/v1/chat/completions", headers={"Authorization": "Bearer "}
+    )
+
+    assert response.status_code == 401
     assert (
         "API key or Cashu token required"
         in response.json()["detail"]["error"]["message"]

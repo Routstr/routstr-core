@@ -7,7 +7,12 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from .auth import adjust_payment_for_tokens, pay_for_request, validate_bearer_key
+from .auth import (
+    adjust_payment_for_tokens,
+    check_token_balance,
+    pay_for_request,
+    validate_bearer_key,
+)
 from .cashu import x_cashu_refund
 from .db import ApiKey, AsyncSession, create_session, get_session
 
@@ -15,57 +20,6 @@ UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 
 proxy_router = APIRouter()
-
-
-async def validate_and_read_json_body(
-    request: Request, path: str
-) -> tuple[bytes | None, Response | None]:
-    """Validate and read JSON body for requests that require it.
-
-    Returns:
-        tuple of (request_body, error_response)
-        - If successful: (body_bytes, None)
-        - If error: (None, error_response)
-    """
-    if request.method not in ["POST", "PUT", "PATCH"] or not path.endswith(
-        "chat/completions"
-    ):
-        return None, None
-
-    try:
-        request_body = await request.body()
-        # Try to parse JSON to validate it
-        if request_body:
-            json.loads(request_body)
-        return request_body, None
-    except json.JSONDecodeError as e:
-        return None, Response(
-            content=json.dumps(
-                {
-                    "error": {
-                        "message": f"Invalid JSON in request body: {str(e)}",
-                        "type": "invalid_request_error",
-                        "code": "invalid_json",
-                    }
-                }
-            ),
-            status_code=400,
-            media_type="application/json",
-        )
-    except Exception:
-        return None, Response(
-            content=json.dumps(
-                {
-                    "error": {
-                        "message": "Error reading request body",
-                        "type": "invalid_request_error",
-                        "code": "request_error",
-                    }
-                }
-            ),
-            status_code=400,
-            media_type="application/json",
-        )
 
 
 def prepare_upstream_headers(request_headers: dict) -> dict:
@@ -331,23 +285,43 @@ async def forward_to_upstream(
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
 ) -> Response | StreamingResponse:
-    # todo check token balance without claiming and raise 402 or 413 if not enough
-    # check_token_balance(request, session)
+    request_body = await request.body()
+    headers = dict(request.headers)
 
-    if x_cashu := request.headers.get("X-Cashu", None):
+    # Parse JSON body if present, handle empty/invalid JSON
+    request_body_dict = {}
+    if request_body:
+        try:
+            request_body_dict = json.loads(request_body)
+        except json.JSONDecodeError:
+            return Response(
+                content=json.dumps(
+                    {"error": {"type": "invalid_request_error", "code": "invalid_json"}}
+                ),
+                status_code=400,
+                media_type="application/json",
+            )
+
+    # Handle authentication
+    if x_cashu := headers.get("x-cashu", None):
+        # Check token balance before authentication for cashu tokens
+        if request_body_dict:
+            check_token_balance(headers, request_body_dict)
         key = await validate_bearer_key(x_cashu, session, "X-CASHU")
 
-    elif auth := request.headers.get("Authorization", None):
-        key = await get_bearer_token_key(request, path, session, auth)
+    elif auth := headers.get("authorization", None):
+        key = await get_bearer_token_key(headers, path, session, auth)
 
     else:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        return Response(
+            content=json.dumps({"detail": "Unauthorized"}),
+            status_code=401,
+            media_type="application/json",
+        )
 
-    request_body, error_response = await validate_and_read_json_body(request, path)
-    if error_response:
-        return error_response
-
-    await pay_for_request(key, session, request, request_body)
+    # Only pay for request if we have request body data (for completions endpoints)
+    if request_body_dict:
+        await pay_for_request(key, session, request_body_dict)
 
     # Prepare headers for upstream
     headers = prepare_upstream_headers(dict(request.headers))
@@ -357,6 +331,25 @@ async def proxy(
         request, path, headers, request_body, key, session
     )
 
+    if response.status_code != 200 and key.refund_address == "X-CASHU":
+        refund_token = await x_cashu_refund(key, session)
+        response = Response(
+            content=json.dumps(
+                {
+                    "error": {
+                        "message": "Error forwarding request to upstream",
+                        "type": "upstream_error",
+                        "code": response.status_code,
+                        "refund_token": refund_token,
+                    }
+                }
+            ),
+            status_code=response.status_code,
+            media_type="application/json",
+        )
+        response.headers["X-Cashu"] = refund_token
+        return response
+
     if key.refund_address == "X-CASHU":
         refund_token = await x_cashu_refund(key, session)
         response.headers["X-Cashu"] = refund_token
@@ -365,14 +358,12 @@ async def proxy(
 
 
 async def get_bearer_token_key(
-    request: Request, path: str, session: AsyncSession, auth: str
+    headers: dict, path: str, session: AsyncSession, auth: str
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
-    # Handle regular bearer token authentication
-    auth = request.headers.get("Authorization", "")
     bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
-    refund_address = request.headers.get("Refund-LNURL", None)
-    key_expiry_time = request.headers.get("Key-Expiry-Time", None)
+    refund_address = headers.get("Refund-LNURL", None)
+    key_expiry_time = headers.get("Key-Expiry-Time", None)
 
     # Validate key_expiry_time header
     if key_expiry_time:
