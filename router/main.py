@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .account import wallet_router
 from .admin import admin_router
-from .cashu import check_for_refunds, close_wallet, init_wallet, periodic_payout
+from .cashu import check_for_refunds, init_wallet, periodic_payout
 from .db import init_db
 from .discovery import providers_router
 from .models import MODELS, update_sats_pricing
@@ -21,6 +21,7 @@ __version__ = "0.0.1"
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     await init_wallet()
+
     pricing_task = asyncio.create_task(update_sats_pricing())
     refund_task = asyncio.create_task(check_for_refunds())
     payout_task = asyncio.create_task(periodic_payout())
@@ -34,7 +35,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         await asyncio.gather(
             pricing_task, refund_task, payout_task, return_exceptions=True
         )
-        await close_wallet()
 
 
 app = FastAPI(

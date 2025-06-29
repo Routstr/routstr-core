@@ -13,16 +13,19 @@ uv pip install -e ".[dev]"
 ## Running Tests
 
 To run all tests:
+
 ```bash
 pytest
 ```
 
 To run tests with coverage:
+
 ```bash
 pytest --cov=router --cov-report=html
 ```
 
 To run specific test files:
+
 ```bash
 pytest tests/test_main.py
 pytest tests/test_account.py
@@ -31,6 +34,7 @@ pytest tests/test_models.py
 ```
 
 To run only async tests:
+
 ```bash
 pytest -m asyncio
 ```
@@ -60,4 +64,4 @@ The tests automatically set up required environment variables in `conftest.py`. 
 2. Use the provided fixtures for database and client access
 3. Mock external dependencies (like upstream API calls)
 4. Test both success and error cases
-5. Verify database state changes when applicable 
+5. Verify database state changes when applicable

@@ -16,9 +16,19 @@ DEV_LN_ADDRESS = "routstr@minibits.cash"
 DEVS_DONATION_RATE = float(os.environ.get("DEVS_DONATION_RATE", 0.021))  # 2.1%
 NSEC = os.environ["NSEC"]  # Nostr private key for the wallet
 
-WALLET = Wallet(nsec=NSEC, mint_urls=[MINT], currency="msat")
-PAY_OUT_LOCK = asyncio.Lock()
-WALLET_LOCK = asyncio.Lock()
+WALLET: Wallet | None = None
+
+
+async def init_wallet() -> None:
+    global WALLET
+    WALLET = await Wallet.create(nsec=NSEC)
+
+
+def wallet() -> Wallet:
+    global WALLET
+    if WALLET is None:
+        raise ValueError("Wallet not initialized")
+    return WALLET
 
 
 async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None:
@@ -28,63 +38,45 @@ async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None
         await session.commit()
 
 
-async def init_wallet() -> None:
-    global WALLET
-    async with WALLET_LOCK:
-        WALLET = await Wallet.create(nsec=NSEC, mint_urls=[MINT], currency="msat")
-
-
-async def close_wallet() -> None:
-    global WALLET
-    async with WALLET_LOCK:
-        await WALLET.aclose()
-
-
 async def pay_out() -> None:
     """
     Calculates the pay-out amount based on the spent balance, profit, and donation rate.
     """
-    async with PAY_OUT_LOCK:
-        try:
-            from .db import create_session
+    try:
+        from .db import create_session
 
-            async with create_session() as session:
-                result = await session.exec(
-                    select(func.sum(col(ApiKey.balance))).where(ApiKey.balance > 0)
+        async with create_session() as session:
+            result = await session.exec(
+                select(func.sum(col(ApiKey.balance))).where(ApiKey.balance > 0)
+            )
+            balance = result.one_or_none()
+            if not balance:
+                # No balance to pay out - this is OK, not an error
+                return
+
+            user_balance_sats = balance // 1000
+            wallet_balance_sats = await wallet().get_balance()
+
+            # Handle edge cases more gracefully
+            if wallet_balance_sats < user_balance_sats:
+                print(
+                    f"Warning: Wallet balance ({wallet_balance_sats} sats) is less than user balance ({user_balance_sats} sats). Skipping payout."
                 )
-                balance = result.one_or_none()
-                if not balance:
-                    # No balance to pay out - this is OK, not an error
-                    return
+                return
 
-                user_balance_sats = balance // 1000
-                async with WALLET_LOCK:
-                    state = await WALLET.fetch_wallet_state()
-                wallet_balance_sats = state.balance
+            if (revenue := wallet_balance_sats - user_balance_sats) <= MINIMUM_PAYOUT:
+                # Not enough revenue yet - this is OK
+                return
 
-                # Handle edge cases more gracefully
-                if wallet_balance_sats < user_balance_sats:
-                    print(
-                        f"Warning: Wallet balance ({wallet_balance_sats} sats) is less than user balance ({user_balance_sats} sats). Skipping payout."
-                    )
-                    return
+            devs_donation = int(revenue * DEVS_DONATION_RATE)
+            owners_draw = revenue - devs_donation
 
-                if (
-                    revenue := wallet_balance_sats - user_balance_sats
-                ) <= MINIMUM_PAYOUT:
-                    # Not enough revenue yet - this is OK
-                    return
+            # Send payouts
+            await wallet().send_to_lnurl(RECEIVE_LN_ADDRESS, owners_draw)
+            await wallet().send_to_lnurl(DEV_LN_ADDRESS, devs_donation)
 
-                devs_donation = int(revenue * DEVS_DONATION_RATE)
-                owners_draw = revenue - devs_donation
-
-                # Send payouts
-                async with WALLET_LOCK:
-                    await WALLET.send_to_lnurl(RECEIVE_LN_ADDRESS, owners_draw)
-                    await WALLET.send_to_lnurl(DEV_LN_ADDRESS, devs_donation)
-
-        except Exception as e:
-            print(f"Error in pay_out: {e}")
+    except Exception as e:
+        print(f"Error in pay_out: {e}")
 
 
 # Periodic payout task
@@ -196,23 +188,20 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
     if key.refund_address is None:
         raise ValueError("Refund address not set.")
 
-    async with WALLET_LOCK:
-        return await WALLET.send_to_lnurl(
-            key.refund_address,
-            amount=amount_sats,
-        )
+    assert WALLET is not None, "Wallet not initialized"
+    return await WALLET.send_to_lnurl(key.refund_address, amount=amount_sats)
 
 
 async def x_cashu_refund(key: ApiKey, session: AsyncSession) -> str:
-    async with WALLET_LOCK:
-        refund_token = await WALLET.send(key.balance)
+    assert WALLET is not None, "Wallet not initialized"
+    refund_token = await WALLET.send(key.balance)
     await session.delete(key)
     await session.commit()
     return refund_token
 
 
 async def redeem(cashu_token: str, lnurl: str) -> int:
-    async with WALLET_LOCK:
-        amount_sats, _ = await WALLET.redeem(cashu_token)
-        await WALLET.send_to_lnurl(lnurl, amount=amount_sats)
+    assert WALLET is not None, "Wallet not initialized"
+    amount_sats, _ = await WALLET.redeem(cashu_token)
+    await WALLET.send_to_lnurl(lnurl, amount=amount_sats)
     return amount_sats
