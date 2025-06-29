@@ -226,11 +226,12 @@ async def adjust_payment_for_tokens(
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
     """
+    max_cost = get_max_cost_for_model(model=response_data["model"])
     cost_data: dict = {
-        "base_msats": COST_PER_REQUEST,
+        "base_msats": max_cost,
         "input_msats": 0,
         "output_msats": 0,
-        "total_msats": COST_PER_REQUEST,
+        "total_msats": max_cost,
     }
 
     # Check if we have usage data
@@ -289,7 +290,7 @@ async def adjust_payment_for_tokens(
 
     # If token-based pricing is enabled and base cost is 0, use token-based cost
     # Otherwise, token cost is additional to the base cost
-    cost_difference = token_based_cost - COST_PER_REQUEST
+    cost_difference = token_based_cost - max_cost
 
     if cost_difference == 0:
         await session.commit()
@@ -317,7 +318,7 @@ async def adjust_payment_for_tokens(
             result = await session.exec(charge_stmt)  # type: ignore[call-overload]
             await session.commit()
             if result.rowcount:
-                cost_data["total_msats"] = COST_PER_REQUEST + cost_difference
+                cost_data["total_msats"] = max_cost + cost_difference
                 await session.refresh(key)
     else:
         # Refund some of the base cost
@@ -332,7 +333,7 @@ async def adjust_payment_for_tokens(
         )
         await session.exec(refund_stmt)  # type: ignore[call-overload]
         await session.commit()
-        cost_data["total_msats"] = COST_PER_REQUEST - refund
+        cost_data["total_msats"] = max_cost - refund
         await session.refresh(key)
 
     return cost_data
