@@ -16,7 +16,7 @@ DEV_LN_ADDRESS = "routstr@minibits.cash"
 DEVS_DONATION_RATE = float(os.environ.get("DEVS_DONATION_RATE", 0.021))  # 2.1%
 NSEC = os.environ["NSEC"]  # Nostr private key for the wallet
 
-WALLET = Wallet(nsec=NSEC, mint_urls=[MINT])
+WALLET = Wallet(nsec=NSEC, mint_urls=[MINT], currency="msat")
 PAY_OUT_LOCK = asyncio.Lock()
 WALLET_LOCK = asyncio.Lock()
 
@@ -31,7 +31,7 @@ async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None
 async def init_wallet() -> None:
     global WALLET
     async with WALLET_LOCK:
-        WALLET = await Wallet.create(nsec=NSEC, mint_urls=[MINT])
+        WALLET = await Wallet.create(nsec=NSEC, mint_urls=[MINT], currency="msat")
 
 
 async def close_wallet() -> None:
@@ -104,16 +104,16 @@ async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -
     """Redeem a Cashu token and credit the amount to the API key balance."""
     try:
         async with WALLET_LOCK:
-            amount_sats, _ = await WALLET.redeem(cashu_token)
+            amount, unit = await WALLET.redeem(cashu_token)
     except Exception as e:
         print(f"Error in credit_balance: {e}")
         # Ensure the balance cannot become negative if redeem fails
         return 0
 
-    if amount_sats <= 0:
+    if amount <= 0:
         return 0
 
-    amount_msats = amount_sats * 1000
+    amount_msats = amount * 1000 if unit == 'sat' else amount
 
     # Apply the balance change atomically to avoid race conditions when topping
     # up the same key concurrently.
