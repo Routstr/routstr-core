@@ -21,13 +21,7 @@ COST_PER_1K_OUTPUT_TOKENS = (
 )  # Convert to msats
 MODEL_BASED_PRICING = os.environ.get("MODEL_BASED_PRICING", "false").lower() == "true"
 PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
-PREPAID_BALANCE = (
-    int(os.environ.get("PREPAID_BALANCE", "0")) * 1000
-)  # Convert to msats
-
-# TODO: implement prepaid api key (not like it was before)
-# PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
-# PREPAID_BALANCE = int(os.environ.get("PREPAID_BALANCE", "0")) * 1000  # Convert to msats
+PREPAID_BALANCE = int(os.environ.get("PREPAID_BALANCE", "0")) * 1000  # Convert to msats
 
 
 async def validate_bearer_key(
