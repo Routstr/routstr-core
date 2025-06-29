@@ -8,17 +8,12 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from .auth import (
-    adjust_payment_for_tokens,
-    check_token_balance,
-    pay_for_request,
-    validate_bearer_key,
-)
-from .cashu import x_cashu_refund
+from .auth import adjust_payment_for_tokens, pay_for_request, validate_bearer_key
 from .db import ApiKey, AsyncSession, create_session, get_session
 
 UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
+X_CASHU_SERVER = os.environ.get("X_CASHU_SERVER")
 
 proxy_router = APIRouter()
 
@@ -303,16 +298,21 @@ async def proxy(
                 media_type="application/json",
             )
 
-    # Handle authentication
-    if x_cashu := headers.get("x-cashu", None):
-        # Check token balance before authentication for cashu tokens
-        if request_body_dict:
-            check_token_balance(headers, request_body_dict)
-        key = await validate_bearer_key(x_cashu, session, "X-CASHU")
-
+    if headers.get("x-cashu", None):
+        if X_CASHU_SERVER:
+            return await forward_get_to_upstream(request, path, headers, X_CASHU_SERVER)
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
+        if request_body_dict:
+            await pay_for_request(key, session, request_body_dict)
 
+        headers = prepare_upstream_headers(dict(request.headers))
+
+        response = await forward_to_upstream(
+            request, path, headers, request_body, key, session
+        )
+
+        return response
     else:
         if request.method not in ["GET"]:
             return Response(
@@ -321,46 +321,14 @@ async def proxy(
                 media_type="application/json",
             )
 
-        # Prepare headers for upstream
         headers = prepare_upstream_headers(dict(request.headers))
-        return await forward_get_to_upstream(request, path, headers)
+        return await forward_get_to_upstream(request, path, headers, UPSTREAM_BASE_URL)
 
-    # Only pay for request if we have request body data (for completions endpoints)
-    if request_body_dict:
-        await pay_for_request(key, session, request_body_dict)
-
-    # Prepare headers for upstream
-    headers = prepare_upstream_headers(dict(request.headers))
-
-    # Forward to upstream and handle response
-    response = await forward_to_upstream(
-        request, path, headers, request_body, key, session
+    return Response(
+        content=json.dumps({"detail": "Unauthorized"}),
+        status_code=401,
+        media_type="application/json",
     )
-
-    if response.status_code != 200 and key.refund_address == "X-CASHU":
-        refund_token = await x_cashu_refund(key, session)
-        response = Response(
-            content=json.dumps(
-                {
-                    "error": {
-                        "message": "Error forwarding request to upstream",
-                        "type": "upstream_error",
-                        "code": response.status_code,
-                        "refund_token": refund_token,
-                    }
-                }
-            ),
-            status_code=response.status_code,
-            media_type="application/json",
-        )
-        response.headers["X-Cashu"] = refund_token
-        return response
-
-    if key.refund_address == "X-CASHU":
-        refund_token = await x_cashu_refund(key, session)
-        response.headers["X-Cashu"] = refund_token
-
-    return response
 
 
 async def get_bearer_token_key(
@@ -400,12 +368,13 @@ async def forward_get_to_upstream(
     request: Request,
     path: str,
     headers: dict,
+    endpoint: str,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    url = f"{endpoint}/{path}"
 
     async with httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(retries=1),

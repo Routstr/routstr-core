@@ -104,7 +104,7 @@ async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -
     if amount <= 0:
         return 0
 
-    amount_msats = amount * 1000 if unit == 'sat' else amount
+    amount_msats = amount * 1000 if unit == "sat" else amount
 
     # Apply the balance change atomically to avoid race conditions when topping
     # up the same key concurrently.
