@@ -9,6 +9,21 @@ LOG_FILE="${LOG_FILE:-/home/ubuntu/proxy/update.log}"
 LOCK_FILE="${LOCK_FILE:-/tmp/proxy_update.lock}"
 MAX_LOG_LINES="${MAX_LOG_LINES:-10000}"  # Maximum number of log lines to keep
 
+# Detect which Docker Compose command is available
+detect_docker_compose_cmd() {
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        echo "docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        echo "docker-compose"
+    else
+        log_message "ERROR: Neither 'docker compose' nor 'docker-compose' is available"
+        exit 1
+    fi
+}
+
+# Set the Docker Compose command
+DOCKER_COMPOSE_CMD=$(detect_docker_compose_cmd)
+
 # Function to log messages with timestamp
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
@@ -68,11 +83,11 @@ if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
         
         # Stop current containers
         log_message "Stopping current containers..."
-        sudo docker compose down 2>&1 | tee -a "$LOG_FILE"
+        sudo $DOCKER_COMPOSE_CMD down 2>&1 | tee -a "$LOG_FILE"
         
         # Build and start updated containers
         log_message "Building and starting updated containers..."
-        if sudo docker compose up -d --build 2>&1 | tee -a "$LOG_FILE"; then
+        if sudo $DOCKER_COMPOSE_CMD up -d --build 2>&1 | tee -a "$LOG_FILE"; then
             log_message "Successfully updated and restarted containers"
         else
             log_message "ERROR: Failed to start containers"

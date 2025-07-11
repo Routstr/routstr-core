@@ -1,4 +1,7 @@
+#!/usr/bin/env python3
+
 import json
+import os
 from typing import TypedDict
 from urllib.request import urlopen
 
@@ -38,9 +41,13 @@ class Model(TypedDict):
     per_request_limits: dict | None
 
 
+OUTPUT_FILE = os.getenv("OUTPUT_FILE", "models.json")
+BASE_URL = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
+
+
 def fetch_openrouter_models() -> list[Model]:
     """Fetches model information from OpenRouter API."""
-    with urlopen("https://openrouter.ai/api/v1/models") as response:
+    with urlopen(f"{BASE_URL}/models") as response:
         data = json.loads(response.read().decode("utf-8"))
 
         models_data: list[Model] = []
@@ -64,9 +71,10 @@ def main() -> None:
     models = fetch_openrouter_models()
 
     # Print the first model data in a nicely indented JSON format
-    print(json.dumps(models[0], indent=4))
+    # print(json.dumps(models[0], indent=4))
+    print(f"Writing {len(models)} models to {OUTPUT_FILE}")
 
-    with open("or-models.json", "w") as f:
+    with open(OUTPUT_FILE, "w") as f:
         json.dump({"models": models}, f, indent=4)
 
 
