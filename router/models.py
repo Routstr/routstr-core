@@ -112,7 +112,9 @@ async def update_sats_pricing() -> None:
                         reasonable_completion = min(
                             model.top_provider.context_length // 4, 4000
                         )
-                        max_completion_cost = reasonable_completion * model.sats_pricing.completion
+                        max_completion_cost = (
+                            reasonable_completion * model.sats_pricing.completion
+                        )
                         theoretical_max = max_context_cost + max_completion_cost
                         model.sats_pricing.max_cost = theoretical_max * 0.5
                     elif model.top_provider.max_completion_tokens:
@@ -121,8 +123,10 @@ async def update_sats_pricing() -> None:
                             * model.sats_pricing.completion
                         )
                         reasonable_input = min(
-                            int(model.context_length * 0.75) if model.context_length else 8000,
-                            16000
+                            int(model.context_length * 0.75)
+                            if model.context_length
+                            else 8000,
+                            16000,
                         )
                         max_context_cost = reasonable_input * model.sats_pricing.prompt
                         theoretical_max = max_context_cost + max_completion_cost
@@ -135,14 +139,16 @@ async def update_sats_pricing() -> None:
                         model.sats_pricing.max_cost = theoretical_max * 0.5
                 else:
                     # Fallback calculation for models without top_provider info
-                    # Use reasonable defaults: 8k input + 2k completion
                     p = model.sats_pricing.prompt * 8000
                     c = model.sats_pricing.completion * 2000
                     r = model.sats_pricing.request
                     i = model.sats_pricing.image * 10  # Assume max 10 images
                     w = model.sats_pricing.web_search * 5  # Assume max 5 web searches
-                    ir = model.sats_pricing.internal_reasoning * 1000  # Reasonable reasoning tokens
+                    ir = (
+                        model.sats_pricing.internal_reasoning * 1000
+                    )  # Reasonable reasoning tokens
                     theoretical_max = p + c + r + i + w + ir
+                    model.sats_pricing.max_cost = theoretical_max
 
         except asyncio.CancelledError:
             break

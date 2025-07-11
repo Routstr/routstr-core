@@ -88,8 +88,10 @@ async def test_update_sats_pricing_calculation(sample_model: Model) -> None:
                 )  # 10 sats
 
                 # Verify max_cost calculation for model with top_provider
-                expected_max_context = 4096 * sample_model.sats_pricing.prompt
-                expected_max_completion = 2048 * sample_model.sats_pricing.completion
+                expected_max_context = 4096 * sample_model.sats_pricing.prompt * 0.5
+                expected_max_completion = (
+                    2048 * sample_model.sats_pricing.completion * 0.5
+                )
                 assert sample_model.sats_pricing.max_cost == pytest.approx(
                     expected_max_context + expected_max_completion
                 )
@@ -159,12 +161,12 @@ async def test_update_sats_pricing_without_top_provider() -> None:
                 assert model_without_top.sats_pricing is not None
 
                 # Verify the fallback max_cost calculation
-                p = model_without_top.sats_pricing.prompt * 1_000_000
-                c = model_without_top.sats_pricing.completion * 32_000
-                r = model_without_top.sats_pricing.request * 100_000
-                i = model_without_top.sats_pricing.image * 100
-                w = model_without_top.sats_pricing.web_search * 1000
-                ir = model_without_top.sats_pricing.internal_reasoning * 100
+                p = model_without_top.sats_pricing.prompt * 8000
+                c = model_without_top.sats_pricing.completion * 2000
+                r = model_without_top.sats_pricing.request
+                i = model_without_top.sats_pricing.image * 10
+                w = model_without_top.sats_pricing.web_search * 5
+                ir = model_without_top.sats_pricing.internal_reasoning * 1000
                 expected_max = p + c + r + i + w + ir
 
                 assert model_without_top.sats_pricing.max_cost == pytest.approx(
