@@ -124,6 +124,7 @@ graph TD
 ```
 
 **Key Benefits:**
+
 - **Per-Request Payments** – Send exact tokens for each API call
 - **Automatic Change** – Receive change tokens in response headers
 - **No Pre-funding** – No need to maintain account balances
@@ -131,6 +132,7 @@ graph TD
 - **Minimum Amount Protection** – Proxy enforces minimum token value to prevent dust attacks
 
 **Header Format:**
+
 - **Request**: `x-cashu: <ecash_token>` – Token to spend for this request (must meet minimum amount)
 - **Response**: `x-cashu: <change_token>` – Change token if payment exceeds cost
 
@@ -144,6 +146,7 @@ To use this feature, you'll need a client that handles both OpenAI API calls and
 - **[cashu-402-client](https://github.com/9qeklajc/ecash-402-client)** – rust client with automatic wallet management
 
 clients automatically:
+
 - **Handle eCash Headers** – Add `x-cashu` tokens to requests and process change tokens
 - **Manage Wallets** – Maintain your Cashu wallet
 - **Configure Proxy** – Set Routstr proxy endpoints

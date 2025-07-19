@@ -1,8 +1,10 @@
 import asyncio
 import os
 import time
+from typing import cast
 
 from sixty_nuts import Wallet
+from sixty_nuts.mint import CurrencyUnit
 from sqlmodel import col, func, select, update
 
 from .db import ApiKey, AsyncSession, get_session
@@ -15,20 +17,21 @@ PAYOUT_INTERVAL = int(os.environ.get("PAYOUT_INTERVAL", 300))  # Default 5 minut
 DEV_LN_ADDRESS = "routstr@minibits.cash"
 DEVS_DONATION_RATE = float(os.environ.get("DEVS_DONATION_RATE", 0.021))  # 2.1%
 NSEC = os.environ["NSEC"]  # Nostr private key for the wallet
+CURRENCY = cast(CurrencyUnit, os.environ.get("CURRENCY", "sat"))
 
-WALLET: Wallet | None = None
+wallet_instance: Wallet | None = None
 
 
 async def init_wallet() -> None:
-    global WALLET
-    WALLET = await Wallet.create(nsec=NSEC)
+    global wallet_instance
+    wallet_instance = await Wallet.create(nsec=NSEC)
 
 
 def wallet() -> Wallet:
-    global WALLET
-    if WALLET is None:
+    global wallet_instance
+    if wallet_instance is None:
         raise ValueError("Wallet not initialized")
-    return WALLET
+    return wallet_instance
 
 
 async def delete_key_if_zero_balance(key: ApiKey, session: AsyncSession) -> None:
@@ -187,20 +190,17 @@ async def refund_balance(amount_msats: int, key: ApiKey, session: AsyncSession) 
     if key.refund_address is None:
         raise ValueError("Refund address not set.")
 
-    assert WALLET is not None, "Wallet not initialized"
-    return await WALLET.send_to_lnurl(key.refund_address, amount=amount_sats)
+    return await wallet().send_to_lnurl(key.refund_address, amount=amount_sats)
 
 
 async def x_cashu_refund(key: ApiKey, session: AsyncSession) -> str:
-    assert WALLET is not None, "Wallet not initialized"
-    refund_token = await WALLET.send(key.balance)
+    refund_token = await wallet().send(key.balance)
     await session.delete(key)
     await session.commit()
     return refund_token
 
 
 async def redeem(cashu_token: str, lnurl: str) -> int:
-    assert WALLET is not None, "Wallet not initialized"
-    amount_sats, _ = await WALLET.redeem(cashu_token)
-    await WALLET.send_to_lnurl(lnurl, amount=amount_sats)
+    amount_sats, _ = await wallet().redeem(cashu_token)
+    await wallet().send_to_lnurl(lnurl, amount=amount_sats)
     return amount_sats

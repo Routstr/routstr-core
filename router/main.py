@@ -11,7 +11,7 @@ from .admin import admin_router
 from .cashu import check_for_refunds, init_wallet, periodic_payout
 from .db import init_db
 from .discovery import providers_router
-from .models import MODELS, update_sats_pricing
+from .models import MODELS, models_router, update_sats_pricing
 from .proxy import proxy_router
 
 __version__ = "0.0.1"
@@ -69,11 +69,7 @@ async def info() -> dict:
     }
 
 
-@app.get("/v1/models")
-async def models() -> dict:
-    return {"data": MODELS}
-
-
+app.include_router(models_router)
 app.include_router(admin_router)
 app.include_router(wallet_router)
 app.include_router(providers_router)

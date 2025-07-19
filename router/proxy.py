@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import traceback
 from typing import AsyncGenerator
@@ -8,57 +7,19 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from .auth import (
-    adjust_payment_for_tokens,
+from router.payment.helpers import (
+    UPSTREAM_BASE_URL,
     check_token_balance,
-    pay_for_request,
-    validate_bearer_key,
+    create_error_response,
+    prepare_upstream_headers,
 )
+from router.payment.x_cashu import x_cashu_handler
+
+from .auth import adjust_payment_for_tokens, pay_for_request, validate_bearer_key
 from .cashu import x_cashu_refund
 from .db import ApiKey, AsyncSession, create_session, get_session
 
-UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
-UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
-
 proxy_router = APIRouter()
-
-
-def prepare_upstream_headers(request_headers: dict) -> dict:
-    """Prepare headers for upstream request, removing sensitive/problematic ones."""
-    headers = dict(request_headers)
-    # Remove headers that shouldn't be forwarded
-    headers.pop("host", None)
-    headers.pop("content-length", None)
-    headers.pop("refund-lnurl", None)
-    headers.pop("key-expiry-time", None)
-    headers.pop("x-cashu", None)
-
-    # Handle authorization
-    if UPSTREAM_API_KEY:
-        headers["Authorization"] = f"Bearer {UPSTREAM_API_KEY}"
-        headers.pop("authorization", None)
-    else:
-        headers.pop("Authorization", None)
-        headers.pop("authorization", None)
-
-    return headers
-
-
-def create_error_response(error_type: str, message: str, status_code: int) -> Response:
-    """Create a standardized error response."""
-    return Response(
-        content=json.dumps(
-            {
-                "error": {
-                    "message": message,
-                    "type": error_type,
-                    "code": status_code,
-                }
-            }
-        ),
-        status_code=status_code,
-        media_type="application/json",
-    )
 
 
 async def handle_streaming_chat_completion(
@@ -307,8 +268,8 @@ async def proxy(
     if x_cashu := headers.get("x-cashu", None):
         # Check token balance before authentication for cashu tokens
         if request_body_dict:
-            check_token_balance(headers, request_body_dict)
-        key = await validate_bearer_key(x_cashu, session, "X-CASHU")
+            check_token_balance(headers, request_body_dict, "msat")
+        return await x_cashu_handler(request, x_cashu, path)
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)

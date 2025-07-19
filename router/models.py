@@ -3,9 +3,12 @@ import json
 import os
 from pathlib import Path
 
+from fastapi import APIRouter
 from pydantic.v1 import BaseModel
 
 from .price import sats_usd_ask_price
+
+models_router = APIRouter()
 
 
 class Architecture(BaseModel):
@@ -139,3 +142,8 @@ async def update_sats_pricing() -> None:
             await asyncio.sleep(10)
         except asyncio.CancelledError:
             break
+
+
+@models_router.get("/v1/models")
+async def models() -> dict:
+    return {"data": MODELS}
