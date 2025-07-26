@@ -21,6 +21,16 @@ services:
       - HS_ROUTER=router:8000:80
     depends_on:
       - router
+  
+  relay:
+    image: dockurr/strfry:latest
+    restart: unless-stopped
+    ports:
+      - "8088:8080"  # host:container
+    volumes:
+      - ./.relay/data:/app/strfry-db
+      - ./.relay/strfry.conf:/app/strfry.conf:ro
+    command: ["./strfry", "relay"]
 
 volumes:
   tor-data:

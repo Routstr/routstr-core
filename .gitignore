@@ -17,3 +17,6 @@ compose.override.yml
 
 # deployment
 *.log
+
+# relay
+.relay/data
