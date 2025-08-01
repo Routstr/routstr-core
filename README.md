@@ -84,6 +84,10 @@ The most common settings are shown below. See `.env.example` for the full list.
 - `REFUND_PROCESSING_INTERVAL` – Seconds between automatic refunds
 - `ADMIN_PASSWORD` – Password for the `/admin` dashboard
 
+## Withdrawing Balance
+
+Go to `https://<your.routstr.proxy>/admin/` (NOTE: be sure to add the '/' at the end), enter the `ADMIN_PASSWORD` you set above and withdraw your balance as a Cashu token. 
+
 ## Example Client
 
 `example.py` shows how to use the proxy with the official OpenAI client:

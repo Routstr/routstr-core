@@ -3,13 +3,8 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from .auth import validate_bearer_key
-from .cashu import (
-    credit_balance,
-    delete_key_if_zero_balance,
-    refund_balance,
-    wallet,
-)
 from .db import ApiKey, AsyncSession, get_session
+from .wallet import credit_balance, send_to_lnurl, send_token
 
 wallet_router = APIRouter(prefix="/v1/wallet")
 
@@ -66,8 +61,8 @@ async def refund_wallet_endpoint(
 
     # Perform refund operation first, before modifying balance
     if key.refund_address:
-        await refund_balance(remaining_balance_msats, key, session)
-        result = {"recipient": key.refund_address, "msats": remaining_balance_msats}
+        await send_to_lnurl(remaining_balance_msats, "msat", key.refund_address)
+        result = {"recipient": key.refund_address, "msat": remaining_balance_msats}
     else:
         # Convert msats to sats for cashu wallet
         remaining_balance_sats = remaining_balance_msats // 1000
@@ -76,15 +71,13 @@ async def refund_wallet_endpoint(
                 status_code=400, detail="Balance too small to refund (less than 1 sat)"
             )
 
-        token = await wallet().send(remaining_balance_sats)
+        # TODO: choose currency and mint based on what user has configured
+        token = await send_token(remaining_balance_sats, "sat")
 
         result = {"msats": remaining_balance_msats, "recipient": None, "token": token}
 
-    # Only after successful refund, zero out the balance
-    key.balance = 0
-    session.add(key)
+    await session.delete(key)
     await session.commit()
-    await delete_key_if_zero_balance(key, session)
 
     return result
 

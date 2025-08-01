@@ -8,33 +8,64 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .account import wallet_router
 from .admin import admin_router
-from .cashu import check_for_refunds, init_wallet, periodic_payout
 from .db import init_db
 from .discovery import providers_router
+from .logging import get_logger, setup_logging
 from .models import MODELS, models_router, update_sats_pricing
 from .proxy import proxy_router
+from .wallet import check_for_refunds, periodic_payout
+
+# Initialize logging first
+setup_logging()
+logger = get_logger(__name__)
 
 __version__ = "0.0.1"
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    await init_db()
-    await init_wallet()
-
-    pricing_task = asyncio.create_task(update_sats_pricing())
-    refund_task = asyncio.create_task(check_for_refunds())
-    payout_task = asyncio.create_task(periodic_payout())
+    logger.info("Application startup initiated", extra={"version": __version__})
 
     try:
+        await init_db()
+        logger.info("Database initialized successfully")
+
+        logger.info("Wallet initialized successfully")
+
+        pricing_task = asyncio.create_task(update_sats_pricing())
+        refund_task = asyncio.create_task(check_for_refunds())
+        payout_task = asyncio.create_task(periodic_payout())
+
+        logger.info(
+            "Background tasks started successfully",
+            extra={"tasks": ["pricing", "refunds", "payouts"]},
+        )
+
         yield
+
+    except Exception as e:
+        logger.error(
+            "Application startup failed",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+        raise
     finally:
+        logger.info("Application shutdown initiated")
+
         refund_task.cancel()
         pricing_task.cancel()
         payout_task.cancel()
-        await asyncio.gather(
-            pricing_task, refund_task, payout_task, return_exceptions=True
-        )
+
+        try:
+            await asyncio.gather(
+                pricing_task, refund_task, payout_task, return_exceptions=True
+            )
+            logger.info("Background tasks stopped successfully")
+        except Exception as e:
+            logger.error(
+                "Error stopping background tasks",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
 
 
 app = FastAPI(
@@ -54,9 +85,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logger.info(
+    "CORS middleware configured",
+    extra={"allowed_origins": os.environ.get("CORS_ORIGINS", "*").split(",")},
+)
+
 
 @app.get("/")
 async def info() -> dict:
+    logger.info("Info endpoint accessed")
     return {
         "name": app.title,
         "description": app.description,
@@ -74,3 +111,8 @@ app.include_router(admin_router)
 app.include_router(wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)
+
+logger.info(
+    "Application initialized successfully",
+    extra={"version": __version__, "routers_count": 5},
+)
