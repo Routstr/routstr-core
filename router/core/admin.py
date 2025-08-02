@@ -6,10 +6,10 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..wallet import get_balance, send_token
 from .db import ApiKey, create_session
-from .wallet import get_balance, send_token
 
-admin_router = APIRouter(prefix="/admin")
+admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
 
 class WithdrawRequest(BaseModel):

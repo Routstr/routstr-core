@@ -2,8 +2,8 @@ import os
 
 from pydantic import BaseModel
 
-from ..logging import get_logger
-from ..models import MODELS
+from ..core import get_logger
+from .models import MODELS
 
 logger = get_logger(__name__)
 

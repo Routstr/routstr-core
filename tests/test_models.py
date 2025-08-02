@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from router.models import (
+from router.payment.models import (
     MODELS,
     Architecture,
     Model,
@@ -49,7 +49,7 @@ async def test_update_sats_pricing_calculation(sample_model: Model) -> None:
     """Test that sats pricing is calculated correctly."""
     # Mock the sats_usd_ask_price function
     with patch(
-        "router.models.sats_usd_ask_price", new_callable=AsyncMock
+        "router.payment.models.sats_usd_ask_price", new_callable=AsyncMock
     ) as mock_price:
         mock_price.return_value = 0.0001  # 1 sat = 0.0001 USD
 
@@ -137,7 +137,7 @@ async def test_update_sats_pricing_without_top_provider() -> None:
     )
 
     with patch(
-        "router.models.sats_usd_ask_price", new_callable=AsyncMock
+        "router.payment.models.sats_usd_ask_price", new_callable=AsyncMock
     ) as mock_price:
         mock_price.return_value = 0.0001  # 1 sat = 0.0001 USD
 
@@ -189,7 +189,7 @@ async def test_update_sats_pricing_without_top_provider() -> None:
 async def test_update_sats_pricing_handles_errors() -> None:
     """Test that update_sats_pricing handles errors gracefully."""
     with patch(
-        "router.models.sats_usd_ask_price", new_callable=AsyncMock
+        "router.payment.models.sats_usd_ask_price", new_callable=AsyncMock
     ) as mock_price:
         mock_price.side_effect = Exception("API Error")
 

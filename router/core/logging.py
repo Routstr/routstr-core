@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pythonjsonlogger import jsonlogger
+from rich.logging import RichHandler
 
 
 class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
@@ -181,10 +182,6 @@ def setup_logging() -> None:
                 "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s",
                 "datefmt": "%Y-%m-%d %H:%M:%S",
             },
-            "standard": {
-                "format": "%(asctime)s [%(levelname)s] %(name)s v%(version)s: %(message)s",
-                "datefmt": "%Y-%m-%d %H:%M:%S",
-            },
         },
         "filters": {
             "version_filter": {"()": VersionFilter},
@@ -192,11 +189,13 @@ def setup_logging() -> None:
         },
         "handlers": {
             "console": {
-                "class": "logging.StreamHandler",
+                "()": RichHandler,
                 "level": log_level,
-                "formatter": "standard",
-                "stream": "ext://sys.stdout",
-                "filters": ["version_filter", "security_filter"],
+                "show_time": False,
+                "show_path": False,
+                "rich_tracebacks": True,
+                "markup": True,
+                "filters": ["security_filter"],
             },
             "file": {
                 "()": DailyRotatingFileHandler,
@@ -252,6 +251,12 @@ def setup_logging() -> None:
                 "handlers": ["console"] if console_enabled else [],
                 "propagate": False,
             },
+            "uvicorn.error": {
+                "level": "INFO",
+                "handlers": ["console"],
+                "propagate": False,
+            },
+            "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},
         },
         "root": {
             "level": log_level,

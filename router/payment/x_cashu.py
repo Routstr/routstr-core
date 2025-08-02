@@ -6,9 +6,14 @@ import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from ..logging import get_logger
+from ..core import get_logger
 from ..wallet import CurrencyUnit, recieve_token, send_token
-from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
+from .cost_caculation import (
+    CostData,
+    CostDataError,
+    MaxCostData,
+    calculate_cost,
+)
 from .helpers import (
     UPSTREAM_BASE_URL,
     create_error_response,
@@ -46,16 +51,37 @@ async def x_cashu_handler(
 
         return await forward_to_upstream(request, path, headers, amount, unit)
     except Exception as e:
+        error_message = str(e)
         logger.error(
             "X-Cashu payment request failed",
             extra={
-                "error": str(e),
+                "error": error_message,
                 "error_type": type(e).__name__,
                 "path": path,
                 "method": request.method,
             },
         )
-        raise
+
+        # Handle specific CASHU errors with appropriate HTTP status codes
+        if "already spent" in error_message.lower():
+            return create_error_response(
+                "token_already_spent",
+                "The provided CASHU token has already been spent",
+                400,
+            )
+        elif "invalid token" in error_message.lower():
+            return create_error_response(
+                "invalid_token", "The provided CASHU token is invalid", 400
+            )
+        elif "mint error" in error_message.lower():
+            return create_error_response(
+                "mint_error", f"CASHU mint error: {error_message}", 422
+            )
+        else:
+            # Generic error for other cases
+            return create_error_response(
+                "cashu_error", f"CASHU token processing failed: {error_message}", 400
+            )
 
 
 async def forward_to_upstream(
@@ -297,7 +323,13 @@ async def handle_streaming_response(
         try:
             cost_data = await get_cost(response_data)
             if cost_data:
-                refund_amount = amount - cost_data.total_msats
+                if unit == "msat":
+                    refund_amount = amount - cost_data.total_msats
+                elif unit == "sat":
+                    refund_amount = amount - (cost_data.total_msats + 999) // 1000
+                else:
+                    raise ValueError(f"Invalid unit: {unit}")
+
                 if refund_amount > 0:
                     logger.info(
                         "Processing refund for streaming response",
@@ -399,7 +431,12 @@ async def handle_non_streaming_response(
         if "content-encoding" in response_headers:
             del response_headers["content-encoding"]
 
-        refund_amount = amount - cost_data.total_msats
+        if unit == "msat":
+            refund_amount = amount - cost_data.total_msats
+        elif unit == "sat":
+            refund_amount = amount - (cost_data.total_msats + 999) // 1000
+        else:
+            raise ValueError(f"Invalid unit: {unit}")
 
         logger.info(
             "Processing non-streaming response cost calculation",

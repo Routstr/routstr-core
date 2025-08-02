@@ -37,8 +37,8 @@ TEST_ENV = {
 os.environ.update(TEST_ENV)
 
 # Now import modules that depend on environment variables
-from router.db import get_session  # noqa: E402
-from router.main import app  # noqa: E402
+from router.core.db import get_session  # noqa: E402
+from router.core.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -79,7 +79,7 @@ async def test_session(test_engine: AsyncEngine) -> AsyncGenerator[AsyncSession,
 def test_client() -> Generator[TestClient, None, None]:
     """Create a test client for the FastAPI app."""
     with patch.dict(os.environ, TEST_ENV, clear=True):
-        with patch("router.models.update_sats_pricing") as mock_update:
+        with patch("router.payment.models.update_sats_pricing") as mock_update:
             mock_update.return_value = None
             yield TestClient(app)
 
@@ -95,7 +95,7 @@ async def async_client(test_session: AsyncSession) -> AsyncGenerator[AsyncClient
 
     # Mock startup tasks
     with patch.dict(os.environ, TEST_ENV, clear=True):
-        with patch("router.models.update_sats_pricing") as mock_update:
+        with patch("router.payment.models.update_sats_pricing") as mock_update:
             mock_update.return_value = None
 
             async with AsyncClient(

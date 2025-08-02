@@ -3,10 +3,11 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from .auth import validate_bearer_key
-from .db import ApiKey, AsyncSession, get_session
+from .core.db import ApiKey, AsyncSession, get_session
 from .wallet import credit_balance, send_to_lnurl, send_token
 
-wallet_router = APIRouter(prefix="/v1/wallet")
+router = APIRouter()
+balance_router = APIRouter(prefix="/v1/balance")
 
 
 async def get_key_from_header(
@@ -23,7 +24,7 @@ async def get_key_from_header(
 
 
 # TODO: remove this endpoint when frontend is updated
-@wallet_router.get("/")
+@router.get("/", include_in_schema=False)
 async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     return {
         "api_key": "sk-" + key.hashed_key,
@@ -31,7 +32,7 @@ async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     }
 
 
-@wallet_router.get("/info")
+@router.get("/info")
 async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     return {
         "api_key": "sk-" + key.hashed_key,
@@ -39,7 +40,7 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     }
 
 
-@wallet_router.post("/topup")
+@router.post("/topup")
 async def topup_wallet_endpoint(
     cashu_token: str,
     key: ApiKey = Depends(get_key_from_header),
@@ -49,7 +50,7 @@ async def topup_wallet_endpoint(
     return {"msats": amount_msats}
 
 
-@wallet_router.post("/refund")
+@router.post("/refund")
 async def refund_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
@@ -82,7 +83,7 @@ async def refund_wallet_endpoint(
     return result
 
 
-@wallet_router.api_route(
+@router.api_route(
     "/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE"],
     include_in_schema=False,
@@ -92,3 +93,8 @@ async def wallet_catch_all(path: str) -> NoReturn:
     raise HTTPException(
         status_code=404, detail="Not found check /docs for available endpoints"
     )
+
+
+balance_router.include_router(router)
+deprecated_wallet_router = APIRouter(prefix="/v1/wallet", include_in_schema=False)
+deprecated_wallet_router.include_router(router)

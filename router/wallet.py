@@ -1,24 +1,11 @@
 import os
 from typing import Literal
 
-from cashu.core.base import Token
+from cashu.core.base import Token, Unit
 from cashu.wallet.helpers import deserialize_token_from_string, receive, send
 from cashu.wallet.wallet import Wallet
 
-from .db import ApiKey, AsyncSession
-from .logging import get_logger
-
-# from .cashu import (
-#     credit_balance,
-#     delete_key_if_zero_balance,
-#     refund_balance,
-#     wallet,
-# )
-# from .cashu import (
-#     check_for_refunds,
-#     init_wallet,
-#     periodic_payout,
-# )
+from .core import db, get_logger
 
 logger = get_logger(__name__)
 
@@ -51,10 +38,12 @@ async def recieve_token(
         load_all_keysets=True,
         unit=token_obj.unit,
     )
-    if token_obj.mint in TRUSTED_MINTS and token_obj.mint != PRIMARY_MINT_URL:
-        return await swap_to_primary_mint(token_obj, wallet)
-    elif token_obj.mint not in TRUSTED_MINTS:
-        raise ValueError("Mint URL is not supported by this proxy")
+
+    if token_obj.mint != PRIMARY_MINT_URL:
+        raise ValueError(
+            f"This mint is not supported, please use {PRIMARY_MINT_URL} instead"
+        )
+
     await receive(wallet, token_obj)
     return token_obj.amount, token_obj.unit, token_obj.mint
 
@@ -73,9 +62,16 @@ async def send_token(
 
 
 async def swap_to_primary_mint(
-    token_obj: Token, wallet: Wallet
+    token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, CurrencyUnit, str]:
-    print(f"swap_to_primary_mint, token_obj: {token_obj}")
+    logger.info(
+        "swap_to_primary_mint",
+        extra={
+            "mint": token_obj.mint,
+            "amount": token_obj.amount,
+            "unit": token_obj.unit,
+        },
+    )
     if token_obj.unit == "sat":
         amount_msat = token_obj.amount * 1000
     elif token_obj.unit == "msat":
@@ -84,46 +80,33 @@ async def swap_to_primary_mint(
         raise ValueError("Invalid unit")
     estimated_fee_sat = max(amount_msat // 1000 * 0.01, 2)
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
-    mint_quote = await wallet.mint_quote(amount_msat_after_fee, "sat")
-    melt_quote = await wallet.melt_quote(mint_quote.request, amount_msat_after_fee)
-    _ = await wallet.melt(
+    print(f"amount_msat_after_fee: {amount_msat_after_fee}")
+    primary_wallet = await Wallet.with_db(
+        PRIMARY_MINT_URL, db=".temp", load_all_keysets=True, unit="sat"
+    )
+    await primary_wallet.load_mint_keysets()
+    mint_quote = await primary_wallet.mint_quote(
+        amount_msat_after_fee // 1000, Unit.sat
+    )
+    print(f"mint_quote: {mint_quote}")
+    melt_quote = await token_wallet.melt_quote(mint_quote.request)
+    print(f"melt_quote: {melt_quote}")
+    melt_quote_resp = await token_wallet.melt(
         proofs=token_obj.proofs,
         invoice=mint_quote.request,
-        fee_reserve=melt_quote.fee_reserve,
+        fee_reserve_sat=melt_quote.fee_reserve,
         quote_id=melt_quote.quote,
     )
+    print(f"melt_quote_resp: {melt_quote_resp}")
 
-    _ = await wallet.mint(token_obj.amount, mint_quote.quote)
+    _ = await primary_wallet.mint(amount_msat_after_fee // 1000, mint_quote.quote)
 
-    return token_obj.amount, "sat", PRIMARY_MINT_URL
-
-
-# insert initial token state here to reduce db calls
-# async def create_refund_token(
-#     amount: int, unit: CurrencyUnit, mint_url: str | None = None
-# ) -> str:
-#     wallet = await Wallet.with_db(
-#         mint_url, DATABASE_URL, load_all_keysets=True, unit=unit
-#     )
-#     if wallet.balance_per_minturl(unit=unit)[mint_url] < amount:
-#         raise ValueError("Wallet has no balance")
-#     if mint_url is None:
-#         mint_url = wallet.mint_urls[0]
-#     return await wallet._make_token(amount, unit=unit, mint_url=mint_url)
+    return amount_msat_after_fee // 1000, "sat", PRIMARY_MINT_URL
 
 
-# async def redeem_token(token: str) -> Token:
-#     token_obj = deserialize_token_from_string(token)
-#     wallet = await Wallet.with_db(
-#         token_obj.mint,
-#         DATABASE_URL,
-#         load_all_keysets=True,
-#         unit=token_obj.unit,
-#     )
-#     return await redeem_universal(wallet, token_obj)
-
-
-async def credit_balance(cashu_token: str, key: ApiKey, session: AsyncSession) -> int:
+async def credit_balance(
+    cashu_token: str, key: db.ApiKey, session: db.AsyncSession
+) -> int:
     amount, unit, mint_url = await recieve_token(cashu_token)
     if unit == "sat":
         amount = amount * 1000
@@ -144,16 +127,11 @@ async def send_to_lnurl(amount: int, unit: CurrencyUnit, lnurl: str) -> dict[str
 
 
 async def check_for_refunds() -> None:
-    print("check_for_refunds, temp not implemented")
-
-
-async def init_wallet() -> None:
-    balance = await get_balance("sat")
-    print(f"init_wallet, balance: {balance}")
+    logger.warning("check_for_refunds, temporary not implemented")
 
 
 async def periodic_payout() -> None:
-    print("periodic_payout, temp not implemented")
+    logger.warning("periodic_payout, temporary not implemented")
 
 
 # class Proof:

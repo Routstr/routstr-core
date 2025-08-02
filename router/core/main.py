@@ -6,14 +6,14 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .account import wallet_router
+from ..balance import balance_router, deprecated_wallet_router
+from ..discovery import providers_router
+from ..payment.models import MODELS, models_router, update_sats_pricing
+from ..proxy import proxy_router
+from ..wallet import check_for_refunds, periodic_payout
 from .admin import admin_router
 from .db import init_db
-from .discovery import providers_router
 from .logging import get_logger, setup_logging
-from .models import MODELS, models_router, update_sats_pricing
-from .proxy import proxy_router
-from .wallet import check_for_refunds, periodic_payout
 
 # Initialize logging first
 setup_logging()
@@ -28,18 +28,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
     try:
         await init_db()
-        logger.info("Database initialized successfully")
-
-        logger.info("Wallet initialized successfully")
 
         pricing_task = asyncio.create_task(update_sats_pricing())
         refund_task = asyncio.create_task(check_for_refunds())
         payout_task = asyncio.create_task(periodic_payout())
-
-        logger.info(
-            "Background tasks started successfully",
-            extra={"tasks": ["pricing", "refunds", "payouts"]},
-        )
 
         yield
 
@@ -85,13 +77,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logger.info(
-    "CORS middleware configured",
-    extra={"allowed_origins": os.environ.get("CORS_ORIGINS", "*").split(",")},
-)
 
-
-@app.get("/")
+@app.get("/", include_in_schema=False)
+@app.get("/v1/info")
 async def info() -> dict:
     logger.info("Info endpoint accessed")
     return {
@@ -99,7 +87,7 @@ async def info() -> dict:
         "description": app.description,
         "version": __version__,
         "npub": os.environ.get("NPUB", ""),
-        "mint": os.environ.get("MINT", ""),
+        "mints": os.environ.get("CASHU_MINTS", "").split(","),
         "http_url": os.environ.get("HTTP_URL", ""),
         "onion_url": os.environ.get("ONION_URL", ""),
         "models": MODELS,
@@ -108,11 +96,7 @@ async def info() -> dict:
 
 app.include_router(models_router)
 app.include_router(admin_router)
-app.include_router(wallet_router)
+app.include_router(balance_router)
+app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)
-
-logger.info(
-    "Application initialized successfully",
-    extra={"version": __version__, "routers_count": 5},
-)

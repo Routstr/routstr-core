@@ -13,7 +13,7 @@ async def test_root_endpoint(async_client: AsyncClient) -> None:
         "NAME": "TestRoutstrNode",
         "DESCRIPTION": "Test Node",
         "NPUB": "npub1test",
-        "MINT": "https://test.mint.com",
+        "CASHU_MINTS": "https://test.mint.com,https://test.mint2.com",
         "HTTP_URL": "http://test.example.com",
         "ONION_URL": "http://test.onion",
     }
@@ -28,7 +28,7 @@ async def test_root_endpoint(async_client: AsyncClient) -> None:
         assert "name" in data
         assert "description" in data
         assert "npub" in data
-        assert "mint" in data
+        assert "mints" in data
         assert "http_url" in data
         assert "onion_url" in data
 

@@ -6,9 +6,9 @@ from typing import Literal
 import cbor2
 from fastapi import HTTPException, Response
 
-from ..logging import get_logger
-from ..models import MODELS
+from ..core import get_logger
 from .cost_caculation import COST_PER_REQUEST, MODEL_BASED_PRICING
+from .models import MODELS
 
 logger = get_logger(__name__)
 
@@ -113,7 +113,7 @@ def check_token_balance(headers: dict, body: dict) -> Literal["sat", "msat"]:
         try:
             _token = base64_token_json(cashu_token)
             amount = sum(p["amount"] for t in _token["token"] for p in t["proofs"])
-            unit: Literal["sat", "msat"] = _token["unit"]
+            unit: Literal["sat", "msat"] = _token.get("unit", "sat")
 
             if unit == "sat":
                 amount *= 1000
@@ -122,7 +122,7 @@ def check_token_balance(headers: dict, body: dict) -> Literal["sat", "msat"]:
                 "CashuA token parsed successfully",
                 extra={
                     "amount": amount,
-                    "unit": _token["unit"],
+                    "unit": unit,
                     "amount_msats": amount,
                     "required_cost_msats": cost,
                     "sufficient_balance": amount >= cost,

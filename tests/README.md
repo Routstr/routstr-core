@@ -28,9 +28,8 @@ To run specific test files:
 
 ```bash
 pytest tests/test_main.py
-pytest tests/test_account.py
-pytest tests/test_proxy.py
 pytest tests/test_models.py
+pytest tests/test_proxy.py
 ```
 
 To run only async tests:
