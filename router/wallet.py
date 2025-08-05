@@ -2,7 +2,7 @@ import os
 from typing import Literal
 
 from cashu.core.base import Token
-from cashu.wallet.helpers import deserialize_token_from_string, send
+from cashu.wallet.helpers import deserialize_token_from_string, receive, send
 from cashu.wallet.wallet import Wallet
 
 from .core import db, get_logger
@@ -44,10 +44,9 @@ async def recieve_token(
     await wallet.load_mint(token_obj.keysets[0])
 
     if token_obj.mint not in TRUSTED_MINTS:
-        print(token_obj.mint, TRUSTED_MINTS)
         return await swap_to_primary_mint(token_obj, wallet)
 
-    await wallet.redeem(token_obj.proofs)
+    await receive(wallet, token_obj)
     return token_obj.amount, token_obj.unit, token_obj.mint
 
 
