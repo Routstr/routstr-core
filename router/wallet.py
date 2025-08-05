@@ -29,6 +29,7 @@ async def get_balance(unit: CurrencyUnit) -> int:
 async def recieve_token(
     token: str,
 ) -> tuple[int, CurrencyUnit, str]:  # amount, unit, mint_url
+    print(token)
     token_obj = deserialize_token_from_string(token)
     if len(token_obj.keysets) > 1:
         raise ValueError("Multiple keysets per token currently not supported")
@@ -39,8 +40,10 @@ async def recieve_token(
         load_all_keysets=True,
         unit=token_obj.unit,
     )
+
     await wallet.load_mint(token_obj.keysets[0])
 
+    print(token_obj.mint, TRUSTED_MINTS)
     if token_obj.mint not in TRUSTED_MINTS:
         return await swap_to_primary_mint(token_obj, wallet)
 
