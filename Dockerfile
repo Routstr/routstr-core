@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y \
     autoconf \
     automake \
     libtool \
+    cmake \
     git \
+    libffi-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
