@@ -63,4 +63,4 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 secp256k1 = { git = "https://github.com/saschanaz/secp256k1-py", branch = "upgrade060" }
-cashu = { git = "https://github.com/9qeklajc/nutshell.git" }
+cashu = { git = "https://github.com/9qeklajc/nutshell.git" , branch = "test" }
