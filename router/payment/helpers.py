@@ -97,7 +97,7 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000
     )
 
-    if max_cost_for_model > amount_msat:
+    if max_cost_for_model - 100 > amount_msat:
         raise HTTPException(
             status_code=413,
             detail={
