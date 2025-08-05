@@ -43,8 +43,8 @@ async def recieve_token(
 
     await wallet.load_mint(token_obj.keysets[0])
 
-    print(token_obj.mint, TRUSTED_MINTS)
     if token_obj.mint not in TRUSTED_MINTS:
+        print(token_obj.mint, TRUSTED_MINTS)
         return await swap_to_primary_mint(token_obj, wallet)
 
     await wallet.redeem(token_obj.proofs)
