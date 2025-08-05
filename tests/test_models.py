@@ -87,11 +87,18 @@ async def test_update_sats_pricing_calculation(sample_model: Model) -> None:
                     0.001 / 0.0001
                 )  # 10 sats
 
-                # Verify max_cost calculation for model with top_provider
-                expected_max_context = 4096 * sample_model.sats_pricing.prompt
-                expected_max_completion = 2048 * sample_model.sats_pricing.completion
+                assert sample_model.top_provider is not None
+                assert sample_model.top_provider.context_length is not None
+                assert sample_model.top_provider.max_completion_tokens is not None
+
                 assert sample_model.sats_pricing.max_cost == pytest.approx(
-                    expected_max_context + expected_max_completion
+                    (
+                        sample_model.top_provider.context_length
+                        - sample_model.top_provider.max_completion_tokens
+                    )
+                    * sample_model.sats_pricing.prompt
+                    + sample_model.top_provider.max_completion_tokens
+                    * sample_model.sats_pricing.completion
                 )
 
                 # Cancel and await the task
@@ -159,16 +166,13 @@ async def test_update_sats_pricing_without_top_provider() -> None:
                 assert model_without_top.sats_pricing is not None
 
                 # Verify the fallback max_cost calculation
-                p = model_without_top.sats_pricing.prompt * 1_000_000
-                c = model_without_top.sats_pricing.completion * 32_000
-                r = model_without_top.sats_pricing.request * 100_000
-                i = model_without_top.sats_pricing.image * 100
-                w = model_without_top.sats_pricing.web_search * 1000
-                ir = model_without_top.sats_pricing.internal_reasoning * 100
-                expected_max = p + c + r + i + w + ir
-
                 assert model_without_top.sats_pricing.max_cost == pytest.approx(
-                    expected_max
+                    model_without_top.context_length
+                    * 0.8
+                    * model_without_top.sats_pricing.prompt
+                    + model_without_top.context_length
+                    * 0.2
+                    * model_without_top.sats_pricing.completion
                 )
 
                 # Cancel and await the task

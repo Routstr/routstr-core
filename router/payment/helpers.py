@@ -1,12 +1,10 @@
-import base64
 import json
 import os
-from typing import Literal
 
-import cbor2
 from fastapi import HTTPException, Response
 
 from ..core import get_logger
+from ..wallet import deserialize_token_from_string
 from .cost_caculation import COST_PER_REQUEST, MODEL_BASED_PRICING
 from .models import MODELS
 
@@ -49,17 +47,7 @@ def get_cost_per_request(model: str | None = None) -> int:
     return COST_PER_REQUEST
 
 
-def check_token_balance(headers: dict, body: dict) -> Literal["sat", "msat"]:
-    """Check if the provided token has sufficient balance."""
-    logger.debug(
-        "Checking token balance",
-        extra={
-            "has_x_cashu": "x-cashu" in headers,
-            "has_authorization": "authorization" in headers,
-            "model": body.get("model", "unknown"),
-        },
-    )
-
+def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
     if x_cashu := headers.get("x-cashu", None):
         cashu_token = x_cashu
         logger.debug(
@@ -100,172 +88,24 @@ def check_token_balance(headers: dict, body: dict) -> Literal["sat", "msat"]:
 
     # Handle regular API keys (sk-*)
     if cashu_token.startswith("sk-"):
-        logger.debug(
-            "Regular API key detected", extra={"key_preview": cashu_token[:10] + "..."}
-        )
-        return "sat"
+        return
 
-    cost = get_cost_per_request(model=body.get("model", None))
+    token_obj = deserialize_token_from_string(cashu_token)
 
-    if cashu_token.startswith("cashuA"):
-        logger.debug("Processing CashuA token", extra={"required_cost_msats": cost})
+    amount_msat = (
+        token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000
+    )
 
-        try:
-            _token = base64_token_json(cashu_token)
-            amount = sum(p["amount"] for t in _token["token"] for p in t["proofs"])
-            unit: Literal["sat", "msat"] = _token.get("unit", "sat")
-
-            if unit == "sat":
-                amount *= 1000
-
-            logger.info(
-                "CashuA token parsed successfully",
-                extra={
-                    "amount": amount,
-                    "unit": unit,
-                    "amount_msats": amount,
-                    "required_cost_msats": cost,
-                    "sufficient_balance": amount >= cost,
-                },
-            )
-
-            if amount < cost:
-                logger.warning(
-                    "Insufficient token balance",
-                    extra={
-                        "amount_msats": amount,
-                        "required_msats": cost,
-                        "shortfall_msats": cost - amount,
-                        "unit": unit,
-                    },
-                )
-                raise HTTPException(status_code=413, detail="Insufficient balance")
-
-        except Exception as e:
-            logger.error(
-                "Failed to parse CashuA token",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "token_preview": cashu_token[:20] + "...",
-                },
-            )
-            raise HTTPException(status_code=401, detail="Invalid token format")
-
-    elif cashu_token.startswith("cashuB"):
-        logger.debug("Processing CashuB token", extra={"required_cost_msats": cost})
-
-        try:
-            _token = base64_token_cbor(cashu_token)
-            amount = sum(p["a"] for t in _token["t"] for p in t["p"])
-            unit = _token["u"]
-
-            if unit == "sat":
-                amount *= 1000
-
-            logger.info(
-                "CashuB token parsed successfully",
-                extra={
-                    "amount": amount,
-                    "unit": unit,
-                    "amount_msats": amount,
-                    "required_cost_msats": cost,
-                    "sufficient_balance": amount >= cost,
-                },
-            )
-
-            if amount < cost:
-                logger.warning(
-                    "Insufficient token balance",
-                    extra={
-                        "amount_msats": amount,
-                        "required_msats": cost,
-                        "shortfall_msats": cost - amount,
-                        "unit": unit,
-                    },
-                )
-                raise HTTPException(status_code=413, detail="Insufficient balance")
-
-        except Exception as e:
-            logger.error(
-                "Failed to parse CashuB token",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "token_preview": cashu_token[:20] + "...",
-                },
-            )
-            raise HTTPException(status_code=401, detail="Invalid token format")
-
-    else:
-        logger.error(
-            "Unknown token format",
-            extra={"token_prefix": cashu_token[:10] if cashu_token else "empty"},
-        )
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    return unit
-
-
-def base64_token_json(cashu_token: str) -> dict:
-    """Decode a CashuA (JSON) token."""
-    logger.debug("Decoding CashuA token", extra={"token_length": len(cashu_token)})
-
-    try:
-        # Version 3 - JSON format
-        encoded = cashu_token[6:]  # Remove "cashuA"
-        # Add correct padding – (-len) % 4 equals 0,1,2,3
-        encoded += "=" * ((-len(encoded)) % 4)
-
-        decoded = base64.urlsafe_b64decode(encoded).decode()
-        token_data = json.loads(decoded)
-
-        logger.debug(
-            "CashuA token decoded successfully",
-            extra={
-                "token_proofs_count": sum(
-                    len(t.get("proofs", [])) for t in token_data.get("token", [])
-                ),
-                "unit": token_data.get("unit", "unknown"),
+    if max_cost_for_model > amount_msat:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "reason": "Insufficient balance",
+                "amount_required_msat": max_cost_for_model,
+                "model": body.get("model", "unknown"),
+                "type": "minimum_balance_required",
             },
         )
-
-        return token_data
-    except Exception as e:
-        logger.error(
-            "Failed to decode CashuA token",
-            extra={"error": str(e), "error_type": type(e).__name__},
-        )
-        raise
-
-
-def base64_token_cbor(cashu_token: str) -> dict:
-    """Decode a CashuB (CBOR) token."""
-    logger.debug("Decoding CashuB token", extra={"token_length": len(cashu_token)})
-
-    try:
-        encoded = cashu_token[6:]  # Remove "cashuB"
-        encoded += "=" * ((-len(encoded)) % 4)
-        decoded_bytes = base64.urlsafe_b64decode(encoded)
-        token_data = cbor2.loads(decoded_bytes)
-
-        logger.debug(
-            "CashuB token decoded successfully",
-            extra={
-                "token_proofs_count": sum(
-                    len(t.get("p", [])) for t in token_data.get("t", [])
-                ),
-                "unit": token_data.get("u", "unknown"),
-            },
-        )
-
-        return token_data
-    except Exception as e:
-        logger.error(
-            "Failed to decode CashuB token",
-            extra={"error": str(e), "error_type": type(e).__name__},
-        )
-        raise
 
 
 def get_max_cost_for_model(model: str) -> int:

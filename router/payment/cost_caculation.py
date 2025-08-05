@@ -1,3 +1,4 @@
+import math
 import os
 
 from pydantic import BaseModel
@@ -145,9 +146,9 @@ def calculate_cost(
     input_tokens = response_data.get("usage", {}).get("prompt_tokens", 0)
     output_tokens = response_data.get("usage", {}).get("completion_tokens", 0)
 
-    input_msats = int(round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 0))
-    output_msats = int(round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 0))
-    token_based_cost = int(round(input_msats + output_msats, 0))
+    input_msats = round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 3)
+    output_msats = round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 3)
+    token_based_cost = math.ceil(input_msats + output_msats)
 
     logger.info(
         "Calculated token-based cost",
@@ -163,7 +164,7 @@ def calculate_cost(
 
     return CostData(
         base_msats=0,
-        input_msats=input_msats,
-        output_msats=output_msats,
+        input_msats=int(input_msats),
+        output_msats=int(output_msats),
         total_msats=token_based_cost,
     )

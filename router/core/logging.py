@@ -10,6 +10,20 @@ from typing import Any
 from pythonjsonlogger import jsonlogger
 from rich.logging import RichHandler
 
+# Define custom TRACE level
+TRACE_LEVEL = 5
+logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+
+def trace(self: logging.Logger, message: str, *args: Any, **kwargs: Any) -> None:
+    """Log with TRACE level"""
+    if self.isEnabledFor(TRACE_LEVEL):
+        self._log(TRACE_LEVEL, message, args, **kwargs)
+
+
+# Add the trace method to Logger class
+setattr(logging.Logger, "trace", trace)
+
 
 class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
     """Custom TimedRotatingFileHandler that creates date-based filenames."""
@@ -150,7 +164,12 @@ class SecurityFilter(logging.Filter):
 
 def get_log_level() -> str:
     """Get log level from environment variable."""
-    return os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    # Validate log level - if invalid, default to INFO
+    valid_levels = {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if level not in valid_levels:
+        level = "INFO"
+    return level
 
 
 def should_enable_console_logging() -> bool:

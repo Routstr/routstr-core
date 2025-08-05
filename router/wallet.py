@@ -1,8 +1,8 @@
 import os
 from typing import Literal
 
-from cashu.core.base import Token, Unit
-from cashu.wallet.helpers import deserialize_token_from_string, receive, send
+from cashu.core.base import Token
+from cashu.wallet.helpers import deserialize_token_from_string, send
 from cashu.wallet.wallet import Wallet
 
 from .core import db, get_logger
@@ -18,7 +18,6 @@ PRIMARY_MINT_URL = TRUSTED_MINTS[0]
 async def get_balance(unit: CurrencyUnit) -> int:
     wallet = await Wallet.with_db(
         PRIMARY_MINT_URL,
-        # DATABASE_URL,
         db=".wallet",
         load_all_keysets=True,
         unit=unit,
@@ -30,21 +29,22 @@ async def get_balance(unit: CurrencyUnit) -> int:
 async def recieve_token(
     token: str,
 ) -> tuple[int, CurrencyUnit, str]:  # amount, unit, mint_url
-    # trusted_mints = os.environ["CASHU_MINTS"].split(",")
     token_obj = deserialize_token_from_string(token)
+    if len(token_obj.keysets) > 1:
+        raise ValueError("Multiple keysets per token currently not supported")
+
     wallet = await Wallet.with_db(
         token_obj.mint,
         db=".wallet",
         load_all_keysets=True,
         unit=token_obj.unit,
     )
+    await wallet.load_mint(token_obj.keysets[0])
 
-    if token_obj.mint != PRIMARY_MINT_URL:
-        raise ValueError(
-            f"This mint is not supported, please use {PRIMARY_MINT_URL} instead"
-        )
+    if token_obj.mint not in TRUSTED_MINTS:
+        return await swap_to_primary_mint(token_obj, wallet)
 
-    await receive(wallet, token_obj)
+    await wallet.redeem(token_obj.proofs)
     return token_obj.amount, token_obj.unit, token_obj.mint
 
 
@@ -80,28 +80,24 @@ async def swap_to_primary_mint(
         raise ValueError("Invalid unit")
     estimated_fee_sat = max(amount_msat // 1000 * 0.01, 2)
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
-    print(f"amount_msat_after_fee: {amount_msat_after_fee}")
     primary_wallet = await Wallet.with_db(
-        PRIMARY_MINT_URL, db=".temp", load_all_keysets=True, unit="sat"
+        PRIMARY_MINT_URL, db=".wallet", load_all_keysets=True, unit="sat"
     )
-    await primary_wallet.load_mint_keysets()
-    mint_quote = await primary_wallet.mint_quote(
-        amount_msat_after_fee // 1000, Unit.sat
-    )
-    print(f"mint_quote: {mint_quote}")
+    await primary_wallet.load_mint()
+
+    minted_amount = amount_msat_after_fee // 1000
+    mint_quote = await primary_wallet.request_mint(minted_amount)
+
     melt_quote = await token_wallet.melt_quote(mint_quote.request)
-    print(f"melt_quote: {melt_quote}")
-    melt_quote_resp = await token_wallet.melt(
+    _ = await token_wallet.melt(
         proofs=token_obj.proofs,
         invoice=mint_quote.request,
         fee_reserve_sat=melt_quote.fee_reserve,
         quote_id=melt_quote.quote,
     )
-    print(f"melt_quote_resp: {melt_quote_resp}")
+    _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
 
-    _ = await primary_wallet.mint(amount_msat_after_fee // 1000, mint_quote.quote)
-
-    return amount_msat_after_fee // 1000, "sat", PRIMARY_MINT_URL
+    return minted_amount, "sat", PRIMARY_MINT_URL
 
 
 async def credit_balance(

@@ -89,43 +89,23 @@ async def update_sats_pricing() -> None:
                 model.sats_pricing = Pricing(
                     **{k: v / sats_to_usd for k, v in model.pricing.dict().items()}
                 )
+                mspp = model.sats_pricing.prompt
+                mspc = model.sats_pricing.completion
                 if model.top_provider:
-                    if (
-                        model.top_provider.context_length
-                        and model.top_provider.max_completion_tokens
+                    if (cl := model.top_provider.context_length) and (
+                        mct := model.top_provider.max_completion_tokens
                     ):
-                        max_context_cost = (
-                            model.top_provider.context_length
-                            * model.sats_pricing.prompt
-                        )
-                        max_completion_cost = (
-                            model.top_provider.max_completion_tokens
-                            * model.sats_pricing.completion
-                        )
-                        model.sats_pricing.max_cost = (
-                            max_context_cost + max_completion_cost
-                        )
-                    elif model.top_provider.context_length:
-                        max_context_cost = (
-                            model.top_provider.context_length
-                            * model.sats_pricing.prompt
-                        )
-                        max_completion_cost = 32_000 * model.sats_pricing.completion
-                        model.sats_pricing.max_cost = (
-                            max_context_cost + max_completion_cost
-                        )
-                    elif model.top_provider.max_completion_tokens:
-                        max_completion_cost = (
-                            model.top_provider.max_completion_tokens
-                            * model.sats_pricing.completion
-                        )
-                        max_context_cost = 1_048_576 * model.sats_pricing.prompt
-                        model.sats_pricing.max_cost = max_completion_cost
+                        model.sats_pricing.max_cost = (cl - mct) * mspp + mct * mspc
+                    elif cl := model.top_provider.context_length:
+                        model.sats_pricing.max_cost = cl * 0.8 * mspp + cl * 0.2 * mspc
+                    elif mct := model.top_provider.max_completion_tokens:
+                        model.sats_pricing.max_cost = mct * 4 * mspp + mct * mspc
                     else:
-                        model.sats_pricing.max_cost = (
-                            1_048_576 * model.sats_pricing.prompt
-                            + 32_000 * model.sats_pricing.completion
-                        )
+                        model.sats_pricing.max_cost = 1_000_000 * mspp + 32_000 * mspc
+                elif model.context_length:
+                    model.sats_pricing.max_cost = (
+                        model.sats_pricing.prompt * model.context_length * 0.8
+                    ) + (model.sats_pricing.completion * model.context_length * 0.2)
                 else:
                     p = model.sats_pricing.prompt * 1_000_000
                     c = model.sats_pricing.completion * 32_000

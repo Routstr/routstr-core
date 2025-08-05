@@ -9,8 +9,9 @@ logger = get_logger(__name__)
 
 # artifical spread to cover conversion fees
 EXCHANGE_FEE = float(os.environ.get("EXCHANGE_FEE", "1.005"))  # 0.5% default
-
-logger.info("Price module initialized", extra={"exchange_fee": EXCHANGE_FEE})
+UPSTREAM_PROVIDER_FEE = float(
+    os.environ.get("UPSTREAM_PROVIDER_FEE", "1.05")
+)  # 5% default (e.g. openrouter charges 5% margin)
 
 
 async def kraken_btc_usd(client: httpx.AsyncClient) -> float | None:
@@ -98,7 +99,7 @@ async def btc_usd_ask_price() -> float:
                 raise ValueError("Unable to fetch BTC price from any exchange")
 
             max_price = max(valid_prices)
-            final_price = max_price * EXCHANGE_FEE
+            final_price = max_price * EXCHANGE_FEE * UPSTREAM_PROVIDER_FEE
 
             return final_price
 

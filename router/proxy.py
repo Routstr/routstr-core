@@ -19,6 +19,7 @@ from .payment.helpers import (
     UPSTREAM_BASE_URL,
     check_token_balance,
     create_error_response,
+    get_cost_per_request,
     prepare_upstream_headers,
 )
 from .payment.x_cashu import x_cashu_handler
@@ -28,7 +29,7 @@ proxy_router = APIRouter()
 
 
 async def handle_streaming_chat_completion(
-    response: httpx.Response, key: ApiKey, session: AsyncSession
+    response: httpx.Response, key: ApiKey, max_cost_for_model: int
 ) -> StreamingResponse:
     """Handle streaming chat completion responses with token-based pricing."""
     logger.info(
@@ -40,7 +41,7 @@ async def handle_streaming_chat_completion(
         },
     )
 
-    async def stream_with_cost() -> AsyncGenerator[bytes, None]:
+    async def stream_with_cost(max_cost_for_model: int) -> AsyncGenerator[bytes, None]:
         # Store all chunks to analyze
         stored_chunks = []
 
@@ -103,7 +104,10 @@ async def handle_streaming_chat_completion(
                                 if fresh_key:
                                     try:
                                         cost_data = await adjust_payment_for_tokens(
-                                            fresh_key, data, new_session
+                                            fresh_key,
+                                            data,
+                                            new_session,
+                                            max_cost_for_model,
                                         )
                                         logger.info(
                                             "Token adjustment completed for streaming",
@@ -140,14 +144,17 @@ async def handle_streaming_chat_completion(
                 )
 
     return StreamingResponse(
-        stream_with_cost(),
+        stream_with_cost(max_cost_for_model),
         status_code=response.status_code,
         headers=dict(response.headers),
     )
 
 
 async def handle_non_streaming_chat_completion(
-    response: httpx.Response, key: ApiKey, session: AsyncSession
+    response: httpx.Response,
+    key: ApiKey,
+    session: AsyncSession,
+    deducted_max_cost: int,
 ) -> Response:
     """Handle non-streaming chat completion responses with token-based pricing."""
     logger.info(
@@ -172,7 +179,9 @@ async def handle_non_streaming_chat_completion(
             },
         )
 
-        cost_data = await adjust_payment_for_tokens(key, response_json, session)
+        cost_data = await adjust_payment_for_tokens(
+            key, response_json, session, deducted_max_cost
+        )
         response_json["cost"] = cost_data
 
         logger.info(
@@ -239,6 +248,7 @@ async def forward_to_upstream(
     headers: dict,
     request_body: bytes | None,
     key: ApiKey,
+    max_cost_for_model: int,
     session: AsyncSession,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
@@ -338,7 +348,9 @@ async def forward_to_upstream(
 
             if is_streaming and response.status_code == 200:
                 # Process streaming response and extract cost from the last chunk
-                result = await handle_streaming_chat_completion(response, key, session)
+                result = await handle_streaming_chat_completion(
+                    response, key, max_cost_for_model
+                )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
                 background_tasks.add_task(client.aclose)
@@ -349,7 +361,7 @@ async def forward_to_upstream(
                 # Handle non-streaming response
                 try:
                     return await handle_non_streaming_chat_completion(
-                        response, key, session
+                        response, key, session, max_cost_for_model
                     )
                 finally:
                     await response.aclose()
@@ -479,18 +491,10 @@ async def proxy(
                 media_type="application/json",
             )
 
-    # Check token balance for all requests to get currency unit
-    try:
-        unit = check_token_balance(headers, request_body_dict)
-        logger.debug(
-            "Token balance check completed", extra={"path": path, "unit": unit}
-        )
-    except HTTPException as e:
-        logger.warning(
-            "Token balance check failed",
-            extra={"path": path, "status_code": e.status_code, "detail": str(e.detail)},
-        )
-        raise
+    max_cost_for_model = get_cost_per_request(
+        model=request_body_dict.get("model", None)
+    )
+    check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     # Handle authentication
     if x_cashu := headers.get("x-cashu", None):
@@ -571,7 +575,7 @@ async def proxy(
 
     # Forward to upstream and handle response
     response = await forward_to_upstream(
-        request, path, headers, request_body, key, session
+        request, path, headers, request_body, key, max_cost_for_model, session
     )
 
     if response.status_code != 200:

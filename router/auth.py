@@ -370,7 +370,7 @@ async def revert_pay_for_request(
 
 
 async def adjust_payment_for_tokens(
-    key: ApiKey, response_data: dict, session: AsyncSession
+    key: ApiKey, response_data: dict, session: AsyncSession, deducted_max_cost: int
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -378,20 +378,19 @@ async def adjust_payment_for_tokens(
     Returns cost data to be included in the response.
     """
     model = response_data.get("model", "unknown")
-    max_cost = get_max_cost_for_model(model=model)
 
     logger.debug(
         "Starting payment adjustment for tokens",
         extra={
             "key_hash": key.hashed_key[:8] + "...",
             "model": model,
-            "max_cost": max_cost,
+            "deducted_max_cost": deducted_max_cost,
             "current_balance": key.balance,
             "has_usage": "usage" in response_data,
         },
     )
 
-    match calculate_cost(response_data, max_cost):
+    match calculate_cost(response_data, deducted_max_cost):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",
@@ -406,7 +405,7 @@ async def adjust_payment_for_tokens(
         case CostData() as cost:
             # If token-based pricing is enabled and base cost is 0, use token-based cost
             # Otherwise, token cost is additional to the base cost
-            cost_difference = cost.total_msats - max_cost
+            cost_difference = cost.total_msats - deducted_max_cost
 
             logger.info(
                 "Calculated token-based cost",
@@ -414,7 +413,7 @@ async def adjust_payment_for_tokens(
                     "key_hash": key.hashed_key[:8] + "...",
                     "model": model,
                     "token_cost": cost.total_msats,
-                    "max_cost": max_cost,
+                    "deducted_max_cost": deducted_max_cost,
                     "cost_difference": cost_difference,
                     "input_msats": cost.input_msats,
                     "output_msats": cost.output_msats,
@@ -468,7 +467,7 @@ async def adjust_payment_for_tokens(
                     await session.commit()
 
                     if result.rowcount:
-                        cost.total_msats = max_cost + cost_difference
+                        cost.total_msats = deducted_max_cost + cost_difference
                         await session.refresh(key)
 
                         logger.info(
@@ -513,7 +512,7 @@ async def adjust_payment_for_tokens(
                 )
                 await session.exec(refund_stmt)  # type: ignore[call-overload]
                 await session.commit()
-                cost.total_msats = max_cost - refund
+                cost.total_msats = deducted_max_cost - refund
                 await session.refresh(key)
 
                 logger.info(
