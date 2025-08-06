@@ -18,8 +18,10 @@ from .helpers import (
     UPSTREAM_BASE_URL,
     create_error_response,
     get_max_cost_for_model,
+    match_model_id_to_internal_model,
     prepare_upstream_headers,
 )
+from .models import Model
 
 logger = get_logger(__name__)
 
@@ -288,21 +290,28 @@ async def handle_streaming_response(
 
     # For streaming responses, we'll extract the final usage data
     # and calculate cost based on that
-    usage_data = None
-    model = None
+    usage_data: dict | None = None
+    model: Model | None = None
 
     # Parse SSE format to extract usage information
     lines = content_str.strip().split("\n")
     for line in lines:
         if line.startswith("data: "):
             try:
-                data_json = json.loads(line[6:])  # Remove 'data: ' prefix
+                data_json = json.loads(
+                    line.replace("data: ", "")
+                )  # Remove 'data: ' prefix
+                model = match_model_id_to_internal_model(data_json.get("model", ""))
+                if not model:
+                    logger.error(
+                        "Invalid model in response",
+                        extra={"response_model": data_json.get("model", "unknown")},
+                    )
+                    continue
                 # Look for usage information in the final chunks
                 if "usage" in data_json:
                     usage_data = data_json["usage"]
-                    model = data_json.get("model")
-                elif "model" in data_json and not model:
-                    model = data_json["model"]
+                    model = match_model_id_to_internal_model(data_json.get("model", ""))
             except json.JSONDecodeError:
                 continue
 
@@ -319,9 +328,8 @@ async def handle_streaming_response(
             },
         )
 
-        response_data = {"usage": usage_data, "model": model}
         try:
-            cost_data = await get_cost(response_data)
+            cost_data = await get_cost(model, usage_data)
             if cost_data:
                 if unit == "msat":
                     refund_amount = amount - cost_data.total_msats
@@ -400,7 +408,27 @@ async def handle_non_streaming_response(
     try:
         response_json = json.loads(content_str)
 
-        cost_data = await get_cost(response_json)
+        model = match_model_id_to_internal_model(response_json.get("model", ""))
+        if not model:
+            logger.error(
+                "Invalid model in response",
+                extra={"response_model": response_json.get("model", "unknown")},
+            )
+            return Response(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "message": "Error forwarding request to upstream",
+                            "type": "upstream_error",
+                            "code": response.status_code,
+                        }
+                    }
+                ),
+                status_code=response.status_code,
+                media_type="application/json",
+            )
+
+        cost_data = await get_cost(model, response_json.get("usage", {}))
 
         if not cost_data:
             logger.error(
@@ -408,7 +436,7 @@ async def handle_non_streaming_response(
                 extra={
                     "amount": amount,
                     "unit": unit,
-                    "response_model": response_json.get("model", "unknown"),
+                    "response_model": model.id,
                 },
             )
             return Response(
@@ -445,7 +473,7 @@ async def handle_non_streaming_response(
                 "cost_msats": cost_data.total_msats,
                 "refund_amount": refund_amount,
                 "unit": unit,
-                "model": response_json.get("model", "unknown"),
+                "model_id": model.id,
             },
         )
 
@@ -506,32 +534,31 @@ async def handle_non_streaming_response(
         )
 
 
-async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
+async def get_cost(model: Model, usage_data: dict) -> MaxCostData | CostData | None:
     """
     Adjusts the payment based on token usage in the response.
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
     """
-    model = response_data.get("model", "unknown")
     logger.debug(
         "Calculating cost for response",
-        extra={"model": model, "has_usage": "usage" in response_data},
+        extra={"model_id": model.id, "usage_data": usage_data},
     )
 
     max_cost = get_max_cost_for_model(model=model)
 
-    match calculate_cost(response_data, max_cost):
+    match calculate_cost(usage_data, max_cost):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost pricing",
-                extra={"model": model, "max_cost_msats": cost.total_msats},
+                extra={"model_id": model.id, "max_cost_msats": cost.total_msats},
             )
             return cost
         case CostData() as cost:
             logger.debug(
                 "Using token-based pricing",
                 extra={
-                    "model": model,
+                    "model_id": model.id,
                     "total_cost_msats": cost.total_msats,
                     "input_msats": cost.input_msats,
                     "output_msats": cost.output_msats,
@@ -542,7 +569,7 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
             logger.error(
                 "Cost calculation error",
                 extra={
-                    "model": model,
+                    "model_id": model.id,
                     "error_message": error.message,
                     "error_code": error.code,
                 },

@@ -38,6 +38,8 @@ class TopProvider(BaseModel):
 class Model(BaseModel):
     id: str
     name: str
+    canonical_slug: str | None = None
+    provider: str | None
     created: int
     description: str
     context_length: int

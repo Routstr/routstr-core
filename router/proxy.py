@@ -20,6 +20,7 @@ from .payment.helpers import (
     check_token_balance,
     create_error_response,
     get_cost_per_request,
+    match_model_id_to_internal_model,
     prepare_upstream_headers,
 )
 from .payment.x_cashu import x_cashu_handler
@@ -491,9 +492,19 @@ async def proxy(
                 media_type="application/json",
             )
 
-    max_cost_for_model = get_cost_per_request(
-        model=request_body_dict.get("model", None)
-    )
+    model = match_model_id_to_internal_model(request_body_dict.get("model", ""))
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"Invalid model ID: {request_body_dict.get('model', None)}",
+                    "type": "invalid_request_error",
+                    "code": "invalid_model_id",
+                }
+            },
+        )
+    max_cost_for_model = get_cost_per_request(model=model)
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     # Handle authentication

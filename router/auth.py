@@ -12,7 +12,7 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
-from .payment.helpers import get_max_cost_for_model
+from .payment.helpers import get_max_cost_for_model, match_model_id_to_internal_model
 from .wallet import credit_balance
 
 logger = get_logger(__name__)
@@ -241,8 +241,19 @@ async def validate_bearer_key(
 
 async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int:
     """Process payment for a request."""
-    model = body["model"]
-    cost_per_request = get_max_cost_for_model(model=model)
+    model = match_model_id_to_internal_model(body["model"])
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"Invalid model ID: {body['model']}",
+                    "type": "invalid_request_error",
+                    "code": "invalid_model_id",
+                }
+            },
+        )
+    cost_per_request = get_max_cost_for_model(model=model.id)
 
     logger.info(
         "Processing payment for request",
@@ -250,7 +261,7 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
             "key_hash": key.hashed_key[:8] + "...",
             "current_balance": key.balance,
             "required_cost": cost_per_request,
-            "model": model,
+            "model_id": model.id,
             "sufficient_balance": key.balance >= cost_per_request,
         },
     )
@@ -263,7 +274,7 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
                 "balance": key.balance,
                 "required": cost_per_request,
                 "shortfall": cost_per_request - key.balance,
-                "model": model,
+                "model_id": model.id,
             },
         )
 
@@ -333,7 +344,7 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
             "new_balance": key.balance,
             "total_spent": key.total_spent,
             "total_requests": key.total_requests,
-            "model": model,
+            "model_id": model.id,
         },
     )
 
@@ -377,13 +388,25 @@ async def adjust_payment_for_tokens(
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
     """
-    model = response_data.get("model", "unknown")
+    model_response = response_data.get("model", "unknown")
+    model = match_model_id_to_internal_model(model_response)
+    if not model:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": f"Invalid model ID: {model_response}",
+                    "type": "invalid_request_error",
+                    "code": "invalid_model_id",
+                }
+            },
+        )
 
     logger.debug(
         "Starting payment adjustment for tokens",
         extra={
             "key_hash": key.hashed_key[:8] + "...",
-            "model": model,
+            "model_id": model.id,
             "deducted_max_cost": deducted_max_cost,
             "current_balance": key.balance,
             "has_usage": "usage" in response_data,
@@ -396,7 +419,7 @@ async def adjust_payment_for_tokens(
                 "Using max cost data (no token adjustment)",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
-                    "model": model,
+                    "model_id": model.id,
                     "max_cost": cost.total_msats,
                 },
             )
@@ -411,7 +434,7 @@ async def adjust_payment_for_tokens(
                 "Calculated token-based cost",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
-                    "model": model,
+                    "model_id": model.id,
                     "token_cost": cost.total_msats,
                     "deducted_max_cost": deducted_max_cost,
                     "cost_difference": cost_difference,
@@ -423,7 +446,10 @@ async def adjust_payment_for_tokens(
             if cost_difference == 0:
                 logger.debug(
                     "No cost adjustment needed",
-                    extra={"key_hash": key.hashed_key[:8] + "...", "model": model},
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "model_id": model.id,
+                    },
                 )
                 await session.commit()
                 return cost.dict()
@@ -437,7 +463,7 @@ async def adjust_payment_for_tokens(
                         "additional_charge": cost_difference,
                         "current_balance": key.balance,
                         "sufficient_balance": key.balance >= cost_difference,
-                        "model": model,
+                        "model_id": model.id,
                     },
                 )
 
@@ -449,7 +475,7 @@ async def adjust_payment_for_tokens(
                             "required": cost_difference,
                             "available": key.balance,
                             "shortfall": cost_difference - key.balance,
-                            "model": model,
+                            "model_id": model.id,
                         },
                     )
                     await session.commit()
@@ -477,7 +503,7 @@ async def adjust_payment_for_tokens(
                                 "charged_amount": cost_difference,
                                 "new_balance": key.balance,
                                 "total_cost": cost.total_msats,
-                                "model": model,
+                                "model_id": model.id,
                             },
                         )
                     else:
@@ -486,7 +512,7 @@ async def adjust_payment_for_tokens(
                             extra={
                                 "key_hash": key.hashed_key[:8] + "...",
                                 "attempted_charge": cost_difference,
-                                "model": model,
+                                "model_id": model.id,
                             },
                         )
             else:
@@ -498,7 +524,7 @@ async def adjust_payment_for_tokens(
                         "key_hash": key.hashed_key[:8] + "...",
                         "refund_amount": refund,
                         "current_balance": key.balance,
-                        "model": model,
+                        "model_id": model.id,
                     },
                 )
 
@@ -522,7 +548,7 @@ async def adjust_payment_for_tokens(
                         "refunded_amount": refund,
                         "new_balance": key.balance,
                         "final_cost": cost.total_msats,
-                        "model": model,
+                        "model_id": model.id,
                     },
                 )
 
@@ -533,7 +559,7 @@ async def adjust_payment_for_tokens(
                 "Cost calculation error during payment adjustment",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
-                    "model": model,
+                    "model_id": model.id,
                     "error_message": error.message,
                     "error_code": error.code,
                 },

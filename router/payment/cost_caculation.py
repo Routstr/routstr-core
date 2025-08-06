@@ -3,6 +3,8 @@ import os
 
 from pydantic import BaseModel
 
+from router.payment.helpers import match_model_id_to_internal_model
+
 from ..core import get_logger
 from .models import MODELS
 
@@ -89,33 +91,29 @@ def calculate_cost(
     MSATS_PER_1K_OUTPUT_TOKENS = COST_PER_1K_OUTPUT_TOKENS
 
     if MODEL_BASED_PRICING and MODELS:
-        response_model = response_data.get("model", "")
+        model = match_model_id_to_internal_model(response_data.get("model", ""))
+        if not model:
+            logger.error(
+                "Invalid model in response",
+                extra={"response_model": response_data.get("model", "unknown")},
+            )
+            return CostDataError(
+                message=f"Invalid model in response: {response_data.get('model', 'unknown')}",
+                code="invalid_model_id",
+            )
+
         logger.debug(
             "Using model-based pricing",
             extra={
-                "model": response_model,
+                "model_id": model.id,
                 "available_models": [model.id for model in MODELS],
             },
         )
 
-        if response_model not in [model.id for model in MODELS]:
-            logger.error(
-                "Invalid model in response",
-                extra={
-                    "response_model": response_model,
-                    "available_models": [model.id for model in MODELS],
-                },
-            )
-            return CostDataError(
-                message=f"Invalid model in response: {response_model}",
-                code="model_not_found",
-            )
-
-        model = next(model for model in MODELS if model.id == response_model)
         if model.sats_pricing is None:
             logger.error(
                 "Model pricing not defined",
-                extra={"model": response_model, "model_id": model.id},
+                extra={"model_id": model.id},
             )
             return CostDataError(
                 message="Model pricing not defined", code="pricing_not_found"
@@ -127,7 +125,7 @@ def calculate_cost(
         logger.info(
             "Applied model-specific pricing",
             extra={
-                "model": response_model,
+                "model_id": model.id,
                 "input_price_msats_per_1k": MSATS_PER_1K_INPUT_TOKENS,
                 "output_price_msats_per_1k": MSATS_PER_1K_OUTPUT_TOKENS,
             },
