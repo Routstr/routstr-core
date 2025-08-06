@@ -45,13 +45,26 @@ OUTPUT_FILE = os.getenv("OUTPUT_FILE", "models.json")
 BASE_URL = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
 
 
-def fetch_openrouter_models() -> list[Model]:
+def fetch_openrouter_models(whitelist_provider: str | None = None) -> list[Model]:
     """Fetches model information from OpenRouter API."""
     with urlopen(f"{BASE_URL}/models") as response:
         data = json.loads(response.read().decode("utf-8"))
 
         models_data: list[Model] = []
         for model in data.get("data", []):
+            if whitelist_provider:
+                provider_prefix = f"{whitelist_provider}/"
+                # Check if id starts with the provider prefix
+                if not model.get("id", "").startswith(provider_prefix):
+                    continue
+
+                # Remove the prefix from id
+                model_id = model.get("id", "")[len(provider_prefix) :]
+
+                # Update the model data
+                model = dict(model)
+                model["id"] = model_id
+
             # Skip models with '(free)' in the name or id = 'openrouter/auto'
             if (
                 "(free)" in model.get("name", "")
@@ -68,7 +81,8 @@ def fetch_openrouter_models() -> list[Model]:
 
 
 def main() -> None:
-    models = fetch_openrouter_models()
+    PROVIDER = os.getenv("PROVIDER", "")
+    models = fetch_openrouter_models(whitelist_provider=PROVIDER)
 
     # Print the first model data in a nicely indented JSON format
     # print(json.dumps(models[0], indent=4))
