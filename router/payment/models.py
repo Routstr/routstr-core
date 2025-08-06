@@ -125,5 +125,6 @@ async def update_sats_pricing() -> None:
 
 
 @models_router.get("/v1/models")
+@models_router.get("/models")
 async def models() -> dict:
     return {"data": MODELS}

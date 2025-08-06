@@ -18,7 +18,6 @@ async def kraken_btc_usd(client: httpx.AsyncClient) -> float | None:
     """Fetch BTC/USD price from Kraken API."""
     api = "https://api.kraken.com/0/public/Ticker?pair=XBTUSD"
     try:
-        logger.debug("Fetching BTC price from Kraken")
         response = await client.get(api)
         price_data = response.json()
         price = float(price_data["result"]["XXBTZUSD"]["c"][0])
@@ -40,7 +39,6 @@ async def coinbase_btc_usd(client: httpx.AsyncClient) -> float | None:
     """Fetch BTC/USD price from Coinbase API."""
     api = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
     try:
-        logger.debug("Fetching BTC price from Coinbase")
         response = await client.get(api)
         price_data = response.json()
         price = float(price_data["data"]["amount"])
@@ -62,7 +60,6 @@ async def binance_btc_usdt(client: httpx.AsyncClient) -> float | None:
     """Fetch BTC/USDT price from Binance API."""
     api = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     try:
-        logger.debug("Fetching BTC price from Binance")
         response = await client.get(api)
         price_data = response.json()
         price = float(price_data["price"])
@@ -82,7 +79,6 @@ async def binance_btc_usdt(client: httpx.AsyncClient) -> float | None:
 
 async def btc_usd_ask_price() -> float:
     """Get the highest BTC/USD price from multiple exchanges with fee adjustment."""
-    logger.debug("Starting BTC price aggregation from multiple exchanges")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -113,7 +109,6 @@ async def btc_usd_ask_price() -> float:
 
 async def sats_usd_ask_price() -> float:
     """Get the USD price per satoshi."""
-    logger.debug("Calculating satoshi price from BTC price")
 
     try:
         btc_price = await btc_usd_ask_price()

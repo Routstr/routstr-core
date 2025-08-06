@@ -10,17 +10,12 @@ from .models import MODELS
 
 logger = get_logger(__name__)
 
-UPSTREAM_BASE_URL = os.environ["UPSTREAM_BASE_URL"]
+
+UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", "")
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 
-logger.info(
-    "Payment helpers initialized",
-    extra={
-        "upstream_base_url": UPSTREAM_BASE_URL,
-        "has_upstream_api_key": bool(UPSTREAM_API_KEY),
-        "model_based_pricing": MODEL_BASED_PRICING,
-    },
-)
+if not UPSTREAM_BASE_URL:
+    raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
 
 
 def get_cost_per_request(model: str | None = None) -> int:

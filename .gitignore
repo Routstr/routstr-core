@@ -9,6 +9,7 @@ wallet.sqlite3
 .*wallet.sqlite3
 *models.json
 .cashu
+.dockerignore
 
 compose.override.yml
 

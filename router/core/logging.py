@@ -276,6 +276,7 @@ def setup_logging() -> None:
                 "propagate": False,
             },
             "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},
+            "aiosqlite": {"level": "ERROR", "handlers": [], "propagate": False},
         },
         "root": {
             "level": log_level,

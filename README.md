@@ -32,22 +32,32 @@ sequenceDiagram
 - **Cashu Wallet Integration** – Accept Lightning payments and redeem eCash tokens before forwarding requests
 - **API Key Management** – Hashed keys stored in SQLite with balance tracking and optional expiry/refund address
 - **Model-Based Pricing** – Convert USD prices in `models.json` to sats using live BTC/USD rates
-- **Admin Dashboard** – Simple HTML interface at `/admin` to view balances and API keys
+- **Admin Dashboard** – Simple HTML interface at `/admin/` to view balances and API keys
 - **Discovery** – Fetch available providers from Nostr relays
 - **Docker Support** – Provided `Dockerfile` and `compose.yml` for running with an optional Tor hidden service
 
 ## Getting Started
 
-### Requirements
+### Running the proxy using Docker
+
+```bash
+docker run -d \
+--name routstr-proxy \
+-p 8000:8000 \
+-e UPSTREAM_BASE_URL=https://api.openai.com/v1 \
+-e UPSTREAM_API_KEY=your-openai-api-key \
+ghcr.io/routstr/proxy:latest
+```
+
+### Development Requirements
 
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv) package manager (used in development)
-- A Cashu wallet secret (`NSEC`) and Lightning address for receiving payments
 
 ### Installation
 
 ```bash
-uv sync --dev  # install dependencies
+uv sync  # install dependencies
 ```
 
 Create a `.env` file based on `.env.example` and fill in the required values:
@@ -78,15 +88,18 @@ The most common settings are shown below. See `.env.example` for the full list.
 
 - `UPSTREAM_BASE_URL` – URL of the OpenAI-compatible service
 - `UPSTREAM_API_KEY` – API key for the upstream service (optional)
-- `RECEIVE_LN_ADDRESS` – Lightning address that receives payouts
-- `MINIMUM_PAYOUT` – Minimum sats before forwarding earnings
 - `MODEL_BASED_PRICING` – Set to `true` to use pricing from `models.json`
-- `REFUND_PROCESSING_INTERVAL` – Seconds between automatic refunds
-- `ADMIN_PASSWORD` – Password for the `/admin` dashboard
+- `ADMIN_PASSWORD` – Password for the `/admin/` dashboard
+- `CASHU_MINTS` – Comma-separated list of Cashu mint URLs
+- `NAME` – Name of the proxy
+- `DESCRIPTION` – Description of the proxy
+- `NPUB` – Nostr public key of the proxy
+- `HTTP_URL` – Public-facing URL of the proxy
+- `ONION_URL` – Tor hidden service URL of the proxy
 
 ## Withdrawing Balance
 
-Go to `https://<your.routstr.proxy>/admin/` (NOTE: be sure to add the '/' at the end), enter the `ADMIN_PASSWORD` you set above and withdraw your balance as a Cashu token. 
+Go to `https://<your.routstr.proxy>/admin/` (NOTE: be sure to add the '/' at the end), enter the `ADMIN_PASSWORD` you set above and withdraw your balance as a Cashu token.
 
 ## Example Client
 
@@ -147,7 +160,8 @@ The proxy should implement either a dedicated endpoint to communicate minimum eC
 
 To use this feature, you'll need a client that handles both OpenAI API calls and eCash header management. The following clients provide seamless integration:
 
-- **[cashu-402-client](https://github.com/9qeklajc/ecash-402-client)** – rust client with automatic wallet management
+- **[routstr-chat](https://github.com/routstr/routstr-chat)** – chat app for the routstr network
+- **[otrta-client](https://github.com/routstr/otrta-client)** – rust web app for the routstr network
 
 clients automatically:
 
