@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from urllib.request import urlopen
 
 from fastapi import APIRouter
 from pydantic.v1 import BaseModel
@@ -51,31 +52,76 @@ class Model(BaseModel):
 MODELS: list[Model] = []
 
 
+def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
+    """Fetches model information from OpenRouter API."""
+    base_url = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
+
+    try:
+        with urlopen(f"{base_url}/models") as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+            models_data: list[dict] = []
+            for model in data.get("data", []):
+                model_id = model.get("id", "")
+
+                if source_filter:
+                    source_prefix = f"{source_filter}/"
+                    if not model_id.startswith(source_prefix):
+                        continue
+
+                    model = dict(model)
+                    model["id"] = model_id[len(source_prefix) :]
+                    model_id = model["id"]
+
+                if (
+                    "(free)" in model.get("name", "")
+                    or model_id == "openrouter/auto"
+                    or model_id == "google/gemini-2.5-pro-exp-03-25"
+                ):
+                    continue
+
+                models_data.append(model)
+
+            return models_data
+    except Exception as e:
+        print(f"Error fetching models from OpenRouter API: {e}")
+        return []
+
+
 def load_models() -> list[Model]:
-    """Load model definitions from a JSON file.
+    """Load model definitions from a JSON file or auto-generate from OpenRouter API.
 
     The file path can be specified via the ``MODELS_PATH`` environment variable.
-    If ``models.json`` is not found, the bundled ``models.example.json`` is used
-    as a fallback. If neither file exists or an error occurs while loading, an
-    empty list is returned.
+    If a user-provided models.json exists, it will be used. Otherwise, models are
+    automatically fetched from OpenRouter API in memory. If the example file exists
+    and no user file is provided, it will be used as a fallback.
     """
 
     models_path = Path(os.environ.get("MODELS_PATH", "models.json"))
-    if not models_path.exists():
-        example = Path(__file__).resolve().parent.parent / "models.example.json"
-        if example.exists():
-            models_path = example
-        else:
-            return []
 
-    try:
-        with models_path.open("r") as f:
-            data = json.load(f)
-    except Exception as e:  # pragma: no cover - log and continue
-        print(f"Error loading models from {models_path}: {e}")
+    # Check if user has actively provided a models.json file
+    if models_path.exists():
+        print(f"Loading models from user-provided file: {models_path}")
+        try:
+            with models_path.open("r") as f:
+                data = json.load(f)
+            return [Model(**model) for model in data.get("models", [])]
+        except Exception as e:
+            print(f"Error loading models from {models_path}: {e}")
+            # Fall through to auto-generation
+
+    # Auto-generate models from OpenRouter API
+    print("Auto-generating models from OpenRouter API")
+    source_filter = os.getenv("SOURCE")
+    source_filter = source_filter if source_filter and source_filter.strip() else None
+
+    models_data = fetch_openrouter_models(source_filter=source_filter)
+    if not models_data:
+        print("Failed to fetch models from OpenRouter API")
         return []
 
-    return [Model(**model) for model in data.get("models", [])]
+    print(f"Successfully fetched {len(models_data)} models from OpenRouter API")
+    return [Model(**model) for model in models_data]
 
 
 MODELS = load_models()
@@ -91,7 +137,9 @@ async def update_sats_pricing() -> None:
                 )
                 mspp = model.sats_pricing.prompt
                 mspc = model.sats_pricing.completion
-                if model.top_provider:
+                if (tp := model.top_provider) and (
+                    tp.context_length or tp.max_completion_tokens
+                ):
                     if (cl := model.top_provider.context_length) and (
                         mct := model.top_provider.max_completion_tokens
                     ):

@@ -77,7 +77,6 @@ app.add_middleware(
 @app.get("/", include_in_schema=False)
 @app.get("/v1/info")
 async def info() -> dict:
-    logger.info("Info endpoint accessed")
     return {
         "name": app.title,
         "description": app.description,

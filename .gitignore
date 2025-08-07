@@ -10,6 +10,7 @@ wallet.sqlite3
 *models.json
 .cashu
 .dockerignore
+relay-data
 
 compose.override.yml
 
