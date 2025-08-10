@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,7 +100,7 @@ app.add_middleware(
 
 @app.get("/", include_in_schema=False)
 @app.get("/v1/info")
-async def get_info() -> dict[str, str | list[str]]:
+async def get_info() -> dict[str, Any]:
     """Get basic node information with settings from database."""
     # Get settings from database
     name = await SettingsManager.get("NAME", "ARoutstrNode" + __version__)
@@ -123,7 +123,7 @@ async def get_info() -> dict[str, str | list[str]]:
         "mints": mints_list,
         "http_url": http_url,
         "onion_url": onion_url,
-        "models": [model.id for model in MODELS],
+        "models": [model.dict() for model in MODELS],
     }
 
 

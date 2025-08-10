@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
@@ -10,6 +11,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from router.core.db import ApiKey
+
+
+def setup_test_environment():
+    """Set up environment variables for testing to ensure Settings work properly."""
+    # These are required for the settings system to initialize
+    if "DATABASE_URL" not in os.environ:
+        os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    if "UPSTREAM_BASE_URL" not in os.environ:
+        os.environ["UPSTREAM_BASE_URL"] = "http://test"
+    if "UPSTREAM_API_KEY" not in os.environ:
+        os.environ["UPSTREAM_API_KEY"] = "test"
+    if "CASHU_MINTS" not in os.environ:
+        os.environ["CASHU_MINTS"] = "http://localhost:3338"
+
+
+# Call it when the module is imported
+setup_test_environment()
 
 
 class CashuTokenGenerator:

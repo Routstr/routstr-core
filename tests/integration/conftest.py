@@ -65,6 +65,7 @@ os.environ.update(test_env)
 
 from router.core.db import ApiKey, get_session  # noqa: E402
 from router.core.main import app, lifespan  # noqa: E402
+from router.core.settings import SettingsManager  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -478,6 +479,7 @@ async def integration_app(
     integration_session: AsyncSession,
     testmint_wallet: TestmintWallet,
     test_database_url: str,
+    reset_settings_manager: Any,
 ) -> AsyncGenerator[FastAPI, None]:
     """Create FastAPI app instance for integration tests"""
 
@@ -605,6 +607,14 @@ async def create_api_key() -> Callable:
         return wallet_info["api_key"], wallet_info["balance"]
 
     return _create_key
+
+
+@pytest.fixture(autouse=True)
+def reset_settings_manager():
+    """Reset the settings manager before each test to avoid state leakage."""
+    SettingsManager.reset_for_testing()
+    yield
+    SettingsManager.reset_for_testing()
 
 
 @pytest.fixture
