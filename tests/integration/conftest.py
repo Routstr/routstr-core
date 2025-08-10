@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -508,8 +508,8 @@ async def integration_app(
         mint_url = os.environ.get("CASHU_MINTS", "http://localhost:3338")
         with (
             patch("router.core.db.engine", integration_engine),
-            patch("router.wallet.TRUSTED_MINTS", [mint_url]),
-            patch("router.wallet.PRIMARY_MINT_URL", mint_url),
+            patch("router.wallet._get_trusted_mints", AsyncMock(return_value=[mint_url])),
+            patch("router.wallet._get_primary_mint_url", AsyncMock(return_value=mint_url)),
             patch("router.auth.credit_balance", testmint_wallet.credit_balance),
             patch("router.wallet.credit_balance", testmint_wallet.credit_balance),
             patch("router.balance.credit_balance", testmint_wallet.credit_balance),

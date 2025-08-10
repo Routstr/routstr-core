@@ -1,6 +1,5 @@
 import json
 import os
-import traceback
 from typing import Optional
 
 from fastapi import HTTPException, Response
@@ -88,7 +87,8 @@ async def get_cost_per_request(model: str | None = None) -> int:
         return cost
 
     logger.debug(
-        "Using default cost per request", extra={"cost_msats": await _get_cost_per_request()}
+        "Using default cost per request",
+        extra={"cost_msats": await _get_cost_per_request()},
     )
     return await _get_cost_per_request()
 
@@ -191,10 +191,14 @@ async def get_max_cost_for_model(model: str) -> int:
 
     for m in MODELS:
         if m.id == model:
-            cost = m.pricing.get("msat", await _get_cost_per_request())
+            # Check if sats_pricing exists and has max_cost
+            if m.sats_pricing and hasattr(m.sats_pricing, "max_cost"):
+                cost = int(m.sats_pricing.max_cost * 1000)  # Convert sats to msats
+            else:
+                cost = await _get_cost_per_request()
             logger.debug(
                 "Found model pricing",
-                extra={"model": model, "cost_msats": cost, "pricing": m.pricing},
+                extra={"model": model, "cost_msats": cost},
             )
             return cost
 

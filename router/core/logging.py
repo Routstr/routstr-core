@@ -186,7 +186,7 @@ def should_enable_console_logging() -> bool:
 async def get_log_level_from_settings() -> str:
     """Get log level from settings (for runtime updates)."""
     from .settings import SettingsManager
-    
+
     level = await SettingsManager.get("LOG_LEVEL", "INFO")
     level = level.upper()
     # Validate log level - if invalid, default to INFO
@@ -197,7 +197,7 @@ async def get_log_level_from_settings() -> str:
 async def should_enable_console_logging_from_settings() -> bool:
     """Check if console logging should be enabled from settings."""
     from .settings import SettingsManager
-    
+
     return await SettingsManager.get("ENABLE_CONSOLE_LOGGING", True)
 
 

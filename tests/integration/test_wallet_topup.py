@@ -470,7 +470,11 @@ async def test_topup_with_zero_amount_token(  # type: ignore[no-untyped-def]
 
     # Create a token with 0 amount (edge case)
     # The testmint wallet should handle this
-    with patch.object(testmint_wallet, "redeem_token", return_value=(0, "sat", testmint_wallet.mint_url)):
+    with patch.object(
+        testmint_wallet,
+        "redeem_token",
+        return_value=(0, "sat", testmint_wallet.mint_url),
+    ):
         token = await testmint_wallet.mint_tokens(0)
 
         response = await authenticated_client.post(

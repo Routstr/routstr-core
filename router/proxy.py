@@ -492,7 +492,7 @@ async def proxy(
                 media_type="application/json",
             )
 
-    max_cost_for_model = get_cost_per_request(
+    max_cost_for_model = await get_cost_per_request(
         model=request_body_dict.get("model", None)
     )
     check_token_balance(headers, request_body_dict, max_cost_for_model)

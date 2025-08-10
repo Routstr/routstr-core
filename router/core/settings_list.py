@@ -3,7 +3,20 @@ List of all environment variables used in the codebase.
 This file is a reference for the settings database model.
 """
 
-ENVIRONMENT_VARIABLES = {
+from typing import Any, NotRequired, TypedDict
+
+
+class EnvironmentVariableConfig(TypedDict):
+    default: Any
+    description: str
+    type: str
+    locations: list[str]
+    required: NotRequired[bool]
+    sensitive: NotRequired[bool]
+    choices: NotRequired[list[str]]
+
+
+ENVIRONMENT_VARIABLES: dict[str, EnvironmentVariableConfig] = {
     # Database
     "DATABASE_URL": {
         "default": "sqlite+aiosqlite:///keys.db",
@@ -11,7 +24,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/core/db.py"],
     },
-    
     # API/Upstream
     "UPSTREAM_BASE_URL": {
         "default": "",
@@ -33,7 +45,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/payment/models.py", "scripts/models_meta.py"],
     },
-    
     # Pricing/Fees
     "EXCHANGE_FEE": {
         "default": "1.005",
@@ -71,7 +82,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "bool",
         "locations": ["router/payment/cost_caculation.py"],
     },
-    
     # App Info
     "NAME": {
         "default": "ARoutstrNode",
@@ -103,7 +113,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/core/main.py"],
     },
-    
     # Security/Admin
     "ADMIN_PASSWORD": {
         "default": "",
@@ -112,7 +121,6 @@ ENVIRONMENT_VARIABLES = {
         "locations": ["router/core/admin.py"],
         "sensitive": True,
     },
-    
     # Cashu/Mints
     "CASHU_MINTS": {
         "default": "https://mint.minibits.cash/Bitcoin",
@@ -120,7 +128,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/wallet.py", "router/core/main.py"],
     },
-    
     # Logging
     "LOG_LEVEL": {
         "default": "INFO",
@@ -135,7 +142,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "bool",
         "locations": ["router/core/logging.py"],
     },
-    
     # CORS
     "CORS_ORIGINS": {
         "default": "*",
@@ -143,7 +149,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/core/main.py"],
     },
-    
     # Models
     "MODELS_PATH": {
         "default": "models.json",
@@ -157,7 +162,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/payment/models.py", "scripts/models_meta.py"],
     },
-    
     # Proxy
     "TOR_PROXY_URL": {
         "default": "socks5://127.0.0.1:9050",
@@ -165,7 +169,6 @@ ENVIRONMENT_VARIABLES = {
         "type": "str",
         "locations": ["router/discovery.py"],
     },
-    
     # Testing/Development (excluded from production settings)
     # These are handled separately in test environments
 }

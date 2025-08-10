@@ -1,5 +1,4 @@
 import math
-import os
 
 from pydantic.v1 import BaseModel
 
@@ -54,12 +53,16 @@ async def _is_model_based_pricing() -> bool:
 # Cache reload function
 async def reload_pricing_settings() -> None:
     """Reload pricing settings from database."""
-    global _COST_PER_REQUEST, _COST_PER_1K_INPUT_TOKENS, _COST_PER_1K_OUTPUT_TOKENS, _MODEL_BASED_PRICING
+    global \
+        _COST_PER_REQUEST, \
+        _COST_PER_1K_INPUT_TOKENS, \
+        _COST_PER_1K_OUTPUT_TOKENS, \
+        _MODEL_BASED_PRICING
     _COST_PER_REQUEST = None
     _COST_PER_1K_INPUT_TOKENS = None
     _COST_PER_1K_OUTPUT_TOKENS = None
     _MODEL_BASED_PRICING = None
-    
+
     # Log the updated settings
     logger.info(
         "Pricing settings reloaded",

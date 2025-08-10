@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import random
 import string
 from typing import Any
@@ -163,7 +162,9 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
         proxies = None
         if is_onion:
             # Get Tor proxy URL from settings
-            tor_proxy = await SettingsManager.get("TOR_PROXY_URL", "socks5://127.0.0.1:9050")
+            tor_proxy = await SettingsManager.get(
+                "TOR_PROXY_URL", "socks5://127.0.0.1:9050"
+            )
             proxies = {"http://": tor_proxy, "https://": tor_proxy}  # type: ignore[assignment]
 
         async with httpx.AsyncClient(

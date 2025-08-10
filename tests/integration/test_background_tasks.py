@@ -122,7 +122,7 @@ class TestPricingUpdateTask:
                 assert False, "Expected exception on first call"
             except Exception:
                 pass
-            
+
             # Second call should succeed
             result = await mock_price_func()
             assert result == 0.00002

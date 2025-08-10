@@ -524,9 +524,9 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
         extra={"model": model, "has_usage": "usage" in response_data},
     )
 
-    max_cost = get_max_cost_for_model(model=model)
+    max_cost = await get_max_cost_for_model(model=model)
 
-    match calculate_cost(response_data, max_cost):
+    match await calculate_cost(response_data, max_cost):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost pricing",
@@ -563,6 +563,10 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
                     }
                 },
             )
+        case _:
+            # Default case - should not happen
+            logger.error("Unexpected return type from calculate_cost")
+            return None
 
 
 async def send_refund(amount: int, unit: CurrencyUnit, mint: str | None = None) -> str:

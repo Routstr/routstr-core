@@ -1,7 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import AsyncGenerator, Any
+from typing import Any, AsyncGenerator
 
 from alembic import command
 from alembic.config import Config

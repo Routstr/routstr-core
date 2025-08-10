@@ -7,9 +7,8 @@ from urllib.request import urlopen
 from fastapi import APIRouter
 from pydantic.v1 import BaseModel
 
-from .price import sats_usd_ask_price
 from ..core.logging import get_logger
-from ..core.settings import SettingsManager
+from .price import sats_usd_ask_price
 
 logger = get_logger(__name__)
 

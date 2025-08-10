@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -107,13 +106,15 @@ async def get_info() -> dict[str, str | list[str]]:
     name = await SettingsManager.get("NAME", "ARoutstrNode" + __version__)
     description = await SettingsManager.get("DESCRIPTION", "A Routstr Node")
     npub = await SettingsManager.get("NPUB", "")
-    cashu_mints = await SettingsManager.get("CASHU_MINTS", "https://mint.minibits.cash/Bitcoin")
+    cashu_mints = await SettingsManager.get(
+        "CASHU_MINTS", "https://mint.minibits.cash/Bitcoin"
+    )
     http_url = await SettingsManager.get("HTTP_URL", "")
     onion_url = await SettingsManager.get("ONION_URL", "")
-    
+
     # Split cashu_mints by comma
     mints_list = [mint.strip() for mint in cashu_mints.split(",") if mint.strip()]
-    
+
     return {
         "name": name,
         "description": description,
@@ -122,7 +123,7 @@ async def get_info() -> dict[str, str | list[str]]:
         "mints": mints_list,
         "http_url": http_url,
         "onion_url": onion_url,
-        "models": MODELS,
+        "models": [model.id for model in MODELS],
     }
 
 

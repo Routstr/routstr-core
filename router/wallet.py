@@ -1,14 +1,11 @@
-import asyncio
-import os
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from cashu.core.base import Token
-from cashu.core.errors import CashuError
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
 
-from .core.db import ApiKey, create_session
+from .core.db import ApiKey
 from .core.logging import get_logger
 from .core.settings import SettingsManager
 
@@ -18,6 +15,7 @@ logger = get_logger(__name__)
 class CurrencyUnit(Enum):
     sat = "sat"
     msat = "msat"
+
 
 # Default values - will be loaded from settings
 _CASHU_MINTS = None
@@ -29,7 +27,9 @@ async def _get_cashu_mints() -> str:
     """Get CASHU_MINTS from settings."""
     global _CASHU_MINTS
     if _CASHU_MINTS is None:
-        _CASHU_MINTS = await SettingsManager.get("CASHU_MINTS", "https://mint.minibits.cash/Bitcoin")
+        _CASHU_MINTS = await SettingsManager.get(
+            "CASHU_MINTS", "https://mint.minibits.cash/Bitcoin"
+        )
     return _CASHU_MINTS
 
 
@@ -38,7 +38,9 @@ async def _get_trusted_mints() -> list[str]:
     global _TRUSTED_MINTS
     if _TRUSTED_MINTS is None:
         cashu_mints = await _get_cashu_mints()
-        _TRUSTED_MINTS = [mint.strip() for mint in cashu_mints.split(",") if mint.strip()]
+        _TRUSTED_MINTS = [
+            mint.strip() for mint in cashu_mints.split(",") if mint.strip()
+        ]
     return _TRUSTED_MINTS
 
 
@@ -47,7 +49,9 @@ async def _get_primary_mint_url() -> str:
     global _PRIMARY_MINT_URL
     if _PRIMARY_MINT_URL is None:
         trusted_mints = await _get_trusted_mints()
-        _PRIMARY_MINT_URL = trusted_mints[0] if trusted_mints else "https://mint.minibits.cash/Bitcoin"
+        _PRIMARY_MINT_URL = (
+            trusted_mints[0] if trusted_mints else "https://mint.minibits.cash/Bitcoin"
+        )
     return _PRIMARY_MINT_URL
 
 
@@ -97,7 +101,10 @@ async def recieve_token(
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Internal send function - returns amount and serialized token"""
     wallet = await Wallet.with_db(
-        mint_url or await _get_primary_mint_url(), db=".wallet", load_all_keysets=True, unit=unit
+        mint_url or await _get_primary_mint_url(),
+        db=".wallet",
+        load_all_keysets=True,
+        unit=unit,
     )
     await wallet.load_mint()
     await wallet.load_proofs()
@@ -160,9 +167,7 @@ async def swap_to_primary_mint(
     return minted_amount, CurrencyUnit.sat, await _get_primary_mint_url()
 
 
-async def credit_balance(
-    cashu_token: str, key: ApiKey, session: Any
-) -> int:
+async def credit_balance(cashu_token: str, key: ApiKey, session: Any) -> int:
     logger.info(
         "credit_balance: Starting token redemption",
         extra={"token_preview": cashu_token[:50]},
@@ -184,7 +189,10 @@ async def credit_balance(
         if mint_url != await _get_primary_mint_url():
             logger.error(
                 "credit_balance: Mint URL mismatch",
-                extra={"mint_url": mint_url, "primary_mint": await _get_primary_mint_url()},
+                extra={
+                    "mint_url": mint_url,
+                    "primary_mint": await _get_primary_mint_url(),
+                },
             )
             raise ValueError("Mint URL is not supported by this proxy")
 
@@ -218,29 +226,32 @@ async def send_to_lnurl(amount: int, unit: CurrencyUnit, lnurl: str) -> dict[str
     try:
         # Create wallet instance for this operation
         payment_wallet = await Wallet.with_db(
-            await _get_primary_mint_url(), db=".wallet", load_all_keysets=True, unit=unit
+            await _get_primary_mint_url(),
+            db=".wallet",
+            load_all_keysets=True,
+            unit=unit,
         )
         await payment_wallet.load_mint()
-        
+
         # Convert amount to correct unit
         if unit == CurrencyUnit.sat and amount < 1000:
-            # Convert sats to msats for small amounts  
+            # Convert sats to msats for small amounts
             amount_to_send = amount * 1000
             send_unit = CurrencyUnit.msat
         else:
             amount_to_send = amount
             send_unit = unit if isinstance(unit, CurrencyUnit) else CurrencyUnit(unit)
-            
+
         # For now, return a mock successful response since LNURL payment is complex
         logger.info(f"Mock payment: {amount_to_send} {send_unit} to {lnurl}")
-        
+
         return {
             "amount_sent": amount_to_send,
             "unit": send_unit.name,
             "lnurl": lnurl,
-            "status": "completed"
+            "status": "completed",
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to send to LNURL {lnurl}: {e}")
         unit_str = unit.value if isinstance(unit, CurrencyUnit) else unit
@@ -249,7 +260,7 @@ async def send_to_lnurl(amount: int, unit: CurrencyUnit, lnurl: str) -> dict[str
             "unit": unit_str,
             "lnurl": lnurl,
             "status": "failed",
-            "error": str(e)
+            "error": str(e),
         }
 
 

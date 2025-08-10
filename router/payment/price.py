@@ -1,6 +1,4 @@
 import asyncio
-import os
-from datetime import datetime
 
 import httpx
 
@@ -26,7 +24,9 @@ async def _get_upstream_provider_fee() -> float:
     """Get upstream provider fee from settings."""
     global _UPSTREAM_PROVIDER_FEE
     if _UPSTREAM_PROVIDER_FEE is None:
-        _UPSTREAM_PROVIDER_FEE = await SettingsManager.get("UPSTREAM_PROVIDER_FEE", 1.05)
+        _UPSTREAM_PROVIDER_FEE = await SettingsManager.get(
+            "UPSTREAM_PROVIDER_FEE", 1.05
+        )
     return _UPSTREAM_PROVIDER_FEE
 
 

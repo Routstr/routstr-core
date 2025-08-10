@@ -77,28 +77,39 @@ async def refund_wallet_endpoint(
     # Perform refund operation first, before modifying balance
     try:
         if key.refund_address:
-            await send_to_lnurl(remaining_balance_msats, CurrencyUnit.msat, key.refund_address)
+            await send_to_lnurl(
+                remaining_balance_msats, CurrencyUnit.msat, key.refund_address
+            )
             result = {"recipient": key.refund_address, "msats": remaining_balance_msats}
         else:
             # Convert msats to sats for cashu wallet
             remaining_balance_sats = remaining_balance_msats // 1000
             if remaining_balance_sats == 0:
                 raise HTTPException(
-                    status_code=400, detail="Balance too small to refund (less than 1 sat)"
+                    status_code=400,
+                    detail="Balance too small to refund (less than 1 sat)",
                 )
 
             # TODO: choose currency and mint based on what user has configured
             token = await send_token(remaining_balance_sats, "sat")
 
-            result = {"msats": remaining_balance_msats, "recipient": None, "token": token}
+            result = {
+                "msats": remaining_balance_msats,
+                "recipient": None,
+                "token": token,
+            }
     except HTTPException:
         # Re-raise HTTP exceptions (like 400 for balance too small)
         raise
     except Exception as e:
         # If refund fails, don't modify the database
         error_msg = str(e)
-        if ("mint" in error_msg.lower() or "connection" in error_msg.lower() or 
-            isinstance(e, Exception) and "ConnectError" in str(type(e))):
+        if (
+            "mint" in error_msg.lower()
+            or "connection" in error_msg.lower()
+            or isinstance(e, Exception)
+            and "ConnectError" in str(type(e))
+        ):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
             raise HTTPException(status_code=500, detail="Refund failed")

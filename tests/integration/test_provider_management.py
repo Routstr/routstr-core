@@ -155,7 +155,7 @@ async def test_providers_data_structure_validation(
                 ["description", "A comprehensive AI provider"],
                 ["model", "gpt-3.5-turbo"],
                 ["model", "gpt-4"],
-            ]
+            ],
         }
     ]
 
@@ -165,9 +165,9 @@ async def test_providers_data_structure_validation(
         "json": {
             "data": [
                 {"id": "gpt-3.5-turbo", "object": "model"},
-                {"id": "gpt-4", "object": "model"}
+                {"id": "gpt-4", "object": "model"},
             ]
-        }
+        },
     }
 
     with patch(
@@ -188,7 +188,7 @@ async def test_providers_data_structure_validation(
                 # Should have provider and health keys based on actual implementation
                 assert "provider" in provider_data
                 assert "health" in provider_data
-                
+
                 provider_info = provider_data["provider"]
                 # Expected fields from RIP-02 parser
                 expected_fields = ["id", "name", "endpoint_url", "supported_models"]
@@ -245,27 +245,35 @@ async def test_providers_endpoint_offline_providers(
                 ["d", "healthy-provider"],
                 ["endpoint", "http://healthy-provider.onion"],
                 ["name", "Healthy Provider"],
-            ]
+            ],
         },
         {
             "id": "event2",
-            "pubkey": "offline_provider_pubkey", 
+            "pubkey": "offline_provider_pubkey",
             "created_at": 1234567891,
             "content": "Offline provider announcement",
             "tags": [
                 ["d", "offline-provider"],
                 ["endpoint", "http://offline-provider.onion"],
                 ["name", "Offline Provider"],
-            ]
+            ],
         },
     ]
 
     # Mock one healthy and one offline provider
     def mock_fetch_provider_health(url: str) -> dict[str, Any]:
         if "healthy" in url:
-            return {"status_code": 200, "endpoint": "root", "json": {"status": "online"}}
+            return {
+                "status_code": 200,
+                "endpoint": "root",
+                "json": {"status": "online"},
+            }
         else:
-            return {"status_code": 500, "endpoint": "error", "json": {"error": "Service unavailable"}}
+            return {
+                "status_code": 500,
+                "endpoint": "error",
+                "json": {"error": "Service unavailable"},
+            }
 
     with patch(
         "router.discovery.query_nostr_relay_for_providers", return_value=mock_events
@@ -286,10 +294,10 @@ async def test_providers_endpoint_offline_providers(
             for provider_data in data["providers"]:
                 assert "provider" in provider_data
                 assert "health" in provider_data
-                
+
                 provider_info = provider_data["provider"]
                 health_info = provider_data["health"]
-                
+
                 if "offline" in provider_info["endpoint_url"]:
                     # Offline provider should have error information in health
                     assert health_info["status_code"] == 500
@@ -297,7 +305,10 @@ async def test_providers_endpoint_offline_providers(
                 else:
                     # Healthy provider should have successful health check
                     assert health_info["status_code"] == 200
-                    assert "status" in health_info["json"] or "error" not in health_info["json"]
+                    assert (
+                        "status" in health_info["json"]
+                        or "error" not in health_info["json"]
+                    )
 
 
 @pytest.mark.integration
@@ -318,7 +329,7 @@ async def test_providers_endpoint_duplicate_urls(
                 ["d", "provider-1"],
                 ["endpoint", "http://provider.onion"],
                 ["name", "Provider"],
-            ]
+            ],
         },
         {
             "id": "event2",
@@ -329,7 +340,7 @@ async def test_providers_endpoint_duplicate_urls(
                 ["d", "other-provider"],
                 ["endpoint", "http://other-provider.onion"],
                 ["name", "Other Provider"],
-            ]
+            ],
         },
     ]
 
@@ -337,7 +348,11 @@ async def test_providers_endpoint_duplicate_urls(
         "router.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
         with patch("router.discovery.fetch_provider_health") as mock_fetch:
-            mock_fetch.return_value = {"status_code": 200, "endpoint": "root", "json": {"status": "online"}}
+            mock_fetch.return_value = {
+                "status_code": 200,
+                "endpoint": "root",
+                "json": {"status": "online"},
+            }
 
             response = await integration_client.get("/v1/providers/")
 
@@ -352,7 +367,7 @@ async def test_providers_endpoint_duplicate_urls(
             endpoint_urls = []
             for provider_data in providers:
                 endpoint_urls.append(provider_data["endpoint_url"])
-            
+
             unique_endpoints = set(endpoint_urls)
             assert len(unique_endpoints) == len(endpoint_urls)
 

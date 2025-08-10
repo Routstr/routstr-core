@@ -212,7 +212,7 @@ async def test_refund_with_lightning_address(
             "amount_sent": balance,
             "unit": "msat",
             "lnurl": refund_address,
-            "status": "completed"
+            "status": "completed",
         }
 
         # Request refund

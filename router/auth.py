@@ -260,7 +260,7 @@ async def validate_bearer_key(
 async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int:
     """Process payment for a request."""
     model = body["model"]
-    cost_per_request = get_max_cost_for_model(model=model)
+    cost_per_request = await get_max_cost_for_model(model=model)
 
     logger.info(
         "Processing payment for request",
@@ -408,7 +408,7 @@ async def adjust_payment_for_tokens(
         },
     )
 
-    match calculate_cost(response_data, deducted_max_cost):
+    match await calculate_cost(response_data, deducted_max_cost):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",
@@ -567,3 +567,12 @@ async def adjust_payment_for_tokens(
                     }
                 },
             )
+        case _:
+            # Default case - should not happen
+            logger.error("Unexpected return type from calculate_cost")
+            return {
+                "base_msats": 0,
+                "input_msats": 0,
+                "output_msats": 0,
+                "total_msats": 0,
+            }
