@@ -1,7 +1,7 @@
 import math
 import os
 
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 
 from router.payment.helpers import match_model_id_to_internal_model
 

@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Optional
 
 from fastapi import HTTPException, Response
 
@@ -86,7 +87,14 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
     if cashu_token.startswith("sk-"):
         return
 
-    token_obj = deserialize_token_from_string(cashu_token)
+    try:
+        token_obj = deserialize_token_from_string(cashu_token)
+    except Exception:
+        # Invalid token format - let the auth system handle it
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token format",
+        )
 
     amount_msat = (
         token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000
@@ -149,7 +157,9 @@ def get_max_cost_for_model(model: Model) -> int:
     return COST_PER_REQUEST
 
 
-def create_error_response(error_type: str, message: str, status_code: int) -> Response:
+def create_error_response(
+    error_type: str, message: str, status_code: int, token: Optional[str] = None
+) -> Response:
     """Create a standardized error response."""
     logger.info(
         "Creating error response",
@@ -160,6 +170,9 @@ def create_error_response(error_type: str, message: str, status_code: int) -> Re
         },
     )
 
+    response_headers = {}
+    if token:
+        response_headers["X-Cashu"] = token
     return Response(
         content=json.dumps(
             {
@@ -172,6 +185,7 @@ def create_error_response(error_type: str, message: str, status_code: int) -> Re
         ),
         status_code=status_code,
         media_type="application/json",
+        headers=dict(response_headers),
     )
 
 

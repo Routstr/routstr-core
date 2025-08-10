@@ -3,13 +3,22 @@ __pycache__
 keys.db
 wallet.sqlite3
 
+# Python build artifacts
+*.egg-info/
+build/
+dist/
+*.egg
+
 # Development 
 .notes
 .*keys.db
 .*wallet.sqlite3
 *models.json
 .cashu
+.relay
+relay-data
 .dockerignore
+relay-data
 
 compose.override.yml
 
@@ -23,3 +32,4 @@ logs/*
 
 # deployment
 proof_backups
+

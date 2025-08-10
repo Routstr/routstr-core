@@ -97,6 +97,49 @@ The most common settings are shown below. See `.env.example` for the full list.
 - `HTTP_URL` – Public-facing URL of the proxy
 - `ONION_URL` – Tor hidden service URL of the proxy
 
+## Database Migrations
+
+The application uses Alembic for database schema management and **automatically runs migrations on startup**. This ensures your database is always up-to-date when deploying new versions.
+
+### Automatic Migrations in Production
+
+When the FastAPI application starts, it automatically:
+
+1. Runs all pending database migrations
+2. Updates the schema to the latest version
+3. Logs the migration status
+
+This means you don't need to manually run migrations when deploying - just restart the application and migrations will be applied automatically.
+
+### Manual Migration Commands
+
+For development or troubleshooting, you can use these Makefile commands:
+
+```bash
+make db-upgrade         # Apply all pending migrations
+make db-downgrade       # Downgrade one migration
+make db-current         # Show current migration revision
+make db-history         # Show migration history
+make db-migrate         # Auto-generate new migration from model changes
+make db-revision        # Create empty migration file
+make db-heads           # Show current migration heads
+make db-clean           # Clean migration cache files
+```
+
+### Creating New Migrations
+
+When you modify SQLModel models:
+
+```bash
+# Auto-generate a migration from model changes
+make db-migrate
+# Enter a descriptive message when prompted
+
+# Review the generated migration file in migrations/versions/
+# Edit if needed, then test with:
+make db-upgrade
+```
+
 ## Withdrawing Balance
 
 Go to `https://<your.routstr.proxy>/admin/` (NOTE: be sure to add the '/' at the end), enter the `ADMIN_PASSWORD` you set above and withdraw your balance as a Cashu token.

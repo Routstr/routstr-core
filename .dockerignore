@@ -1,0 +1,11 @@
+.env
+.venv
+.git
+.gitignore
+.dockerignore
+compose.yml
+compose.testing.yml
+.todo
+.github
+.vscode
+.DS_Store

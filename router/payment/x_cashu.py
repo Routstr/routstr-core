@@ -8,12 +8,7 @@ from fastapi.responses import Response, StreamingResponse
 
 from ..core import get_logger
 from ..wallet import CurrencyUnit, recieve_token, send_token
-from .cost_caculation import (
-    CostData,
-    CostDataError,
-    MaxCostData,
-    calculate_cost,
-)
+from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
 from .helpers import (
     UPSTREAM_BASE_URL,
     create_error_response,
@@ -70,20 +65,29 @@ async def x_cashu_handler(
                 "token_already_spent",
                 "The provided CASHU token has already been spent",
                 400,
+                x_cashu_token,
             )
-        elif "invalid token" in error_message.lower():
+
+        if "invalid token" in error_message.lower():
             return create_error_response(
-                "invalid_token", "The provided CASHU token is invalid", 400
+                "invalid_token",
+                "The provided CASHU token is invalid",
+                400,
+                x_cashu_token,
             )
-        elif "mint error" in error_message.lower():
+
+        if "mint error" in error_message.lower():
             return create_error_response(
-                "mint_error", f"CASHU mint error: {error_message}", 422
+                "mint_error", f"CASHU mint error: {error_message}", 422, x_cashu_token
             )
-        else:
-            # Generic error for other cases
-            return create_error_response(
-                "cashu_error", f"CASHU token processing failed: {error_message}", 400
-            )
+
+        # Generic error for other cases
+        return create_error_response(
+            "cashu_error",
+            f"CASHU token processing failed: {error_message}",
+            400,
+            x_cashu_token,
+        )
 
 
 async def forward_to_upstream(

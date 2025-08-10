@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
+
 dependencies = [
     "fastapi[standard]>=0.115",
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
     "httpx[socks]>=0.25.2",
     "greenlet>=3.2.1",
+    "alembic>=1.13",
     "python-json-logger>=2.0.0",
     "cashu",
     "secp256k1",
@@ -25,6 +27,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.1.1",
     "httpx>=0.25.2",
+    "psutil>=5.9.0",
+    "aiohttp>=3.9.0",
+    "pytest-benchmark>=4.0.0",
+    "routstr",
 ]
 
 [tool.pytest.ini_options]
@@ -44,8 +50,12 @@ addopts = [
 ]
 markers = [
     "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",
-    "integration: marks tests as integration tests",
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "unit: marks tests as unit tests",
+    "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
+    "requires_real_mint: marks tests that require a running Cashu mint instance",
+    "requires_docker: marks tests that require Docker services running (deselect with '-m \"not requires_docker\"')",
+    "performance: marks tests that measure performance metrics",
 ]
 
 [tool.ruff.lint]
@@ -63,3 +73,7 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 secp256k1 = { git = "https://github.com/saschanaz/secp256k1-py", branch = "upgrade060" }
+routstr = { workspace = true }
+
+[tool.uv.workspace]
+members = ["."]
