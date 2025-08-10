@@ -20,9 +20,9 @@ from .payment.helpers import (
     check_token_balance,
     create_error_response,
     get_cost_per_request,
-    match_model_id_to_internal_model,
     prepare_upstream_headers,
 )
+from .payment.models import match_model_id_to_internal_model
 from .payment.x_cashu import x_cashu_handler
 
 logger = get_logger(__name__)
@@ -253,6 +253,12 @@ async def forward_to_upstream(
     session: AsyncSession,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
+    if not UPSTREAM_BASE_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="UPSTREAM_BASE_URL is not configured"
+        )
+    
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
@@ -690,6 +696,12 @@ async def forward_get_to_upstream(
     headers: dict,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
+    if not UPSTREAM_BASE_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="UPSTREAM_BASE_URL is not configured"
+        )
+    
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 

@@ -31,6 +31,7 @@ class TestPricingUpdateTask:
             test_model = Model(  # type: ignore[arg-type]
                 id="test-model",
                 name="Test Model",
+                provider="test-provider",
                 created=1234567890,
                 description="Test",
                 context_length=4096,
@@ -138,6 +139,7 @@ class TestPricingUpdateTask:
         test_model = Model(  # type: ignore[arg-type]
             id="test-atomic",
             name="Test Atomic",
+            provider="test-provider",
             created=1234567890,
             description="Test",
             context_length=4096,

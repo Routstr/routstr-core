@@ -15,8 +15,9 @@ logger = get_logger(__name__)
 UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", "")
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 
-if not UPSTREAM_BASE_URL:
-    raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
+# Don't raise during import - check when actually used
+# if not UPSTREAM_BASE_URL:
+#     raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
 
 
 def get_cost_per_request(model: Model) -> int:
@@ -130,7 +131,7 @@ def get_max_cost_for_model(model: Model) -> int:
         )
         return COST_PER_REQUEST
 
-    if model not in [model.id for model in MODELS]:
+    if model.id not in [m.id for m in MODELS]:
         logger.warning(
             "Model not found in available models",
             extra={
@@ -142,7 +143,7 @@ def get_max_cost_for_model(model: Model) -> int:
         return COST_PER_REQUEST
 
     for m in MODELS:
-        if m.id == model:
+        if m.id == model.id:
             max_cost = m.sats_pricing.max_cost * 1000  # type: ignore
             logger.debug(
                 "Found model-specific max cost",
@@ -233,22 +234,3 @@ def prepare_upstream_headers(request_headers: dict) -> dict:
     )
 
     return headers
-
-
-def match_model_id_to_internal_model(model_id: str) -> Model | None:
-    """Match a model ID to an internal model."""
-    if not model_id:
-        return None
-
-    if "/" in model_id:
-        _, model_id = model_id.split("/")
-
-    for model in MODELS:
-        if model.id == model_id:
-            return model
-        if model.canonical_slug == model_id:
-            return model
-        if model_id in model.id:
-            return model
-
-    return None

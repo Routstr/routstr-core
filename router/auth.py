@@ -12,7 +12,8 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
-from .payment.helpers import get_max_cost_for_model, match_model_id_to_internal_model
+from .payment.helpers import get_max_cost_for_model
+from .payment.models import match_model_id_to_internal_model
 from .wallet import credit_balance
 
 logger = get_logger(__name__)
@@ -271,7 +272,7 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
                 }
             },
         )
-    cost_per_request = get_max_cost_for_model(model=model.id)
+    cost_per_request = get_max_cost_for_model(model=model)
 
     logger.info(
         "Processing payment for request",

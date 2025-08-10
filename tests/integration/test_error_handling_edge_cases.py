@@ -5,8 +5,9 @@ import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
-from httpx import AsyncClient, ConnectError
+from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -27,11 +28,11 @@ class TestNetworkFailureScenarios:
         with (
             patch(
                 "router.wallet.send_token",
-                AsyncMock(side_effect=ConnectError("Mint service unavailable")),
+                AsyncMock(side_effect=httpx.ConnectError("Mint service unavailable")),
             ),
             patch(
                 "router.balance.send_token",
-                AsyncMock(side_effect=ConnectError("Mint service unavailable")),
+                AsyncMock(side_effect=httpx.ConnectError("Mint service unavailable")),
             ),
         ):
             # Try to refund when mint is down - should return 503 status
@@ -43,22 +44,16 @@ class TestNetworkFailureScenarios:
     async def test_upstream_llm_service_down(
         self,
         authenticated_client: AsyncClient,
-        integration_session: AsyncSession,
     ) -> None:
-        """Test proxy behavior when upstream LLM service is down"""
-        # Mock at the router level to simulate upstream being down
-        with patch("router.proxy.httpx.AsyncClient") as mock_client_class:
-            # Create a mock client instance
-            mock_client = AsyncMock()
-            mock_client_class.return_value = mock_client
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=None)
-            mock_client.aclose = AsyncMock()
+        """Test handling when upstream LLM service is unavailable"""
 
-            # Make the send method raise ConnectError
-            mock_client.send = AsyncMock(side_effect=ConnectError("Connection refused"))
-            mock_client.build_request = MagicMock(return_value=MagicMock())
-
+        # Mock httpx.AsyncClient to simulate connection error
+        mock_client = AsyncMock()
+        mock_client.send = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        mock_client.build_request = MagicMock(return_value=MagicMock())
+        mock_client.aclose = AsyncMock()
+        
+        with patch("router.proxy.httpx.AsyncClient", return_value=mock_client):
             # Try to make a proxy request
             response = await authenticated_client.post(
                 "/v1/chat/completions",
@@ -84,7 +79,7 @@ class TestNetworkFailureScenarios:
         async def mock_aiter_bytes() -> Any:  # type: ignore[misc]
             yield b'data: {"choices": [{"delta": {"content": "Hello"}}]}\n\n'
             yield b'data: {"choices": [{"delta": {"content": " World"}}]}\n\n'
-            raise ConnectError("Connection lost")
+            raise httpx.ConnectError("Connection lost")
 
         with patch("httpx.AsyncClient.request") as mock_request:
             mock_response = AsyncMock()
