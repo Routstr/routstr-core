@@ -13,7 +13,7 @@ from sqlmodel import select
 from router.core.db import ApiKey
 
 
-def setup_test_environment():
+def setup_test_environment() -> None:
     """Set up environment variables for testing to ensure Settings work properly."""
     # These are required for the settings system to initialize
     if "DATABASE_URL" not in os.environ:

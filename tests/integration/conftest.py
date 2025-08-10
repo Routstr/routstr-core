@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, Generator, List, Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -610,7 +610,7 @@ async def create_api_key() -> Callable:
 
 
 @pytest.fixture(autouse=True)
-def reset_settings_manager():
+def reset_settings_manager() -> Generator[None, None, None]:
     """Reset the settings manager before each test to avoid state leakage."""
     SettingsManager.reset_for_testing()
     yield
