@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from datetime import datetime
+from typing import AsyncGenerator, Any
 
 from alembic import command
 from alembic.config import Config
@@ -39,6 +40,57 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=None,
         description="URL of the mint used to create the cashu-token",
     )
+
+
+class Settings(SQLModel, table=True):  # type: ignore
+    __tablename__ = "settings"
+
+    key: str = Field(primary_key=True, description="Setting key/name")
+    value: str = Field(description="Setting value (stored as string)")
+    description: str | None = Field(default=None, description="Setting description")
+    value_type: str = Field(
+        default="str",
+        description="Type of the value (str, int, float, bool)",
+    )
+    is_manually_changed: bool = Field(
+        default=False,
+        description="Whether this setting was manually changed in the database",
+    )
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the setting was created",
+    )
+    updated_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the setting was last updated",
+    )
+
+    def get_typed_value(self) -> Any:
+        """Convert the string value to its proper type based on value_type."""
+        if self.value_type == "int":
+            return int(self.value)
+        elif self.value_type == "float":
+            return float(self.value)
+        elif self.value_type == "bool":
+            return self.value.lower() in ("true", "1", "yes", "on")
+        return self.value
+
+    @classmethod
+    def from_env_var(
+        cls,
+        key: str,
+        value: str,
+        value_type: str = "str",
+        description: str | None = None,
+    ) -> "Settings":
+        """Create a Settings instance from an environment variable."""
+        return cls(
+            key=key,
+            value=value,
+            value_type=value_type,
+            description=description,
+            is_manually_changed=False,
+        )
 
 
 async def init_db() -> None:

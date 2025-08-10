@@ -164,21 +164,41 @@ class SecurityFilter(logging.Filter):
 
 def get_log_level() -> str:
     """Get log level from environment variable."""
+    # During initialization, we need to use env vars directly
+    # as the database might not be ready yet
     level = os.environ.get("LOG_LEVEL", "INFO").upper()
     # Validate log level - if invalid, default to INFO
     valid_levels = {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-    if level not in valid_levels:
-        level = "INFO"
-    return level
+    return level if level in valid_levels else "INFO"
 
 
 def should_enable_console_logging() -> bool:
     """Check if console logging should be enabled."""
+    # During initialization, we need to use env vars directly
     return os.environ.get("ENABLE_CONSOLE_LOGGING", "true").lower() in (
         "true",
         "1",
         "yes",
+        "on",
     )
+
+
+async def get_log_level_from_settings() -> str:
+    """Get log level from settings (for runtime updates)."""
+    from .settings import SettingsManager
+    
+    level = await SettingsManager.get("LOG_LEVEL", "INFO")
+    level = level.upper()
+    # Validate log level - if invalid, default to INFO
+    valid_levels = {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    return level if level in valid_levels else "INFO"
+
+
+async def should_enable_console_logging_from_settings() -> bool:
+    """Check if console logging should be enabled from settings."""
+    from .settings import SettingsManager
+    
+    return await SettingsManager.get("ENABLE_CONSOLE_LOGGING", True)
 
 
 def setup_logging() -> None:

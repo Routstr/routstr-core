@@ -1,12 +1,16 @@
+import asyncio
 import os
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from cashu.core.base import Token
+from cashu.core.errors import CashuError
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
 
-from .core import db, get_logger
+from .core.db import ApiKey, create_session
+from .core.logging import get_logger
+from .core.settings import SettingsManager
 
 logger = get_logger(__name__)
 
@@ -15,14 +19,50 @@ class CurrencyUnit(Enum):
     sat = "sat"
     msat = "msat"
 
-CASHU_MINTS = os.environ.get("CASHU_MINTS", "https://mint.minibits.cash/Bitcoin")
-TRUSTED_MINTS = CASHU_MINTS.split(",")
-PRIMARY_MINT_URL = TRUSTED_MINTS[0]
+# Default values - will be loaded from settings
+_CASHU_MINTS = None
+_TRUSTED_MINTS = None
+_PRIMARY_MINT_URL = None
+
+
+async def _get_cashu_mints() -> str:
+    """Get CASHU_MINTS from settings."""
+    global _CASHU_MINTS
+    if _CASHU_MINTS is None:
+        _CASHU_MINTS = await SettingsManager.get("CASHU_MINTS", "https://mint.minibits.cash/Bitcoin")
+    return _CASHU_MINTS
+
+
+async def _get_trusted_mints() -> list[str]:
+    """Get list of trusted mints from settings."""
+    global _TRUSTED_MINTS
+    if _TRUSTED_MINTS is None:
+        cashu_mints = await _get_cashu_mints()
+        _TRUSTED_MINTS = [mint.strip() for mint in cashu_mints.split(",") if mint.strip()]
+    return _TRUSTED_MINTS
+
+
+async def _get_primary_mint_url() -> str:
+    """Get primary mint URL from settings."""
+    global _PRIMARY_MINT_URL
+    if _PRIMARY_MINT_URL is None:
+        trusted_mints = await _get_trusted_mints()
+        _PRIMARY_MINT_URL = trusted_mints[0] if trusted_mints else "https://mint.minibits.cash/Bitcoin"
+    return _PRIMARY_MINT_URL
+
+
+# Cache to reload settings when changed
+async def reload_mint_settings() -> None:
+    """Reload mint settings from database."""
+    global _CASHU_MINTS, _TRUSTED_MINTS, _PRIMARY_MINT_URL
+    _CASHU_MINTS = None
+    _TRUSTED_MINTS = None
+    _PRIMARY_MINT_URL = None
 
 
 async def get_balance(unit: CurrencyUnit | str) -> int:
     wallet = await Wallet.with_db(
-        PRIMARY_MINT_URL,
+        await _get_primary_mint_url(),
         db=".wallet",
         load_all_keysets=True,
         unit=unit,
@@ -46,7 +86,8 @@ async def recieve_token(
     )
     await wallet.load_mint(token_obj.keysets[0])
 
-    if token_obj.mint not in TRUSTED_MINTS:
+    trusted_mints = await _get_trusted_mints()
+    if token_obj.mint not in trusted_mints:
         return await swap_to_primary_mint(token_obj, wallet)
 
     await wallet.redeem(token_obj.proofs)
@@ -56,7 +97,7 @@ async def recieve_token(
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Internal send function - returns amount and serialized token"""
     wallet = await Wallet.with_db(
-        mint_url or PRIMARY_MINT_URL, db=".wallet", load_all_keysets=True, unit=unit
+        mint_url or await _get_primary_mint_url(), db=".wallet", load_all_keysets=True, unit=unit
     )
     await wallet.load_mint()
     await wallet.load_proofs()
@@ -100,7 +141,7 @@ async def swap_to_primary_mint(
     estimated_fee_sat = max(amount_msat // 1000 * 0.01, 2)
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
     primary_wallet = await Wallet.with_db(
-        PRIMARY_MINT_URL, db=".wallet", load_all_keysets=True, unit="sat"
+        await _get_primary_mint_url(), db=".wallet", load_all_keysets=True, unit="sat"
     )
     await primary_wallet.load_mint()
 
@@ -116,11 +157,11 @@ async def swap_to_primary_mint(
     )
     _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
 
-    return minted_amount, CurrencyUnit.sat, PRIMARY_MINT_URL
+    return minted_amount, CurrencyUnit.sat, await _get_primary_mint_url()
 
 
 async def credit_balance(
-    cashu_token: str, key: db.ApiKey, session: db.AsyncSession
+    cashu_token: str, key: ApiKey, session: Any
 ) -> int:
     logger.info(
         "credit_balance: Starting token redemption",
@@ -140,10 +181,10 @@ async def credit_balance(
                 "credit_balance: Converted to msat", extra={"amount_msat": amount}
             )
 
-        if mint_url != PRIMARY_MINT_URL:
+        if mint_url != await _get_primary_mint_url():
             logger.error(
                 "credit_balance: Mint URL mismatch",
-                extra={"mint_url": mint_url, "primary_mint": PRIMARY_MINT_URL},
+                extra={"mint_url": mint_url, "primary_mint": await _get_primary_mint_url()},
             )
             raise ValueError("Mint URL is not supported by this proxy")
 
@@ -177,7 +218,7 @@ async def send_to_lnurl(amount: int, unit: CurrencyUnit, lnurl: str) -> dict[str
     try:
         # Create wallet instance for this operation
         payment_wallet = await Wallet.with_db(
-            PRIMARY_MINT_URL, db=".wallet", load_all_keysets=True, unit=unit
+            await _get_primary_mint_url(), db=".wallet", load_all_keysets=True, unit=unit
         )
         await payment_wallet.load_mint()
         

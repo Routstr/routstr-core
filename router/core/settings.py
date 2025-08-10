@@ -1,0 +1,206 @@
+"""
+Settings management module for database-backed configuration.
+Handles loading settings from database with environment variable fallback.
+"""
+
+import os
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from .db import Settings, create_session
+from .logging import get_logger
+from .settings_list import ENVIRONMENT_VARIABLES
+
+logger = get_logger(__name__)
+
+
+class SettingsManager:
+    """Manages application settings with database persistence and caching."""
+    
+    _cache: dict[str, Any] = {}
+    _initialized: bool = False
+    
+    @classmethod
+    async def initialize(cls) -> None:
+        """Initialize settings from environment variables if they don't exist in database."""
+        if cls._initialized:
+            return
+            
+        logger.info("Initializing settings from environment variables")
+        
+        async with create_session() as session:
+            # Get all existing settings
+            result = await session.exec(select(Settings))
+            existing_settings = result.all()
+            existing_keys = {s.key for s in existing_settings}
+            
+            # Initialize missing settings from environment variables
+            new_settings = []
+            for key, config in ENVIRONMENT_VARIABLES.items():
+                if key not in existing_keys:
+                    # Get value from environment or use default
+                    env_value = os.environ.get(key, config["default"])
+                    
+                    # Skip empty required values during initialization
+                    if config.get("required") and not env_value:
+                        logger.warning(
+                            f"Required setting {key} not found in environment, "
+                            "will need to be configured"
+                        )
+                        continue
+                    
+                    setting = Settings.from_env_var(
+                        key=key,
+                        value=str(env_value),
+                        value_type=config["type"],
+                        description=config["description"],
+                    )
+                    new_settings.append(setting)
+                    logger.info(f"Initialized setting {key} from environment")
+            
+            if new_settings:
+                session.add_all(new_settings)
+                await session.commit()
+                logger.info(f"Created {len(new_settings)} new settings from environment")
+            
+            # Update settings that haven't been manually changed
+            updated_count = 0
+            for key, config in ENVIRONMENT_VARIABLES.items():
+                if key in existing_keys:
+                    # Get current environment value
+                    env_value = os.environ.get(key)
+                    if env_value is None:
+                        continue
+                    
+                    # Find the existing setting
+                    stmt = select(Settings).where(Settings.key == key)
+                    result = await session.exec(stmt)
+                    setting = result.first()
+                    
+                    if setting and not setting.is_manually_changed:
+                        # Check if environment value differs from database value
+                        if str(env_value) != setting.value:
+                            setting.value = str(env_value)
+                            setting.updated_at = datetime.utcnow()
+                            updated_count += 1
+                            logger.info(
+                                f"Updated setting {key} from environment "
+                                f"(not manually changed)"
+                            )
+            
+            if updated_count > 0:
+                await session.commit()
+                logger.info(f"Updated {updated_count} settings from environment")
+            
+            # Load all settings into cache
+            await cls.reload_cache()
+            
+        cls._initialized = True
+    
+    @classmethod
+    async def reload_cache(cls) -> None:
+        """Reload all settings from database into cache."""
+        async with create_session() as session:
+            result = await session.exec(select(Settings))
+            settings = result.all()
+            cls._cache = {s.key: s.get_typed_value() for s in settings}
+            logger.debug(f"Loaded {len(cls._cache)} settings into cache")
+    
+    @classmethod
+    async def get(cls, key: str, default: Any = None) -> Any:
+        """Get a setting value from cache or database."""
+        if not cls._initialized:
+            await cls.initialize()
+        
+        # Check cache first
+        if key in cls._cache:
+            return cls._cache[key]
+        
+        # If not in cache, try to load from database
+        async with create_session() as session:
+            stmt = select(Settings).where(Settings.key == key)
+            result = await session.exec(stmt)
+            setting = result.first()
+            
+            if setting:
+                value = setting.get_typed_value()
+                cls._cache[key] = value
+                return value
+        
+        # Return default if not found
+        return default
+    
+    @classmethod
+    async def set(
+        cls,
+        key: str,
+        value: Any,
+        mark_as_manually_changed: bool = True
+    ) -> None:
+        """Set a setting value in database and cache."""
+        if not cls._initialized:
+            await cls.initialize()
+        
+        async with create_session() as session:
+            stmt = select(Settings).where(Settings.key == key)
+            result = await session.exec(stmt)
+            setting = result.first()
+            
+            if setting:
+                setting.value = str(value)
+                setting.updated_at = datetime.utcnow()
+                if mark_as_manually_changed:
+                    setting.is_manually_changed = True
+            else:
+                # Create new setting
+                config = ENVIRONMENT_VARIABLES.get(key, {})
+                setting = Settings(
+                    key=key,
+                    value=str(value),
+                    value_type=config.get("type", "str"),
+                    description=config.get("description"),
+                    is_manually_changed=mark_as_manually_changed,
+                )
+                session.add(setting)
+            
+            await session.commit()
+            
+            # Update cache
+            if setting.value_type == "int":
+                cls._cache[key] = int(value)
+            elif setting.value_type == "float":
+                cls._cache[key] = float(value)
+            elif setting.value_type == "bool":
+                cls._cache[key] = str(value).lower() in ("true", "1", "yes", "on")
+            else:
+                cls._cache[key] = str(value)
+            
+            logger.info(f"Updated setting {key} = {value}")
+    
+    @classmethod
+    async def get_all(cls) -> dict[str, Any]:
+        """Get all settings as a dictionary."""
+        if not cls._initialized:
+            await cls.initialize()
+        
+        return cls._cache.copy()
+    
+    @classmethod
+    async def reset(cls, key: str) -> None:
+        """Reset a setting to its environment variable value."""
+        env_value = os.environ.get(key)
+        if env_value is None:
+            config = ENVIRONMENT_VARIABLES.get(key, {})
+            env_value = config.get("default", "")
+        
+        await cls.set(key, env_value, mark_as_manually_changed=False)
+        logger.info(f"Reset setting {key} to environment value: {env_value}")
+
+
+# Convenience function for backward compatibility
+async def get_setting(key: str, default: Any = None) -> Any:
+    """Get a setting value (convenience function)."""
+    return await SettingsManager.get(key, default)

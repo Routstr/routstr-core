@@ -3,31 +3,73 @@ import os
 
 from pydantic.v1 import BaseModel
 
-from ..core import get_logger
+from ..core.logging import get_logger
+from ..core.settings import SettingsManager
 from .models import MODELS
 
 logger = get_logger(__name__)
 
-COST_PER_REQUEST = (
-    int(os.environ.get("COST_PER_REQUEST", "1")) * 1000
-)  # Convert to msats
-COST_PER_1K_INPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_INPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-COST_PER_1K_OUTPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_OUTPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-MODEL_BASED_PRICING = os.environ.get("MODEL_BASED_PRICING", "false").lower() == "true"
+# Cached settings - will be loaded from database
+_COST_PER_REQUEST = None
+_COST_PER_1K_INPUT_TOKENS = None
+_COST_PER_1K_OUTPUT_TOKENS = None
+_MODEL_BASED_PRICING = None
 
-logger.info(
-    "Cost calculation initialized",
-    extra={
-        "cost_per_request_msats": COST_PER_REQUEST,
-        "cost_per_1k_input_tokens_msats": COST_PER_1K_INPUT_TOKENS,
-        "cost_per_1k_output_tokens_msats": COST_PER_1K_OUTPUT_TOKENS,
-        "model_based_pricing": MODEL_BASED_PRICING,
-    },
-)
+
+async def _get_cost_per_request() -> int:
+    """Get cost per request in msats from settings."""
+    global _COST_PER_REQUEST
+    if _COST_PER_REQUEST is None:
+        cost_sats = await SettingsManager.get("COST_PER_REQUEST", 1)
+        _COST_PER_REQUEST = cost_sats * 1000  # Convert to msats
+    return _COST_PER_REQUEST
+
+
+async def _get_cost_per_1k_input_tokens() -> int:
+    """Get cost per 1K input tokens in msats from settings."""
+    global _COST_PER_1K_INPUT_TOKENS
+    if _COST_PER_1K_INPUT_TOKENS is None:
+        cost_sats = await SettingsManager.get("COST_PER_1K_INPUT_TOKENS", 0)
+        _COST_PER_1K_INPUT_TOKENS = cost_sats * 1000  # Convert to msats
+    return _COST_PER_1K_INPUT_TOKENS
+
+
+async def _get_cost_per_1k_output_tokens() -> int:
+    """Get cost per 1K output tokens in msats from settings."""
+    global _COST_PER_1K_OUTPUT_TOKENS
+    if _COST_PER_1K_OUTPUT_TOKENS is None:
+        cost_sats = await SettingsManager.get("COST_PER_1K_OUTPUT_TOKENS", 0)
+        _COST_PER_1K_OUTPUT_TOKENS = cost_sats * 1000  # Convert to msats
+    return _COST_PER_1K_OUTPUT_TOKENS
+
+
+async def _is_model_based_pricing() -> bool:
+    """Check if model-based pricing is enabled from settings."""
+    global _MODEL_BASED_PRICING
+    if _MODEL_BASED_PRICING is None:
+        _MODEL_BASED_PRICING = await SettingsManager.get("MODEL_BASED_PRICING", False)
+    return _MODEL_BASED_PRICING
+
+
+# Cache reload function
+async def reload_pricing_settings() -> None:
+    """Reload pricing settings from database."""
+    global _COST_PER_REQUEST, _COST_PER_1K_INPUT_TOKENS, _COST_PER_1K_OUTPUT_TOKENS, _MODEL_BASED_PRICING
+    _COST_PER_REQUEST = None
+    _COST_PER_1K_INPUT_TOKENS = None
+    _COST_PER_1K_OUTPUT_TOKENS = None
+    _MODEL_BASED_PRICING = None
+    
+    # Log the updated settings
+    logger.info(
+        "Pricing settings reloaded",
+        extra={
+            "cost_per_request": await _get_cost_per_request(),
+            "cost_per_1k_input_tokens": await _get_cost_per_1k_input_tokens(),
+            "cost_per_1k_output_tokens": await _get_cost_per_1k_output_tokens(),
+            "model_based_pricing": await _is_model_based_pricing(),
+        },
+    )
 
 
 class CostData(BaseModel):
@@ -46,7 +88,7 @@ class CostDataError(BaseModel):
     code: str
 
 
-def calculate_cost(
+async def calculate_cost(
     response_data: dict, max_cost: int
 ) -> CostData | MaxCostData | CostDataError:
     """
@@ -85,10 +127,10 @@ def calculate_cost(
         )
         return cost_data
 
-    MSATS_PER_1K_INPUT_TOKENS = COST_PER_1K_INPUT_TOKENS
-    MSATS_PER_1K_OUTPUT_TOKENS = COST_PER_1K_OUTPUT_TOKENS
+    MSATS_PER_1K_INPUT_TOKENS = await _get_cost_per_1k_input_tokens()
+    MSATS_PER_1K_OUTPUT_TOKENS = await _get_cost_per_1k_output_tokens()
 
-    if MODEL_BASED_PRICING and MODELS:
+    if await _is_model_based_pricing() and MODELS:
         response_model = response_data.get("model", "")
         logger.debug(
             "Using model-based pricing",

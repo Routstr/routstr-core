@@ -8,6 +8,10 @@ from fastapi import APIRouter
 from pydantic.v1 import BaseModel
 
 from .price import sats_usd_ask_price
+from ..core.logging import get_logger
+from ..core.settings import SettingsManager
+
+logger = get_logger(__name__)
 
 models_router = APIRouter()
 
@@ -54,6 +58,8 @@ MODELS: list[Model] = []
 
 def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     """Fetches model information from OpenRouter API."""
+    # This is a sync function called at startup, so we use env vars for now
+    # In the future, this could be refactored to be async
     base_url = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
 
     try:

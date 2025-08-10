@@ -8,6 +8,7 @@ from sqlmodel import select
 
 from ..wallet import get_balance, send_token
 from .db import ApiKey, create_session
+from .settings import SettingsManager
 
 admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
@@ -85,8 +86,9 @@ def info(content: str) -> str:
     """
 
 
-def admin_auth() -> str:
-    if os.getenv("ADMIN_PASSWORD", "") == "":
+async def admin_auth() -> str:
+    admin_password = await SettingsManager.get("ADMIN_PASSWORD", "")
+    if admin_password == "":
         return info("Please set a secure ADMIN_PASSWORD= in your ENV variables.")
     else:
         return login_form()
@@ -378,9 +380,10 @@ async def dashboard(request: Request) -> str:
 @admin_router.get("/", response_class=HTMLResponse)
 async def admin(request: Request) -> str:
     admin_cookie = request.cookies.get("admin_password")
-    if admin_cookie and admin_cookie == os.getenv("ADMIN_PASSWORD"):
+    admin_password = await SettingsManager.get("ADMIN_PASSWORD", "")
+    if admin_cookie and admin_cookie == admin_password:
         return await dashboard(request)
-    return admin_auth()
+    return await admin_auth()
 
 
 @admin_router.post("/withdraw")
@@ -388,7 +391,8 @@ async def withdraw(
     request: Request, withdraw_request: WithdrawRequest
 ) -> dict[str, str]:
     admin_cookie = request.cookies.get("admin_password")
-    if not admin_cookie or admin_cookie != os.getenv("ADMIN_PASSWORD"):
+    admin_password = await SettingsManager.get("ADMIN_PASSWORD", "")
+    if not admin_cookie or admin_cookie != admin_password:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     current_balance = await get_balance("sat")

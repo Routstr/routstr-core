@@ -1,17 +1,41 @@
 import asyncio
 import os
+from datetime import datetime
 
 import httpx
 
-from ..core import get_logger
+from ..core.logging import get_logger
+from ..core.settings import SettingsManager
 
 logger = get_logger(__name__)
 
-# artifical spread to cover conversion fees
-EXCHANGE_FEE = float(os.environ.get("EXCHANGE_FEE", "1.005"))  # 0.5% default
-UPSTREAM_PROVIDER_FEE = float(
-    os.environ.get("UPSTREAM_PROVIDER_FEE", "1.05")
-)  # 5% default (e.g. openrouter charges 5% margin)
+# Default values - will be loaded from settings
+_EXCHANGE_FEE = None
+_UPSTREAM_PROVIDER_FEE = None
+
+
+async def _get_exchange_fee() -> float:
+    """Get exchange fee from settings."""
+    global _EXCHANGE_FEE
+    if _EXCHANGE_FEE is None:
+        _EXCHANGE_FEE = await SettingsManager.get("EXCHANGE_FEE", 1.005)
+    return _EXCHANGE_FEE
+
+
+async def _get_upstream_provider_fee() -> float:
+    """Get upstream provider fee from settings."""
+    global _UPSTREAM_PROVIDER_FEE
+    if _UPSTREAM_PROVIDER_FEE is None:
+        _UPSTREAM_PROVIDER_FEE = await SettingsManager.get("UPSTREAM_PROVIDER_FEE", 1.05)
+    return _UPSTREAM_PROVIDER_FEE
+
+
+# Cache reload function
+async def reload_fee_settings() -> None:
+    """Reload fee settings from database."""
+    global _EXCHANGE_FEE, _UPSTREAM_PROVIDER_FEE
+    _EXCHANGE_FEE = None
+    _UPSTREAM_PROVIDER_FEE = None
 
 
 async def kraken_btc_usd(client: httpx.AsyncClient) -> float | None:
@@ -95,7 +119,9 @@ async def btc_usd_ask_price() -> float:
                 raise ValueError("Unable to fetch BTC price from any exchange")
 
             max_price = max(valid_prices)
-            final_price = max_price * EXCHANGE_FEE * UPSTREAM_PROVIDER_FEE
+            exchange_fee = await _get_exchange_fee()
+            upstream_provider_fee = await _get_upstream_provider_fee()
+            final_price = max_price * exchange_fee * upstream_provider_fee
 
             return final_price
 

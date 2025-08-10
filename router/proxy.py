@@ -16,7 +16,7 @@ from .auth import (
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession, create_session, get_session
 from .payment.helpers import (
-    UPSTREAM_BASE_URL,
+    _get_upstream_base_url,
     check_token_balance,
     create_error_response,
     get_cost_per_request,
@@ -255,7 +255,8 @@ async def forward_to_upstream(
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    upstream_base_url = await _get_upstream_base_url()
+    url = f"{upstream_base_url}/{path}"
 
     logger.info(
         "Forwarding request to upstream",
@@ -682,7 +683,8 @@ async def forward_get_to_upstream(
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    upstream_base_url = await _get_upstream_base_url()
+    url = f"{upstream_base_url}/{path}"
 
     logger.info(
         "Forwarding GET request to upstream",

@@ -1,46 +1,96 @@
 import json
 import os
+import traceback
 from typing import Optional
 
 from fastapi import HTTPException, Response
 
-from ..core import get_logger
+from ..core.logging import get_logger
+from ..core.settings import SettingsManager
 from ..wallet import deserialize_token_from_string
-from .cost_caculation import COST_PER_REQUEST, MODEL_BASED_PRICING
+from .cost_caculation import _get_cost_per_request, _is_model_based_pricing
 from .models import MODELS
 
 logger = get_logger(__name__)
 
+# Cached settings - will be loaded from database
+_UPSTREAM_BASE_URL = None
+_UPSTREAM_API_KEY = None
 
+
+async def _get_upstream_base_url() -> str:
+    """Get upstream base URL from settings."""
+    global _UPSTREAM_BASE_URL
+    if _UPSTREAM_BASE_URL is None:
+        _UPSTREAM_BASE_URL = await SettingsManager.get("UPSTREAM_BASE_URL", "")
+        if not _UPSTREAM_BASE_URL:
+            raise ValueError(
+                "UPSTREAM_BASE_URL setting is required but not set. "
+                "Please set it to your API provider's base URL (e.g., https://api.openai.com/v1)"
+            )
+    return _UPSTREAM_BASE_URL
+
+
+async def _get_upstream_api_key() -> str:
+    """Get upstream API key from settings."""
+    global _UPSTREAM_API_KEY
+    if _UPSTREAM_API_KEY is None:
+        _UPSTREAM_API_KEY = await SettingsManager.get("UPSTREAM_API_KEY", "")
+        if not _UPSTREAM_API_KEY:
+            raise ValueError(
+                "UPSTREAM_API_KEY setting is required but not set. "
+                "Please set it to your API provider's API key"
+            )
+    return _UPSTREAM_API_KEY
+
+
+# Cache reload function
+async def reload_upstream_settings() -> None:
+    """Reload upstream settings from database."""
+    global _UPSTREAM_BASE_URL, _UPSTREAM_API_KEY
+    _UPSTREAM_BASE_URL = None
+    _UPSTREAM_API_KEY = None
+
+
+# For backward compatibility during initialization
 UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", "")
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 
 if not UPSTREAM_BASE_URL:
-    raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
+    logger.warning(
+        "UPSTREAM_BASE_URL environment variable not set. "
+        "It will need to be configured in settings."
+    )
+
+if not UPSTREAM_API_KEY:
+    logger.warning(
+        "UPSTREAM_API_KEY environment variable not set. "
+        "It will need to be configured in settings."
+    )
 
 
-def get_cost_per_request(model: str | None = None) -> int:
+async def get_cost_per_request(model: str | None = None) -> int:
     """Get the cost per request for a given model."""
     logger.debug(
         "Calculating cost per request",
         extra={
             "model": model,
-            "model_based_pricing": MODEL_BASED_PRICING,
+            "model_based_pricing": await _is_model_based_pricing(),
             "has_models": bool(MODELS),
         },
     )
 
-    if MODEL_BASED_PRICING and MODELS and model:
-        cost = get_max_cost_for_model(model=model)
+    if await _is_model_based_pricing() and MODELS and model:
+        cost = await get_max_cost_for_model(model=model)
         logger.debug(
             "Using model-based cost", extra={"model": model, "cost_msats": cost}
         )
         return cost
 
     logger.debug(
-        "Using default cost per request", extra={"cost_msats": COST_PER_REQUEST}
+        "Using default cost per request", extra={"cost_msats": await _get_cost_per_request()}
     )
-    return COST_PER_REQUEST
+    return await _get_cost_per_request()
 
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
@@ -111,49 +161,48 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         )
 
 
-def get_max_cost_for_model(model: str) -> int:
-    """Get the maximum cost for a specific model."""
-    logger.debug(
-        "Getting max cost for model",
-        extra={
-            "model": model,
-            "model_based_pricing": MODEL_BASED_PRICING,
-            "has_models": bool(MODELS),
-        },
-    )
+async def get_max_cost_for_model(model: str) -> int:
+    """
+    Get the maximum cost for a model based on its pricing configuration.
 
-    if not MODEL_BASED_PRICING or not MODELS:
+    Args:
+        model: The model identifier
+
+    Returns:
+        Maximum cost in millisats
+    """
+    if not await _is_model_based_pricing() or not MODELS:
         logger.debug(
             "Using default cost (no model-based pricing)",
-            extra={"cost_msats": COST_PER_REQUEST, "model": model},
+            extra={"cost_msats": await _get_cost_per_request(), "model": model},
         )
-        return COST_PER_REQUEST
+        return await _get_cost_per_request()
 
     if model not in [model.id for model in MODELS]:
         logger.warning(
-            "Model not found in available models",
+            "Unknown model requested, using default cost",
             extra={
                 "requested_model": model,
                 "available_models": [m.id for m in MODELS],
-                "using_default_cost": COST_PER_REQUEST,
+                "using_default_cost": await _get_cost_per_request(),
             },
         )
-        return COST_PER_REQUEST
+        return await _get_cost_per_request()
 
     for m in MODELS:
         if m.id == model:
-            max_cost = m.sats_pricing.max_cost * 1000  # type: ignore
+            cost = m.pricing.get("msat", await _get_cost_per_request())
             logger.debug(
-                "Found model-specific max cost",
-                extra={"model": model, "max_cost_msats": max_cost},
+                "Found model pricing",
+                extra={"model": model, "cost_msats": cost, "pricing": m.pricing},
             )
-            return int(max_cost)
+            return cost
 
     logger.warning(
         "Model pricing not found, using default",
-        extra={"model": model, "default_cost_msats": COST_PER_REQUEST},
+        extra={"model": model, "default_cost_msats": await _get_cost_per_request()},
     )
-    return COST_PER_REQUEST
+    return await _get_cost_per_request()
 
 
 def create_error_response(
