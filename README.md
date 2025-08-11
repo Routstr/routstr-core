@@ -33,7 +33,8 @@ sequenceDiagram
 - **API Key Management** – Hashed keys stored in SQLite with balance tracking and optional expiry/refund address
 - **Model-Based Pricing** – Convert USD prices in `models.json` to sats using live BTC/USD rates
 - **Admin Dashboard** – Simple HTML interface at `/admin/` to view balances and API keys
-- **Discovery** – Fetch available providers from Nostr relays
+- **Discovery** – Fetch available providers from Nostr relays using NIP-91 protocol
+- **NIP-91 Auto-Announcement** – Automatically announce this provider to Nostr relays when NSEC is provided
 - **Docker Support** – Provided `Dockerfile` and `compose.yml` for running with an optional Tor hidden service
 
 ## Getting Started
@@ -86,6 +87,7 @@ This builds the image and also starts a Tor container exposing the API as a hidd
 
 The most common settings are shown below. See `.env.example` for the full list.
 
+### Core Settings
 - `UPSTREAM_BASE_URL` – URL of the OpenAI-compatible service
 - `UPSTREAM_API_KEY` – API key for the upstream service (optional)
 - `MODEL_BASED_PRICING` – Set to `true` to use pricing from `models.json`
@@ -96,6 +98,18 @@ The most common settings are shown below. See `.env.example` for the full list.
 - `NPUB` – Nostr public key of the proxy
 - `HTTP_URL` – Public-facing URL of the proxy
 - `ONION_URL` – Tor hidden service URL of the proxy
+
+### NIP-91 Provider Announcement Settings
+- `NOSTR_NSEC` – Nostr private key in hex format for announcing this provider (optional)
+- `ROUTSTR_PROVIDER_ID` – Unique identifier for this provider instance (defaults to hostname)
+- `ROUTSTR_BASE_URL` – Base URL for the provider API (defaults to http://localhost:8000)
+- `ROUTSTR_ONION_URL` – Tor hidden service URL for the provider (optional)
+- `ROUTSTR_MINT_URL` – Associated ecash mint URL for payments (optional)
+- `ROUTSTR_PROVIDER_NAME` – Human-readable name for the provider (defaults to "Routstr Proxy")
+- `ROUTSTR_PROVIDER_ABOUT` – Description of the provider (defaults to "Privacy-preserving AI proxy via Nostr")
+- `ROUTSTR_VERSION` – Provider software version (defaults to "0.1.0")
+- `NOSTR_RELAYS` – Comma-separated list of Nostr relay URLs for announcing (defaults to popular relays)
+- `NIP91_ANNOUNCEMENT_INTERVAL` – Seconds between re-announcements (defaults to 86400/24 hours)
 
 ## Database Migrations
 
