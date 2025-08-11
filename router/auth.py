@@ -174,7 +174,25 @@ async def validate_bearer_key(
                 extra={"key_hash": hashed_key[:8] + "..."},
             )
 
-            msats = await credit_balance(bearer_key, new_key, session)
+            logger.info(
+                "AUTH: About to call credit_balance",
+                extra={"token_preview": bearer_key[:50]},
+            )
+            try:
+                msats = await credit_balance(bearer_key, new_key, session)
+                logger.info(
+                    "AUTH: credit_balance returned successfully", extra={"msats": msats}
+                )
+            except Exception as credit_error:
+                logger.error(
+                    "AUTH: credit_balance failed",
+                    extra={
+                        "error": str(credit_error),
+                        "error_type": type(credit_error).__name__,
+                    },
+                )
+                raise credit_error
+
             if msats <= 0:
                 logger.error(
                     "Token redemption returned zero or negative amount",

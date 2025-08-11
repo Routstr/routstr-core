@@ -1,7 +1,7 @@
 import math
 import os
 
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 
 from ..core import get_logger
 from .models import MODELS

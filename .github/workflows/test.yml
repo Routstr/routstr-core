@@ -26,6 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync --dev
+          uv run python setup.py develop
 
       - name: Run linting with ruff
         run: |
@@ -36,6 +37,9 @@ jobs:
           uv run mypy .
 
       - name: Run tests with pytest
+        env:
+          UPSTREAM_BASE_URL: "http://test"
+          UPSTREAM_API_KEY: "test"
         run: |
           uv run pytest --verbose --tb=short
 

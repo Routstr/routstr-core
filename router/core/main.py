@@ -12,7 +12,7 @@ from ..payment.models import MODELS, models_router, update_sats_pricing
 from ..proxy import proxy_router
 from ..wallet import periodic_payout
 from .admin import admin_router
-from .db import init_db
+from .db import init_db, run_migrations
 from .logging import get_logger, setup_logging
 
 # Initialize logging first
@@ -26,7 +26,18 @@ __version__ = "0.1.0"
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Application startup initiated", extra={"version": __version__})
 
+    pricing_task = None
+    payout_task = None
+
     try:
+        # Run database migrations on startup
+        # This ensures the database schema is always up-to-date in production
+        # Migrations are idempotent - running them multiple times is safe
+        logger.info("Running database migrations")
+        run_migrations()
+
+        # Initialize database connection pools
+        # This creates any tables that might not be tracked by migrations yet
         await init_db()
 
         pricing_task = asyncio.create_task(update_sats_pricing())
@@ -43,11 +54,20 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         logger.info("Application shutdown initiated")
 
-        pricing_task.cancel()
-        payout_task.cancel()
+        if pricing_task is not None:
+            pricing_task.cancel()
+        if payout_task is not None:
+            payout_task.cancel()
 
         try:
-            await asyncio.gather(pricing_task, payout_task, return_exceptions=True)
+            tasks_to_wait = []
+            if pricing_task is not None:
+                tasks_to_wait.append(pricing_task)
+            if payout_task is not None:
+                tasks_to_wait.append(payout_task)
+
+            if tasks_to_wait:
+                await asyncio.gather(*tasks_to_wait, return_exceptions=True)
             logger.info("Background tasks stopped successfully")
         except Exception as e:
             logger.error(

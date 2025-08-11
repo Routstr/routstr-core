@@ -86,7 +86,14 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
     if cashu_token.startswith("sk-"):
         return
 
-    token_obj = deserialize_token_from_string(cashu_token)
+    try:
+        token_obj = deserialize_token_from_string(cashu_token)
+    except Exception:
+        # Invalid token format - let the auth system handle it
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token format",
+        )
 
     amount_msat = (
         token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000

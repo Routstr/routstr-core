@@ -78,7 +78,7 @@ async def binance_btc_usdt(client: httpx.AsyncClient) -> float | None:
 
 
 async def btc_usd_ask_price() -> float:
-    """Get the highest BTC/USD price from multiple exchanges with fee adjustment."""
+    """Get the lowest BTC/USD price from multiple exchanges with fee adjustment."""
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -94,9 +94,8 @@ async def btc_usd_ask_price() -> float:
                 logger.error("No valid BTC prices obtained from any exchange")
                 raise ValueError("Unable to fetch BTC price from any exchange")
 
-            max_price = max(valid_prices)
-            final_price = max_price * EXCHANGE_FEE * UPSTREAM_PROVIDER_FEE
-
+            min_price = min(valid_prices)
+            final_price = min_price / (EXCHANGE_FEE * UPSTREAM_PROVIDER_FEE)
             return final_price
 
         except Exception as e:
