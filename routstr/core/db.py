@@ -5,7 +5,7 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio.engine import create_async_engine
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
@@ -43,6 +43,16 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=None,
         description="Currency of the cashu-token",
     )
+
+
+async def balances_for_mint_and_unit(
+    db_session: AsyncSession, mint_url: str, unit: str
+) -> int:
+    query = select(func.sum(ApiKey.balance)).where(
+        ApiKey.refund_mint_url == mint_url, ApiKey.refund_currency == unit
+    )
+    result = await db_session.exec(query)
+    return result.one() or 0
 
 
 async def init_db() -> None:

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
-from .wallet import CurrencyUnit, credit_balance, send_to_lnurl, send_token
+from .wallet import PRIMARY_MINT_URL, credit_balance, send_to_lnurl, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -69,7 +69,7 @@ async def refund_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    remaining_balance_msats = key.balance
+    remaining_balance_msats: int = key.balance
 
     if remaining_balance_msats <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
@@ -77,8 +77,13 @@ async def refund_wallet_endpoint(
     # Perform refund operation first, before modifying balance
     try:
         if key.refund_address:
+            if key.refund_currency == "sat":
+                remaining_balance = remaining_balance_msats * 1000
             await send_to_lnurl(
-                remaining_balance_msats, CurrencyUnit.msat, key.refund_address
+                remaining_balance,
+                key.refund_currency or "sat",
+                key.refund_mint_url or PRIMARY_MINT_URL,
+                key.refund_address,
             )
             result = {"recipient": key.refund_address, "msats": remaining_balance_msats}
         else:

@@ -7,7 +7,7 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ..core import get_logger
-from ..wallet import CurrencyUnit, recieve_token, send_token
+from ..wallet import recieve_token, send_token
 from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
 from .helpers import (
     UPSTREAM_BASE_URL,
@@ -96,7 +96,7 @@ async def x_cashu_handler(
 
 
 async def forward_to_upstream(
-    request: Request, path: str, headers: dict, amount: int, unit: CurrencyUnit
+    request: Request, path: str, headers: dict, amount: int, unit: str
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
     if path.startswith("v1/"):
@@ -232,7 +232,7 @@ async def forward_to_upstream(
 
 
 async def handle_x_cashu_chat_completion(
-    response: httpx.Response, amount: int, unit: CurrencyUnit
+    response: httpx.Response, amount: int, unit: str
 ) -> StreamingResponse | Response:
     """Handle both streaming and non-streaming chat completion responses with token-based pricing."""
     logger.debug(
@@ -281,7 +281,7 @@ async def handle_x_cashu_chat_completion(
 
 
 async def handle_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: CurrencyUnit
+    content_str: str, response: httpx.Response, amount: int, unit: str
 ) -> StreamingResponse:
     """Handle Server-Sent Events (SSE) streaming response."""
     logger.debug(
@@ -403,7 +403,7 @@ async def handle_streaming_response(
 
 
 async def handle_non_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: CurrencyUnit
+    content_str: str, response: httpx.Response, amount: int, unit: str
 ) -> Response:
     """Handle regular JSON response."""
     logger.debug(
@@ -573,7 +573,7 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
             )
 
 
-async def send_refund(amount: int, unit: CurrencyUnit, mint: str | None = None) -> str:
+async def send_refund(amount: int, unit: str, mint: str | None = None) -> str:
     """Send a refund using Cashu tokens."""
     logger.debug(
         "Creating refund token", extra={"amount": amount, "unit": unit, "mint": mint}
