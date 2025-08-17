@@ -14,6 +14,7 @@ from ..payment.models import MODELS, models_router, update_sats_pricing
 from ..proxy import proxy_router
 from ..wallet import periodic_payout
 from .admin import admin_router
+from .admin_api import admin_api_router
 from .db import init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
@@ -127,6 +128,7 @@ async def admin_redirect() -> RedirectResponse:
 
 app.include_router(models_router)
 app.include_router(admin_router)
+app.include_router(admin_api_router)
 app.include_router(balance_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
