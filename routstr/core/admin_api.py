@@ -739,6 +739,8 @@ async def get_status(
             # Count today's requests (simplified since we don't have created_at)
             total_requests_today = sum(key.total_requests for key in api_keys)
 
+        from ..core.main import __version__
+
         return SystemStatus(
             status="healthy",
             version=__version__,
@@ -770,6 +772,8 @@ async def get_status(
 @admin_api_router.get("/config", response_model=NodeConfig)
 async def get_config(payload: dict[str, Any] = Depends(verify_jwt_token)) -> NodeConfig:
     """Get current node configuration."""
+    from ..core.main import __version__
+
     return NodeConfig(
         node_info={
             "name": os.environ.get("NAME", f"ARoutstrNode v{__version__}"),
