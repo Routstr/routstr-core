@@ -13,6 +13,7 @@ from .helpers import (
     UPSTREAM_BASE_URL,
     create_error_response,
     get_max_cost_for_model,
+    get_upstream_url_for_request,
     prepare_upstream_headers,
 )
 
@@ -37,14 +38,31 @@ async def x_cashu_handler(
     try:
         headers = dict(request.headers)
         amount, unit, mint = await recieve_token(x_cashu_token)
-        headers = prepare_upstream_headers(dict(request.headers))
+        # Extract model name for proper header preparation
+        model_name = None
+        if request_body_dict:
+            from .helpers import extract_model_from_request
+
+            model_name = extract_model_from_request(request_body_dict)
+        headers = prepare_upstream_headers(dict(request.headers), model_name)
 
         logger.info(
             "X-Cashu token redeemed successfully",
             extra={"amount": amount, "unit": unit, "path": path, "mint": mint},
         )
 
-        return await forward_to_upstream(request, path, headers, amount, unit)
+        # Parse request body to extract model name for provider URL lookup
+        request_body_dict = None
+        try:
+            request_body = await request.body()
+            if request_body:
+                request_body_dict = json.loads(request_body)
+        except (json.JSONDecodeError, Exception):
+            pass  # Continue with default URL if body parsing fails
+
+        return await forward_to_upstream(
+            request, path, headers, amount, unit, request_body_dict
+        )
     except Exception as e:
         error_message = str(e)
         logger.error(
@@ -89,13 +107,15 @@ async def x_cashu_handler(
 
 
 async def forward_to_upstream(
-    request: Request, path: str, headers: dict, amount: int, unit: CurrencyUnit
+    request: Request,
+    path: str,
+    headers: dict,
+    amount: int,
+    unit: CurrencyUnit,
+    request_body_dict: dict | None = None,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
-    if path.startswith("v1/"):
-        path = path.replace("v1/", "")
-
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    url = get_upstream_url_for_request(path, request_body_dict)
 
     logger.debug(
         "Forwarding request to upstream",

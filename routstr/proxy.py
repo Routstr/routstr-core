@@ -20,6 +20,7 @@ from .payment.helpers import (
     check_token_balance,
     create_error_response,
     get_cost_per_request,
+    get_upstream_url_for_request,
     prepare_upstream_headers,
 )
 from .payment.x_cashu import x_cashu_handler
@@ -252,10 +253,15 @@ async def forward_to_upstream(
     session: AsyncSession,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
-    if path.startswith("v1/"):
-        path = path.replace("v1/", "")
+    # Parse request body to extract model name for provider URL lookup
+    request_body_dict = None
+    if request_body:
+        try:
+            request_body_dict = json.loads(request_body)
+        except json.JSONDecodeError:
+            pass  # Continue with default URL if body parsing fails
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    url = get_upstream_url_for_request(path, request_body_dict)
 
     logger.info(
         "Forwarding request to upstream",
@@ -530,8 +536,8 @@ async def proxy(
             )
 
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
-        # Prepare headers for upstream
-        headers = prepare_upstream_headers(dict(request.headers))
+        # Prepare headers for upstream (no model name for GET requests)
+        headers = prepare_upstream_headers(dict(request.headers), None)
         return await forward_get_to_upstream(request, path, headers)
 
     cost_per_request = 0
@@ -571,7 +577,12 @@ async def proxy(
             raise
 
     # Prepare headers for upstream
-    headers = prepare_upstream_headers(dict(request.headers))
+    model_name = None
+    if request_body_dict:
+        from .payment.helpers import extract_model_from_request
+
+        model_name = extract_model_from_request(request_body_dict)
+    headers = prepare_upstream_headers(dict(request.headers), model_name)
 
     # Forward to upstream and handle response
     response = await forward_to_upstream(
@@ -679,10 +690,8 @@ async def forward_get_to_upstream(
     headers: dict,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
-    if path.startswith("v1/"):
-        path = path.replace("v1/", "")
-
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    # For GET requests, we don't have a request body, so use default URL
+    url = get_upstream_url_for_request(path, None)
 
     logger.info(
         "Forwarding GET request to upstream",
