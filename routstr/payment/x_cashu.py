@@ -1,4 +1,5 @@
 import json
+import re
 import traceback
 from typing import AsyncGenerator
 
@@ -57,7 +58,6 @@ async def x_cashu_handler(
             },
         )
 
-        # Handle specific CASHU errors with appropriate HTTP status codes
         if "already spent" in error_message.lower():
             return create_error_response(
                 "token_already_spent",
@@ -85,7 +85,6 @@ async def x_cashu_handler(
                 token=x_cashu_token,
             )
 
-        # Generic error for other cases
         return create_error_response(
             "cashu_error",
             f"CASHU token processing failed: {error_message}",
@@ -115,173 +114,142 @@ async def forward_to_upstream(
         },
     )
 
-    async with httpx.AsyncClient(
+    client = httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(retries=1),
         timeout=None,
-    ) as client:
-        try:
-            response = await client.send(
-                client.build_request(
-                    request.method,
-                    url,
-                    headers=headers,
-                    content=request.stream(),
-                    params=request.query_params,
-                ),
-                stream=True,
-            )
-
-            logger.debug(
-                "Received upstream response",
-                extra={
-                    "status_code": response.status_code,
-                    "path": path,
-                    "response_headers": dict(response.headers),
-                },
-            )
-
-            if response.status_code != 200:
-                logger.warning(
-                    "Upstream request failed, processing refund",
-                    extra={
-                        "status_code": response.status_code,
-                        "path": path,
-                        "amount": amount,
-                        "unit": unit,
-                    },
-                )
-
-                refund_token = await send_refund(amount - 60, unit)
-
-                logger.info(
-                    "Refund processed for failed upstream request",
-                    extra={
-                        "status_code": response.status_code,
-                        "refund_amount": amount,
-                        "unit": unit,
-                        "refund_token_preview": refund_token[:20] + "..."
-                        if len(refund_token) > 20
-                        else refund_token,
-                    },
-                )
-
-                error_response = Response(
-                    content=json.dumps(
-                        {
-                            "error": {
-                                "message": "Error forwarding request to upstream",
-                                "type": "upstream_error",
-                                "code": response.status_code,
-                                "refund_token": refund_token,
-                            }
-                        }
-                    ),
-                    status_code=response.status_code,
-                    media_type="application/json",
-                )
-                error_response.headers["X-Cashu"] = refund_token
-                return error_response
-
-            if path.endswith("chat/completions"):
-                logger.debug(
-                    "Processing chat completion response",
-                    extra={"path": path, "amount": amount, "unit": unit},
-                )
-
-                result = await handle_x_cashu_chat_completion(response, amount, unit)
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(response.aclose)
-                result.background = background_tasks
-                return result
-
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
-
-            logger.debug(
-                "Streaming non-chat response",
-                extra={"path": path, "status_code": response.status_code},
-            )
-
-            return StreamingResponse(
-                response.aiter_bytes(),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                background=background_tasks,
-            )
-        except Exception as exc:
-            tb = traceback.format_exc()
-            logger.error(
-                "Unexpected error in upstream forwarding",
-                extra={
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "method": request.method,
-                    "url": url,
-                    "path": path,
-                    "query_params": dict(request.query_params),
-                    "traceback": tb,
-                },
-            )
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
-            )
-
-
-async def handle_x_cashu_chat_completion(
-    response: httpx.Response, amount: int, unit: str
-) -> StreamingResponse | Response:
-    """Handle both streaming and non-streaming chat completion responses with token-based pricing."""
-    logger.debug(
-        "Handling chat completion response",
-        extra={"amount": amount, "unit": unit, "status_code": response.status_code},
     )
 
     try:
-        content = await response.aread()
-        content_str = content.decode("utf-8") if isinstance(content, bytes) else content
-        is_streaming = content_str.startswith("data:") or "data:" in content_str
+        response = await client.send(
+            client.build_request(
+                request.method,
+                url,
+                headers=headers,
+                content=request.stream(),
+                params=request.query_params,
+            ),
+            stream=True,
+        )
 
         logger.debug(
-            "Chat completion response analysis",
+            "Received upstream response",
             extra={
-                "is_streaming": is_streaming,
-                "content_length": len(content_str),
-                "amount": amount,
-                "unit": unit,
+                "status_code": response.status_code,
+                "path": path,
+                "response_headers": dict(response.headers),
             },
         )
 
-        if is_streaming:
-            return await handle_streaming_response(content_str, response, amount, unit)
-        else:
-            return await handle_non_streaming_response(
-                content_str, response, amount, unit
+        if response.status_code != 200:
+            logger.warning(
+                "Upstream request failed, processing refund",
+                extra={
+                    "status_code": response.status_code,
+                    "path": path,
+                    "amount": amount,
+                    "unit": unit,
+                },
             )
 
-    except Exception as e:
-        logger.error(
-            "Error processing chat completion response",
-            extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "amount": amount,
-                "unit": unit,
-            },
+            refund_token = await send_refund(amount - 60, unit)
+
+            logger.info(
+                "Refund processed for failed upstream request",
+                extra={
+                    "status_code": response.status_code,
+                    "refund_amount": amount,
+                    "unit": unit,
+                    "refund_token_preview": refund_token[:20] + "..."
+                    if len(refund_token) > 20
+                    else refund_token,
+                },
+            )
+
+            await response.aclose()
+            await client.aclose()
+
+            error_response = Response(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "message": "Error forwarding request to upstream",
+                            "type": "upstream_error",
+                            "code": response.status_code,
+                            "refund_token": refund_token,
+                        }
+                    }
+                ),
+                status_code=response.status_code,
+                media_type="application/json",
+            )
+            error_response.headers["X-Cashu"] = refund_token
+            return error_response
+
+        if path.endswith("chat/completions"):
+            logger.debug(
+                "Processing chat completion response",
+                extra={"path": path, "amount": amount, "unit": unit},
+            )
+
+            content_type = response.headers.get("content-type", "")
+            is_streaming = "text/event-stream" in content_type
+
+            if is_streaming:
+                result = await handle_streaming_response(
+                    request, response, amount, unit
+                )
+                background_tasks = BackgroundTasks()
+                background_tasks.add_task(response.aclose)
+                background_tasks.add_task(client.aclose)
+                result.background = background_tasks
+                return result
+            else:
+                try:
+                    return await handle_non_streaming_response(response, amount, unit)
+                finally:
+                    await response.aclose()
+                    await client.aclose()
+
+        background_tasks = BackgroundTasks()
+        background_tasks.add_task(response.aclose)
+        background_tasks.add_task(client.aclose)
+
+        logger.debug(
+            "Streaming non-chat response",
+            extra={"path": path, "status_code": response.status_code},
         )
-        # Return the original response if we can't process it
+
         return StreamingResponse(
             response.aiter_bytes(),
             status_code=response.status_code,
             headers=dict(response.headers),
+            background=background_tasks,
+        )
+    except Exception as exc:
+        await client.aclose()
+        tb = traceback.format_exc()
+        logger.error(
+            "Unexpected error in upstream forwarding",
+            extra={
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "method": request.method,
+                "url": url,
+                "path": path,
+                "query_params": dict(request.query_params),
+                "traceback": tb,
+            },
+        )
+        return create_error_response(
+            "internal_error",
+            "An unexpected server error occurred",
+            500,
+            request=request,
         )
 
 
 async def handle_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: str
+    request: Request, response: httpx.Response, amount: int, unit: str
 ) -> StreamingResponse:
     """Handle Server-Sent Events (SSE) streaming response."""
     logger.debug(
@@ -289,155 +257,311 @@ async def handle_streaming_response(
         extra={
             "amount": amount,
             "unit": unit,
-            "content_lines": len(content_str.strip().split("\n")),
+            "status_code": response.status_code,
         },
     )
 
-    # Initialize response headers early so they can be modified during processing
+    model = "unknown"
+    try:
+        request_body = await request.body()
+        if request_body:
+            request_data = json.loads(request_body)
+            model = request_data.get("model", "unknown")
+    except Exception as e:
+        logger.warning(
+            "Could not extract model from request for streaming response",
+            extra={"error": str(e), "amount": amount, "unit": unit},
+        )
+
+    # For streaming responses, we can't calculate exact cost upfront
+    # Instead, we'll hold most of the payment and refund properly after streaming
+    # Only refund a small conservative amount upfront to show the user something is happening
+    upfront_refund_percentage = 0.1  # Only refund 10% upfront
+    upfront_refund_amount = int(amount * upfront_refund_percentage)
+
+    # Ensure minimum refund is reasonable but not too much
+    min_upfront = 100  # msat
+    max_upfront = 5000  # msat
+
+    if unit == "sat":
+        min_upfront = 1  # sat
+        max_upfront = 50  # sat
+
+    refund_amount = max(min_upfront, min(upfront_refund_amount, max_upfront))
+
+    refund_token = None
+    if refund_amount > 0:
+        try:
+            refund_token = await send_refund(refund_amount, unit)
+            logger.info(
+                "Conservative upfront refund issued for streaming response",
+                extra={
+                    "original_amount": amount,
+                    "upfront_refund": refund_amount,
+                    "upfront_percentage": f"{upfront_refund_percentage * 100}%",
+                    "unit": unit,
+                    "model": model,
+                    "note": "Small upfront refund - actual refund calculated after streaming",
+                },
+            )
+        except Exception as refund_error:
+            logger.error(
+                "Failed to issue estimated refund for streaming response",
+                extra={
+                    "error": str(refund_error),
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
+
     response_headers = dict(response.headers)
     if "transfer-encoding" in response_headers:
         del response_headers["transfer-encoding"]
     if "content-encoding" in response_headers:
         del response_headers["content-encoding"]
 
-    # For streaming responses, we'll extract the final usage data
-    # and calculate cost based on that
-    usage_data = None
-    model = None
+    if refund_token:
+        response_headers["X-Cashu"] = refund_token
 
-    # Parse SSE format to extract usage information
-    lines = content_str.strip().split("\n")
-    for line in lines:
-        if line.startswith("data: "):
-            try:
-                data_json = json.loads(line[6:])  # Remove 'data: ' prefix
-                # Look for usage information in the final chunks
-                if "usage" in data_json:
-                    usage_data = data_json["usage"]
-                    model = data_json.get("model")
-                elif "model" in data_json and not model:
-                    model = data_json["model"]
-            except json.JSONDecodeError:
-                continue
+    async def stream_with_monitoring() -> AsyncGenerator[bytes, None]:
+        """Stream response while monitoring usage for logging."""
+        stored_chunks = []
 
-    response_headers = dict(response.headers)
-    # If we found usage data, calculate cost and refund
-    if usage_data and model:
+        async for chunk in response.aiter_bytes():
+            stored_chunks.append(chunk)
+            yield chunk
+
         logger.debug(
-            "Found usage data in streaming response",
+            "Streaming completed, analyzing usage for monitoring",
             extra={
-                "model": model,
-                "usage_data": usage_data,
                 "amount": amount,
                 "unit": unit,
+                "chunks_count": len(stored_chunks),
+                "estimated_refund_issued": refund_amount,
             },
         )
 
-        response_data = {"usage": usage_data, "model": model}
-        try:
-            cost_data = await get_cost(response_data)
-            if cost_data:
-                if unit == "msat":
-                    refund_amount = amount - cost_data.total_msats
-                elif unit == "sat":
-                    refund_amount = amount - (cost_data.total_msats + 999) // 1000
+        usage_data = None
+        response_model = None
+
+        for i in range(len(stored_chunks) - 1, -1, -1):
+            chunk = stored_chunks[i]
+            if not chunk or chunk == b"":
+                continue
+
+            try:
+                events = re.split(b"data: ", chunk)
+                for event_data in events:
+                    if (
+                        not event_data
+                        or event_data.strip() == b"[DONE]"
+                        or event_data.strip() == b""
+                    ):
+                        continue
+
+                    try:
+                        data = json.loads(event_data)
+                        if (
+                            "usage" in data
+                            and data["usage"] is not None
+                            and isinstance(data["usage"], dict)
+                        ):
+                            usage_data = data["usage"]
+                            response_model = data.get("model", model)
+                            break
+                        elif "model" in data and not response_model:
+                            response_model = data["model"]
+                    except json.JSONDecodeError:
+                        continue
+
+                if usage_data:
+                    break
+
+            except Exception as e:
+                logger.error(
+                    "Error processing streaming response chunk for monitoring",
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "amount": amount,
+                        "unit": unit,
+                    },
+                )
+
+        if usage_data and response_model:
+            try:
+                cost_data = await get_cost(
+                    {"usage": usage_data, "model": response_model}
+                )
+                print(cost_data)
+                if cost_data:
+                    if unit == "msat":
+                        actual_cost = cost_data.total_msats
+                    elif unit == "sat":
+                        actual_cost = (cost_data.total_msats + 999) // 1000
+                    else:
+                        actual_cost = 0
+
+                    ideal_total_refund = amount - actual_cost
+                    additional_refund_needed = ideal_total_refund - refund_amount
+
+                    if additional_refund_needed > 0:
+                        try:
+                            additional_refund_token = await send_refund(
+                                additional_refund_needed, unit
+                            )
+                            logger.info(
+                                "Additional refund issued after streaming analysis",
+                                extra={
+                                    "original_amount": amount,
+                                    "actual_cost": actual_cost,
+                                    "upfront_refund": refund_amount,
+                                    "additional_refund": additional_refund_needed,
+                                    "total_refund": ideal_total_refund,
+                                    "unit": unit,
+                                    "model": response_model,
+                                    "additional_refund_token": additional_refund_token[
+                                        :20
+                                    ]
+                                    + "..."
+                                    if len(additional_refund_token) > 20
+                                    else additional_refund_token,
+                                },
+                            )
+                        except Exception as refund_error:
+                            logger.error(
+                                "Failed to issue additional refund after streaming",
+                                extra={
+                                    "error": str(refund_error),
+                                    "additional_refund_needed": additional_refund_needed,
+                                    "unit": unit,
+                                    "model": response_model,
+                                },
+                            )
+                    else:
+                        logger.info(
+                            "No additional refund needed after streaming analysis",
+                            extra={
+                                "original_amount": amount,
+                                "actual_cost": actual_cost,
+                                "upfront_refund": refund_amount,
+                                "ideal_total_refund": ideal_total_refund,
+                                "unit": unit,
+                                "model": response_model,
+                                "note": "Upfront refund was sufficient or overpaid",
+                            },
+                        )
                 else:
-                    raise ValueError(f"Invalid unit: {unit}")
-
-                if refund_amount > 0:
-                    logger.info(
-                        "Processing refund for streaming response",
-                        extra={
-                            "original_amount": amount,
-                            "cost_msats": cost_data.total_msats,
-                            "refund_amount": refund_amount,
-                            "unit": unit,
-                            "model": model,
-                        },
+                    logger.warning(
+                        "Could not calculate actual cost for streaming response",
+                        extra={"amount": amount, "unit": unit, "model": response_model},
                     )
-
-                    refund_token = await send_refund(refund_amount, unit)
-                    response_headers["X-Cashu"] = refund_token
-
-                    logger.info(
-                        "Refund processed for streaming response",
-                        extra={
-                            "refund_amount": refund_amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-                else:
-                    logger.debug(
-                        "No refund needed for streaming response",
+            except Exception as e:
+                logger.error(
+                    "Error analyzing actual usage for streaming response",
+                    extra={
+                        "error": str(e),
+                        "amount": amount,
+                        "unit": unit,
+                        "model": response_model,
+                    },
+                )
+        else:
+            # No usage data found, issue emergency refund
+            emergency_refund = (
+                amount - refund_amount - 60
+            )  # Total minus upfront minus processing fee
+            if emergency_refund > 0:
+                try:
+                    emergency_refund_token = await send_refund(emergency_refund, unit)
+                    logger.warning(
+                        "Emergency refund issued - no usage data found",
                         extra={
                             "amount": amount,
-                            "cost_msats": cost_data.total_msats,
-                            "model": model,
+                            "upfront_refund": refund_amount,
+                            "emergency_refund": emergency_refund,
+                            "total_refund": refund_amount + emergency_refund,
+                            "unit": unit,
+                            "estimated_model": model,
+                            "emergency_token": emergency_refund_token[:20] + "..."
+                            if len(emergency_refund_token) > 20
+                            else emergency_refund_token,
                         },
                     )
-        except Exception as e:
-            logger.error(
-                "Error calculating cost for streaming response",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "model": model,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-    async def generate() -> AsyncGenerator[bytes, None]:
-        for line in lines:
-            yield (line + "\n").encode("utf-8")
+                except Exception as refund_error:
+                    logger.error(
+                        "Failed to issue emergency refund for no usage data",
+                        extra={
+                            "error": str(refund_error),
+                            "emergency_refund": emergency_refund,
+                            "unit": unit,
+                        },
+                    )
+            else:
+                logger.warning(
+                    "No usage data found in streaming response",
+                    extra={
+                        "amount": amount,
+                        "unit": unit,
+                        "estimated_model": model,
+                        "upfront_refund": refund_amount,
+                    },
+                )
 
     return StreamingResponse(
-        generate(),
+        stream_with_monitoring(),
         status_code=response.status_code,
         headers=response_headers,
-        media_type="text/plain",
     )
 
 
 async def handle_non_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: str
+    response: httpx.Response, amount: int, unit: str
 ) -> Response:
     """Handle regular JSON response."""
     logger.debug(
         "Processing non-streaming response",
-        extra={"amount": amount, "unit": unit, "content_length": len(content_str)},
+        extra={"amount": amount, "unit": unit, "status_code": response.status_code},
     )
 
     try:
+        content = await response.aread()
+        content_str = content.decode("utf-8") if isinstance(content, bytes) else content
         response_json = json.loads(content_str)
 
         cost_data = await get_cost(response_json)
+        refund_token = None
 
         if not cost_data:
-            logger.error(
-                "Failed to calculate cost for response",
+            logger.warning(
+                "Failed to calculate cost for response, issuing emergency refund",
                 extra={
                     "amount": amount,
                     "unit": unit,
                     "response_model": response_json.get("model", "unknown"),
                 },
             )
-            return Response(
-                content=json.dumps(
-                    {
-                        "error": {
-                            "message": "Error forwarding request to upstream",
-                            "type": "upstream_error",
-                            "code": response.status_code,
-                        }
-                    }
-                ),
-                status_code=response.status_code,
-                media_type="application/json",
-            )
+            emergency_refund_amount = amount - 60
+            if emergency_refund_amount > 0:
+                try:
+                    refund_token = await send_refund(emergency_refund_amount, unit)
+                    logger.info(
+                        "Emergency refund issued for cost calculation failure",
+                        extra={
+                            "refund_amount": emergency_refund_amount,
+                            "unit": unit,
+                            "original_amount": amount,
+                        },
+                    )
+                except Exception as refund_error:
+                    logger.error(
+                        "Failed to issue emergency refund for cost calculation failure",
+                        extra={
+                            "error": str(refund_error),
+                            "amount": amount,
+                            "unit": unit,
+                        },
+                    )
 
         response_headers = dict(response.headers)
         if "transfer-encoding" in response_headers:
@@ -445,38 +569,41 @@ async def handle_non_streaming_response(
         if "content-encoding" in response_headers:
             del response_headers["content-encoding"]
 
-        if unit == "msat":
-            refund_amount = amount - cost_data.total_msats
-        elif unit == "sat":
-            refund_amount = amount - (cost_data.total_msats + 999) // 1000
-        else:
-            raise ValueError(f"Invalid unit: {unit}")
-
-        logger.info(
-            "Processing non-streaming response cost calculation",
-            extra={
-                "original_amount": amount,
-                "cost_msats": cost_data.total_msats,
-                "refund_amount": refund_amount,
-                "unit": unit,
-                "model": response_json.get("model", "unknown"),
-            },
-        )
-
-        if refund_amount > 0:
-            refund_token = await send_refund(refund_amount, unit)
-            response_headers["X-Cashu"] = refund_token
+        if cost_data:
+            if unit == "msat":
+                refund_amount = amount - cost_data.total_msats
+            elif unit == "sat":
+                refund_amount = amount - (cost_data.total_msats + 999) // 1000
+            else:
+                raise ValueError(f"Invalid unit: {unit}")
 
             logger.info(
-                "Refund processed for non-streaming response",
+                "Processing non-streaming response cost calculation",
                 extra={
+                    "original_amount": amount,
+                    "cost_msats": cost_data.total_msats,
                     "refund_amount": refund_amount,
                     "unit": unit,
-                    "refund_token_preview": refund_token[:20] + "..."
-                    if len(refund_token) > 20
-                    else refund_token,
+                    "model": response_json.get("model", "unknown"),
                 },
             )
+
+            if refund_amount > 0:
+                refund_token = await send_refund(refund_amount, unit)
+
+                logger.info(
+                    "Refund processed for non-streaming response",
+                    extra={
+                        "refund_amount": refund_amount,
+                        "unit": unit,
+                        "refund_token_preview": refund_token[:20] + "..."
+                        if len(refund_token) > 20
+                        else refund_token,
+                    },
+                )
+
+        if refund_token:
+            response_headers["X-Cashu"] = refund_token
 
         return Response(
             content=content_str,
@@ -497,25 +624,44 @@ async def handle_non_streaming_response(
             },
         )
 
-        # Emergency refund with small deduction for processing
-        emergency_refund = amount
-        refund_token = await send_token(emergency_refund, unit=unit)
-        response.headers["X-Cashu"] = refund_token
+        emergency_refund_amount = amount - 60
+        refund_token = None
 
-        logger.warning(
-            "Emergency refund issued due to JSON parse error",
-            extra={
-                "original_amount": amount,
-                "refund_amount": emergency_refund,
-                "deduction": 60,
-            },
-        )
+        if emergency_refund_amount > 0:
+            try:
+                refund_token = await send_refund(emergency_refund_amount, unit)
+                logger.warning(
+                    "Emergency refund issued due to JSON parse error",
+                    extra={
+                        "original_amount": amount,
+                        "refund_amount": emergency_refund_amount,
+                        "deduction": 60,
+                        "unit": unit,
+                    },
+                )
+            except Exception as refund_error:
+                logger.error(
+                    "Failed to issue emergency refund for JSON parse error",
+                    extra={
+                        "error": str(refund_error),
+                        "amount": amount,
+                        "unit": unit,
+                    },
+                )
 
-        # Return original content if JSON parsing fails
+        response_headers = dict(response.headers)
+        if "transfer-encoding" in response_headers:
+            del response_headers["transfer-encoding"]
+        if "content-encoding" in response_headers:
+            del response_headers["content-encoding"]
+
+        if refund_token:
+            response_headers["X-Cashu"] = refund_token
+
         return Response(
             content=content_str,
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=response_headers,
             media_type="application/json",
         )
 
@@ -534,43 +680,44 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
 
     max_cost = get_max_cost_for_model(model=model)
 
-    match calculate_cost(response_data, max_cost):
-        case MaxCostData() as cost:
-            logger.debug(
-                "Using max cost pricing",
-                extra={"model": model, "max_cost_msats": cost.total_msats},
-            )
-            return cost
-        case CostData() as cost:
-            logger.debug(
-                "Using token-based pricing",
-                extra={
-                    "model": model,
-                    "total_cost_msats": cost.total_msats,
-                    "input_msats": cost.input_msats,
-                    "output_msats": cost.output_msats,
-                },
-            )
-            return cost
-        case CostDataError() as error:
-            logger.error(
-                "Cost calculation error",
-                extra={
-                    "model": model,
-                    "error_message": error.message,
-                    "error_code": error.code,
-                },
-            )
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "message": error.message,
-                        "type": "invalid_request_error",
-                        "code": error.code,
-                    }
-                },
-            )
+    cost_result = calculate_cost(response_data, max_cost)
+
+    if isinstance(cost_result, MaxCostData):
+        logger.debug(
+            "Using max cost pricing",
+            extra={"model": model, "max_cost_msats": cost_result.total_msats},
+        )
+        return cost_result
+    elif isinstance(cost_result, CostData):
+        logger.debug(
+            "Using token-based pricing",
+            extra={
+                "model": model,
+                "total_cost_msats": cost_result.total_msats,
+                "input_msats": cost_result.input_msats,
+                "output_msats": cost_result.output_msats,
+            },
+        )
+        return cost_result
+    elif isinstance(cost_result, CostDataError):
+        logger.error(
+            "Cost calculation error",
+            extra={
+                "model": model,
+                "error_message": cost_result.message,
+                "error_code": cost_result.code,
+            },
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "message": cost_result.message,
+                    "type": "invalid_request_error",
+                    "code": cost_result.code,
+                }
+            },
+        )
 
 
 async def send_refund(amount: int, unit: str, mint: str | None = None) -> str:
@@ -629,7 +776,6 @@ async def send_refund(amount: int, unit: str, mint: str | None = None) -> str:
                     },
                 )
 
-    # If we get here, all retries failed
     raise HTTPException(
         status_code=401,
         detail={
