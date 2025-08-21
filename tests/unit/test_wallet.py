@@ -11,6 +11,7 @@ from routstr.wallet import credit_balance, get_balance, recieve_token, send_toke
 async def test_get_balance() -> None:
     mock_wallet = Mock()
     mock_wallet.available_balance = Mock(amount=50000)
+    mock_wallet.load_mint = AsyncMock()
     mock_wallet.load_proofs = AsyncMock()
 
     with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
@@ -48,9 +49,9 @@ async def test_recieve_token_valid() -> None:
             mock_token.proofs = [{"amount": 1000}]
             mock_deserialize.return_value = mock_token
 
+            mock_wallet.load_mint = AsyncMock()
+            mock_wallet.load_proofs = AsyncMock()
             with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
-                mock_wallet.load_mint = AsyncMock()
-
                 amount, unit, mint = await recieve_token(token_str)
                 assert amount == 1000
                 assert unit == "sat"
@@ -105,8 +106,9 @@ async def test_recieve_token_untrusted_mint() -> None:
         mock_token.amount = 1000
         mock_deserialize.return_value = mock_token
 
+        mock_wallet.load_mint = AsyncMock()
+        mock_wallet.load_proofs = AsyncMock()
         with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
-            mock_wallet.load_mint = AsyncMock()
             with patch(
                 "routstr.wallet.swap_to_primary_mint",
                 return_value=(900, "sat", "http://mint:3338"),
