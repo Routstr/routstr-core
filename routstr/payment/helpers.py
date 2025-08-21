@@ -1,8 +1,8 @@
 import json
 import os
-from typing import Optional
 
 from fastapi import HTTPException, Response
+from fastapi.requests import Request
 
 from ..core import get_logger
 from ..wallet import deserialize_token_from_string
@@ -157,21 +157,13 @@ def get_max_cost_for_model(model: str) -> int:
 
 
 def create_error_response(
-    error_type: str, message: str, status_code: int, token: Optional[str] = None
+    error_type: str,
+    message: str,
+    status_code: int,
+    request: Request,
+    token: str | None = None,
 ) -> Response:
     """Create a standardized error response."""
-    logger.info(
-        "Creating error response",
-        extra={
-            "error_type": error_type,
-            "error_message": message,
-            "status_code": status_code,
-        },
-    )
-
-    response_headers = {}
-    if token:
-        response_headers["X-Cashu"] = token
     return Response(
         content=json.dumps(
             {
@@ -179,12 +171,13 @@ def create_error_response(
                     "message": message,
                     "type": error_type,
                     "code": status_code,
-                }
+                },
+                "request_id": getattr(request.state, "request_id", "unknown"),
             }
         ),
         status_code=status_code,
         media_type="application/json",
-        headers=dict(response_headers),
+        headers={"X-Cashu": token} if token else {},
     )
 
 

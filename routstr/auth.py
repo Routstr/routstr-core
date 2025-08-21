@@ -13,7 +13,12 @@ from .payment.cost_caculation import (
     calculate_cost,
 )
 from .payment.helpers import get_max_cost_for_model
-from .wallet import credit_balance
+from .wallet import (
+    PRIMARY_MINT_URL,
+    TRUSTED_MINTS,
+    credit_balance,
+    deserialize_token_from_string,
+)
 
 logger = get_logger(__name__)
 
@@ -113,6 +118,7 @@ async def validate_bearer_key(
 
         try:
             hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
+            token_obj = deserialize_token_from_string(bearer_key)
             logger.debug(
                 "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
             )
@@ -159,12 +165,20 @@ async def validate_bearer_key(
                     "has_expiry_time": bool(key_expiry_time),
                 },
             )
+            if token_obj.mint in TRUSTED_MINTS:
+                refund_currency = token_obj.unit
+                refund_mint_url = token_obj.mint
+            else:
+                refund_currency = "sat"
+                refund_mint_url = PRIMARY_MINT_URL
 
             new_key = ApiKey(
                 hashed_key=hashed_key,
                 balance=0,
                 refund_address=refund_address,
                 key_expiry_time=key_expiry_time,
+                refund_currency=refund_currency,
+                refund_mint_url=refund_mint_url,
             )
             session.add(new_key)
             await session.flush()

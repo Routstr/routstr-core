@@ -1,8 +1,8 @@
 import asyncio
 import pathlib
 import sys
-from logging.config import fileConfig
 
+# from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -17,7 +17,10 @@ from routstr.core.db import DATABASE_URL
 config = context.config
 if config.config_file_name is None:
     raise ValueError("config_file_name is None")
-fileConfig(config.config_file_name)
+
+# Skip loading alembic's logging configuration to preserve our custom logging
+# fileConfig(config.config_file_name)
+
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 target_metadata = SQLModel.metadata

@@ -7,7 +7,7 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ..core import get_logger
-from ..wallet import CurrencyUnit, recieve_token, send_token
+from ..wallet import recieve_token, send_token
 from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
 from .helpers import (
     UPSTREAM_BASE_URL,
@@ -81,7 +81,8 @@ async def x_cashu_handler(
                 "token_already_spent",
                 "The provided CASHU token has already been spent",
                 400,
-                x_cashu_token,
+                request=request,
+                token=x_cashu_token,
             )
 
         if "invalid token" in error_message.lower():
@@ -89,12 +90,17 @@ async def x_cashu_handler(
                 "invalid_token",
                 "The provided CASHU token is invalid",
                 400,
-                x_cashu_token,
+                request=request,
+                token=x_cashu_token,
             )
 
         if "mint error" in error_message.lower():
             return create_error_response(
-                "mint_error", f"CASHU mint error: {error_message}", 422, x_cashu_token
+                "mint_error",
+                f"CASHU mint error: {error_message}",
+                422,
+                request=request,
+                token=x_cashu_token,
             )
 
         # Generic error for other cases
@@ -102,7 +108,8 @@ async def x_cashu_handler(
             "cashu_error",
             f"CASHU token processing failed: {error_message}",
             400,
-            x_cashu_token,
+            request=request,
+            token=x_cashu_token,
         )
 
 
@@ -237,12 +244,15 @@ async def forward_to_upstream(
                 },
             )
             return create_error_response(
-                "internal_error", "An unexpected server error occurred", 500
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
             )
 
 
 async def handle_x_cashu_chat_completion(
-    response: httpx.Response, amount: int, unit: CurrencyUnit
+    response: httpx.Response, amount: int, unit: str
 ) -> StreamingResponse | Response:
     """Handle both streaming and non-streaming chat completion responses with token-based pricing."""
     logger.debug(
@@ -291,7 +301,7 @@ async def handle_x_cashu_chat_completion(
 
 
 async def handle_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: CurrencyUnit
+    content_str: str, response: httpx.Response, amount: int, unit: str
 ) -> StreamingResponse:
     """Handle Server-Sent Events (SSE) streaming response."""
     logger.debug(
@@ -413,7 +423,7 @@ async def handle_streaming_response(
 
 
 async def handle_non_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: CurrencyUnit
+    content_str: str, response: httpx.Response, amount: int, unit: str
 ) -> Response:
     """Handle regular JSON response."""
     logger.debug(
@@ -583,7 +593,7 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
             )
 
 
-async def send_refund(amount: int, unit: CurrencyUnit, mint: str | None = None) -> str:
+async def send_refund(amount: int, unit: str, mint: str | None = None) -> str:
     """Send a refund using Cashu tokens."""
     logger.debug(
         "Creating refund token", extra={"amount": amount, "unit": unit, "mint": mint}

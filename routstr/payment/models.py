@@ -7,7 +7,10 @@ from urllib.request import urlopen
 from fastapi import APIRouter
 from pydantic.v1 import BaseModel
 
+from ..core.logging import get_logger
 from .price import sats_usd_ask_price
+
+logger = get_logger(__name__)
 
 models_router = APIRouter()
 
@@ -213,10 +216,10 @@ def load_models_from_openrouter_api(source_filter: str | None = None) -> list[Mo
 
     models_data = fetch_openrouter_models(source_filter=source_filter)
     if not models_data:
-        print("Failed to fetch models from OpenRouter API")
+        logger.error("Failed to fetch models from OpenRouter API")
         return []
 
-    print(f"Successfully fetched {len(models_data)} models from OpenRouter API")
+    logger.info(f"Successfully fetched {len(models_data)} models from OpenRouter API")
     return [Model(**model) for model in models_data]
 
 
@@ -321,6 +324,6 @@ async def update_sats_pricing() -> None:
 
 
 @models_router.get("/v1/models")
-@models_router.get("/models")
+@models_router.get("/models", include_in_schema=False)
 async def models() -> dict:
     return {"data": MODELS}
