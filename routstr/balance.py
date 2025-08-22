@@ -1,6 +1,7 @@
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
@@ -32,6 +33,17 @@ async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     }
 
 
+
+@router.get("/create")
+async def create_balance(initial_balance_token: str, session: AsyncSession = Depends(get_session)) -> dict:
+    key = await validate_bearer_key(initial_balance_token, session)
+    return {
+        "api_key": "sk-" + key.hashed_key,
+        "balance": key.balance,
+    }
+    
+
+
 @router.get("/info")
 async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     return {
@@ -39,13 +51,21 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
         "balance": key.balance,
     }
 
+class TopupRequest(BaseModel):
+    cashu_token: str
 
 @router.post("/topup")
 async def topup_wallet_endpoint(
-    cashu_token: str,
+    cashu_token: str | None = None,
+    topup_request: TopupRequest | None = None,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
+    if topup_request is not None:
+        cashu_token = topup_request.cashu_token
+    if cashu_token is None:
+        raise HTTPException(status_code=400, detail="A cashu_token is required.")
+    
     cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")

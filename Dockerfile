@@ -12,7 +12,7 @@ RUN apk add --no-cache \
 RUN apk add git
 
 COPY uv.lock pyproject.toml ./
-COPY routstr ./routstr
+RUN mkdir -p /routstr
 
 RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
 # RUN uv sync

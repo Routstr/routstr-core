@@ -550,7 +550,6 @@ async def proxy(
         headers = prepare_upstream_headers(dict(request.headers), None)
         return await forward_get_to_upstream(request, path, headers)
 
-    cost_per_request = 0
     # Only pay for request if we have request body data (for completions endpoints)
     if request_body_dict:
         logger.info(
@@ -600,7 +599,7 @@ async def proxy(
     )
 
     if response.status_code != 200:
-        await revert_pay_for_request(key, session, cost_per_request)
+        await revert_pay_for_request(key, session, max_cost_for_model)
         logger.warning(
             "Upstream request failed, revert payment",
             extra={
@@ -608,7 +607,21 @@ async def proxy(
                 "path": path,
                 "key_hash": key.hashed_key[:8] + "...",
                 "key_balance": key.balance,
+                "max_cost_for_model": max_cost_for_model,
+                "upstream_headers": response.headers
+                if hasattr(response, "headers")
+                else None,
+                "upstream_response": response.body
+                if hasattr(response, "body")
+                else None,
             },
+        )
+        request_id = (
+            request.state.request_id if hasattr(request.state, "request_id") else None
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream request failed, please contact support with request id: {request_id}",
         )
 
     return response

@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 from typing import TypedDict
 
@@ -73,17 +74,24 @@ async def swap_to_primary_mint(
             "unit": token_obj.unit,
         },
     )
+    # Ensure amount is an integer
+    if not isinstance(token_obj.amount, int):
+        print(f"Token amount is not an integer: {token_obj.amount}")
+        token_amount = int(token_obj.amount)
+    else:
+        token_amount = token_obj.amount
+    
     if token_obj.unit == "sat":
-        amount_msat = token_obj.amount * 1000
+        amount_msat = token_amount * 1000
     elif token_obj.unit == "msat":
-        amount_msat = token_obj.amount
+        amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
-    estimated_fee_sat = int(max(amount_msat // 1000 * 0.01, 2))
+    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2))
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
     primary_wallet = await get_wallet(PRIMARY_MINT_URL, "sat")
 
-    minted_amount = amount_msat_after_fee // 1000
+    minted_amount = int(amount_msat_after_fee // 1000)
     mint_quote = await primary_wallet.request_mint(minted_amount)
 
     melt_quote = await token_wallet.melt_quote(mint_quote.request)
@@ -95,7 +103,7 @@ async def swap_to_primary_mint(
     )
     _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
 
-    return minted_amount, "sat", PRIMARY_MINT_URL
+    return int(minted_amount), "sat", PRIMARY_MINT_URL
 
 
 async def credit_balance(
