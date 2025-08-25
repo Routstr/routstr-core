@@ -8,10 +8,11 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
-from router.core.logging import get_logger
+from routstr.core.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -25,7 +26,7 @@ if use_local_services:
         "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
         "UPSTREAM_BASE_URL": "http://localhost:3000",  # Mock OpenAI service
         "UPSTREAM_API_KEY": "test-upstream-key",
-        "CASHU_MINTS": "http://mint:3338",  # Docker service name for router validation
+        "CASHU_MINTS": "http://mint:3338",  # Docker service name for routstr validation
         "MINT": "http://mint:3338",
         "MINT_URL": "http://mint:3338",
         "NOSTR_RELAY_URL": "ws://localhost:8088",
@@ -63,8 +64,8 @@ else:
 # Set test environment variables before importing the app
 os.environ.update(test_env)
 
-from router.core.db import ApiKey, get_session  # noqa: E402
-from router.core.main import app, lifespan  # noqa: E402
+from routstr.core.db import ApiKey, get_session  # noqa: E402
+from routstr.core.main import app, lifespan  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -157,7 +158,7 @@ class TestmintWallet:
                 mint_response = await wallet.mint(amount=amount, hash=quote)
                 token = mint_response.token
 
-                # Replace connection URL with Docker service name for router validation
+                # Replace connection URL with Docker service name for routstr validation
                 if self.connection_url != self.mint_url:
                     token = token.replace(self.connection_url, self.mint_url)
 
@@ -251,7 +252,7 @@ class TestmintWallet:
     async def send_token(
         self, amount: int, unit: str, mint_url: Optional[str] = None
     ) -> str:
-        """Send token with compatible signature for mocking router.wallet.send_token"""
+        """Send token with compatible signature for mocking routstr.wallet.send_token"""
         return await self.send(amount)
 
     async def send_to_lnurl(self, lnurl: str, amount: int) -> int:
@@ -501,25 +502,25 @@ async def integration_app(
 
     if use_real_mint:
         # Use real mint - no wallet patches needed
-        with patch("router.core.db.engine", integration_engine):
+        with patch("routstr.core.db.engine", integration_engine):
             yield test_app
     else:
         # Use testmint with wallet patches for all integration tests
         mint_url = os.environ.get("CASHU_MINTS", "http://localhost:3338")
         with (
-            patch("router.core.db.engine", integration_engine),
-            patch("router.wallet.TRUSTED_MINTS", [mint_url]),
-            patch("router.wallet.PRIMARY_MINT_URL", mint_url),
-            patch("router.auth.credit_balance", testmint_wallet.credit_balance),
-            patch("router.wallet.credit_balance", testmint_wallet.credit_balance),
-            patch("router.balance.credit_balance", testmint_wallet.credit_balance),
-            patch("router.wallet.send_token", testmint_wallet.send_token),
-            patch("router.balance.send_token", testmint_wallet.send_token),
-            patch("router.wallet.recieve_token", testmint_wallet.redeem_token),
-            patch("router.wallet.get_balance", testmint_wallet.get_balance),
+            patch("routstr.core.db.engine", integration_engine),
+            patch("routstr.wallet.TRUSTED_MINTS", [mint_url]),
+            patch("routstr.wallet.PRIMARY_MINT_URL", mint_url),
+            patch("routstr.auth.credit_balance", testmint_wallet.credit_balance),
+            patch("routstr.wallet.credit_balance", testmint_wallet.credit_balance),
+            patch("routstr.balance.credit_balance", testmint_wallet.credit_balance),
+            patch("routstr.wallet.send_token", testmint_wallet.send_token),
+            patch("routstr.balance.send_token", testmint_wallet.send_token),
+            patch("routstr.wallet.recieve_token", testmint_wallet.redeem_token),
+            patch("routstr.wallet.get_balance", testmint_wallet.get_balance),
             patch("websockets.connect") as mock_websockets,
-            patch("router.payment.price.btc_usd_ask_price", return_value=50000.0),
-            patch("router.payment.price.sats_usd_ask_price", return_value=0.0005),
+            patch("routstr.payment.price.btc_usd_ask_price", return_value=50000.0),
+            patch("routstr.payment.price.sats_usd_ask_price", return_value=0.0005),
         ):
             # Configure the WebSocket mock for discovery service - fast failure for performance tests
             async def mock_websocket_connect(*args: Any, **kwargs: Any) -> None:
@@ -689,8 +690,8 @@ async def background_tasks_controller() -> AsyncGenerator[Any, None]:
     original_periodic_payout: Optional[Callable] = None
 
     try:
-        from router.payment.models import update_sats_pricing
-        from router.wallet import periodic_payout
+        from routstr.payment.models import update_sats_pricing
+        from routstr.wallet import periodic_payout
 
         async def controlled_update_pricing() -> None:
             while not controller.cancelled:

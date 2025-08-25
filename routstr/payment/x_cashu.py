@@ -7,20 +7,15 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ..core import get_logger
-from ..wallet import CurrencyUnit, recieve_token, send_token
+from ..wallet import recieve_token, send_token
 from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
-from .helpers import (
-    UPSTREAM_BASE_URL,
-    create_error_response,
-    get_max_cost_for_model,
-    prepare_upstream_headers,
-)
+from .helpers import UPSTREAM_BASE_URL, create_error_response, prepare_upstream_headers
 
 logger = get_logger(__name__)
 
 
 async def x_cashu_handler(
-    request: Request, x_cashu_token: str, path: str
+    request: Request, x_cashu_token: str, path: str, max_cost_for_model: int
 ) -> Response | StreamingResponse:
     """Handle X-Cashu token payment requests."""
     logger.info(
@@ -44,7 +39,9 @@ async def x_cashu_handler(
             extra={"amount": amount, "unit": unit, "path": path, "mint": mint},
         )
 
-        return await forward_to_upstream(request, path, headers, amount, unit)
+        return await forward_to_upstream(
+            request, path, headers, amount, unit, max_cost_for_model
+        )
     except Exception as e:
         error_message = str(e)
         logger.error(
@@ -63,7 +60,8 @@ async def x_cashu_handler(
                 "token_already_spent",
                 "The provided CASHU token has already been spent",
                 400,
-                x_cashu_token,
+                request=request,
+                token=x_cashu_token,
             )
 
         if "invalid token" in error_message.lower():
@@ -71,12 +69,17 @@ async def x_cashu_handler(
                 "invalid_token",
                 "The provided CASHU token is invalid",
                 400,
-                x_cashu_token,
+                request=request,
+                token=x_cashu_token,
             )
 
         if "mint error" in error_message.lower():
             return create_error_response(
-                "mint_error", f"CASHU mint error: {error_message}", 422, x_cashu_token
+                "mint_error",
+                f"CASHU mint error: {error_message}",
+                422,
+                request=request,
+                token=x_cashu_token,
             )
 
         # Generic error for other cases
@@ -84,12 +87,18 @@ async def x_cashu_handler(
             "cashu_error",
             f"CASHU token processing failed: {error_message}",
             400,
-            x_cashu_token,
+            request=request,
+            token=x_cashu_token,
         )
 
 
 async def forward_to_upstream(
-    request: Request, path: str, headers: dict, amount: int, unit: CurrencyUnit
+    request: Request,
+    path: str,
+    headers: dict,
+    amount: int,
+    unit: str,
+    max_cost_for_model: int,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
     if path.startswith("v1/"):
@@ -181,7 +190,9 @@ async def forward_to_upstream(
                     extra={"path": path, "amount": amount, "unit": unit},
                 )
 
-                result = await handle_x_cashu_chat_completion(response, amount, unit)
+                result = await handle_x_cashu_chat_completion(
+                    response, amount, unit, max_cost_for_model
+                )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
                 result.background = background_tasks
@@ -217,12 +228,15 @@ async def forward_to_upstream(
                 },
             )
             return create_error_response(
-                "internal_error", "An unexpected server error occurred", 500
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
             )
 
 
 async def handle_x_cashu_chat_completion(
-    response: httpx.Response, amount: int, unit: CurrencyUnit
+    response: httpx.Response, amount: int, unit: str, max_cost_for_model: int
 ) -> StreamingResponse | Response:
     """Handle both streaming and non-streaming chat completion responses with token-based pricing."""
     logger.debug(
@@ -246,10 +260,12 @@ async def handle_x_cashu_chat_completion(
         )
 
         if is_streaming:
-            return await handle_streaming_response(content_str, response, amount, unit)
+            return await handle_streaming_response(
+                content_str, response, amount, unit, max_cost_for_model
+            )
         else:
             return await handle_non_streaming_response(
-                content_str, response, amount, unit
+                content_str, response, amount, unit, max_cost_for_model
             )
 
     except Exception as e:
@@ -271,7 +287,11 @@ async def handle_x_cashu_chat_completion(
 
 
 async def handle_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: CurrencyUnit
+    content_str: str,
+    response: httpx.Response,
+    amount: int,
+    unit: str,
+    max_cost_for_model: int,
 ) -> StreamingResponse:
     """Handle Server-Sent Events (SSE) streaming response."""
     logger.debug(
@@ -325,7 +345,7 @@ async def handle_streaming_response(
 
         response_data = {"usage": usage_data, "model": model}
         try:
-            cost_data = await get_cost(response_data)
+            cost_data = await get_cost(response_data, max_cost_for_model)
             if cost_data:
                 if unit == "msat":
                     refund_amount = amount - cost_data.total_msats
@@ -393,7 +413,11 @@ async def handle_streaming_response(
 
 
 async def handle_non_streaming_response(
-    content_str: str, response: httpx.Response, amount: int, unit: CurrencyUnit
+    content_str: str,
+    response: httpx.Response,
+    amount: int,
+    unit: str,
+    max_cost_for_model: int,
 ) -> Response:
     """Handle regular JSON response."""
     logger.debug(
@@ -404,7 +428,7 @@ async def handle_non_streaming_response(
     try:
         response_json = json.loads(content_str)
 
-        cost_data = await get_cost(response_json)
+        cost_data = await get_cost(response_json, max_cost_for_model)
 
         if not cost_data:
             logger.error(
@@ -510,21 +534,21 @@ async def handle_non_streaming_response(
         )
 
 
-async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
+async def get_cost(
+    response_data: dict, max_cost_for_model: int
+) -> MaxCostData | CostData | None:
     """
     Adjusts the payment based on token usage in the response.
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
     """
-    model = response_data.get("model", "unknown")
+    model = response_data.get("model", None)
     logger.debug(
         "Calculating cost for response",
         extra={"model": model, "has_usage": "usage" in response_data},
     )
 
-    max_cost = get_max_cost_for_model(model=model)
-
-    match calculate_cost(response_data, max_cost):
+    match calculate_cost(response_data, max_cost_for_model):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost pricing",
@@ -563,7 +587,7 @@ async def get_cost(response_data: dict) -> MaxCostData | CostData | None:
             )
 
 
-async def send_refund(amount: int, unit: CurrencyUnit, mint: str | None = None) -> str:
+async def send_refund(amount: int, unit: str, mint: str | None = None) -> str:
     """Send a refund using Cashu tokens."""
     logger.debug(
         "Creating refund token", extra={"amount": amount, "unit": unit, "mint": mint}

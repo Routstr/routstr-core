@@ -1,4 +1,5 @@
 import hashlib
+import math
 from typing import Optional
 
 from fastapi import HTTPException
@@ -12,8 +13,12 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
-from .payment.helpers import get_max_cost_for_model
-from .wallet import credit_balance
+from .wallet import (
+    PRIMARY_MINT_URL,
+    TRUSTED_MINTS,
+    credit_balance,
+    deserialize_token_from_string,
+)
 
 logger = get_logger(__name__)
 
@@ -113,6 +118,7 @@ async def validate_bearer_key(
 
         try:
             hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
+            token_obj = deserialize_token_from_string(bearer_key)
             logger.debug(
                 "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
             )
@@ -159,12 +165,20 @@ async def validate_bearer_key(
                     "has_expiry_time": bool(key_expiry_time),
                 },
             )
+            if token_obj.mint in TRUSTED_MINTS:
+                refund_currency = token_obj.unit
+                refund_mint_url = token_obj.mint
+            else:
+                refund_currency = "sat"
+                refund_mint_url = PRIMARY_MINT_URL
 
             new_key = ApiKey(
                 hashed_key=hashed_key,
                 balance=0,
                 refund_address=refund_address,
                 key_expiry_time=key_expiry_time,
+                refund_currency=refund_currency,
+                refund_mint_url=refund_mint_url,
             )
             session.add(new_key)
             await session.flush()
@@ -257,10 +271,10 @@ async def validate_bearer_key(
     )
 
 
-async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int:
+async def pay_for_request(
+    key: ApiKey, cost_per_request: int, session: AsyncSession
+) -> int:
     """Process payment for a request."""
-    model = body["model"]
-    cost_per_request = get_max_cost_for_model(model=model)
 
     logger.info(
         "Processing payment for request",
@@ -268,20 +282,19 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
             "key_hash": key.hashed_key[:8] + "...",
             "current_balance": key.balance,
             "required_cost": cost_per_request,
-            "model": model,
             "sufficient_balance": key.balance >= cost_per_request,
         },
     )
 
-    if key.balance < cost_per_request:
+    if key.total_balance < cost_per_request:
         logger.warning(
             "Insufficient balance for request",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
                 "balance": key.balance,
+                "reserved_balance": key.reserved_balance,
                 "required": cost_per_request,
-                "shortfall": cost_per_request - key.balance,
-                "model": model,
+                "shortfall": cost_per_request - key.total_balance,
             },
         )
 
@@ -289,7 +302,7 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {key.balance} available.",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {key.total_balance} available. (reserved: {key.reserved_balance})",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
                 }
@@ -311,8 +324,7 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
         .where(col(ApiKey.hashed_key) == key.hashed_key)
         .where(col(ApiKey.balance) >= cost_per_request)
         .values(
-            balance=col(ApiKey.balance) - cost_per_request,
-            total_spent=col(ApiKey.total_spent) + cost_per_request,
+            reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
             total_requests=col(ApiKey.total_requests) + 1,
         )
     )
@@ -351,7 +363,6 @@ async def pay_for_request(key: ApiKey, session: AsyncSession, body: dict) -> int
             "new_balance": key.balance,
             "total_spent": key.total_spent,
             "total_requests": key.total_requests,
-            "model": model,
         },
     )
 
@@ -365,8 +376,7 @@ async def revert_pay_for_request(
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
         .values(
-            balance=col(ApiKey.balance) + cost_per_request,
-            total_spent=col(ApiKey.total_spent) - cost_per_request,
+            reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
             total_requests=col(ApiKey.total_requests) - 1,
         )
     )
@@ -374,6 +384,14 @@ async def revert_pay_for_request(
     result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
     if result.rowcount == 0:
+        logger.error(
+            "Failed to revert payment - insufficient reserved balance",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "cost_to_revert": cost_per_request,
+                "current_reserved_balance": key.reserved_balance,
+            },
+        )
         raise HTTPException(
             status_code=402,
             detail={
@@ -424,6 +442,7 @@ async def adjust_payment_for_tokens(
             # If token-based pricing is enabled and base cost is 0, use token-based cost
             # Otherwise, token cost is additional to the base cost
             cost_difference = cost.total_msats - deducted_max_cost
+            total_cost_msats: int = math.ceil(cost.total_msats)
 
             logger.info(
                 "Calculated token-based cost",
@@ -446,6 +465,7 @@ async def adjust_payment_for_tokens(
                 await session.commit()
                 return cost.dict()
 
+            # this should never happen why do we handle this???
             if cost_difference > 0:
                 # Need to charge more
                 logger.info(
@@ -459,6 +479,7 @@ async def adjust_payment_for_tokens(
                     },
                 )
 
+                # this should never happen why do we handle this???
                 if key.balance < cost_difference:
                     logger.warning(
                         "Insufficient balance for token-based pricing adjustment",
@@ -472,6 +493,7 @@ async def adjust_payment_for_tokens(
                     )
                     await session.commit()
                 else:
+                    # this should never happen why do we handle this???
                     charge_stmt = (
                         update(ApiKey)
                         .where(col(ApiKey.hashed_key) == key.hashed_key)
@@ -524,13 +546,30 @@ async def adjust_payment_for_tokens(
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == key.hashed_key)
                     .values(
-                        balance=col(ApiKey.balance) + refund,
-                        total_spent=col(ApiKey.total_spent) - refund,
+                        reserved_balance=col(ApiKey.reserved_balance)
+                        - deducted_max_cost,
+                        balance=col(ApiKey.balance) - total_cost_msats,
+                        total_spent=col(ApiKey.total_spent) + total_cost_msats,
                     )
                 )
-                await session.exec(refund_stmt)  # type: ignore[call-overload]
+                result = await session.exec(refund_stmt)  # type: ignore[call-overload]
                 await session.commit()
-                cost.total_msats = deducted_max_cost - refund
+
+                if result.rowcount == 0:
+                    logger.error(
+                        "Failed to finalize payment - insufficient reserved balance",
+                        extra={
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "deducted_max_cost": deducted_max_cost,
+                            "current_reserved_balance": key.reserved_balance,
+                            "total_cost": total_cost_msats,
+                            "model": model,
+                        },
+                    )
+                    # Still return the cost data even if we couldn't properly finalize
+                    # The reservation was already made, so the user has paid
+
+                cost.total_msats = total_cost_msats
                 await session.refresh(key)
 
                 logger.info(

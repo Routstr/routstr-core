@@ -43,8 +43,8 @@ def check_imports() -> bool:
 
         print("Conftest fixtures imported successfully")
 
-        # Check router modules - imports are for verification only
-        from router.core.db import ApiKey
+        # Check routstr modules - imports are for verification only
+        from routstr.core.db import ApiKey
 
         del ApiKey
 

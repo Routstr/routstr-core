@@ -1,16 +1,17 @@
 """Comprehensive error handling and edge case tests"""
 
 import asyncio
+import hashlib
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ConnectError
+from httpx import ASGITransport, AsyncClient, ConnectError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from router.core.db import ApiKey
+from routstr.core.db import ApiKey
 
 
 class TestNetworkFailureScenarios:
@@ -26,11 +27,11 @@ class TestNetworkFailureScenarios:
         # Patch the wallet send function to simulate failure across all modules
         with (
             patch(
-                "router.wallet.send_token",
+                "routstr.wallet.send_token",
                 AsyncMock(side_effect=ConnectError("Mint service unavailable")),
             ),
             patch(
-                "router.balance.send_token",
+                "routstr.balance.send_token",
                 AsyncMock(side_effect=ConnectError("Mint service unavailable")),
             ),
         ):
@@ -46,8 +47,8 @@ class TestNetworkFailureScenarios:
         integration_session: AsyncSession,
     ) -> None:
         """Test proxy behavior when upstream LLM service is down"""
-        # Mock at the router level to simulate upstream being down
-        with patch("router.proxy.httpx.AsyncClient") as mock_client_class:
+        # Mock at the routstr level to simulate upstream being down
+        with patch("routstr.proxy.httpx.AsyncClient") as mock_client_class:
             # Create a mock client instance
             mock_client = AsyncMock()
             mock_client_class.return_value = mock_client
@@ -465,7 +466,7 @@ class TestRecoveryScenarios:
         # Simulate operations that might be interrupted
         try:
             # Start a transaction
-            api_key.balance -= 1000
+            api_key.reserved_balance += 1000
             api_key.total_requests += 1
             # Don't commit - simulate crash
             raise Exception("Simulated database crash")
@@ -616,30 +617,56 @@ class TestEdgeCaseCombinations:
     @pytest.mark.asyncio
     async def test_rapid_balance_exhaustion(
         self,
-        authenticated_client: AsyncClient,
+        integration_app: Any,
         integration_session: AsyncSession,
+        testmint_wallet: Any,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Test behavior when balance is rapidly exhausted"""
-        # Set a low balance
-        api_key_header = authenticated_client.headers["Authorization"].replace(
-            "Bearer ", ""
-        )
-        api_key_hash = (
-            api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
-        )
+        """Test behavior when balance is rapidly exhausted by concurrent requests.
 
-        # Set balance to just 1000 msats (1 sat)
-        from sqlalchemy import update
+        This test creates an API key with insufficient balance (500 msats) for even
+        a single request (which costs 1000 msats). It then makes 5 concurrent requests
+        to verify that all requests fail with 402 Payment Required errors.
 
-        await integration_session.execute(
-            update(ApiKey).where(ApiKey.hashed_key == api_key_hash).values(balance=1000)  # type: ignore[arg-type]
+        Note: The test disables MODEL_BASED_PRICING to avoid model lookup errors
+        since the test environment doesn't have models configured.
+        """
+        # Disable MODEL_BASED_PRICING for this test to avoid model lookup issues
+        monkeypatch.setattr(
+            "routstr.payment.cost_caculation.MODEL_BASED_PRICING", False
         )
+        monkeypatch.setattr("routstr.payment.helpers.MODEL_BASED_PRICING", False)
+
+        # Create a new API key with very low balance
+        # Generate a unique API key
+        test_key = f"sk-test-low-balance-{hashlib.sha256(str(time.time()).encode()).hexdigest()[:8]}"
+        api_key_hash = test_key[3:]  # Remove sk- prefix
+
+        # Create the API key with only 500 msats (less than one request cost)
+        new_key = ApiKey(
+            hashed_key=api_key_hash,
+            balance=500,  # Less than COST_PER_REQUEST (1000 msats)
+            reserved_balance=0,
+            total_spent=0,
+            total_requests=0,
+        )
+        integration_session.add(new_key)
         await integration_session.commit()
+
+        # Verify the key was created
+        await integration_session.refresh(new_key)
+
+        # Create a client with this low-balance key
+        low_balance_client = AsyncClient(
+            transport=ASGITransport(app=integration_app),  # type: ignore
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {test_key}"},
+        )
 
         # Make multiple concurrent requests that would exhaust balance
         tasks = []
         for _ in range(5):
-            task = authenticated_client.post(
+            task = low_balance_client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "gpt-3.5-turbo",
@@ -665,3 +692,6 @@ class TestEdgeCaseCombinations:
         result = await integration_session.execute(stmt)
         final_key = result.scalar_one()
         assert final_key.balance >= 0
+
+        # Clean up the test client
+        await low_balance_client.aclose()

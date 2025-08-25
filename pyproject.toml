@@ -1,6 +1,6 @@
 [project]
 name = "routstr"
-version = "0.1.0"
+version = "0.1.1b"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -58,6 +58,13 @@ markers = [
     "performance: marks tests that measure performance metrics",
 ]
 
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["routstr"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
@@ -72,8 +79,5 @@ disallow_incomplete_defs = true
 disallow_untyped_decorators = true
 
 [tool.uv.sources]
-secp256k1 = { git = "https://github.com/saschanaz/secp256k1-py", branch = "upgrade060" }
 routstr = { workspace = true }
-
-[tool.uv.workspace]
-members = ["."]
+secp256k1 = { git = "https://github.com/saschanaz/secp256k1-py", branch = "upgrade060" }

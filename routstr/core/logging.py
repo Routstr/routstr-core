@@ -89,7 +89,7 @@ def get_package_version() -> str:
                 return version
             current_path = current_path.parent
 
-        # Fallback: try the simple path resolution (3 levels up for router/logging/logging_config.py)
+        # Fallback: try the simple path resolution (3 levels up for routstr/logging/logging_config.py)
         pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
         if pyproject_path.exists():
             with open(pyproject_path, "rb") as f:
@@ -112,6 +112,23 @@ class VersionFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         """Add version information to the log record."""
         record.version = self.version
+        return True
+
+
+class RequestIdFilter(logging.Filter):
+    """Filter to add request ID to all log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Add request ID to the log record if available."""
+        try:
+            # Import here to avoid circular imports
+            from .middleware import request_id_context
+
+            request_id = request_id_context.get(None)
+            record.request_id = request_id if request_id else "no-request-id"
+        except ImportError:
+            # If middleware isn't available yet, just use default
+            record.request_id = "no-request-id"
         return True
 
 
@@ -198,12 +215,13 @@ def setup_logging() -> None:
         "formatters": {
             "json": {
                 "()": jsonlogger.JsonFormatter,
-                "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s",
+                "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s %(request_id)s",
                 "datefmt": "%Y-%m-%d %H:%M:%S",
             },
         },
         "filters": {
             "version_filter": {"()": VersionFilter},
+            "request_id_filter": {"()": RequestIdFilter},
             "security_filter": {"()": SecurityFilter},
         },
         "handlers": {
@@ -214,7 +232,7 @@ def setup_logging() -> None:
                 "show_path": False,
                 "rich_tracebacks": True,
                 "markup": True,
-                "filters": ["security_filter"],
+                "filters": ["request_id_filter", "security_filter"],
             },
             "file": {
                 "()": DailyRotatingFileHandler,
@@ -225,33 +243,43 @@ def setup_logging() -> None:
                 "interval": 1,  # Every 1 day
                 "backupCount": 30,  # Keep 30 days of logs
                 "atTime": None,  # Rotate at midnight (00:00)
-                "filters": ["version_filter", "security_filter"],
+                "filters": ["version_filter", "request_id_filter", "security_filter"],
             },
         },
         "loggers": {
-            "router": {
+            "routstr": {
                 "level": log_level,
                 "handlers": handlers,
                 "propagate": False,
             },
-            "router.payment": {
+            "routstr.payment": {
                 "level": log_level,
                 "handlers": handlers,
                 "propagate": False,
             },
-            "router.cashu": {
+            "routstr.proxy": {
                 "level": log_level,
                 "handlers": handlers,
                 "propagate": False,
             },
-            "router.proxy": {
+            "routstr.auth": {
                 "level": log_level,
                 "handlers": handlers,
                 "propagate": False,
             },
-            "router.auth": {
+            "routstr.payment.models": {
                 "level": log_level,
                 "handlers": handlers,
+                "propagate": False,
+            },
+            "routstr.core.exceptions": {
+                "level": log_level,
+                "handlers": handlers,
+                "propagate": False,
+            },
+            "routstr.core.middleware": {
+                "level": log_level,
+                "handlers": ["file"],
                 "propagate": False,
             },
             # Suppress verbose third-party logging
@@ -266,13 +294,13 @@ def setup_logging() -> None:
                 "propagate": False,
             },
             "uvicorn.access": {
-                "level": "WARNING",
-                "handlers": ["console"] if console_enabled else [],
+                "level": log_level,  # Use the configured log level instead of WARNING
+                "handlers": handlers,  # Use both console and file handlers
                 "propagate": False,
             },
             "uvicorn.error": {
-                "level": "INFO",
-                "handlers": ["console"],
+                "level": log_level,  # Use the configured log level
+                "handlers": handlers,  # Use both console and file handlers
                 "propagate": False,
             },
             "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},

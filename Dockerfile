@@ -12,6 +12,7 @@ RUN apk add --no-cache \
 RUN apk add git
 
 COPY uv.lock pyproject.toml ./
+RUN mkdir -p /routstr
 
 RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
 # RUN uv sync
@@ -25,4 +26,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["/.venv/bin/fastapi", "run", "router", "--host", "0.0.0.0"]
+CMD ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]

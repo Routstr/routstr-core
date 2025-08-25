@@ -69,7 +69,7 @@ cp .env.example .env
 ### Running Locally
 
 ```bash
-fastapi run router --host 0.0.0.0 --port 8000
+fastapi run routstr --host 0.0.0.0 --port 8000
 ```
 
 The service forwards requests to `UPSTREAM_BASE_URL`. Supply the upstream API key via the `UPSTREAM_API_KEY` environment variable if required.

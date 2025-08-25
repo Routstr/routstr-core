@@ -259,7 +259,7 @@ Before requesting review, ensure:
 
 ```text
 routstr-proxy/
-├── router/                 # Main application code
+├── routstr/                 # Main application code
 │   ├── core/              # Core functionality
 │   │   ├── admin.py       # Admin interface
 │   │   ├── db.py          # Database models and operations
@@ -284,10 +284,10 @@ routstr-proxy/
 
 ### Key Components
 
-- **FastAPI Application**: Main API server in `router/core/main.py`
-- **Database Models**: SQLModel definitions in `router/core/db.py`
-- **Payment Logic**: Cashu integration and cost calculation in `router/payment/`
-- **Proxy Handler**: Request forwarding logic in `router/proxy.py`
+- **FastAPI Application**: Main API server in `routstr/core/main.py`
+- **Database Models**: SQLModel definitions in `routstr/core/db.py`
+- **Payment Logic**: Cashu integration and cost calculation in `routstr/payment/`
+- **Proxy Handler**: Request forwarding logic in `routstr/proxy.py`
 
 ## Documentation
 

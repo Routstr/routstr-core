@@ -105,7 +105,15 @@ async def test_full_wallet_flow(
     assert refund_response.status_code == 200
     refund_data = refund_response.json()
     assert "token" in refund_data
-    assert refund_data["msats"] == (initial_amount + topup_amount) * 1000
+
+    # Check for either sats or msats depending on refund_currency
+    total_amount = initial_amount + topup_amount
+    if "sats" in refund_data:
+        assert refund_data["sats"] == str(total_amount)
+    elif "msats" in refund_data:
+        assert refund_data["msats"] == str(total_amount * 1000)
+    else:
+        pytest.fail("Response should contain either 'sats' or 'msats'")
 
 
 @pytest.mark.integration

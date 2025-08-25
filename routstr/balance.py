@@ -1,10 +1,11 @@
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
-from .wallet import CurrencyUnit, credit_balance, send_to_lnurl, send_token
+from .wallet import PRIMARY_MINT_URL, credit_balance, send_to_lnurl, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -32,6 +33,17 @@ async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     }
 
 
+@router.get("/create")
+async def create_balance(
+    initial_balance_token: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    key = await validate_bearer_key(initial_balance_token, session)
+    return {
+        "api_key": "sk-" + key.hashed_key,
+        "balance": key.balance,
+    }
+
+
 @router.get("/info")
 async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     return {
@@ -40,12 +52,22 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
     }
 
 
+class TopupRequest(BaseModel):
+    cashu_token: str
+
+
 @router.post("/topup")
 async def topup_wallet_endpoint(
-    cashu_token: str,
+    cashu_token: str | None = None,
+    topup_request: TopupRequest | None = None,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
+    if topup_request is not None:
+        cashu_token = topup_request.cashu_token
+    if cashu_token is None:
+        raise HTTPException(status_code=400, detail="A cashu_token is required.")
+
     cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")
@@ -69,36 +91,52 @@ async def refund_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    remaining_balance_msats = key.balance
+    remaining_balance_msats: int = key.balance
 
-    if remaining_balance_msats == 0:
+    if remaining_balance_msats <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
 
     # Perform refund operation first, before modifying balance
     try:
         if key.refund_address:
-            await send_to_lnurl(remaining_balance_msats, CurrencyUnit.msat, key.refund_address)
-            result = {"recipient": key.refund_address, "msats": remaining_balance_msats}
+            if key.refund_currency == "sat":
+                remaining_balance = remaining_balance_msats * 1000
+            await send_to_lnurl(
+                remaining_balance,
+                key.refund_currency or "sat",
+                key.refund_mint_url or PRIMARY_MINT_URL,
+                key.refund_address,
+            )
+            result = {"recipient": key.refund_address}
         else:
-            # Convert msats to sats for cashu wallet
-            remaining_balance_sats = remaining_balance_msats // 1000
-            if remaining_balance_sats == 0:
-                raise HTTPException(
-                    status_code=400, detail="Balance too small to refund (less than 1 sat)"
-                )
+            refund_amount = (
+                remaining_balance_msats // 1000
+                if key.refund_currency == "sat"
+                else remaining_balance_msats
+            )
+            refund_currency = key.refund_currency or "sat"
+            token = await send_token(
+                refund_amount, refund_currency, key.refund_mint_url
+            )
+            result = {"token": token}
 
-            # TODO: choose currency and mint based on what user has configured
-            token = await send_token(remaining_balance_sats, "sat")
+        if key.refund_currency == "sat":
+            result["sats"] = str(remaining_balance_msats // 1000)
+        else:
+            result["msats"] = str(remaining_balance_msats)
 
-            result = {"msats": remaining_balance_msats, "recipient": None, "token": token}
     except HTTPException:
         # Re-raise HTTP exceptions (like 400 for balance too small)
         raise
     except Exception as e:
         # If refund fails, don't modify the database
         error_msg = str(e)
-        if ("mint" in error_msg.lower() or "connection" in error_msg.lower() or 
-            isinstance(e, Exception) and "ConnectError" in str(type(e))):
+        if (
+            "mint" in error_msg.lower()
+            or "connection" in error_msg.lower()
+            or isinstance(e, Exception)
+            and "ConnectError" in str(type(e))
+        ):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
             raise HTTPException(status_code=500, detail="Refund failed")

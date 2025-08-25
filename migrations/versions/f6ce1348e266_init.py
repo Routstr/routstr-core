@@ -6,8 +6,8 @@ Create Date: 2025-08-09 13:28:38.537652
 """
 
 import sqlalchemy as sa
-import sqlmodel as sqlm
 from alembic import op
+from sqlmodel.sql import sqltypes
 
 # revision identifiers, used by Alembic.
 revision = "f6ce1348e266"
@@ -20,9 +20,9 @@ def upgrade() -> None:
     if "api_keys" not in sa.inspect(op.get_bind()).get_table_names():
         op.create_table(
             "api_keys",
-            sa.Column("hashed_key", sqlm.sql.sqltypes.AutoString(), nullable=False),
+            sa.Column("hashed_key", sqltypes.AutoString(), nullable=False),
             sa.Column("balance", sa.Integer(), nullable=False),
-            sa.Column("refund_address", sqlm.sql.sqltypes.AutoString(), nullable=True),
+            sa.Column("refund_address", sqltypes.AutoString(), nullable=True),
             sa.Column("key_expiry_time", sa.Integer(), nullable=True),
             sa.Column("total_spent", sa.Integer(), nullable=False),
             sa.Column("total_requests", sa.Integer(), nullable=False),

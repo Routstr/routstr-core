@@ -11,7 +11,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from router.core.db import ApiKey
+from routstr.core.db import ApiKey
 
 from .utils import (
     CashuTokenGenerator,
@@ -425,7 +425,7 @@ async def test_network_failure_during_token_verification(  # type: ignore[no-unt
     token = await testmint_wallet.mint_tokens(300)
 
     # Mock credit_balance to simulate network failure during token verification
-    with patch("router.balance.credit_balance") as mock_credit_balance:
+    with patch("routstr.balance.credit_balance") as mock_credit_balance:
         mock_credit_balance.side_effect = Exception("Network error: Connection timeout")
 
         response = await authenticated_client.post(
@@ -470,7 +470,11 @@ async def test_topup_with_zero_amount_token(  # type: ignore[no-untyped-def]
 
     # Create a token with 0 amount (edge case)
     # The testmint wallet should handle this
-    with patch.object(testmint_wallet, "redeem_token", return_value=(0, "sat", testmint_wallet.mint_url)):
+    with patch.object(
+        testmint_wallet,
+        "redeem_token",
+        return_value=(0, "sat", testmint_wallet.mint_url),
+    ):
         token = await testmint_wallet.mint_tokens(0)
 
         response = await authenticated_client.post(

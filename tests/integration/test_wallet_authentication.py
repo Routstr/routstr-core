@@ -11,7 +11,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from router.core.db import ApiKey
+from routstr.core.db import ApiKey
 
 from .utils import (
     CashuTokenGenerator,

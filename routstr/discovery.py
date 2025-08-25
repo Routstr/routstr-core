@@ -9,6 +9,10 @@ import httpx
 import websockets
 from fastapi import APIRouter
 
+from .core.logging import get_logger
+
+logger = get_logger(__name__)
+
 providers_router = APIRouter(prefix="/v1/providers")
 
 
@@ -44,7 +48,7 @@ async def query_nostr_relay_for_providers(
 
     try:
         async with websockets.connect(relay_url, timeout=timeout) as websocket:
-            print("Connected to relay, searching for kind 31338 events")
+            logger.debug("Connected to relay, searching for kind 31338 events")
             await websocket.send(req_message)
 
             while True:
@@ -54,27 +58,27 @@ async def query_nostr_relay_for_providers(
 
                     if data[0] == "EVENT" and data[1] == sub_id:
                         event = data[2]
-                        print(f"Found provider announcement: {event['id']}")
+                        logger.debug(f"Found provider announcement: {event['id']}")
                         events.append(event)
                     elif data[0] == "EOSE" and data[1] == sub_id:
-                        print("Received EOSE message")
+                        logger.debug("Received EOSE message")
                         break
                     elif data[0] == "NOTICE":
-                        print(f"Relay notice: {data[1]}")
+                        logger.warning(f"Relay notice: {data[1]}")
 
                 except asyncio.TimeoutError:
-                    print("Timeout waiting for message")
+                    logger.debug("Timeout waiting for message")
                     break
                 except json.JSONDecodeError:
-                    print("Failed to decode message as JSON")
+                    logger.warning("Failed to decode message as JSON")
                     continue
 
             await websocket.send(json.dumps(["CLOSE", sub_id]))
 
     except Exception as e:
-        print(f"Query failed: {e}")
+        logger.error(f"Query failed: {e}")
 
-    print(f"Query complete. Found {len(events)} provider announcements")
+    logger.info(f"Query complete. Found {len(events)} provider announcements")
     return events
 
 
@@ -103,7 +107,7 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
 
         # Validate required fields
         if not endpoint_url or not provider_name or not d_tag:
-            print(
+            logger.warning(
                 f"Invalid provider announcement - missing required tags: {event['id']}"
             )
             return None
@@ -140,7 +144,7 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     except Exception as e:
-        print(f"Error parsing provider announcement {event.get('id', 'unknown')}: {e}")
+        logger.error(f"Error parsing provider announcement {event.get('id', 'unknown')}: {e}")
         return None
 
 
@@ -221,7 +225,7 @@ async def get_providers(
 
     # Query multiple relays for provider announcements
     for relay_url in discovery_relays:
-        print(f"\nQuerying relay for providers: {relay_url}")
+        logger.info(f"Querying relay for providers: {relay_url}")
         try:
             events = await query_nostr_relay_for_providers(
                 relay_url=relay_url,
@@ -235,13 +239,13 @@ async def get_providers(
                     event_ids.add(event["id"])
                     all_events.append(event)
 
-            print(f"Got {len(events)} provider announcements from {relay_url}")
+            logger.info(f"Got {len(events)} provider announcements from {relay_url}")
 
         except Exception as e:
-            print(f"Failed to query {relay_url}: {e}")
+            logger.error(f"Failed to query {relay_url}: {e}")
             continue
 
-    print(f"Found {len(all_events)} total unique provider announcements")
+    logger.info(f"Found {len(all_events)} total unique provider announcements")
 
     # Parse provider announcements according to RIP-02
     providers = []
@@ -250,7 +254,7 @@ async def get_providers(
         if parsed_provider:
             providers.append(parsed_provider)
 
-    print(f"Parsed {len(providers)} valid provider announcements")
+    logger.info(f"Parsed {len(providers)} valid provider announcements")
 
     # Check provider health if requested
     healthy_providers: list[dict[str, Any]] = []

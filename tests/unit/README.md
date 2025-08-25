@@ -21,7 +21,7 @@ pytest
 To run tests with coverage:
 
 ```bash
-pytest --cov=router --cov-report=html
+pytest --cov=routstr --cov-report=html
 ```
 
 To run specific test files:

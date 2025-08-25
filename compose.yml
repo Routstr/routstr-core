@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  router:
+  routstr:
     build: .
     volumes:
       - .:/app
@@ -21,9 +21,16 @@ services:
       - tor-data:/var/lib/tor
     environment:
       # Format: HS_<NAME>=<TARGET_HOST>:<TARGET_PORT>:<VIRTUAL_PORT>
-      - HS_ROUTER=router:8000:80
+      - HS_ROUTER=routstr:8000:80
     depends_on:
-      - router
+      - routstr
+
+  # Legacy service definition to ensure cleanup of old container
+  router:
+    image: alpine:latest
+    command: /bin/true
+    profiles:
+      - cleanup
 
 volumes:
   tor-data:

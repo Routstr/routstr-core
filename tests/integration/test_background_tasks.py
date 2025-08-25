@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from router.core.db import ApiKey
-from router.payment.models import MODELS, Model, Pricing, update_sats_pricing
-from router.wallet import periodic_payout
+from routstr.core.db import ApiKey
+from routstr.payment.models import MODELS, Model, Pricing, update_sats_pricing
+from routstr.wallet import periodic_payout
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,7 @@ class TestPricingUpdateTask:
         mock_sats_usd = 0.00002  # 1 sat = $0.00002 (BTC at $50,000)
 
         with patch(
-            "router.payment.price.sats_usd_ask_price",
+            "routstr.payment.price.sats_usd_ask_price",
             AsyncMock(return_value=mock_sats_usd),
         ):
             # Create a test model
@@ -114,7 +114,7 @@ class TestPricingUpdateTask:
                 raise Exception("Price API error")
             return 0.00002
 
-        with patch("router.payment.price.sats_usd_ask_price", mock_price_func):
+        with patch("routstr.payment.price.sats_usd_ask_price", mock_price_func):
             # Test the retry behavior directly
             # First call should fail
             try:
@@ -122,7 +122,7 @@ class TestPricingUpdateTask:
                 assert False, "Expected exception on first call"
             except Exception:
                 pass
-            
+
             # Second call should succeed
             result = await mock_price_func()
             assert result == 0.00002
@@ -165,7 +165,7 @@ class TestPricingUpdateTask:
 
         try:
             with patch(
-                "router.payment.price.sats_usd_ask_price",
+                "routstr.payment.price.sats_usd_ask_price",
                 AsyncMock(return_value=0.00002),
             ):
                 # Initialize pricing once to ensure consistent state
@@ -214,9 +214,9 @@ class TestRefundCheckTask:
         # Mock the wallet send_to_lnurl method and get_session
         with (
             patch(
-                "router.wallet.send_to_lnurl", AsyncMock(return_value=5)
+                "routstr.wallet.send_to_lnurl", AsyncMock(return_value=5)
             ) as mock_send_to_lnurl,
-            patch("router.core.db.get_session") as mock_get_session,
+            patch("routstr.core.db.get_session") as mock_get_session,
         ):
             # Make get_session return our integration session
             async def get_test_session() -> Any:
@@ -279,9 +279,9 @@ class TestRefundCheckTask:
 
         with (
             patch(
-                "router.wallet.send_to_lnurl", mock_send_to_lnurl
+                "routstr.wallet.send_to_lnurl", mock_send_to_lnurl
             ) as mock_send_to_lnurl_patch,
-            patch("router.core.db.get_session") as mock_get_session,
+            patch("routstr.core.db.get_session") as mock_get_session,
         ):
             # Make get_session return our integration session
             async def get_test_session() -> Any:
@@ -366,9 +366,9 @@ class TestRefundCheckTask:
 
         with (
             patch(
-                "router.wallet.send_to_lnurl", AsyncMock(return_value=1)
+                "routstr.wallet.send_to_lnurl", AsyncMock(return_value=1)
             ) as mock_send_to_lnurl,
-            patch("router.core.db.get_session") as mock_get_session,
+            patch("routstr.core.db.get_session") as mock_get_session,
         ):
             # Make get_session return our integration session
             async def get_test_session() -> Any:
@@ -424,7 +424,7 @@ class TestRefundCheckTask:
     # async def test_refund_check_disabled(self) -> None:
     #     """Test that refund check can be disabled by setting interval to 0"""
     #     # Patch the constant directly to disable refunds
-    #     with patch.object(router.wallet, "REFUND_PROCESSING_INTERVAL", 0):
+    #     with patch.object(routstr.wallet, "REFUND_PROCESSING_INTERVAL", 0):
     #         # Task should exit immediately
     #         task = asyncio.create_task(check_for_refunds())
     #         await task  # Should complete without hanging
@@ -466,9 +466,9 @@ class TestPeriodicPayoutTask:
         wallet_balance = 200000  # 200 sats total
 
         with (
-            patch("router.wallet.get_balance", AsyncMock(return_value=wallet_balance)),
+            patch("routstr.wallet.get_balance", AsyncMock(return_value=wallet_balance)),
             patch(
-                "router.wallet.send_to_lnurl", AsyncMock(return_value=None)
+                "routstr.wallet.send_to_lnurl", AsyncMock(return_value=None)
             ) as mock_send_to_lnurl,
         ):
             # Mock environment variables
@@ -481,7 +481,7 @@ class TestPeriodicPayoutTask:
                 },
             ):
                 # Call periodic_payout directly (pay_out was renamed/refactored)
-                from router.wallet import periodic_payout
+                from routstr.wallet import periodic_payout
 
                 await periodic_payout()
 
@@ -506,7 +506,7 @@ class TestPeriodicPayoutTask:
     #     integration_session.add(key)
     #     await integration_session.commit()
 
-    #     with patch("router.cashu.wallet") as mock_wallet:
+    #     with patch("routstr.cashu.wallet") as mock_wallet:
     #         mock_wallet_instance = AsyncMock()
     #         mock_wallet_instance.balance = AsyncMock(
     #             return_value=100000
@@ -522,7 +522,7 @@ class TestPeriodicPayoutTask:
     #                 "DEV_LN_ADDRESS": "dev@test.com",
     #             },
     #         ):
-    #             from router.cashu import pay_out
+    #             from routstr.cashu import pay_out
 
     #             await pay_out()
 
@@ -543,7 +543,7 @@ class TestPeriodicPayoutTask:
     #     integration_session.add(key)
     #     await integration_session.commit()
 
-    #     with patch("router.cashu.wallet") as mock_wallet:
+    #     with patch("routstr.cashu.wallet") as mock_wallet:
     #         mock_wallet_instance = AsyncMock()
     #         mock_wallet_instance.balance = AsyncMock(
     #             return_value=96000
@@ -552,7 +552,7 @@ class TestPeriodicPayoutTask:
     #         mock_wallet.return_value = mock_wallet_instance
 
     #         with patch.dict(os.environ, {"MINIMUM_PAYOUT": "10"}):  # 10 sats minimum
-    #             from router.cashu import pay_out
+    #             from routstr.cashu import pay_out
 
     #             await pay_out()
 
@@ -571,9 +571,9 @@ class TestTaskInteractions:
     #     """Test that all tasks can run concurrently without issues"""
     #     # Mock all external dependencies
     #     with (
-    #         patch("router.payment.price.sats_usd_ask_price", AsyncMock(return_value=0.00002)),
-    #         patch("router.cashu.wallet") as mock_wallet,
-    #         patch("router.cashu.pay_out", AsyncMock()),
+    #         patch("routstr.payment.price.sats_usd_ask_price", AsyncMock(return_value=0.00002)),
+    #         patch("routstr.cashu.wallet") as mock_wallet,
+    #         patch("routstr.cashu.pay_out", AsyncMock()),
     #     ):
     #         mock_wallet_instance = AsyncMock()
     #         mock_wallet_instance.send_to_lnurl = AsyncMock(return_value=1)
@@ -587,7 +587,7 @@ class TestTaskInteractions:
     #             tasks.append(pricing_task)
 
     #             # Refund task (disabled to avoid interference)
-    #             with patch.object(router.wallet, "REFUND_PROCESSING_INTERVAL", 0):
+    #             with patch.object(routstr.wallet, "REFUND_PROCESSING_INTERVAL", 0):
     #                 refund_task = asyncio.create_task(check_for_refunds())
     #                 tasks.append(refund_task)
 
@@ -621,7 +621,7 @@ class TestTaskInteractions:
             processing.set()
             await asyncio.sleep(2)  # Simulate long operation
 
-        with patch("router.payment.price.sats_usd_ask_price", slow_task):
+        with patch("routstr.payment.price.sats_usd_ask_price", slow_task):
             # Start the pricing task
             task = asyncio.create_task(update_sats_pricing())
 
@@ -708,11 +708,15 @@ class TestTaskInteractions:
         # Patch the actual task functions
         with (
             patch(
-                "router.payment.models.update_sats_pricing",
+                "routstr.payment.models.update_sats_pricing",
                 lambda: task_with_cleanup("pricing"),
             ),
-            patch("router.wallet.periodic_payout", lambda: task_with_cleanup("refund")),
-            patch("router.wallet.periodic_payout", lambda: task_with_cleanup("payout")),
+            patch(
+                "routstr.wallet.periodic_payout", lambda: task_with_cleanup("refund")
+            ),
+            patch(
+                "routstr.wallet.periodic_payout", lambda: task_with_cleanup("payout")
+            ),
         ):
             # Start all tasks
             tasks = [

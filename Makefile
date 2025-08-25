@@ -92,7 +92,7 @@ docker-down:
 lint:
 	@echo "🔍 Running linting checks..."
 	$(RUFF) check .
-	$(MYPY) router/ --ignore-missing-imports
+	$(MYPY) routstr/ --ignore-missing-imports
 
 format:
 	@echo "✨ Formatting code..."
@@ -101,7 +101,7 @@ format:
 
 type-check:
 	@echo "🔎 Running type checks..."
-	$(MYPY) router/ --ignore-missing-imports
+	$(MYPY) routstr/ --ignore-missing-imports
 
 # Development setup
 dev-setup:
@@ -209,7 +209,7 @@ db-clean:
 # Advanced testing options
 test-coverage:
 	@echo "📊 Running tests with coverage..."
-	$(PYTEST) --cov=router --cov-report=html --cov-report=term
+	$(PYTEST) --cov=routstr --cov-report=html --cov-report=term
 	@echo "Coverage report generated in htmlcov/"
 
 test-watch:
@@ -228,7 +228,7 @@ ci-test:
 ci-lint:
 	@echo "🤖 Running CI linting..."
 	$(RUFF) check . --exit-non-zero-on-fix
-	$(MYPY) router/ --ignore-missing-imports --no-error-summary
+	$(MYPY) routstr/ --ignore-missing-imports --no-error-summary
 
 # Debug helpers
 test-debug:

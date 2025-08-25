@@ -1767,8 +1767,8 @@ wheels = [
 
 [[package]]
 name = "routstr"
-version = "0.1.0"
-source = { virtual = "." }
+version = "0.1.1b"
+source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
@@ -1822,7 +1822,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "pytest-benchmark", specifier = ">=4.0.0" },
     { name = "pytest-cov", specifier = ">=6.1.1" },
-    { name = "routstr", virtual = "." },
+    { name = "routstr", editable = "." },
     { name = "ruff", specifier = ">=0.11.6" },
 ]
 

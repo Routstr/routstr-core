@@ -139,7 +139,7 @@ async def main() -> None:
                 print("WARNING: Proxy server may not be running properly")
     except Exception:
         print("ERROR: Proxy server is not running!")
-        print("Please start the server with: uvicorn router.main:app")
+        print("Please start the server with: uvicorn routstr.main:app")
         sys.exit(1)
 
     # Run performance tests

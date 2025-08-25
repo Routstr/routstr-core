@@ -7,7 +7,10 @@ from urllib.request import urlopen
 from fastapi import APIRouter
 from pydantic.v1 import BaseModel
 
+from ..core.logging import get_logger
 from .price import sats_usd_ask_price
+
+logger = get_logger(__name__)
 
 models_router = APIRouter()
 
@@ -84,7 +87,7 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
 
             return models_data
     except Exception as e:
-        print(f"Error fetching models from OpenRouter API: {e}")
+        logger.error(f"Error fetching models from OpenRouter API: {e}")
         return []
 
 
@@ -101,26 +104,26 @@ def load_models() -> list[Model]:
 
     # Check if user has actively provided a models.json file
     if models_path.exists():
-        print(f"Loading models from user-provided file: {models_path}")
+        logger.info(f"Loading models from user-provided file: {models_path}")
         try:
             with models_path.open("r") as f:
                 data = json.load(f)
             return [Model(**model) for model in data.get("models", [])]
         except Exception as e:
-            print(f"Error loading models from {models_path}: {e}")
+            logger.error(f"Error loading models from {models_path}: {e}")
             # Fall through to auto-generation
 
     # Auto-generate models from OpenRouter API
-    print("Auto-generating models from OpenRouter API")
+    logger.info("Auto-generating models from OpenRouter API")
     source_filter = os.getenv("SOURCE")
     source_filter = source_filter if source_filter and source_filter.strip() else None
 
     models_data = fetch_openrouter_models(source_filter=source_filter)
     if not models_data:
-        print("Failed to fetch models from OpenRouter API")
+        logger.error("Failed to fetch models from OpenRouter API")
         return []
 
-    print(f"Successfully fetched {len(models_data)} models from OpenRouter API")
+    logger.info(f"Successfully fetched {len(models_data)} models from OpenRouter API")
     return [Model(**model) for model in models_data]
 
 
@@ -165,7 +168,7 @@ async def update_sats_pricing() -> None:
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print("Error updating sats pricing: ", e)
+            logger.error(f"Error updating sats pricing: {e}")
         try:
             await asyncio.sleep(10)
         except asyncio.CancelledError:
@@ -173,6 +176,6 @@ async def update_sats_pricing() -> None:
 
 
 @models_router.get("/v1/models")
-@models_router.get("/models")
+@models_router.get("/models", include_in_schema=False)
 async def models() -> dict:
     return {"data": MODELS}

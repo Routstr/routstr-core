@@ -1,8 +1,8 @@
 import json
 import os
-from typing import Optional
 
 from fastapi import HTTPException, Response
+from fastapi.requests import Request
 
 from ..core import get_logger
 from ..wallet import deserialize_token_from_string
@@ -17,30 +17,6 @@ UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
 
 if not UPSTREAM_BASE_URL:
     raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
-
-
-def get_cost_per_request(model: str | None = None) -> int:
-    """Get the cost per request for a given model."""
-    logger.debug(
-        "Calculating cost per request",
-        extra={
-            "model": model,
-            "model_based_pricing": MODEL_BASED_PRICING,
-            "has_models": bool(MODELS),
-        },
-    )
-
-    if MODEL_BASED_PRICING and MODELS and model:
-        cost = get_max_cost_for_model(model=model)
-        logger.debug(
-            "Using model-based cost", extra={"model": model, "cost_msats": cost}
-        )
-        return cost
-
-    logger.debug(
-        "Using default cost per request", extra={"cost_msats": COST_PER_REQUEST}
-    )
-    return COST_PER_REQUEST
 
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
@@ -111,7 +87,7 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         )
 
 
-def get_max_cost_for_model(model: str) -> int:
+def get_max_cost_for_model(model: str, tolerance_percentage: int = 1) -> int:
     """Get the maximum cost for a specific model."""
     logger.debug(
         "Getting max cost for model",
@@ -142,7 +118,7 @@ def get_max_cost_for_model(model: str) -> int:
 
     for m in MODELS:
         if m.id == model:
-            max_cost = m.sats_pricing.max_cost * 1000  # type: ignore
+            max_cost = m.sats_pricing.max_cost * 1000 * (1 - tolerance_percentage / 100)  # type: ignore
             logger.debug(
                 "Found model-specific max cost",
                 extra={"model": model, "max_cost_msats": max_cost},
@@ -157,21 +133,13 @@ def get_max_cost_for_model(model: str) -> int:
 
 
 def create_error_response(
-    error_type: str, message: str, status_code: int, token: Optional[str] = None
+    error_type: str,
+    message: str,
+    status_code: int,
+    request: Request,
+    token: str | None = None,
 ) -> Response:
     """Create a standardized error response."""
-    logger.info(
-        "Creating error response",
-        extra={
-            "error_type": error_type,
-            "error_message": message,
-            "status_code": status_code,
-        },
-    )
-
-    response_headers = {}
-    if token:
-        response_headers["X-Cashu"] = token
     return Response(
         content=json.dumps(
             {
@@ -179,12 +147,13 @@ def create_error_response(
                     "message": message,
                     "type": error_type,
                     "code": status_code,
-                }
+                },
+                "request_id": getattr(request.state, "request_id", "unknown"),
             }
         ),
         status_code=status_code,
         media_type="application/json",
-        headers=dict(response_headers),
+        headers={"X-Cashu": token} if token else {},
     )
 
 

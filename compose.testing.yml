@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  router:
+  routstr:
     build: .
-    command: ["/.venv/bin/fastapi", "dev", "router", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["/.venv/bin/fastapi", "dev", "routstr", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     environment:
@@ -27,9 +27,6 @@ services:
       - "REFUND_PROCESSING_INTERVAL=3600"
       - "MINIMUM_PAYOUT=1000"
       - "PAYOUT_INTERVAL=86400"
-    volumes:
-      - ./:/app
-      - ./logs:/app/logs
     depends_on:
       - mock-mint
       - mock-openai
@@ -40,8 +37,6 @@ services:
     restart: unless-stopped
     ports:
       - "8088:8080"  # host:container
-    volumes:
-      - ./relay-data:/usr/src/app/db
     environment:
       - LISTEN_ADDR=0.0.0.0
       - LISTEN_PORT=8080
