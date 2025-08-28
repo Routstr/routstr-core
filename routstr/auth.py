@@ -606,3 +606,83 @@ async def adjust_payment_for_tokens(
                     }
                 },
             )
+
+
+async def get_bearer_token_key(
+    headers: dict, path: str, session: AsyncSession, auth: str
+) -> ApiKey:
+    """Handle bearer token authentication proxy requests."""
+    bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
+    refund_address = headers.get("Refund-LNURL", None)
+    key_expiry_time = headers.get("Key-Expiry-Time", None)
+
+    logger.debug(
+        "Processing bearer token",
+        extra={
+            "path": path,
+            "has_refund_address": bool(refund_address),
+            "has_expiry_time": bool(key_expiry_time),
+            "bearer_key_preview": bearer_key[:20] + "..."
+            if len(bearer_key) > 20
+            else bearer_key,
+        },
+    )
+
+    # Validate key_expiry_time header
+    if key_expiry_time:
+        try:
+            key_expiry_time = int(key_expiry_time)  # type: ignore
+            logger.debug(
+                "Key expiry time validated",
+                extra={"expiry_time": key_expiry_time, "path": path},
+            )
+        except ValueError:
+            logger.error(
+                "Invalid Key-Expiry-Time header",
+                extra={"key_expiry_time": key_expiry_time, "path": path},
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid Key-Expiry-Time: must be a valid Unix timestamp",
+            )
+        if not refund_address:
+            logger.error(
+                "Missing Refund-LNURL header with Key-Expiry-Time",
+                extra={"path": path, "expiry_time": key_expiry_time},
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Error: Refund-LNURL header required when using Key-Expiry-Time",
+            )
+    else:
+        key_expiry_time = None
+
+    try:
+        key = await validate_bearer_key(
+            bearer_key,
+            session,
+            refund_address,
+            key_expiry_time,  # type: ignore
+        )
+        logger.info(
+            "Bearer token validated successfully",
+            extra={
+                "path": path,
+                "key_hash": key.hashed_key[:8] + "...",
+                "key_balance": key.balance,
+            },
+        )
+        return key
+    except Exception as e:
+        logger.error(
+            "Bearer token validation failed",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "path": path,
+                "bearer_key_preview": bearer_key[:20] + "..."
+                if len(bearer_key) > 20
+                else bearer_key,
+            },
+        )
+        raise

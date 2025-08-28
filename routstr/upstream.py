@@ -11,6 +11,7 @@ from .auth import adjust_payment_for_tokens
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession, create_session
 from .payment.helpers import create_error_response
+from .request import RoutstrRequest
 
 logger = get_logger(__name__)
 
@@ -35,6 +36,22 @@ class UpstreamProvider:
             completion_tokens=None,
             total_tokens=None,
         )
+
+    async def forward(
+        self, request: RoutstrRequest, db_session: AsyncSession
+    ) -> Response | StreamingResponse:
+        headers = self.prepare_upstream_headers(request.request_headers)
+
+        response = await self.forward_to_upstream(
+            request._request,
+            request.path,
+            headers,
+            request.request_body,
+            request._balance,
+            request.reserved_balance,
+            db_session,
+        )
+        return response
 
     async def handle_streaming_chat_completion(
         self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
