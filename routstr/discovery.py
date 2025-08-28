@@ -144,7 +144,9 @@ def parse_provider_announcement(event: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     except Exception as e:
-        logger.error(f"Error parsing provider announcement {event.get('id', 'unknown')}: {e}")
+        logger.error(
+            f"Error parsing provider announcement {event.get('id', 'unknown')}: {e}"
+        )
         return None
 
 

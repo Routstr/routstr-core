@@ -18,6 +18,7 @@ from .db import init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
+from .pricing import pricing_router
 
 # Initialize logging first
 setup_logging()
@@ -128,6 +129,7 @@ async def admin_redirect() -> RedirectResponse:
 
 app.include_router(models_router)
 app.include_router(admin_router)
+app.include_router(pricing_router)
 app.include_router(balance_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
