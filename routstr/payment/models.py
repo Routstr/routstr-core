@@ -26,10 +26,10 @@ class Architecture(BaseModel):
 class Pricing(BaseModel):
     prompt: float
     completion: float
-    request: float
-    image: float
-    web_search: float
-    internal_reasoning: float
+    request: float = 0.0
+    image: float = 0.0
+    web_search: float = 0.0
+    internal_reasoning: float = 0.0
     max_cost: float = 0.0  # in sats not msats
 
 
@@ -51,6 +51,8 @@ class Model(BaseModel):
     per_request_limits: dict | None = None
     top_provider: TopProvider | None = None
     provider_url: str | None = None
+    api_key: str | None = None
+
 
 
 MODELS: list[Model] = []
@@ -326,4 +328,11 @@ async def update_sats_pricing() -> None:
 @models_router.get("/v1/models")
 @models_router.get("/models", include_in_schema=False)
 async def models() -> dict:
-    return {"data": MODELS}
+    sanitized_models = []
+    for model in MODELS:
+        model_dict = model.dict()
+        model_dict.pop("provider_url", None)
+        model_dict.pop("api_key", None)
+        sanitized_models.append(model_dict)
+
+    return {"data": sanitized_models}
