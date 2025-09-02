@@ -367,7 +367,46 @@ async def forward_to_upstream(
                     await response.aclose()
                     await client.aclose()
 
-        # For all other responses, stream the response
+        # For all other responses, check if it's a client error that should be passed through
+        if 400 <= response.status_code < 500:
+            # For client errors, read the response body to pass through the error detail
+            try:
+                content = await response.aread()
+                await response.aclose()
+                await client.aclose()
+                
+                logger.debug(
+                    "Passing through client error from upstream",
+                    extra={
+                        "path": path,
+                        "status_code": response.status_code,
+                        "key_hash": key.hashed_key[:8] + "...",
+                    },
+                )
+                
+                # Remove content-encoding header since we've already decoded the content
+                headers = dict(response.headers)
+                headers.pop("content-encoding", None)
+                headers.pop("content-length", None)  # Content length may have changed
+                
+                return Response(
+                    content=content,
+                    status_code=response.status_code,
+                    headers=headers,
+                    media_type=response.headers.get("content-type", "application/json")
+                )
+            except Exception as e:
+                logger.error(
+                    "Error reading client error response",
+                    extra={
+                        "error": str(e),
+                        "path": path,
+                        "status_code": response.status_code,
+                    },
+                )
+                # Fall through to streaming response if we can't read the body
+        
+        # For server errors and other responses, stream the response
         background_tasks = BackgroundTasks()
         background_tasks.add_task(response.aclose)
         background_tasks.add_task(client.aclose)
@@ -596,20 +635,7 @@ async def proxy(
                 "key_hash": key.hashed_key[:8] + "...",
                 "key_balance": key.balance,
                 "max_cost_for_model": max_cost_for_model,
-                "upstream_headers": response.headers
-                if hasattr(response, "headers")
-                else None,
-                "upstream_response": response.body
-                if hasattr(response, "body")
-                else None,
             },
-        )
-        request_id = (
-            request.state.request_id if hasattr(request.state, "request_id") else None
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Upstream request failed, please contact support with request id: {request_id}",
         )
 
     return response
