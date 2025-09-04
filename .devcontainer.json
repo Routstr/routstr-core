@@ -1,0 +1,45 @@
+{
+    "name": "routstr-proxy",
+    "dockerComposeFile": [
+        "compose.yml",
+        "compose.override.yml"
+    ],
+    "service": "routstr",
+    "workspaceFolder": "/app",
+    "overrideCommand": false,
+    "runServices": [
+        "relay",
+        "routstr"
+    ],
+    "shutdownAction": "stopCompose",
+    "forwardPorts": [
+        8000,
+        8088
+    ],
+    "portsAttributes": {
+        "8000": {
+            "label": "FastAPI",
+            "onAutoForward": "notify"
+        },
+        "8088": {
+            "label": "Relay",
+            "onAutoForward": "ignore"
+        }
+    },
+    "remoteEnv": {
+        "PYTHONUNBUFFERED": "1"
+    },
+    "postCreateCommand": "git config --global --add safe.directory /app || true",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/.venv/bin/python",
+                "python.analysis.typeCheckingMode": "basic"
+            },
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance"
+            ]
+        }
+    }
+}
