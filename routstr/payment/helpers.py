@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Mapping
 
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
@@ -14,6 +15,7 @@ logger = get_logger(__name__)
 
 UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", "")
 UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
+CHAT_COMPLETIONS_API_VERSION = os.environ.get("CHAT_COMPLETIONS_API_VERSION", "")
 
 if not UPSTREAM_BASE_URL:
     raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
@@ -201,3 +203,13 @@ def prepare_upstream_headers(request_headers: dict) -> dict:
     )
 
     return headers
+
+
+def prepare_upstream_params(
+    path: str, query_params: Mapping[str, str] | None
+) -> dict[str, str]:
+    """Prepare query params for upstream request, optionally adding api-version for chat/completions."""
+    params: dict[str, str] = dict(query_params or {})
+    if path.endswith("chat/completions") and CHAT_COMPLETIONS_API_VERSION:
+        params["api-version"] = CHAT_COMPLETIONS_API_VERSION
+    return params

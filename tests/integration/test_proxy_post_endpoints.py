@@ -355,27 +355,29 @@ async def test_proxy_post_model_specific_endpoints(
             },
             "response": {"object": "chat.completion", "model": "gpt-3.5-turbo"},
         },
-        {
-            "endpoint": "/v1/completions",
-            "payload": {
-                "model": "text-davinci-003",
-                "prompt": "Hello world",
-                "max_tokens": 50,
-            },
-            "response": {"object": "text_completion", "model": "text-davinci-003"},
-        },
-        {
-            "endpoint": "/v1/embeddings",
-            "payload": {
-                "model": "text-embedding-ada-002",
-                "input": "The quick brown fox",
-            },
-            "response": {
-                "object": "list",
-                "model": "text-embedding-ada-002",
-                "data": [{"object": "embedding", "embedding": [0.1, 0.2, 0.3]}],
-            },
-        },
+        # Coming soon - completions endpoint
+        # {
+        #     "endpoint": "/v1/completions",
+        #     "payload": {
+        #         "model": "text-davinci-003",
+        #         "prompt": "Hello world",
+        #         "max_tokens": 50,
+        #     },
+        #     "response": {"object": "text_completion", "model": "text-davinci-003"},
+        # },
+        # Coming soon - embeddings endpoint
+        # {
+        #     "endpoint": "/v1/embeddings",
+        #     "payload": {
+        #         "model": "text-embedding-ada-002",
+        #         "input": "The quick brown fox",
+        #     },
+        #     "response": {
+        #         "object": "list",
+        #         "model": "text-embedding-ada-002",
+        #         "data": [{"object": "embedding", "embedding": [0.1, 0.2, 0.3]}],
+        #     },
+        # },
     ]
 
     for test_case in test_cases:

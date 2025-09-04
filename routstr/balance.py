@@ -1,3 +1,7 @@
+import asyncio
+import hashlib
+import os
+from time import monotonic
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -31,6 +35,18 @@ async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
         "api_key": "sk-" + key.hashed_key,
         "balance": key.balance,
     }
+
+
+# TODO: Implement POST /v1/wallet/create endpoint
+# This endpoint should accept:
+# - cashu_token (required): The eCash token to deposit
+# - refund_lnurl (optional): LNURL for refunds (instead of refund_address in validate_bearer_key)
+# - refund_expiry (optional): Expiry timestamp for the key (maps to key_expiry_time in validate_bearer_key)
+# The endpoint should:
+# 1. Create a new wallet/API key from the cashu_token
+# 2. Store refund_lnurl and refund_expiry in the database
+# 3. Return the API key (rstr_...) and balance
+# Note: validate_bearer_key already supports refund_address and key_expiry_time params
 
 
 @router.get("/create")
@@ -86,11 +102,52 @@ async def topup_wallet_endpoint(
     return {"msats": amount_msats}
 
 
+_REFUND_CACHE_TTL_SECONDS: int = int(os.environ.get("REFUND_CACHE_TTL_SECONDS", "3600"))
+_refund_cache_lock: asyncio.Lock = asyncio.Lock()
+_refund_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _cache_key_for_authorization(authorization: str) -> str:
+    return hashlib.sha256(authorization.strip().encode()).hexdigest()
+
+
+async def _refund_cache_get(authorization: str) -> dict[str, str] | None:
+    key = _cache_key_for_authorization(authorization)
+    async with _refund_cache_lock:
+        item = _refund_cache.get(key)
+        if item is None:
+            return None
+        expires_at, value = item
+        if expires_at <= monotonic():
+            del _refund_cache[key]
+            return None
+        return value
+
+
+async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
+    key = _cache_key_for_authorization(authorization)
+    expiry = monotonic() + _REFUND_CACHE_TTL_SECONDS
+    async with _refund_cache_lock:
+        _refund_cache[key] = (expiry, value)
+
+
 @router.post("/refund")
 async def refund_wallet_endpoint(
-    key: ApiKey = Depends(get_key_from_header),
+    authorization: Annotated[str, Header(...)],
     session: AsyncSession = Depends(get_session),
-) -> dict:
+) -> dict[str, str]:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization. Use 'Bearer <cashu-token>' or 'Bearer <api-key>'",
+        )
+
+    bearer_value: str = authorization[7:]
+
+    if cached := await _refund_cache_get(bearer_value):
+        return cached
+
+    key: ApiKey = await validate_bearer_key(bearer_value, session)
     remaining_balance_msats: int = key.balance
 
     if remaining_balance_msats <= 0:
@@ -140,6 +197,8 @@ async def refund_wallet_endpoint(
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
             raise HTTPException(status_code=500, detail="Refund failed")
+
+    await _refund_cache_set(bearer_value, result)
 
     await session.delete(key)
     await session.commit()

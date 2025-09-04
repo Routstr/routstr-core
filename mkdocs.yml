@@ -1,0 +1,105 @@
+site_name: Routstr Core Documentation
+site_url: https://docs.routstr.com
+site_description: FastAPI-based reverse proxy for OpenAI-compatible APIs with Bitcoin eCash micropayments
+site_author: Routstr Team
+
+repo_name: routstr/routstr-core
+repo_url: https://github.com/routstr/routstr-core
+edit_uri: tree/main/docs
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: orange
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: orange
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    logo: material/lightning-bolt
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - mermaid2
+
+markdown_extensions:
+  - admonition
+  - codehilite:
+      guess_lang: false
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/routstr
+    - icon: fontawesome/brands/bitcoin
+      link: https://cashu.space
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/overview.md
+      - Quick Start: getting-started/quickstart.md
+      - Docker Setup: getting-started/docker.md
+      - Configuration: getting-started/configuration.md
+  - User Guide:
+      - Introduction: user-guide/introduction.md
+      - Payment Flow: user-guide/payment-flow.md
+      - Using the API: user-guide/using-api.md
+      - Admin Dashboard: user-guide/admin-dashboard.md
+      - Models & Pricing: user-guide/models-pricing.md
+  - Contributing:
+      - Setup Development: contributing/setup.md
+      - Architecture: contributing/architecture.md
+      - Code Structure: contributing/code-structure.md
+      - Testing: contributing/testing.md
+  - API Reference:
+      - Overview: api/overview.md
+      - Authentication: api/authentication.md
+      - Endpoints: api/endpoints.md
+      - Errors: api/errors.md
+  - Advanced:
+      - Tor Support: advanced/tor.md
+      - Nostr Discovery: advanced/nostr.md
+      - Custom Pricing: advanced/custom-pricing.md
+      - Migrations: advanced/migrations.md

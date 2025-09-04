@@ -244,3 +244,20 @@ profile:
 	@echo "🔥 Running with profiling..."
 	$(PYTHON) -m cProfile -o profile.stats -m pytest tests/integration/test_performance_load.py::TestPerformanceBaseline -v
 	@echo "Profile saved to profile.stats. Use '$(PYTHON) -m pstats profile.stats' to analyze."
+
+# Documentation
+docs-build:
+	@echo "📚 Building documentation..."
+	mkdocs build
+
+docs-serve:
+	@echo "📚 Serving documentation at http://localhost:8001..."
+	mkdocs serve -a localhost:8001
+
+docs-deploy:
+	@echo "📚 Deploying documentation to GitHub Pages..."
+	mkdocs gh-deploy --force
+
+docs-install:
+	@echo "📚 Installing documentation dependencies..."
+	pip install -r docs/requirements.txt

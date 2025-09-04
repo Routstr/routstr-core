@@ -293,14 +293,19 @@ def setup_logging() -> None:
                 "handlers": ["console"] if console_enabled else [],
                 "propagate": False,
             },
+            "websockets": {
+                "level": "WARNING",
+                "handlers": [],
+                "propagate": False,
+            },
             "uvicorn.access": {
-                "level": log_level,  # Use the configured log level instead of WARNING
-                "handlers": handlers,  # Use both console and file handlers
+                "level": "WARNING",
+                "handlers": ["file"],
                 "propagate": False,
             },
             "uvicorn.error": {
-                "level": log_level,  # Use the configured log level
-                "handlers": handlers,  # Use both console and file handlers
+                "level": log_level,
+                "handlers": handlers,
                 "propagate": False,
             },
             "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},

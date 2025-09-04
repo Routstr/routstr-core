@@ -6,6 +6,7 @@ services:
     volumes:
       - .:/app
       - ./logs:/app/logs
+      - tor-data:/var/lib/tor:ro
     env_file:
       - .env
     environment:

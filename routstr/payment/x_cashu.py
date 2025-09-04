@@ -9,7 +9,12 @@ from fastapi.responses import Response, StreamingResponse
 from ..core import get_logger
 from ..wallet import recieve_token, send_token
 from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
-from .helpers import UPSTREAM_BASE_URL, create_error_response, prepare_upstream_headers
+from .helpers import (
+    UPSTREAM_BASE_URL,
+    create_error_response,
+    prepare_upstream_headers,
+    prepare_upstream_params,
+)
 
 logger = get_logger(__name__)
 
@@ -128,7 +133,7 @@ async def forward_to_upstream(
                     url,
                     headers=headers,
                     content=request.stream(),
-                    params=request.query_params,
+                    params=prepare_upstream_params(path, request.query_params),
                 ),
                 stream=True,
             )
