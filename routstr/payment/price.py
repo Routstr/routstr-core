@@ -1,17 +1,15 @@
 import asyncio
-import os
 
 import httpx
 
 from ..core import get_logger
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 
-# artifical spread to cover conversion fees
-EXCHANGE_FEE = float(os.environ.get("EXCHANGE_FEE", "1.005"))  # 0.5% default
-UPSTREAM_PROVIDER_FEE = float(
-    os.environ.get("UPSTREAM_PROVIDER_FEE", "1.05")
-)  # 5% default (e.g. openrouter charges 5% margin)
+
+def _fees() -> tuple[float, float]:
+    return settings.exchange_fee, settings.upstream_provider_fee
 
 
 async def kraken_btc_usd(client: httpx.AsyncClient) -> float | None:
@@ -95,7 +93,8 @@ async def btc_usd_ask_price() -> float:
                 raise ValueError("Unable to fetch BTC price from any exchange")
 
             min_price = min(valid_prices)
-            final_price = min_price / (EXCHANGE_FEE * UPSTREAM_PROVIDER_FEE)
+            exchange_fee, provider_fee = _fees()
+            final_price = min_price / (exchange_fee * provider_fee)
             return final_price
 
         except Exception as e:

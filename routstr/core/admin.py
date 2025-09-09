@@ -3,13 +3,12 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
 from ..wallet import (
-    TRUSTED_MINTS,
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
     get_wallet,
@@ -18,10 +17,216 @@ from ..wallet import (
 )
 from .db import ApiKey, create_session
 from .logging import get_logger
+from .settings import SettingsService, settings
 
 logger = get_logger(__name__)
 
 admin_router = APIRouter(prefix="/admin", include_in_schema=False)
+
+
+def require_admin_api(request: Request) -> None:
+    admin_cookie = request.cookies.get("admin_password")
+    if not admin_cookie or admin_cookie != settings.admin_password:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+
+def is_admin_authenticated(request: Request) -> bool:
+    admin_cookie = request.cookies.get("admin_password")
+    return bool(admin_cookie and admin_cookie == settings.admin_password)
+
+
+DASHBOARD_CSS: str = """
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #2c3e50; line-height: 1.6; padding: 2rem; }
+h1, h2 { margin-bottom: 1rem; color: #1a202c; }
+h1 { font-size: 2rem; }
+h2 { font-size: 1.5rem; margin-top: 2rem; }
+p { margin-bottom: 0.5rem; color: #4a5568; }
+table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-top: 1rem; }
+th { background: #4a5568; color: white; font-weight: 600; padding: 12px; text-align: left; }
+td { padding: 12px; border-bottom: 1px solid #e2e8f0; }
+tr:hover { background: #f7fafc; }
+button { padding: 10px 20px; cursor: pointer; background: #4299e1; color: white; border: none; border-radius: 6px; font-weight: 600; margin-right: 10px; transition: all 0.2s; }
+button:hover { background: #3182ce; transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+button:disabled { background: #a0aec0; cursor: not-allowed; transform: none; }
+.refresh-btn { background: #48bb78; }
+.refresh-btn:hover { background: #38a169; }
+.investigate-btn { background: #4299e1; }
+.balance-card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 2rem; }
+.balance-item { display: flex; justify-content: space-between; margin-bottom: 1rem; }
+.balance-label { color: #718096; }
+.balance-value { font-size: 1.5rem; font-weight: 700; color: #2d3748; }
+.balance-primary { color: #48bb78; }
+.currency-grid { margin-top: 1rem; font-size: 0.9rem; }
+.currency-row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; align-items: center; }
+.currency-row:last-child { border-bottom: none; }
+.currency-header { font-weight: 600; color: #4a5568; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }
+.mint-name { color: #2d3748; font-size: 0.85rem; word-break: break-all; }
+.balance-num { text-align: right; font-family: monospace; }
+.owner-positive { color: #22c55e; }
+.error-row { color: #dc2626; font-style: italic; }
+#token-result { margin-top: 20px; padding: 20px; background: #e6fffa; border: 1px solid #38b2ac; border-radius: 8px; display: none; }
+#token-text { font-family: 'Monaco', monospace; font-size: 13px; background: #2d3748; color: #68d391; padding: 15px; border-radius: 6px; margin: 10px 0; word-break: break-all; }
+.copy-btn { background: #38a169; padding: 6px 12px; font-size: 14px; }
+.copy-btn:hover { background: #2f855a; }
+.modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
+.modal-content { background: white; margin: 10% auto; padding: 2rem; width: 90%; max-width: 400px; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); animation: slideIn 0.3s ease; }
+@keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.close { color: #a0aec0; float: right; font-size: 28px; font-weight: bold; cursor: pointer; margin: -10px -10px 0 0; }
+.close:hover { color: #2d3748; }
+input[type="number"], input[type="text"], select { width: 100%; padding: 10px; margin: 10px 0; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }
+input[type="number"]:focus, input[type="text"]:focus, select:focus { outline: none; border-color: #4299e1; }
+.warning { color: #e53e3e; font-weight: 600; margin: 10px 0; padding: 10px; background: #fff5f5; border-radius: 6px; }
+"""
+
+
+LOGS_CSS: str = """
+body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+h1 { color: #333; }
+.back-btn { padding: 8px 16px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; margin-bottom: 20px; }
+.back-btn:hover { background-color: #0056b3; }
+.log-container { background-color: white; border: 1px solid #ddd; border-radius: 8px; padding: 20px; max-height: 80vh; overflow-y: auto; }
+.log-entry { margin-bottom: 15px; padding: 10px; border: 1px solid #e0e0e0; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 12px; background-color: #f9f9f9; }
+.log-entry.log-error { background-color: #fee; border-color: #fcc; }
+.log-entry.log-warning { background-color: #ffc; border-color: #ff9; }
+.log-entry.log-debug, .log-entry.log-trace { background-color: #f0f0f0; border-color: #ccc; }
+.log-header { margin-bottom: 5px; color: #666; }
+.log-timestamp { color: #0066cc; }
+.log-level { font-weight: bold; }
+.log-message { margin: 5px 0; color: #333; }
+.log-extra { margin-top: 5px; padding-top: 5px; border-top: 1px solid #e0e0e0; }
+.log-field { margin: 2px 0; color: #666; word-break: break-all; }
+.no-logs { text-align: center; color: #666; padding: 40px; }
+.request-id-display { background-color: #e9ecef; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; }
+"""
+
+
+@admin_router.get(
+    "/partials/balances",
+    dependencies=[Depends(require_admin_api)],
+    response_class=HTMLResponse,
+)
+async def partial_balances(request: Request) -> str:
+    (
+        balance_details,
+        total_wallet_balance_sats,
+        total_user_balance_sats,
+        owner_balance,
+    ) = await fetch_all_balances()
+    # Provide JSON for client usage
+    # Embed a script tag to update balanceDetails and the UI markup
+    rows = "".join(
+        [
+            f"""<div class="currency-row {"error-row" if detail.get("error") else ""}">
+                <div class="mint-name">{detail["mint_url"].replace("https://", "").replace("http://", "")} • {detail["unit"].upper()}</div>
+                <div class="balance-num">{detail["wallet_balance"] if not detail.get("error") else "error"}</div>
+                <div class="balance-num">{detail["user_balance"] if not detail.get("error") else "-"}</div>
+                <div class="balance-num {"owner-positive" if detail["owner_balance"] > 0 else ""}">{detail["owner_balance"] if not detail.get("error") else "-"}</div>
+            </div>"""
+            for detail in balance_details
+            if detail.get("wallet_balance", 0) > 0 or detail.get("error")
+        ]
+    )
+    return f"""
+        <h2>Cashu Wallet Balance</h2>
+        <div class="balance-item">
+            <span class="balance-label">Your Balance (Total)</span>
+            <span class="balance-value balance-primary">{owner_balance} sats</span>
+        </div>
+        <div class="balance-item">
+            <span class="balance-label">Total Wallet</span>
+            <span class="balance-value">{total_wallet_balance_sats} sats</span>
+        </div>
+        <div class="balance-item">
+            <span class="balance-label">User Balance</span>
+            <span class="balance-value">{total_user_balance_sats} sats</span>
+        </div>
+        <p style="margin-top: 1rem; font-size: 0.9rem; color: #718096;">Your balance = Total wallet - User balance</p>
+        <div class="currency-grid">
+            <div class="currency-row currency-header">
+                <div>Mint / Unit</div>
+                <div class="balance-num">Wallet</div>
+                <div class="balance-num">Users</div>
+                <div class="balance-num">Owner</div>
+            </div>
+            {rows}
+        </div>
+        <script>balanceDetails = {json.dumps(balance_details)};</script>
+    """
+
+
+@admin_router.get(
+    "/partials/apikeys",
+    dependencies=[Depends(require_admin_api)],
+    response_class=HTMLResponse,
+)
+async def partial_apikeys(request: Request) -> str:
+    async with create_session() as session:
+        result = await session.exec(select(ApiKey))
+        api_keys = result.all()
+
+    def fmt_time(ts: int | None) -> str:
+        if ts is None:
+            return ""
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return f"{ts} ({dt.strftime('%Y-%m-%d %H:%M:%S')} UTC)"
+
+    rows = "".join(
+        [
+            f"<tr><td>{key.hashed_key}</td><td>{key.balance}</td><td>{key.total_spent}</td><td>{key.total_requests}</td><td>{key.refund_address}</td><td>{fmt_time(key.key_expiry_time)}</td></tr>"
+            for key in api_keys
+        ]
+    )
+    return f"""
+        <h2>Temporary Balances</h2>
+        <table>
+            <tr>
+                <th>Hashed Key</th>
+                <th>Balance (mSats)</th>
+                <th>Total Spent (mSats)</th>
+                <th>Total Requests</th>
+                <th>Refund Address</th>
+                <th>Refund Time</th>
+            </tr>
+            {rows}
+        </table>
+    """
+
+
+@admin_router.get("/api/balances", dependencies=[Depends(require_admin_api)])
+async def get_balances_api(request: Request) -> list[dict[str, object]]:
+    balance_details, _tw, _tu, _ow = await fetch_all_balances()
+    return [dict(d) for d in balance_details]
+
+
+@admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
+async def get_settings(request: Request) -> dict:
+    data = settings.dict()
+    if "upstream_api_key" in data:
+        data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
+    if "admin_password" in data:
+        data["admin_password"] = "[REDACTED]" if data["admin_password"] else ""
+    if "nsec" in data:
+        data["nsec"] = "[REDACTED]" if data["nsec"] else ""
+    return data
+
+
+class SettingsUpdate(BaseModel):
+    __root__: dict[str, object]
+
+
+@admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
+async def update_settings(request: Request, update: SettingsUpdate) -> dict:
+    async with create_session() as session:
+        new_settings = await SettingsService.update(update.__root__, session)
+    data = new_settings.dict()
+    if "upstream_api_key" in data:
+        data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
+    if "admin_password" in data:
+        data["admin_password"] = "[REDACTED]" if data["admin_password"] else ""
+    if "nsec" in data:
+        data["nsec"] = "[REDACTED]" if data["nsec"] else ""
+    return data
 
 
 class WithdrawRequest(BaseModel):
@@ -87,298 +292,301 @@ def info(content: str) -> str:
 
 
 def admin_auth() -> str:
-    if os.getenv("ADMIN_PASSWORD", "") == "":
+    try:
+        settings = SettingsService.get()
+        admin_pw = settings.admin_password
+    except Exception:
+        admin_pw = os.getenv("ADMIN_PASSWORD", "")
+    if admin_pw == "":
         return info("Please set a secure ADMIN_PASSWORD= in your ENV variables.")
     else:
         return login_form()
 
 
 async def dashboard(request: Request) -> str:
-    # fetch cashu / api-key data from database
-    async with create_session() as session:
-        result = await session.exec(select(ApiKey))
-        api_keys = result.all()
-
-    api_keys_table_rows = []
-    for key in api_keys:
-        expiry_time_utc = (
-            datetime.fromtimestamp(key.key_expiry_time, tz=timezone.utc)
-            if key.key_expiry_time is not None
-            else None
-        )
-        expiry_time_human_readable = (
-            expiry_time_utc.strftime("%Y-%m-%d %H:%M:%S") if expiry_time_utc else ""
-        )
-
-        api_keys_table_rows.append(
-            f"<tr><td>{key.hashed_key}</td><td>{key.balance}</td><td>{key.total_spent}</td><td>{key.total_requests}</td><td>{key.refund_address}</td><td>{'{} ({} UTC)'.format(key.key_expiry_time, expiry_time_human_readable) if key.key_expiry_time else key.key_expiry_time}</td></tr>"
-        )
-
-    # Fetch all balances using the abstracted function
-    (
-        balance_details,
-        total_wallet_balance_sats,
-        total_user_balance_sats,
-        owner_balance,
-    ) = await fetch_all_balances()
-
-    return f"""<!DOCTYPE html>
+    return (
+        f"""<!DOCTYPE html>
     <html>
         <head>
-            <style>
-                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #2c3e50; line-height: 1.6; padding: 2rem; }}
-                h1, h2 {{ margin-bottom: 1rem; color: #1a202c; }}
-                h1 {{ font-size: 2rem; }}
-                h2 {{ font-size: 1.5rem; margin-top: 2rem; }}
-                p {{ margin-bottom: 0.5rem; color: #4a5568; }}
-                table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-top: 1rem; }}
-                th {{ background: #4a5568; color: white; font-weight: 600; padding: 12px; text-align: left; }}
-                td {{ padding: 12px; border-bottom: 1px solid #e2e8f0; }}
-                tr:hover {{ background: #f7fafc; }}
-                button {{ padding: 10px 20px; cursor: pointer; background: #4299e1; color: white; border: none; border-radius: 6px; font-weight: 600; margin-right: 10px; transition: all 0.2s; }}
-                button:hover {{ background: #3182ce; transform: translateY(-1px); box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                button:disabled {{ background: #a0aec0; cursor: not-allowed; transform: none; }}
-                .refresh-btn {{ background: #48bb78; }}
-                .refresh-btn:hover {{ background: #38a169; }}
-                .investigate-btn {{ background: #4299e1; }}
-                .balance-card {{ background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 2rem; }}
-                .balance-item {{ display: flex; justify-content: space-between; margin-bottom: 1rem; }}
-                .balance-label {{ color: #718096; }}
-                .balance-value {{ font-size: 1.5rem; font-weight: 700; color: #2d3748; }}
-                .balance-primary {{ color: #48bb78; }}
-                .currency-grid {{ margin-top: 1rem; font-size: 0.9rem; }}
-                .currency-row {{ display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; align-items: center; }}
-                .currency-row:last-child {{ border-bottom: none; }}
-                .currency-header {{ font-weight: 600; color: #4a5568; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }}
-                .mint-name {{ color: #2d3748; font-size: 0.85rem; word-break: break-all; }}
-                .balance-num {{ text-align: right; font-family: monospace; }}
-                .owner-positive {{ color: #22c55e; }}
-                .error-row {{ color: #dc2626; font-style: italic; }}
-                #token-result {{ margin-top: 20px; padding: 20px; background: #e6fffa; border: 1px solid #38b2ac; border-radius: 8px; display: none; }}
-                #token-text {{ font-family: 'Monaco', monospace; font-size: 13px; background: #2d3748; color: #68d391; padding: 15px; border-radius: 6px; margin: 10px 0; word-break: break-all; }}
-                .copy-btn {{ background: #38a169; padding: 6px 12px; font-size: 14px; }}
-                .copy-btn:hover {{ background: #2f855a; }}
-                .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }}
-                .modal-content {{ background: white; margin: 10% auto; padding: 2rem; width: 90%; max-width: 400px; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); animation: slideIn 0.3s ease; }}
-                @keyframes slideIn {{ from {{ transform: translateY(-20px); opacity: 0; }} to {{ transform: translateY(0); opacity: 1; }} }}
-                .close {{ color: #a0aec0; float: right; font-size: 28px; font-weight: bold; cursor: pointer; margin: -10px -10px 0 0; }}
-                .close:hover {{ color: #2d3748; }}
-                input[type="number"], input[type="text"], select {{ width: 100%; padding: 10px; margin: 10px 0; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }}
-                input[type="number"]:focus, input[type="text"]:focus, select:focus {{ outline: none; border-color: #4299e1; }}
-                .warning {{ color: #e53e3e; font-weight: 600; margin: 10px 0; padding: 10px; background: #fff5f5; border-radius: 6px; }}
-            </style>
+        <style>{DASHBOARD_CSS}</style>
+            <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+        """
+        + """<!--html-->
             <script>
-                const balanceDetails = {json.dumps(balance_details)};
+                let balanceDetails = [];
                 
-                function openWithdrawModal() {{
+                async function openWithdrawModal() {
                     const modal = document.getElementById('withdraw-modal');
-                    updateWithdrawForm();
+                    try {
+                        if (!balanceDetails.length) {
+                            const resp = await fetch('/admin/api/balances', { credentials: 'same-origin' });
+                            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                            balanceDetails = await resp.json();
+                        }
+                        const select = document.getElementById('mint-unit-select');
+                        select.innerHTML = '';
+                        balanceDetails
+                            .filter(d => !d.error && d.owner_balance > 0)
+                            .forEach(d => {
+                                const opt = document.createElement('option');
+                                opt.value = `${d.mint_url}|${d.unit}`;
+                                opt.textContent = `${d.mint_url.replace("https://", "").replace("http://", "")} • ${d.unit.toUpperCase()} (${d.owner_balance})`;
+                                select.appendChild(opt);
+                            });
+                        updateWithdrawForm();
+                    } catch (e) {
+                        alert('Failed to load balances: ' + e.message);
+                    }
                     modal.style.display = 'block';
-                }}
+                }
 
-                function closeWithdrawModal() {{
+                function closeWithdrawModal() {
                     const modal = document.getElementById('withdraw-modal');
                     modal.style.display = 'none';
-                }}
+                }
 
-                function updateWithdrawForm() {{
+                function updateWithdrawForm() {
                     const select = document.getElementById('mint-unit-select');
                     const selectedValue = select.value;
                     if (!selectedValue) return;
-                    
+
                     const [mint, unit] = selectedValue.split('|');
                     const detail = balanceDetails.find(d => d.mint_url === mint && d.unit === unit);
-                    
-                    if (detail) {{
+
+                    if (detail) {
                         const amountInput = document.getElementById('withdraw-amount');
                         const maxSpan = document.getElementById('max-amount');
                         const recommendedSpan = document.getElementById('recommended-amount');
-                        
+
                         amountInput.max = detail.wallet_balance;
                         amountInput.value = detail.owner_balance > 0 ? detail.owner_balance : 0;
-                        maxSpan.textContent = `${{detail.wallet_balance}} ${{unit}}`;
-                        recommendedSpan.textContent = `${{detail.owner_balance}} ${{unit}}`;
-                        
-                        checkAmount();
-                    }}
-                }}
+                        maxSpan.textContent = `${detail.wallet_balance} ${unit}`;
+                        recommendedSpan.textContent = `${detail.owner_balance} ${unit}`;
 
-                function checkAmount() {{
+                        checkAmount();
+                    }
+                }
+
+                function checkAmount() {
                     const select = document.getElementById('mint-unit-select');
                     const selectedValue = select.value;
                     if (!selectedValue) return;
-                    
+
                     const [mint, unit] = selectedValue.split('|');
                     const detail = balanceDetails.find(d => d.mint_url === mint && d.unit === unit);
-                    
-                    if (detail) {{
+
+                    if (detail) {
                         const amount = parseInt(document.getElementById('withdraw-amount').value) || 0;
                         const warning = document.getElementById('withdraw-warning');
-                        
-                        if (amount > detail.owner_balance && amount <= detail.wallet_balance) {{
-                            warning.style.display = 'block';
-                        }} else {{
-                            warning.style.display = 'none';
-                        }}
-                    }}
-                }}
 
-                async function performWithdraw() {{
+                        if (amount > detail.owner_balance && amount <= detail.wallet_balance) {
+                            warning.style.display = 'block';
+                        } else {
+                            warning.style.display = 'none';
+                        }
+                    }
+                }
+
+                async function performWithdraw() {
                     const amount = parseInt(document.getElementById('withdraw-amount').value);
                     const select = document.getElementById('mint-unit-select');
                     const selectedValue = select.value;
                     const button = document.getElementById('confirm-withdraw-btn');
                     const tokenResult = document.getElementById('token-result');
-                    
-                    if (!selectedValue) {{
+
+                    if (!selectedValue) {
                         alert('Please select a mint and unit');
                         return;
-                    }}
-                    
+                    }
+
                     const [mint, unit] = selectedValue.split('|');
                     const detail = balanceDetails.find(d => d.mint_url === mint && d.unit === unit);
-                    
-                    if (!amount || amount <= 0) {{
+
+                    if (!amount || amount <= 0) {
                         alert('Please enter a valid amount');
                         return;
-                    }}
-                    
-                    if (amount > detail.wallet_balance) {{
+                    }
+
+                    if (amount > detail.wallet_balance) {
                         alert('Amount exceeds wallet balance');
                         return;
-                    }}
-                    
+                    }
+
                     button.disabled = true;
                     button.textContent = 'Withdrawing...';
-                    
-                    try {{
-                        const response = await fetch('/admin/withdraw', {{
+
+                    try {
+                        const response = await fetch('/admin/withdraw', {
                             method: 'POST',
-                            headers: {{
+                            headers: {
                                 'Content-Type': 'application/json',
-                            }},
+                            },
                             credentials: 'same-origin',
-                            body: JSON.stringify({{ 
+                            body: JSON.stringify({
                                 amount: amount,
                                 mint_url: mint,
                                 unit: unit
-                            }})
-                        }});
-                        
-                        if (response.ok) {{
+                            })
+                        });
+
+                        if (response.ok) {
                             const data = await response.json();
                             document.getElementById('token-text').textContent = data.token;
                             tokenResult.style.display = 'block';
                             closeWithdrawModal();
-                        }} else {{
+                        } else {
                             const errorData = await response.json();
                             alert('Failed to withdraw balance: ' + (errorData.detail || 'Unknown error'));
-                        }}
-                    }} catch (error) {{
+                        }
+                    } catch (error) {
                         alert('Error: ' + error.message);
-                    }} finally {{
+                    } finally {
                         button.disabled = false;
                         button.textContent = 'Withdraw';
-                    }}
-                }}
+                    }
+                }
 
-                function copyToken() {{
+                function copyToken() {
                     const tokenText = document.getElementById('token-text');
-                    navigator.clipboard.writeText(tokenText.textContent).then(() => {{
+                    navigator.clipboard.writeText(tokenText.textContent).then(() => {
                         const copyBtn = document.getElementById('copy-btn');
                         const originalText = copyBtn.textContent;
                         copyBtn.textContent = 'Copied!';
-                        setTimeout(() => {{
+                        setTimeout(() => {
                             copyBtn.textContent = originalText;
-                        }}, 2000);
-                    }}).catch(err => {{
+                        }, 2000);
+                    }).catch(err => {
                         alert('Failed to copy token');
-                    }});
-                }}
+                    });
+                }
 
-                function refreshPage() {{
+                function refreshPage() {
                     window.location.reload();
-                }}
+                }
 
-                function openInvestigateModal() {{
+                function openInvestigateModal() {
                     const modal = document.getElementById('investigate-modal');
                     modal.style.display = 'block';
-                }}
+                }
 
-                function closeInvestigateModal() {{
+                function closeInvestigateModal() {
                     const modal = document.getElementById('investigate-modal');
                     modal.style.display = 'none';
-                }}
+                }
 
-                function investigateLogs() {{
+                function investigateLogs() {
                     const requestId = document.getElementById('request-id').value.trim();
-                    if (!requestId) {{
+                    if (!requestId) {
                         alert('Please enter a Request ID');
                         return;
-                    }}
-                    window.location.href = `/admin/logs/${{requestId}}`;
-                }}
+                    }
+                    window.location.href = `/admin/logs/${requestId}`;
+                }
 
-                window.onclick = function(event) {{
+                async function openSettingsModal() {
+                    const modal = document.getElementById('settings-modal');
+                    const textarea = document.getElementById('settings-json');
+                    const errorBox = document.getElementById('settings-error');
+                    errorBox.style.display = 'none';
+                    errorBox.textContent = '';
+                    try {
+                        const resp = await fetch('/admin/api/settings', { credentials: 'same-origin' });
+                        if (!resp.ok) {
+                            throw new Error('HTTP ' + resp.status);
+                        }
+                        const data = await resp.json();
+                        textarea.value = JSON.stringify(data, null, 2);
+                    } catch (e) {
+                        errorBox.style.display = 'block';
+                        errorBox.textContent = 'Failed to load settings: ' + e.message;
+                        textarea.value = '{}';
+                    }
+                    modal.style.display = 'block';
+                }
+
+                function closeSettingsModal() {
+                    const modal = document.getElementById('settings-modal');
+                    modal.style.display = 'none';
+                }
+
+                async function saveSettings() {
+                    const textarea = document.getElementById('settings-json');
+                    const errorBox = document.getElementById('settings-error');
+                    errorBox.style.display = 'none';
+                    errorBox.style.color = '#e53e3e';
+                    let payload;
+                    try {
+                        payload = JSON.parse(textarea.value);
+                    } catch (e) {
+                        errorBox.style.display = 'block';
+                        errorBox.textContent = 'Invalid JSON: ' + e.message;
+                        return;
+                    }
+
+                    ['upstream_api_key', 'admin_password', 'nsec'].forEach(k => {
+                        if (payload && payload[k] === '[REDACTED]') { delete payload[k]; }
+                    });
+
+                    try {
+                        const resp = await fetch('/admin/api/settings', {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify(payload)
+                        });
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            textarea.value = JSON.stringify(data, null, 2);
+                            errorBox.style.display = 'block';
+                            errorBox.style.color = '#22c55e';
+                            errorBox.textContent = 'Saved successfully';
+                            setTimeout(() => { errorBox.style.display = 'none'; }, 2000);
+                        } else {
+                            let errText = 'Failed to save settings';
+                            try {
+                                const err = await resp.json();
+                                if (err && err.detail) {
+                                    errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+                                }
+                            } catch (_ignored) {}
+                            errorBox.style.display = 'block';
+                            errorBox.style.color = '#e53e3e';
+                            errorBox.textContent = errText;
+                        }
+                    } catch (e) {
+                        errorBox.style.display = 'block';
+                        errorBox.style.color = '#e53e3e';
+                        errorBox.textContent = 'Request failed: ' + e.message;
+                    }
+                }
+
+                window.onclick = function(event) {
                     const withdrawModal = document.getElementById('withdraw-modal');
                     const investigateModal = document.getElementById('investigate-modal');
-                    if (event.target == withdrawModal) {{
+                    const settingsModal = document.getElementById('settings-modal');
+                    if (event.target == withdrawModal) {
                         closeWithdrawModal();
-                    }} else if (event.target == investigateModal) {{
+                    } else if (event.target == investigateModal) {
                         closeInvestigateModal();
-                    }}
-                }}
+                    } else if (event.target == settingsModal) {
+                        closeSettingsModal();
+                    }
+                }
             </script>
-        </head>
+            </head>
+            """
+        + """<!--html-->
         <body>
             <h1>Admin Dashboard</h1>
             
-            <div class="balance-card">
-                <h2>Cashu Wallet Balance</h2>
-                <div class="balance-item">
-                    <span class="balance-label">Your Balance (Total)</span>
-                    <span class="balance-value balance-primary">{
-        owner_balance
-    } sats</span>
-                </div>
-                <div class="balance-item">
-                    <span class="balance-label">Total Wallet</span>
-                    <span class="balance-value">{total_wallet_balance_sats} sats</span>
-                </div>
-                <div class="balance-item">
-                    <span class="balance-label">User Balance</span>
-                    <span class="balance-value">{total_user_balance_sats} sats</span>
-                </div>
-                <p style="margin-top: 1rem; font-size: 0.9rem; color: #718096;">Your balance = Total wallet - User balance</p>
-                
-                <div class="currency-grid">
-                    <div class="currency-row currency-header">
-                        <div>Mint / Unit</div>
-                        <div class="balance-num">Wallet</div>
-                        <div class="balance-num">Users</div>
-                        <div class="balance-num">Owner</div>
-                    </div>
-                    {
-        "".join(
-            [
-                f'''<div class="currency-row {"error-row" if detail.get("error") else ""}">
-                    <div class="mint-name">{detail["mint_url"].replace("https://", "").replace("http://", "")} • {detail["unit"].upper()}</div>
-                    <div class="balance-num">{detail["wallet_balance"] if not detail.get("error") else "error"}</div>
-                    <div class="balance-num">{detail["user_balance"] if not detail.get("error") else "-"}</div>
-                    <div class="balance-num {"owner-positive" if detail["owner_balance"] > 0 else ""}">{detail["owner_balance"] if not detail.get("error") else "-"}</div>
-                </div>'''
-                for detail in balance_details
-                if detail.get("wallet_balance", 0) > 0 or detail.get("error")
-            ]
-        )
-    }
-                </div>
+            <div class="balance-card" id="balances-card"
+                 hx-get="/admin/partials/balances"
+                 hx-trigger="load"
+                 hx-swap="innerHTML">
+                <div style="color:#718096;">Loading balances…</div>
             </div>
             
-            <button id="withdraw-btn" onclick="openWithdrawModal()" {
-        "disabled" if total_wallet_balance_sats <= 0 else ""
-    }>
+            <button id="withdraw-btn" onclick="openWithdrawModal()">
                 💸 Withdraw Balance
             </button>
             <button class="refresh-btn" onclick="refreshPage()">
@@ -387,23 +595,16 @@ async def dashboard(request: Request) -> str:
             <button class="investigate-btn" onclick="openInvestigateModal()">
                 🔍 Investigate Logs
             </button>
+            <button onclick="openSettingsModal()">
+                ⚙️ Settings
+            </button>
             
             <div id="withdraw-modal" class="modal">
                 <div class="modal-content">
                     <span class="close" onclick="closeWithdrawModal()">&times;</span>
                     <h3>Withdraw Balance</h3>
                     <p>Select mint and currency:</p>
-                    <select id="mint-unit-select" onchange="updateWithdrawForm()">
-                        {
-        "".join(
-            [
-                f'<option value="{detail["mint_url"]}|{detail["unit"]}">{detail["mint_url"].replace("https://", "").replace("http://", "")} • {detail["unit"].upper()} ({detail["owner_balance"]})</option>'
-                for detail in balance_details
-                if not detail.get("error") and detail["owner_balance"] > 0
-            ]
-        )
-    }
-                    </select>
+                    <select id="mint-unit-select" onchange="updateWithdrawForm()"></select>
                     <p>Enter amount to withdraw:</p>
                     <input type="number" id="withdraw-amount" min="1" placeholder="Amount" oninput="checkAmount()">
                     <p>Maximum: <span id="max-amount">-</span></p>
@@ -416,6 +617,20 @@ async def dashboard(request: Request) -> str:
                 </div>
             </div>
             
+            <div id="settings-modal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeSettingsModal()">&times;</span>
+                    <h3>Edit Settings (JSON)</h3>
+                    <p style="font-size: 0.9rem; color: #718096; margin-bottom: 8px;">Values shown as "[REDACTED]" will remain unchanged if left as-is.</p>
+                    <textarea id="settings-json" placeholder="{{}}" style="width: 100%; min-height: 280px; font-family: 'Monaco', monospace; font-size: 13px; background: #f8fafc; color: #2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+                    <div id="settings-error" style="display: none; margin-top: 8px; font-size: 0.95rem; color: #e53e3e;"></div>
+                    <div style="margin-top: 12px; display: flex; gap: 10px;">
+                        <button onclick="saveSettings()">💾 Save</button>
+                        <button onclick="closeSettingsModal()" style="background-color: #718096;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
             <div id="investigate-modal" class="modal">
                 <div class="modal-content">
                     <span class="close" onclick="closeInvestigateModal()">&times;</span>
@@ -434,35 +649,29 @@ async def dashboard(request: Request) -> str:
                 <p><em>Save this token! It represents your withdrawn balance.</em></p>
             </div>
             
-            <h2>Temporary Balances</h2>
-            <table>
-                <tr>
-                    <th>Hashed Key</th>
-                    <th>Balance (mSats)</th>
-                    <th>Total Spent (mSats)</th>
-                    <th>Total Requests</th>
-                    <th>Refund Address</th>
-                    <th>Refund Time</th>
-                </tr>
-                {"".join(api_keys_table_rows)}
-            </table>
+            <div id="apikeys-table"
+                 hx-get="/admin/partials/apikeys"
+                 hx-trigger="load"
+                 hx-swap="outerHTML">
+                <h2>Temporary Balances</h2>
+                <div style="color:#718096;">Loading API keys…</div>
+            </div>
         </body>
     </html>
     """
+    )
 
 
 @admin_router.get("/", response_class=HTMLResponse)
 async def admin(request: Request) -> str:
-    admin_cookie = request.cookies.get("admin_password")
-    if admin_cookie and admin_cookie == os.getenv("ADMIN_PASSWORD"):
+    if is_admin_authenticated(request):
         return await dashboard(request)
     return admin_auth()
 
 
 @admin_router.get("/logs/{request_id}", response_class=HTMLResponse)
 async def view_logs(request: Request, request_id: str) -> str:
-    admin_cookie = request.cookies.get("admin_password")
-    if not admin_cookie or admin_cookie != os.getenv("ADMIN_PASSWORD"):
+    if not is_admin_authenticated(request):
         return admin_auth()
 
     logger.info(f"Investigating logs for request_id: {request_id}")
@@ -545,99 +754,17 @@ async def view_logs(request: Request, request_id: str) -> str:
             formatted_entry += "</div>"
             formatted_logs.append(formatted_entry)
 
-    return f"""<!DOCTYPE html>
+    return (
+        f"""<!DOCTYPE html>
     <html>
         <head>
             <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    margin: 20px;
-                    background-color: #f5f5f5;
-                }}
-                h1 {{
-                    color: #333;
-                }}
-                .back-btn {{
-                    padding: 8px 16px;
-                    background-color: #007bff;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    cursor: pointer;
-                    text-decoration: none;
-                    display: inline-block;
-                    margin-bottom: 20px;
-                }}
-                .back-btn:hover {{
-                    background-color: #0056b3;
-                }}
-                .log-container {{
-                    background-color: white;
-                    border: 1px solid #ddd;
-                    border-radius: 8px;
-                    padding: 20px;
-                    max-height: 80vh;
-                    overflow-y: auto;
-                }}
-                .log-entry {{
-                    margin-bottom: 15px;
-                    padding: 10px;
-                    border: 1px solid #e0e0e0;
-                    border-radius: 4px;
-                    font-family: 'Courier New', monospace;
-                    font-size: 12px;
-                    background-color: #f9f9f9;
-                }}
-                .log-entry.log-error {{
-                    background-color: #fee;
-                    border-color: #fcc;
-                }}
-                .log-entry.log-warning {{
-                    background-color: #ffc;
-                    border-color: #ff9;
-                }}
-                .log-entry.log-debug, .log-entry.log-trace {{
-                    background-color: #f0f0f0;
-                    border-color: #ccc;
-                }}
-                .log-header {{
-                    margin-bottom: 5px;
-                    color: #666;
-                }}
-                .log-timestamp {{
-                    color: #0066cc;
-                }}
-                .log-level {{
-                    font-weight: bold;
-                }}
-                .log-message {{
-                    margin: 5px 0;
-                    color: #333;
-                }}
-                .log-extra {{
-                    margin-top: 5px;
-                    padding-top: 5px;
-                    border-top: 1px solid #e0e0e0;
-                }}
-                .log-field {{
-                    margin: 2px 0;
-                    color: #666;
-                    word-break: break-all;
-                }}
-                .no-logs {{
-                    text-align: center;
-                    color: #666;
-                    padding: 40px;
-                }}
-                .request-id-display {{
-                    background-color: #e9ecef;
-                    padding: 10px;
-                    border-radius: 4px;
-                    margin-bottom: 20px;
-                    font-family: monospace;
-                }}
-            </style>
-        </head>
+        {LOGS_CSS}
+        </style>
+            </head>
+            </head>
+        """
+        + """<!--html-->
         <body>
             <a href="/admin" class="back-btn">← Back to Dashboard</a>
             <h1>Log Investigation</h1>
@@ -653,23 +780,22 @@ async def view_logs(request: Request, request_id: str) -> str:
         </body>
     </html>
     """
+    )
 
 
-@admin_router.post("/withdraw")
+@admin_router.post("/withdraw", dependencies=[Depends(require_admin_api)])
 async def withdraw(
     request: Request, withdraw_request: WithdrawRequest
 ) -> dict[str, str]:
-    admin_cookie = request.cookies.get("admin_password")
-    if not admin_cookie or admin_cookie != os.getenv("ADMIN_PASSWORD"):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
     # Get wallet and check balance
+    from .settings import settings as global_settings
+
     wallet = await get_wallet(
-        withdraw_request.mint_url or TRUSTED_MINTS[0], withdraw_request.unit
+        withdraw_request.mint_url or global_settings.primary_mint, withdraw_request.unit
     )
     proofs = get_proofs_per_mint_and_unit(
         wallet,
-        withdraw_request.mint_url or TRUSTED_MINTS[0],
+        withdraw_request.mint_url or global_settings.primary_mint,
         withdraw_request.unit,
         not_reserved=True,
     )

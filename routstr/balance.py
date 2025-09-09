@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import os
 from time import monotonic
 from typing import Annotated, NoReturn
 
@@ -9,7 +8,8 @@ from pydantic import BaseModel
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
-from .wallet import PRIMARY_MINT_URL, credit_balance, send_to_lnurl, send_token
+from .core.settings import settings
+from .wallet import credit_balance, send_to_lnurl, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -102,7 +102,7 @@ async def topup_wallet_endpoint(
     return {"msats": amount_msats}
 
 
-_REFUND_CACHE_TTL_SECONDS: int = int(os.environ.get("REFUND_CACHE_TTL_SECONDS", "3600"))
+_REFUND_CACHE_TTL_SECONDS: int = settings.refund_cache_ttl_seconds
 _refund_cache_lock: asyncio.Lock = asyncio.Lock()
 _refund_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
@@ -157,11 +157,13 @@ async def refund_wallet_endpoint(
     try:
         if key.refund_address:
             if key.refund_currency == "sat":
-                remaining_balance = remaining_balance_msats * 1000
+                remaining_balance = remaining_balance_msats // 1000
+            from .core.settings import settings as global_settings
+
             await send_to_lnurl(
                 remaining_balance,
                 key.refund_currency or "sat",
-                key.refund_mint_url or PRIMARY_MINT_URL,
+                key.refund_mint_url or global_settings.primary_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}

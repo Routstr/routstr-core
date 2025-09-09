@@ -1,7 +1,5 @@
-REPO_DIR=/home/user/proxy
-LOG_FILE=/home/user/proxy/update.log
-* * * * * /home/user/proxy/scripts/auto_update.sh >/dev/null 2>&1
+# Example crontab entries for Routstr tasks
 
-OUTPUT_FILE=/home/user/proxy/models.json
-BASE_URL=https://openrouter.ai/api/v1
-0 * * * * python3 /home/user/proxy/scripts/models_meta.py >/dev/null 2>&1
+# Update models.json daily at 03:15 (optional)
+# OUTPUT_FILE=/app/models.json SOURCE=openrouter
+15 3 * * * /usr/local/bin/python /app/scripts/models_meta.py >> /var/log/cron.log 2>&1

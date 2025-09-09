@@ -11,8 +11,8 @@ Routstr supports three pricing models:
 Simple per-request charging:
 
 ```bash
-MODEL_BASED_PRICING=false
-COST_PER_REQUEST=10  # 10 sats per request
+FIXED_PRICING=true
+FIXED_COST_PER_REQUEST=10  # 10 sats per request
 ```
 
 **Best for:**
@@ -26,10 +26,10 @@ COST_PER_REQUEST=10  # 10 sats per request
 Charge based on actual token usage:
 
 ```bash
-MODEL_BASED_PRICING=false
-COST_PER_REQUEST=1              # 1 sat base fee
-COST_PER_1K_INPUT_TOKENS=5      # 5 sats per 1K input
-COST_PER_1K_OUTPUT_TOKENS=15    # 15 sats per 1K output
+FIXED_PRICING=false             # use model pricing
+FIXED_COST_PER_REQUEST=1        # optional base fee
+FIXED_PER_1K_INPUT_TOKENS=5     # optional override
+FIXED_PER_1K_OUTPUT_TOKENS=15   # optional override
 ```
 
 **Best for:**
@@ -43,7 +43,7 @@ COST_PER_1K_OUTPUT_TOKENS=15    # 15 sats per 1K output
 Dynamic pricing based on model costs:
 
 ```bash
-MODEL_BASED_PRICING=true
+FIXED_PRICING=false
 EXCHANGE_FEE=1.005      # 0.5% exchange fee
 UPSTREAM_PROVIDER_FEE=1.05  # 5% provider fee
 ```

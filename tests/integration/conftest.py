@@ -33,8 +33,8 @@ if use_local_services:
         "RECEIVE_LN_ADDRESS": "test@routstr.com",
         "REFUND_PROCESSING_INTERVAL": "3600",
         "NSEC": "nsec1testkey1234567890abcdef",
-        "COST_PER_REQUEST": "10",
-        "MODEL_BASED_PRICING": "true",
+        "FIXED_COST_PER_REQUEST": "10",
+        "FIXED_PRICING": "false",
         "MINIMUM_PAYOUT": "1000",
         "PAYOUT_INTERVAL": "86400",
         "NAME": "TestRoutstrNode",
@@ -55,8 +55,8 @@ else:
         "RECEIVE_LN_ADDRESS": "test@routstr.com",
         "REFUND_PROCESSING_INTERVAL": "3600",
         "NSEC": "nsec1testkey1234567890abcdef",
-        "COST_PER_REQUEST": "10",
-        "MODEL_BASED_PRICING": "true",
+        "FIXED_COST_PER_REQUEST": "10",
+        "FIXED_PRICING": "false",
         "MINIMUM_PAYOUT": "1000",
         "PAYOUT_INTERVAL": "86400",
     }
@@ -507,10 +507,11 @@ async def integration_app(
     else:
         # Use testmint with wallet patches for all integration tests
         mint_url = os.environ.get("CASHU_MINTS", "http://localhost:3338")
+        from routstr.core.settings import settings as _settings
+
         with (
             patch("routstr.core.db.engine", integration_engine),
-            patch("routstr.wallet.TRUSTED_MINTS", [mint_url]),
-            patch("routstr.wallet.PRIMARY_MINT_URL", mint_url),
+            patch.object(_settings, "cashu_mints", [mint_url]),
             patch("routstr.auth.credit_balance", testmint_wallet.credit_balance),
             patch("routstr.wallet.credit_balance", testmint_wallet.credit_balance),
             patch("routstr.balance.credit_balance", testmint_wallet.credit_balance),

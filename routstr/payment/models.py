@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -8,6 +7,7 @@ from fastapi import APIRouter
 from pydantic.v1 import BaseModel
 
 from ..core.logging import get_logger
+from ..core.settings import settings
 from .price import sats_usd_ask_price
 
 logger = get_logger(__name__)
@@ -57,7 +57,7 @@ MODELS: list[Model] = []
 
 def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     """Fetches model information from OpenRouter API."""
-    base_url = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
+    base_url = "https://openrouter.ai/api/v1"
 
     try:
         with urlopen(f"{base_url}/models") as response:
@@ -100,7 +100,10 @@ def load_models() -> list[Model]:
     and no user file is provided, it will be used as a fallback.
     """
 
-    models_path = Path(os.environ.get("MODELS_PATH", "models.json"))
+    try:
+        models_path = Path(settings.models_path)
+    except Exception:
+        models_path = Path("models.json")
 
     # Check if user has actively provided a models.json file
     if models_path.exists():
@@ -115,7 +118,10 @@ def load_models() -> list[Model]:
 
     # Auto-generate models from OpenRouter API
     logger.info("Auto-generating models from OpenRouter API")
-    source_filter = os.getenv("SOURCE")
+    try:
+        source_filter = settings.source or None
+    except Exception:
+        source_filter = None
     source_filter = source_filter if source_filter and source_filter.strip() else None
 
     models_data = fetch_openrouter_models(source_filter=source_filter)

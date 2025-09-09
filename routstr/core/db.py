@@ -4,6 +4,7 @@ from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
+from cashu.core.base import Token
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel import Field, SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -50,6 +51,12 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     @property
     def total_balance(self) -> int:
         return self.balance - self.reserved_balance
+
+    @classmethod
+    def from_cashu_token(cls, cashu_token: Token) -> "ApiKey":
+        raise NotImplementedError(
+            "Not implemented"
+        )  # TODO: Implement when Cashu integration is finished
 
 
 async def balances_for_mint_and_unit(

@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -15,16 +14,19 @@ from ..payment.models import MODELS, models_router, update_sats_pricing
 from ..proxy import proxy_router
 from ..wallet import periodic_payout
 from .admin import admin_router
-from .db import init_db, run_migrations
+from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
+from .pricing import pricing_router
+from .settings import SettingsService
+from .settings import settings as global_settings
 
 # Initialize logging first
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.1.2"
+__version__ = "0.1.3-dev"
 
 
 @asynccontextmanager
@@ -46,6 +48,17 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Initialize database connection pools
         # This creates any tables that might not be tracked by migrations yet
         await init_db()
+
+        # Initialize application settings (env -> computed -> DB precedence)
+        async with create_session() as session:
+            s = await SettingsService.initialize(session)
+
+        # Apply app metadata from settings
+        try:
+            app.title = s.name
+            app.description = s.description
+        except Exception:
+            pass
 
         pricing_task = asyncio.create_task(update_sats_pricing())
         payout_task = asyncio.create_task(periodic_payout())
@@ -93,18 +106,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             )
 
 
-app = FastAPI(
-    version=__version__,
-    title=os.environ.get("NAME", "ARoutstrNode" + __version__),
-    description=os.environ.get("DESCRIPTION", "A Routstr Node"),
-    contact={"name": os.environ.get("NAME", ""), "npub": os.environ.get("NPUB", "")},
-    lifespan=lifespan,
-)
+app = FastAPI(version=__version__, lifespan=lifespan)
 
-# Configure CORS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=global_settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -123,14 +130,14 @@ app.add_exception_handler(Exception, general_exception_handler)
 @app.get("/v1/info")
 async def info() -> dict:
     return {
-        "name": app.title,
-        "description": app.description,
+        "name": global_settings.name,
+        "description": global_settings.description,
         "version": __version__,
-        "npub": os.environ.get("NPUB", ""),
-        "mints": os.environ.get("CASHU_MINTS", "").split(","),
-        "http_url": os.environ.get("HTTP_URL", ""),
-        "onion_url": os.environ.get("ONION_URL", ""),
-        "models": MODELS,
+        "npub": global_settings.npub,
+        "mints": global_settings.cashu_mints,
+        "http_url": global_settings.http_url,
+        "onion_url": global_settings.onion_url,
+        "models": MODELS,  # todo maybe remove models from here
     }
 
 
@@ -141,6 +148,7 @@ async def admin_redirect() -> RedirectResponse:
 
 app.include_router(models_router)
 app.include_router(admin_router)
+app.include_router(pricing_router)
 app.include_router(balance_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
