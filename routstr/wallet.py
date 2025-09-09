@@ -1,6 +1,5 @@
 import asyncio
 import math
-import os
 from typing import TypedDict
 
 from cashu.core.base import Proof, Token
@@ -8,19 +7,14 @@ from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
 
 from .core import db, get_logger
+from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 
 logger = get_logger(__name__)
 
 
-CASHU_MINTS = os.environ.get("CASHU_MINTS", "https://mint.minibits.cash/Bitcoin")
-TRUSTED_MINTS = CASHU_MINTS.split(",")
-PRIMARY_MINT_URL = TRUSTED_MINTS[0]
-RECEIVE_LN_ADDRESS = os.environ.get("RECEIVE_LN_ADDRESS", "")
-
-
 async def get_balance(unit: str) -> int:
-    wallet = await get_wallet(PRIMARY_MINT_URL, unit)
+    wallet = await get_wallet(settings.primary_mint, unit)
     return wallet.available_balance.amount
 
 
@@ -34,7 +28,7 @@ async def recieve_token(
     wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
     wallet.keyset_id = token_obj.keysets[0]
 
-    if token_obj.mint not in TRUSTED_MINTS:
+    if token_obj.mint not in settings.cashu_mints:
         return await swap_to_primary_mint(token_obj, wallet)
 
     wallet.verify_proofs_dleq(token_obj.proofs)
@@ -44,8 +38,10 @@ async def recieve_token(
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Internal send function - returns amount and serialized token"""
-    wallet: Wallet = await get_wallet(mint_url or PRIMARY_MINT_URL, unit)
-    proofs = get_proofs_per_mint_and_unit(wallet, mint_url or PRIMARY_MINT_URL, unit)
+    wallet: Wallet = await get_wallet(mint_url or settings.primary_mint, unit)
+    proofs = get_proofs_per_mint_and_unit(
+        wallet, mint_url or settings.primary_mint, unit
+    )
 
     send_proofs, _ = await wallet.select_to_send(
         proofs, amount, set_reserved=True, include_fees=False
@@ -86,7 +82,7 @@ async def swap_to_primary_mint(
         raise ValueError("Invalid unit")
     estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2))
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
-    primary_wallet = await get_wallet(PRIMARY_MINT_URL, "sat")
+    primary_wallet = await get_wallet(settings.primary_mint, "sat")
 
     minted_amount = int(amount_msat_after_fee // 1000)
     mint_quote = await primary_wallet.request_mint(minted_amount)
@@ -100,7 +96,7 @@ async def swap_to_primary_mint(
     )
     _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
 
-    return int(minted_amount), "sat", PRIMARY_MINT_URL
+    return int(minted_amount), "sat", settings.primary_mint
 
 
 async def credit_balance(
@@ -259,7 +255,7 @@ async def fetch_all_balances(
     async with db.create_session() as session:
         tasks = [
             fetch_balance(session, mint_url, unit)
-            for mint_url in TRUSTED_MINTS
+            for mint_url in settings.cashu_mints
             for unit in units
         ]
 
@@ -299,14 +295,14 @@ async def fetch_all_balances(
 
 
 async def periodic_payout() -> None:
-    if not RECEIVE_LN_ADDRESS:
+    if not settings.receive_ln_address:
         logger.error("RECEIVE_LN_ADDRESS is not set, skipping payout")
         return
     while True:
         await asyncio.sleep(60 * 5)
         try:
             async with db.create_session() as session:
-                for mint_url in TRUSTED_MINTS:
+                for mint_url in settings.cashu_mints:
                     for unit in ["sat", "msat"]:
                         wallet = await get_wallet(mint_url, unit)
                         proofs = get_proofs_per_mint_and_unit(
@@ -323,7 +319,7 @@ async def periodic_payout() -> None:
                         min_amount = 210 if unit == "sat" else 210000
                         if available_balance > min_amount:
                             amount_received = await raw_send_to_lnurl(
-                                wallet, proofs, RECEIVE_LN_ADDRESS, unit
+                                wallet, proofs, settings.receive_ln_address, unit
                             )
                             logger.info(
                                 "Payout sent successfully",

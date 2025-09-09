@@ -33,7 +33,8 @@ sequenceDiagram
 - **API Key Management** – Hashed keys stored in SQLite with balance tracking and optional expiry/refund address
 - **Model-Based Pricing** – Convert USD prices in `models.json` to sats using live BTC/USD rates
 - **Admin Dashboard** – Simple HTML interface at `/admin/` to view balances and API keys
-- **Discovery** – Fetch available providers from Nostr relays
+- **Discovery** – Fetch available providers from Nostr relays using NIP-91 protocol
+- **NIP-91 Auto-Announcement** – Automatically announce this provider to Nostr relays when NSEC is provided
 - **Docker Support** – Provided `Dockerfile` and `compose.yml` for running with an optional Tor hidden service
 
 ## Getting Started
@@ -86,9 +87,11 @@ This builds the image and also starts a Tor container exposing the API as a hidd
 
 The most common settings are shown below. See `.env.example` for the full list.
 
+### Core Settings
+
 - `UPSTREAM_BASE_URL` – URL of the OpenAI-compatible service
 - `UPSTREAM_API_KEY` – API key for the upstream service (optional)
-- `MODEL_BASED_PRICING` – Set to `true` to use pricing from `models.json`
+- `FIXED_PRICING` – Set to `true` to use a fixed per-request price; `false` (default) uses model pricing from `models.json`
 - `ADMIN_PASSWORD` – Password for the `/admin/` dashboard
 - `CASHU_MINTS` – Comma-separated list of Cashu mint URLs
 - `NAME` – Name of the proxy

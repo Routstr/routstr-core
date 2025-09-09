@@ -7,10 +7,15 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ..core import get_logger
+from ..core.settings import settings
 from ..upstream import UpstreamProvider
 from ..wallet import recieve_token, send_token
 from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
-from .helpers import create_error_response
+from .helpers import (
+    create_error_response,
+    prepare_upstream_headers,
+    prepare_upstream_params,
+)
 
 logger = get_logger(__name__)
 
@@ -34,7 +39,7 @@ class XCashuUpstreamProvider(UpstreamProvider):
         try:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
-            headers = self.prepare_upstream_headers(dict(request.headers))
+            headers = prepare_upstream_headers(dict(request.headers))
 
             logger.info(
                 "X-Cashu token redeemed successfully",
@@ -106,7 +111,7 @@ class XCashuUpstreamProvider(UpstreamProvider):
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
-        url = f"{self.url}/{path}"
+        url = f"{settings.upstream_base_url}/{path}"
 
         logger.debug(
             "Forwarding request to upstream",
@@ -130,7 +135,7 @@ class XCashuUpstreamProvider(UpstreamProvider):
                         url,
                         headers=headers,
                         content=request.stream(),
-                        params=request.query_params,
+                        params=prepare_upstream_params(path, request.query_params),
                     ),
                     stream=True,
                 )

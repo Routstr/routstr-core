@@ -39,7 +39,9 @@ async def test_recieve_token_valid() -> None:
     mock_wallet = Mock()
     mock_wallet.split = AsyncMock()
 
-    with patch("routstr.wallet.TRUSTED_MINTS", ["http://mint:3338"]):
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
         with patch("routstr.wallet.deserialize_token_from_string") as mock_deserialize:
             mock_token = Mock()
             mock_token.keysets = ["keyset1"]
@@ -82,7 +84,9 @@ async def test_credit_balance() -> None:
     mock_key.balance = 5000000
     mock_session = AsyncMock()
 
-    with patch("routstr.wallet.PRIMARY_MINT_URL", "http://mint:3338"):
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
         with patch(
             "routstr.wallet.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),

@@ -1,33 +1,12 @@
 import math
-import os
 
 from pydantic.v1 import BaseModel
 
 from ..core import get_logger
+from ..core.settings import settings
 from .models import MODELS
 
 logger = get_logger(__name__)
-
-COST_PER_REQUEST = (
-    int(os.environ.get("COST_PER_REQUEST", "1")) * 1000
-)  # Convert to msats
-COST_PER_1K_INPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_INPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-COST_PER_1K_OUTPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_OUTPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-MODEL_BASED_PRICING = os.environ.get("MODEL_BASED_PRICING", "false").lower() == "true"
-
-logger.info(
-    "Cost calculation initialized",
-    extra={
-        "cost_per_request_msats": COST_PER_REQUEST,
-        "cost_per_1k_input_tokens_msats": COST_PER_1K_INPUT_TOKENS,
-        "cost_per_1k_output_tokens_msats": COST_PER_1K_OUTPUT_TOKENS,
-        "model_based_pricing": MODEL_BASED_PRICING,
-    },
-)
 
 
 class CostData(BaseModel):
@@ -85,10 +64,10 @@ def calculate_cost(
         )
         return cost_data
 
-    MSATS_PER_1K_INPUT_TOKENS = COST_PER_1K_INPUT_TOKENS
-    MSATS_PER_1K_OUTPUT_TOKENS = COST_PER_1K_OUTPUT_TOKENS
+    MSATS_PER_1K_INPUT_TOKENS = settings.fixed_per_1k_input_tokens * 1000
+    MSATS_PER_1K_OUTPUT_TOKENS = settings.fixed_per_1k_output_tokens * 1000
 
-    if MODEL_BASED_PRICING and MODELS:
+    if (not settings.fixed_pricing) and MODELS:
         response_model = response_data.get("model", "")
         logger.debug(
             "Using model-based pricing",

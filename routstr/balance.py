@@ -1,3 +1,6 @@
+import asyncio
+import hashlib
+from time import monotonic
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -5,7 +8,8 @@ from pydantic import BaseModel
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
-from .wallet import PRIMARY_MINT_URL, credit_balance, send_to_lnurl, send_token
+from .core.settings import settings
+from .wallet import credit_balance, send_to_lnurl, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -98,11 +102,52 @@ async def topup_wallet_endpoint(
     return {"msats": amount_msats}
 
 
+_REFUND_CACHE_TTL_SECONDS: int = settings.refund_cache_ttl_seconds
+_refund_cache_lock: asyncio.Lock = asyncio.Lock()
+_refund_cache: dict[str, tuple[float, dict[str, str]]] = {}
+
+
+def _cache_key_for_authorization(authorization: str) -> str:
+    return hashlib.sha256(authorization.strip().encode()).hexdigest()
+
+
+async def _refund_cache_get(authorization: str) -> dict[str, str] | None:
+    key = _cache_key_for_authorization(authorization)
+    async with _refund_cache_lock:
+        item = _refund_cache.get(key)
+        if item is None:
+            return None
+        expires_at, value = item
+        if expires_at <= monotonic():
+            del _refund_cache[key]
+            return None
+        return value
+
+
+async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
+    key = _cache_key_for_authorization(authorization)
+    expiry = monotonic() + _REFUND_CACHE_TTL_SECONDS
+    async with _refund_cache_lock:
+        _refund_cache[key] = (expiry, value)
+
+
 @router.post("/refund")
 async def refund_wallet_endpoint(
-    key: ApiKey = Depends(get_key_from_header),
+    authorization: Annotated[str, Header(...)],
     session: AsyncSession = Depends(get_session),
-) -> dict:
+) -> dict[str, str]:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization. Use 'Bearer <cashu-token>' or 'Bearer <api-key>'",
+        )
+
+    bearer_value: str = authorization[7:]
+
+    if cached := await _refund_cache_get(bearer_value):
+        return cached
+
+    key: ApiKey = await validate_bearer_key(bearer_value, session)
     remaining_balance_msats: int = key.balance
 
     if remaining_balance_msats <= 0:
@@ -112,11 +157,13 @@ async def refund_wallet_endpoint(
     try:
         if key.refund_address:
             if key.refund_currency == "sat":
-                remaining_balance = remaining_balance_msats * 1000
+                remaining_balance = remaining_balance_msats // 1000
+            from .core.settings import settings as global_settings
+
             await send_to_lnurl(
                 remaining_balance,
                 key.refund_currency or "sat",
-                key.refund_mint_url or PRIMARY_MINT_URL,
+                key.refund_mint_url or global_settings.primary_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}
@@ -152,6 +199,8 @@ async def refund_wallet_endpoint(
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
             raise HTTPException(status_code=500, detail="Refund failed")
+
+    await _refund_cache_set(bearer_value, result)
 
     await session.delete(key)
     await session.commit()

@@ -28,23 +28,27 @@ docker run -d \
 For a full setup with Tor support:
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/routstr/routstr-core.git
 cd routstr-core
 ```
 
 2. Create environment file:
+
 ```bash
 cp .env.example .env
 # Edit .env with your settings
 ```
 
 3. Start the services:
+
 ```bash
 docker compose up -d
 ```
 
 This will start:
+
 - Routstr proxy on port 8000
 - Tor hidden service (optional)
 - Automatic database migrations
@@ -58,11 +62,12 @@ curl http://localhost:8000/v1/info
 ```
 
 You should see:
+
 ```json
 {
   "name": "ARoutstrNode",
   "description": "A Routstr Node",
-  "version": "0.1.1b",
+  "version": "0.1.2",
   "npub": "",
   "mints": ["https://mint.minibits.cash/Bitcoin"],
   "models": {...}
@@ -74,11 +79,13 @@ You should see:
 ### Install Dependencies
 
 1. Install [uv](https://github.com/astral-sh/uv) package manager:
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 2. Clone and setup:
+
 ```bash
 git clone https://github.com/routstr/routstr-core.git
 cd routstr-core
@@ -86,6 +93,7 @@ uv sync
 ```
 
 3. Configure environment:
+
 ```bash
 cp .env.example .env
 # Edit .env with your settings
@@ -120,6 +128,7 @@ curl -X POST http://localhost:8000/v1/wallet/create \
 ```
 
 Response:
+
 ```json
 {
   "api_key": "rUvK7...",
@@ -156,6 +165,7 @@ CASHU_TOKEN="your-token" python example.py
 ```
 
 This demonstrates:
+
 - Creating an API key from a token
 - Making streaming chat requests
 - Automatic balance deduction
@@ -170,18 +180,20 @@ curl http://localhost:8000/v1/models
 
 ### View Admin Dashboard
 
-Open http://localhost:8000/admin/ in your browser.
+Open <http://localhost:8000/admin/> in your browser.
 
 Default password is set in `ADMIN_PASSWORD` environment variable.
 
 ### Monitor Logs
 
 Docker:
+
 ```bash
 docker compose logs -f routstr
 ```
 
 Local:
+
 ```bash
 # Logs are in ./logs/ directory
 tail -f logs/routstr.log

@@ -181,7 +181,12 @@ class SecurityFilter(logging.Filter):
 
 def get_log_level() -> str:
     """Get log level from environment variable."""
-    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    try:
+        from .settings import settings
+
+        level = settings.log_level.upper()
+    except Exception:
+        level = os.environ.get("LOG_LEVEL", "INFO").upper()
     # Validate log level - if invalid, default to INFO
     valid_levels = {"TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     if level not in valid_levels:
@@ -191,11 +196,16 @@ def get_log_level() -> str:
 
 def should_enable_console_logging() -> bool:
     """Check if console logging should be enabled."""
-    return os.environ.get("ENABLE_CONSOLE_LOGGING", "true").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    try:
+        from .settings import settings
+
+        return bool(settings.enable_console_logging)
+    except Exception:
+        return os.environ.get("ENABLE_CONSOLE_LOGGING", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
 
 def setup_logging() -> None:
@@ -293,14 +303,19 @@ def setup_logging() -> None:
                 "handlers": ["console"] if console_enabled else [],
                 "propagate": False,
             },
+            "websockets": {
+                "level": "WARNING",
+                "handlers": [],
+                "propagate": False,
+            },
             "uvicorn.access": {
-                "level": log_level,  # Use the configured log level instead of WARNING
-                "handlers": handlers,  # Use both console and file handlers
+                "level": "WARNING",
+                "handlers": ["file"],
                 "propagate": False,
             },
             "uvicorn.error": {
-                "level": log_level,  # Use the configured log level
-                "handlers": handlers,  # Use both console and file handlers
+                "level": log_level,
+                "handlers": handlers,
                 "propagate": False,
             },
             "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},

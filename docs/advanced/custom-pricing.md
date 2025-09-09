@@ -14,11 +14,11 @@ Routstr supports three pricing models:
 
 ### Configuration
 
-Enable model-based pricing:
+Enable model-based pricing (default behavior):
 
 ```bash
 # .env
-MODEL_BASED_PRICING=true
+FIXED_PRICING=false
 MODELS_PATH=/app/config/models.json
 EXCHANGE_FEE=1.005         # 0.5% exchange fee
 UPSTREAM_PROVIDER_FEE=1.05  # 5% provider margin
@@ -118,14 +118,14 @@ if __name__ == "__main__":
 
 ### Configuration
 
-Set up token-based pricing:
+Set up token-based pricing overrides:
 
 ```bash
 # .env
-MODEL_BASED_PRICING=false
-COST_PER_REQUEST=1              # 1 sat base fee
-COST_PER_1K_INPUT_TOKENS=5      # 5 sats per 1K input
-COST_PER_1K_OUTPUT_TOKENS=15    # 15 sats per 1K output
+FIXED_PRICING=false                 # use model pricing
+FIXED_COST_PER_REQUEST=1            # optional base fee
+FIXED_PER_1K_INPUT_TOKENS=5         # optional override
+FIXED_PER_1K_OUTPUT_TOKENS=15       # optional override
 ```
 
 ### Custom Token Counting

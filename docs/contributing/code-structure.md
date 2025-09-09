@@ -348,7 +348,7 @@ Project metadata and dependencies:
 ```toml
 [project]
 name = "routstr"
-version = "0.1.1b"
+version = "0.1.2"
 dependencies = [
     "fastapi[standard]>=0.115",
     "sqlmodel>=0.0.24",

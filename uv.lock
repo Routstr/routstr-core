@@ -1362,6 +1362,22 @@ wheels = [
 ]
 
 [[package]]
+name = "nostr"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+    { name = "cryptography" },
+    { name = "pycparser" },
+    { name = "secp256k1" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/e1/1e24d8d2d75d28871f5b7d03304eda8250121ab665180872b9ba4ff70cc9/nostr-0.0.2.tar.gz", hash = "sha256:5c0c472f69764ae57870710d6b3bfe584df3ccdb0e2e3cd3f302f6b848124d24", size = 17189 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/ef/468ed56f0bea8e8979acf561273f8af2e7c9b3d8dc37bf80e81df08372a3/nostr-0.0.2-py3-none-any.whl", hash = "sha256:3d17d22dbd3aecf1ddf8cc72e330f14702e159fb0f43320d1ac88142db96aaba", size = 15397 },
+]
+
+[[package]]
 name = "openai"
 version = "1.98.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1767,7 +1783,7 @@ wheels = [
 
 [[package]]
 name = "routstr"
-version = "0.1.1b"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1777,9 +1793,11 @@ dependencies = [
     { name = "greenlet" },
     { name = "httpx", extra = ["socks"] },
     { name = "marshmallow" },
+    { name = "nostr" },
     { name = "python-json-logger" },
     { name = "secp256k1" },
     { name = "sqlmodel" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -1806,9 +1824,11 @@ requires-dist = [
     { name = "greenlet", specifier = ">=3.2.1" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.25.2" },
     { name = "marshmallow", specifier = ">=3.13,<4.0" },
+    { name = "nostr", specifier = ">=0.0.2" },
     { name = "python-json-logger", specifier = ">=2.0.0" },
     { name = "secp256k1", git = "https://github.com/saschanaz/secp256k1-py?branch=upgrade060" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
+    { name = "websockets", specifier = ">=12.0" },
 ]
 
 [package.metadata.requires-dev]

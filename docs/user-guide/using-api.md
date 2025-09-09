@@ -316,6 +316,15 @@ client = OpenAI(
 )
 ```
 
+### Azure OpenAI compatibility
+
+To use Azure OpenAI through Routstr with minimal changes:
+
+- Set `UPSTREAM_BASE_URL` to your Azure deployments URL, for example: `https://<resource>.openai.azure.com/openai/deployments/<deployment>`
+- Set `CHAT_COMPLETIONS_API_VERSION=2024-05-01-preview`
+
+When this env var is set, Routstr automatically appends `api-version=2024-05-01-preview` to all upstream `/chat/completions` requests.
+
 ### Async Operations
 
 For high-performance applications:

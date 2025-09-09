@@ -5,6 +5,7 @@ Routstr Core integrates with Nostr (Notes and Other Stuff Transmitted by Relays)
 ## Overview
 
 Nostr integration provides:
+
 - **Decentralized Discovery**: Find providers through relay network
 - **Cryptographic Identity**: Providers identified by public keys
 - **Real-time Updates**: Live provider status and pricing
@@ -34,6 +35,7 @@ Providers announce themselves by publishing signed events to Nostr relays. Clien
 ### Setting Up Nostr Identity
 
 1. **Generate Nostr Keys**
+
    ```bash
    # Using nostril or similar tool
    nostril --generate-keypair
@@ -44,6 +46,7 @@ Providers announce themselves by publishing signed events to Nostr relays. Clien
    ```
 
 2. **Configure Environment**
+
    ```bash
    # .env
    NPUB=npub1xyz...  # Your public key
@@ -104,7 +107,7 @@ DEFAULT_RELAYS = [
 ]
 
 # Custom relay configuration
-NOSTR_RELAYS=wss://relay1.com,wss://relay2.com
+RELAYS=wss://relay1.com,wss://relay2.com
 ```
 
 ## Client Discovery
@@ -276,6 +279,7 @@ def select_provider(
 ### Automatic Updates
 
 Routstr publishes updates when:
+
 - Node starts up
 - Configuration changes
 - Models are added/removed
@@ -295,7 +299,7 @@ async def publish_provider_info():
         pricing=get_current_pricing()
     )
     
-    await publish_to_relays(event, NOSTR_RELAYS)
+    await publish_to_relays(event, RELAYS)
 ```
 
 ### Event Lifecycle
@@ -315,7 +319,7 @@ async def update_nostr_presence():
 async def remove_nostr_presence():
     """Remove provider from discovery."""
     deletion_event = create_deletion_event()
-    await publish_to_relays(deletion_event, NOSTR_RELAYS)
+    await publish_to_relays(deletion_event, RELAYS)
 ```
 
 ## Security Considerations
@@ -323,6 +327,7 @@ async def remove_nostr_presence():
 ### Key Management
 
 1. **Secure Storage**
+
    ```python
    # Never log private keys
    SENSITIVE_VARS = ['NSEC', 'ADMIN_PASSWORD']
@@ -335,6 +340,7 @@ async def remove_nostr_presence():
    ```
 
 2. **Key Rotation**
+
    ```bash
    # Generate new keys
    nostril --generate-keypair
@@ -524,7 +530,7 @@ async def debug_discovery():
     issues = []
     
     # Check relay connectivity
-    for relay in NOSTR_RELAYS:
+    for relay in RELAYS:
         if not await can_connect_to_relay(relay):
             issues.append(f"Cannot connect to {relay}")
     

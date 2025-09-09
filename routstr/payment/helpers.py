@@ -1,22 +1,15 @@
 import json
-import os
+from typing import Mapping
 
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
 
 from ..core import get_logger
+from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
-from .cost_caculation import COST_PER_REQUEST, MODEL_BASED_PRICING
 from .models import MODELS
 
 logger = get_logger(__name__)
-
-
-UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", "")
-UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
-
-if not UPSTREAM_BASE_URL:
-    raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
 
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
@@ -93,28 +86,32 @@ def get_max_cost_for_model(model: str, tolerance_percentage: int = 1) -> int:
         "Getting max cost for model",
         extra={
             "model": model,
-            "model_based_pricing": MODEL_BASED_PRICING,
+            "fixed_pricing": settings.fixed_pricing,
             "has_models": bool(MODELS),
         },
     )
 
-    if not MODEL_BASED_PRICING or not MODELS:
+    # Fixed pricing: always use fixed_cost_per_request
+    if settings.fixed_pricing:
+        default_cost_msats = settings.fixed_cost_per_request * 1000
         logger.debug(
-            "Using default cost (no model-based pricing)",
-            extra={"cost_msats": COST_PER_REQUEST, "model": model},
+            "Using fixed cost pricing",
+            extra={"cost_msats": default_cost_msats, "model": model},
         )
-        return COST_PER_REQUEST
+        return default_cost_msats
 
     if model not in [model.id for model in MODELS]:
+        # If no models or unknown model, fall back to fixed cost if provided, else minimal default
+        fallback_msats = settings.fixed_cost_per_request * 1000
         logger.warning(
             "Model not found in available models",
             extra={
                 "requested_model": model,
                 "available_models": [m.id for m in MODELS],
-                "using_default_cost": COST_PER_REQUEST,
+                "using_default_cost": fallback_msats,
             },
         )
-        return COST_PER_REQUEST
+        return fallback_msats
 
     for m in MODELS:
         if m.id == model:
@@ -126,10 +123,13 @@ def get_max_cost_for_model(model: str, tolerance_percentage: int = 1) -> int:
             return int(max_cost)
 
     logger.warning(
-        "Model pricing not found, using default",
-        extra={"model": model, "default_cost_msats": COST_PER_REQUEST},
+        "Model pricing not found, using fixed cost",
+        extra={
+            "model": model,
+            "default_cost_msats": settings.fixed_cost_per_request * 1000,
+        },
     )
-    return COST_PER_REQUEST
+    return settings.fixed_cost_per_request * 1000
 
 
 def create_error_response(
@@ -155,3 +155,61 @@ def create_error_response(
         media_type="application/json",
         headers={"X-Cashu": token} if token else {},
     )
+
+
+def prepare_upstream_headers(request_headers: dict) -> dict:
+    """Prepare headers for upstream request, removing sensitive/problematic ones."""
+    upstream_api_key = settings.upstream_api_key
+    logger.debug(
+        "Preparing upstream headers",
+        extra={
+            "original_headers_count": len(request_headers),
+            "has_upstream_api_key": bool(upstream_api_key),
+        },
+    )
+
+    headers = dict(request_headers)
+
+    # Remove headers that shouldn't be forwarded
+    removed_headers = []
+    for header in [
+        "host",
+        "content-length",
+        "refund-lnurl",
+        "key-expiry-time",
+        "x-cashu",
+    ]:
+        if headers.pop(header, None) is not None:
+            removed_headers.append(header)
+
+    # Handle authorization
+    if upstream_api_key:
+        headers["Authorization"] = f"Bearer {upstream_api_key}"
+        if headers.pop("authorization", None) is not None:
+            removed_headers.append("authorization (replaced with upstream key)")
+    else:
+        for auth_header in ["Authorization", "authorization"]:
+            if headers.pop(auth_header, None) is not None:
+                removed_headers.append(auth_header)
+
+    logger.debug(
+        "Headers prepared for upstream",
+        extra={
+            "final_headers_count": len(headers),
+            "removed_headers": removed_headers,
+            "added_upstream_auth": bool(upstream_api_key),
+        },
+    )
+
+    return headers
+
+
+def prepare_upstream_params(
+    path: str, query_params: Mapping[str, str] | None
+) -> dict[str, str]:
+    """Prepare query params for upstream request, optionally adding api-version for chat/completions."""
+    params: dict[str, str] = dict(query_params or {})
+    chat_api_version = settings.chat_completions_api_version
+    if path.endswith("chat/completions") and chat_api_version:
+        params["api-version"] = chat_api_version
+    return params

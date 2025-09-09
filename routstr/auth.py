@@ -7,18 +7,14 @@ from sqlmodel import col, update
 
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession
+from .core.settings import settings
 from .payment.cost_caculation import (
     CostData,
     CostDataError,
     MaxCostData,
     calculate_cost,
 )
-from .wallet import (
-    PRIMARY_MINT_URL,
-    TRUSTED_MINTS,
-    credit_balance,
-    deserialize_token_from_string,
-)
+from .wallet import credit_balance, deserialize_token_from_string
 
 logger = get_logger(__name__)
 
@@ -165,12 +161,12 @@ async def validate_bearer_key(
                     "has_expiry_time": bool(key_expiry_time),
                 },
             )
-            if token_obj.mint in TRUSTED_MINTS:
+            if token_obj.mint in settings.cashu_mints:
                 refund_currency = token_obj.unit
                 refund_mint_url = token_obj.mint
             else:
                 refund_currency = "sat"
-                refund_mint_url = PRIMARY_MINT_URL
+                refund_mint_url = settings.primary_mint
 
             new_key = ApiKey(
                 hashed_key=hashed_key,
@@ -436,6 +432,40 @@ async def adjust_payment_for_tokens(
                     "max_cost": cost.total_msats,
                 },
             )
+            # Finalize by releasing reservation and charging max cost
+            finalize_stmt = (
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == key.hashed_key)
+                .values(
+                    reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
+                    balance=col(ApiKey.balance) - cost.total_msats,
+                    total_spent=col(ApiKey.total_spent) + cost.total_msats,
+                )
+            )
+            result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
+            await session.commit()
+            if result.rowcount == 0:
+                logger.error(
+                    "Failed to finalize max-cost payment - insufficient reserved balance",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "deducted_max_cost": deducted_max_cost,
+                        "current_reserved_balance": key.reserved_balance,
+                        "total_cost": cost.total_msats,
+                        "model": model,
+                    },
+                )
+            else:
+                await session.refresh(key)
+                logger.info(
+                    "Max cost payment finalized",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "charged_amount": cost.total_msats,
+                        "new_balance": key.balance,
+                        "model": model,
+                    },
+                )
             return cost.dict()
 
         case CostData() as cost:
@@ -459,15 +489,27 @@ async def adjust_payment_for_tokens(
 
             if cost_difference == 0:
                 logger.debug(
-                    "No cost adjustment needed",
+                    "Finalizing with exact reserved cost",
                     extra={"key_hash": key.hashed_key[:8] + "...", "model": model},
                 )
+                finalize_stmt = (
+                    update(ApiKey)
+                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .values(
+                        reserved_balance=col(ApiKey.reserved_balance)
+                        - deducted_max_cost,
+                        balance=col(ApiKey.balance) - total_cost_msats,
+                        total_spent=col(ApiKey.total_spent) + total_cost_msats,
+                    )
+                )
+                await session.exec(finalize_stmt)  # type: ignore[call-overload]
                 await session.commit()
+                await session.refresh(key)
                 return cost.dict()
 
             # this should never happen why do we handle this???
             if cost_difference > 0:
-                # Need to charge more
+                # Need to charge more than reserved, finalize by releasing reservation and charging total
                 logger.info(
                     "Additional charge required for token usage",
                     extra={
@@ -479,56 +521,41 @@ async def adjust_payment_for_tokens(
                     },
                 )
 
-                # this should never happen why do we handle this???
-                if key.balance < cost_difference:
-                    logger.warning(
-                        "Insufficient balance for token-based pricing adjustment",
+                finalize_stmt = (
+                    update(ApiKey)
+                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .values(
+                        reserved_balance=col(ApiKey.reserved_balance)
+                        - deducted_max_cost,
+                        balance=col(ApiKey.balance) - total_cost_msats,
+                        total_spent=col(ApiKey.total_spent) + total_cost_msats,
+                    )
+                )
+                result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
+                await session.commit()
+
+                if result.rowcount:
+                    cost.total_msats = total_cost_msats
+                    await session.refresh(key)
+
+                    logger.info(
+                        "Finalized payment with additional charge",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
-                            "required": cost_difference,
-                            "available": key.balance,
-                            "shortfall": cost_difference - key.balance,
+                            "charged_amount": total_cost_msats,
+                            "new_balance": key.balance,
                             "model": model,
                         },
                     )
-                    await session.commit()
                 else:
-                    # this should never happen why do we handle this???
-                    charge_stmt = (
-                        update(ApiKey)
-                        .where(col(ApiKey.hashed_key) == key.hashed_key)
-                        .where(col(ApiKey.balance) >= cost_difference)
-                        .values(
-                            balance=col(ApiKey.balance) - cost_difference,
-                            total_spent=col(ApiKey.total_spent) + cost_difference,
-                        )
+                    logger.warning(
+                        "Failed to finalize additional charge (concurrent operation)",
+                        extra={
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "attempted_charge": total_cost_msats,
+                            "model": model,
+                        },
                     )
-                    result = await session.exec(charge_stmt)  # type: ignore[call-overload]
-                    await session.commit()
-
-                    if result.rowcount:
-                        cost.total_msats = deducted_max_cost + cost_difference
-                        await session.refresh(key)
-
-                        logger.info(
-                            "Additional charge applied successfully",
-                            extra={
-                                "key_hash": key.hashed_key[:8] + "...",
-                                "charged_amount": cost_difference,
-                                "new_balance": key.balance,
-                                "total_cost": cost.total_msats,
-                                "model": model,
-                            },
-                        )
-                    else:
-                        logger.warning(
-                            "Failed to apply additional charge (concurrent operation)",
-                            extra={
-                                "key_hash": key.hashed_key[:8] + "...",
-                                "attempted_charge": cost_difference,
-                                "model": model,
-                            },
-                        )
             else:
                 # Refund some of the base cost
                 refund = abs(cost_difference)
