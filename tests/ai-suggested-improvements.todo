@@ -1,0 +1,30 @@
+# AI Generated Suggestions for Integration Test Improvements
+
+## High priority
+- [ ] Standardize httpx mocking: replace all `with patch("httpx.AsyncClient.request")` with `with patch("httpx.AsyncClient.send")` in integration tests
+  - [ ] Update `tests/integration/test_error_handling_edge_cases.py`
+  - [ ] Update `tests/integration/test_proxy_get_endpoints.py`
+  - [ ] Update any remaining tests using `.request` (grep to confirm)
+- [ ] Ensure streaming mocks expose `aiter_bytes` (async generator) wherever streaming responses are tested
+  - [ ] Add `aiter_bytes` alongside `iter_bytes` in GET streaming tests in `tests/integration/test_proxy_get_endpoints.py`
+  - [ ] Verify all POST streaming tests in `tests/integration/test_proxy_post_endpoints.py` already provide `aiter_bytes`
+- [ ] Make model loading deterministic during tests to avoid network
+  - [ ] In `tests/integration/conftest.py` add `MODELS_PATH=models.example.json` to both mock and docker `test_env`
+  - [ ] Optionally add a tiny `models.json` for tests and point `MODELS_PATH` to it if you need non-empty models
+- [ ] Prevent accidental real upstream calls in mock mode
+  - [ ] In `tests/integration/conftest.py` set `UPSTREAM_BASE_URL=http://upstream.invalid` for mock mode
+
+## Medium priority
+- [ ] Review performance thresholds and mark flaky if needed
+  - [ ] `tests/integration/test_general_info_endpoints.py`: validate p95 < 500ms – relax or `@pytest.mark.flaky` if CI is noisy
+  - [ ] `tests/integration/test_proxy_get_endpoints.py` and `test_proxy_post_endpoints.py`: review p95 targets and adjust if required
+- [ ] Remove or convert stray `print()` debug statements to assertions/logging in tests
+- [ ] Add pytest markers configuration
+  - [ ] Create `pytest.ini` with markers: `integration`, `slow`
+  - [ ] Ensure CI uses `-m "integration and not slow"` for default runs
+- [ ] Normalize httpx response mocks
+  - [ ] Where tests call `response.json()` (sync in httpx), ensure mocks use `MagicMock(return_value=...)` (not async) unless explicitly awaited
+
+## Additional coverage
+- [ ] Add a positive POST test with `X-Cashu` header to exercise `x_cashu_handler` happy-path (mock inside as needed)
+- [ ] Add explicit assertions for forwarded rate-limit headers in POST/GET error propagation cases (429/5xx)
