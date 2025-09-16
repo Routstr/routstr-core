@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   routstr:
     build: .
@@ -25,13 +23,6 @@ services:
       - HS_ROUTER=routstr:8000:80
     depends_on:
       - routstr
-
-  # Legacy service definition to ensure cleanup of old container
-  router:
-    image: alpine:latest
-    command: /bin/true
-    profiles:
-      - cleanup
 
 volumes:
   tor-data:

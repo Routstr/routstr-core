@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import random
 import string
 from typing import Any
@@ -10,6 +9,7 @@ import websockets
 from fastapi import APIRouter
 
 from .core.logging import get_logger
+from .core.settings import settings
 
 logger = get_logger(__name__)
 
@@ -196,15 +196,18 @@ async def get_cache() -> list[dict[str, Any]]:
 
 
 def _get_discovery_relays() -> list[str]:
-    relays_env = os.getenv("RELAYS") or ""
-    discovery_relays = [r.strip() for r in relays_env.split(",") if r.strip()]
-    if not discovery_relays:
-        discovery_relays = [
+    try:
+        relays = settings.relays
+    except Exception:
+        relays = []
+    if not relays:
+        relays = [
             "wss://relay.nostr.band",
             "wss://relay.damus.io",
             "wss://relay.routstr.com",
+            "wss://nos.lol",
         ]
-    return discovery_relays
+    return relays
 
 
 async def _discover_providers(pubkey: str | None = None) -> list[dict[str, Any]]:
@@ -297,10 +300,8 @@ async def providers_cache_refresher(
 ) -> None:
     if interval_seconds is None:
         try:
-            interval_seconds = int(
-                os.getenv("PROVIDERS_REFRESH_INTERVAL_SECONDS", "300")
-            )
-        except ValueError:
+            interval_seconds = settings.providers_refresh_interval_seconds
+        except Exception:
             interval_seconds = 300
 
     await refresh_providers_cache(pubkey=pubkey)
@@ -321,8 +322,10 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
         # Set up client arguments conditionally
         proxies = None
         if is_onion:
-            # Get Tor proxy URL from environment variable
-            tor_proxy = os.getenv("TOR_PROXY_URL", "socks5://127.0.0.1:9050")
+            try:
+                tor_proxy = settings.tor_proxy_url
+            except Exception:
+                tor_proxy = "socks5://127.0.0.1:9050"
             proxies = {"http://": tor_proxy, "https://": tor_proxy}  # type: ignore[assignment]
 
         async with httpx.AsyncClient(

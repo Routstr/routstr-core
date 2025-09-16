@@ -52,6 +52,20 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         return self.balance - self.reserved_balance
 
 
+class ModelRow(SQLModel, table=True):  # type: ignore
+    __tablename__ = "models"
+    id: str = Field(primary_key=True)
+    name: str = Field()
+    created: int = Field()
+    description: str = Field()
+    context_length: int = Field()
+    architecture: str = Field()
+    pricing: str = Field()
+    sats_pricing: str | None = Field(default=None)
+    per_request_limits: str | None = Field(default=None)
+    top_provider: str | None = Field(default=None)
+
+
 async def balances_for_mint_and_unit(
     db_session: AsyncSession, mint_url: str, unit: str
 ) -> int:

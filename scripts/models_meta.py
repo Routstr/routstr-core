@@ -42,13 +42,13 @@ class Model(TypedDict):
 
 
 OUTPUT_FILE = os.getenv("OUTPUT_FILE", "models.json")
-BASE_URL = os.getenv("BASE_URL", "https://openrouter.ai/api/v1")
 SOURCE = os.getenv("SOURCE")
 
 
 def fetch_openrouter_models(source_filter: str | None = None) -> list[Model]:
     """Fetches model information from OpenRouter API."""
-    with urlopen(f"{BASE_URL}/models") as response:
+    base_url = "https://openrouter.ai/api/v1"
+    with urlopen(f"{base_url}/models") as response:
         data = json.loads(response.read().decode("utf-8"))
 
         models_data: list[Model] = []

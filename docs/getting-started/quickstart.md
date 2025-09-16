@@ -67,7 +67,7 @@ You should see:
 {
   "name": "ARoutstrNode",
   "description": "A Routstr Node",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "npub": "",
   "mints": ["https://mint.minibits.cash/Bitcoin"],
   "models": {...}

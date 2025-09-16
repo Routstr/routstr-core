@@ -436,6 +436,27 @@ Authorization: Bearer sk-...
 
 ## Provider Discovery
 
+## Admin Settings
+
+These endpoints are protected by the Admin cookie (`admin_password` set to your configured admin password).
+
+### Get Settings
+
+```http
+GET /admin/api/settings
+```
+
+Returns the current application settings (sensitive values may be redacted).
+
+### Update Settings
+
+```http
+PATCH /admin/api/settings
+Content-Type: application/json
+```
+
+Body is a partial JSON of settings fields to update. Validated and persisted to the database.
+
 ### List Providers
 
 Get available upstream providers.

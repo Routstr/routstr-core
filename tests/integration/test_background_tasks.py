@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from routstr.core.db import ApiKey
-from routstr.payment.models import MODELS, Model, Pricing, update_sats_pricing
+from routstr.payment.models import Model, Pricing, update_sats_pricing
 from routstr.wallet import periodic_payout
 
 
@@ -57,51 +57,49 @@ class TestPricingUpdateTask:
                 },
             )
 
-            # Add test model to MODELS list
-            original_models = MODELS.copy()
-            MODELS.clear()
-            MODELS.append(test_model)
+            # Compute sats pricing once using the same logic as the background task
+            # Run the pricing update logic once directly
+            sats_to_usd = mock_sats_usd
+            _pdict = {k: v / sats_to_usd for k, v in test_model.pricing.dict().items()}
+            test_model.sats_pricing = Pricing(
+                prompt=_pdict.get("prompt", 0.0),
+                completion=_pdict.get("completion", 0.0),
+                request=_pdict.get("request", 0.0),
+                image=_pdict.get("image", 0.0),
+                web_search=_pdict.get("web_search", 0.0),
+                internal_reasoning=_pdict.get("internal_reasoning", 0.0),
+                max_prompt_cost=_pdict.get("max_prompt_cost", 0.0),
+                max_completion_cost=_pdict.get("max_completion_cost", 0.0),
+                max_cost=_pdict.get("max_cost", 0.0),
+            )
+            mspp = test_model.sats_pricing.prompt
+            mspc = test_model.sats_pricing.completion
+            if (tp := test_model.top_provider) and (
+                tp.context_length or tp.max_completion_tokens
+            ):
+                if (cl := test_model.top_provider.context_length) and (
+                    mct := test_model.top_provider.max_completion_tokens
+                ):
+                    test_model.sats_pricing.max_cost = (cl - mct) * mspp + mct * mspc
 
-            try:
-                # Run the pricing update logic once directly
-                sats_to_usd = mock_sats_usd
-                for model in [test_model]:
-                    model.sats_pricing = Pricing(
-                        **{k: v / sats_to_usd for k, v in model.pricing.dict().items()}
-                    )
-                    mspp = model.sats_pricing.prompt
-                    mspc = model.sats_pricing.completion
-                    if (tp := model.top_provider) and (
-                        tp.context_length or tp.max_completion_tokens
-                    ):
-                        if (cl := model.top_provider.context_length) and (
-                            mct := model.top_provider.max_completion_tokens
-                        ):
-                            model.sats_pricing.max_cost = (cl - mct) * mspp + mct * mspc
+            # Verify sats pricing was calculated correctly
+            assert test_model.sats_pricing is not None
+            assert test_model.sats_pricing.prompt == pytest.approx(
+                0.001 / mock_sats_usd
+            )
+            assert test_model.sats_pricing.completion == pytest.approx(
+                0.002 / mock_sats_usd
+            )
 
-                # Verify sats pricing was calculated correctly
-                assert test_model.sats_pricing is not None
-                assert test_model.sats_pricing.prompt == pytest.approx(
-                    0.001 / mock_sats_usd
-                )
-                assert test_model.sats_pricing.completion == pytest.approx(
-                    0.002 / mock_sats_usd
-                )
+            # Verify max_cost calculation
+            # Logic uses (context_length - max_completion_tokens) * prompt + max_completion_tokens * completion
+            expected_max_cost = (
+                (4096 - 1024) * test_model.sats_pricing.prompt
+                + 1024 * test_model.sats_pricing.completion
+            )
+            assert test_model.sats_pricing.max_cost == pytest.approx(expected_max_cost)
 
-                # Verify max_cost calculation
-                # Logic uses (context_length - max_completion_tokens) * prompt + max_completion_tokens * completion
-                expected_max_cost = (
-                    (4096 - 1024) * test_model.sats_pricing.prompt
-                    + 1024 * test_model.sats_pricing.completion
-                )
-                assert test_model.sats_pricing.max_cost == pytest.approx(
-                    expected_max_cost
-                )
-
-            finally:
-                # Restore original models
-                MODELS.clear()
-                MODELS.extend(original_models)
+            # Nothing to clean up; no global state was modified
 
     async def test_handles_provider_api_failures(self) -> None:
         """Test that pricing update continues running even if price API fails"""
@@ -159,37 +157,39 @@ class TestPricingUpdateTask:
             ),
         )
 
-        original_models = MODELS.copy()
-        MODELS.clear()
-        MODELS.append(test_model)
+        # Initialize pricing once to ensure consistent state
+        with patch(
+            "routstr.payment.price.sats_usd_ask_price",
+            AsyncMock(return_value=0.00002),
+        ):
+            sats_to_usd = 0.00002
+            _pdict = {k: v / sats_to_usd for k, v in test_model.pricing.dict().items()}
+            test_model.sats_pricing = Pricing(
+                prompt=_pdict.get("prompt", 0.0),
+                completion=_pdict.get("completion", 0.0),
+                request=_pdict.get("request", 0.0),
+                image=_pdict.get("image", 0.0),
+                web_search=_pdict.get("web_search", 0.0),
+                internal_reasoning=_pdict.get("internal_reasoning", 0.0),
+                max_prompt_cost=_pdict.get("max_prompt_cost", 0.0),
+                max_completion_cost=_pdict.get("max_completion_cost", 0.0),
+                max_cost=_pdict.get("max_cost", 0.0),
+            )
 
-        try:
-            with patch(
-                "routstr.payment.price.sats_usd_ask_price",
-                AsyncMock(return_value=0.00002),
-            ):
-                # Initialize pricing once to ensure consistent state
-                sats_to_usd = 0.00002
-                test_model.sats_pricing = Pricing(
-                    **{k: v / sats_to_usd for k, v in test_model.pricing.dict().items()}
-                )
+            # Simulate concurrent access to the model
+            results = []
 
-                # Simulate concurrent access to the model
-                results = []
+            async def access_model() -> None:
+                await asyncio.sleep(0.05)  # Small delay
+                results.append(test_model.sats_pricing)
 
-                async def access_model() -> None:
-                    await asyncio.sleep(0.05)  # Small delay
-                    results.append(test_model.sats_pricing)
+            # Run multiple concurrent accesses - they should all see the consistent state
+            await asyncio.gather(*[access_model() for _ in range(10)])
 
-                # Run multiple concurrent accesses - they should all see the consistent state
-                await asyncio.gather(*[access_model() for _ in range(10)])
+            # All accesses should see consistent state
+            assert all(r is not None for r in results)
 
-                # All accesses should see consistent state
-                assert all(r is not None for r in results)
-
-        finally:
-            MODELS.clear()
-            MODELS.extend(original_models)
+        # No global state to restore
 
 
 @pytest.mark.asyncio

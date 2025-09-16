@@ -91,7 +91,7 @@ The most common settings are shown below. See `.env.example` for the full list.
 
 - `UPSTREAM_BASE_URL` – URL of the OpenAI-compatible service
 - `UPSTREAM_API_KEY` – API key for the upstream service (optional)
-- `MODEL_BASED_PRICING` – Set to `true` to use pricing from `models.json`
+- `FIXED_PRICING` – Set to `true` to use a fixed per-request price; `false` (default) uses model pricing from `models.json`
 - `ADMIN_PASSWORD` – Password for the `/admin/` dashboard
 - `CASHU_MINTS` – Comma-separated list of Cashu mint URLs
 - `NAME` – Name of the proxy

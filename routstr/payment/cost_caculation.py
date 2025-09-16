@@ -1,33 +1,15 @@
+import json
 import math
-import os
 
 from pydantic.v1 import BaseModel
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from .models import MODELS
+from ..core.db import ModelRow
+from ..core.settings import settings
 
 logger = get_logger(__name__)
-
-COST_PER_REQUEST = (
-    int(os.environ.get("COST_PER_REQUEST", "1")) * 1000
-)  # Convert to msats
-COST_PER_1K_INPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_INPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-COST_PER_1K_OUTPUT_TOKENS = (
-    int(os.environ.get("COST_PER_1K_OUTPUT_TOKENS", "0")) * 1000
-)  # Convert to msats
-MODEL_BASED_PRICING = os.environ.get("MODEL_BASED_PRICING", "false").lower() == "true"
-
-logger.info(
-    "Cost calculation initialized",
-    extra={
-        "cost_per_request_msats": COST_PER_REQUEST,
-        "cost_per_1k_input_tokens_msats": COST_PER_1K_INPUT_TOKENS,
-        "cost_per_1k_output_tokens_msats": COST_PER_1K_OUTPUT_TOKENS,
-        "model_based_pricing": MODEL_BASED_PRICING,
-    },
-)
 
 
 class CostData(BaseModel):
@@ -46,8 +28,8 @@ class CostDataError(BaseModel):
     code: str
 
 
-def calculate_cost(
-    response_data: dict, max_cost: int
+async def calculate_cost(
+    response_data: dict, max_cost: int, session: AsyncSession | None = None
 ) -> CostData | MaxCostData | CostDataError:
     """
     Calculate the cost of an API request based on token usage.
@@ -85,44 +67,53 @@ def calculate_cost(
         )
         return cost_data
 
-    MSATS_PER_1K_INPUT_TOKENS = COST_PER_1K_INPUT_TOKENS
-    MSATS_PER_1K_OUTPUT_TOKENS = COST_PER_1K_OUTPUT_TOKENS
+    MSATS_PER_1K_INPUT_TOKENS: float = (
+        float(settings.fixed_per_1k_input_tokens) * 1000.0
+    )
+    MSATS_PER_1K_OUTPUT_TOKENS: float = (
+        float(settings.fixed_per_1k_output_tokens) * 1000.0
+    )
 
-    if MODEL_BASED_PRICING and MODELS:
+    if not settings.fixed_pricing and session is not None:
         response_model = response_data.get("model", "")
         logger.debug(
             "Using model-based pricing",
-            extra={
-                "model": response_model,
-                "available_models": [model.id for model in MODELS],
-            },
+            extra={"model": response_model},
         )
 
-        if response_model not in [model.id for model in MODELS]:
+        result = await session.exec(select(ModelRow.id))  # type: ignore
+        available_ids = [
+            row[0] if isinstance(row, tuple) else row for row in result.all()
+        ]
+        if response_model not in available_ids:
             logger.error(
                 "Invalid model in response",
-                extra={
-                    "response_model": response_model,
-                    "available_models": [model.id for model in MODELS],
-                },
+                extra={"response_model": response_model},
             )
             return CostDataError(
                 message=f"Invalid model in response: {response_model}",
                 code="model_not_found",
             )
 
-        model = next(model for model in MODELS if model.id == response_model)
-        if model.sats_pricing is None:
+        row = await session.get(ModelRow, response_model)
+        if row is None or not row.sats_pricing:
             logger.error(
                 "Model pricing not defined",
-                extra={"model": response_model, "model_id": model.id},
+                extra={"model": response_model, "model_id": response_model},
             )
             return CostDataError(
                 message="Model pricing not defined", code="pricing_not_found"
             )
 
-        MSATS_PER_1K_INPUT_TOKENS = model.sats_pricing.prompt * 1_000_000  # type: ignore
-        MSATS_PER_1K_OUTPUT_TOKENS = model.sats_pricing.completion * 1_000_000  # type: ignore
+        try:
+            sats_pricing = json.loads(row.sats_pricing)
+            mspp = float(sats_pricing.get("prompt", 0))
+            mspc = float(sats_pricing.get("completion", 0))
+        except Exception:
+            return CostDataError(message="Invalid pricing data", code="pricing_invalid")
+
+        MSATS_PER_1K_INPUT_TOKENS = mspp * 1_000_000.0
+        MSATS_PER_1K_OUTPUT_TOKENS = mspc * 1_000_000.0
 
         logger.info(
             "Applied model-specific pricing",

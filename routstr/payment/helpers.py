@@ -1,24 +1,19 @@
 import json
-import os
+import math
 from typing import Mapping
 
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
+from ..core.db import ModelRow
+from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
-from .cost_caculation import COST_PER_REQUEST, MODEL_BASED_PRICING
-from .models import MODELS
+from .models import Pricing
 
 logger = get_logger(__name__)
-
-
-UPSTREAM_BASE_URL = os.environ.get("UPSTREAM_BASE_URL", "")
-UPSTREAM_API_KEY = os.environ.get("UPSTREAM_API_KEY", "")
-CHAT_COMPLETIONS_API_VERSION = os.environ.get("CHAT_COMPLETIONS_API_VERSION", "")
-
-if not UPSTREAM_BASE_URL:
-    raise ValueError("Please set the UPSTREAM_BASE_URL environment variable")
 
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
@@ -89,49 +84,154 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         )
 
 
-def get_max_cost_for_model(model: str, tolerance_percentage: int = 1) -> int:
+async def get_max_cost_for_model(
+    model: str, session: AsyncSession | None = None
+) -> int:
     """Get the maximum cost for a specific model."""
     logger.debug(
         "Getting max cost for model",
         extra={
             "model": model,
-            "model_based_pricing": MODEL_BASED_PRICING,
-            "has_models": bool(MODELS),
+            "fixed_pricing": settings.fixed_pricing,
+            "has_models": True,
         },
     )
 
-    if not MODEL_BASED_PRICING or not MODELS:
+    # Fixed pricing: always use fixed_cost_per_request
+    if settings.fixed_pricing:
+        default_cost_msats = settings.fixed_cost_per_request * 1000
         logger.debug(
-            "Using default cost (no model-based pricing)",
-            extra={"cost_msats": COST_PER_REQUEST, "model": model},
+            "Using fixed cost pricing",
+            extra={"cost_msats": default_cost_msats, "model": model},
         )
-        return COST_PER_REQUEST
+        return max(settings.min_request_msat, default_cost_msats)
 
-    if model not in [model.id for model in MODELS]:
+    if session is None:
+        # Without a DB session, we can't resolve model pricing; fall back to fixed cost
+        fallback_msats = settings.fixed_cost_per_request * 1000
+        logger.warning(
+            "No DB session provided for model pricing; using fixed cost",
+            extra={"requested_model": model, "using_default_cost": fallback_msats},
+        )
+        return max(settings.min_request_msat, fallback_msats)
+
+    result = await session.exec(select(ModelRow.id))  # type: ignore
+    available_ids = [row[0] if isinstance(row, tuple) else row for row in result.all()]
+    if model not in available_ids:
+        # If no models or unknown model, fall back to fixed cost if provided, else minimal default
+        fallback_msats = settings.fixed_cost_per_request * 1000
         logger.warning(
             "Model not found in available models",
             extra={
                 "requested_model": model,
-                "available_models": [m.id for m in MODELS],
-                "using_default_cost": COST_PER_REQUEST,
+                "available_models": available_ids,
+                "using_default_cost": fallback_msats,
             },
         )
-        return COST_PER_REQUEST
+        return max(settings.min_request_msat, fallback_msats)
 
-    for m in MODELS:
-        if m.id == model:
-            max_cost = m.sats_pricing.max_cost * 1000 * (1 - tolerance_percentage / 100)  # type: ignore
+    row = await session.get(ModelRow, model)
+    if row and row.sats_pricing:
+        try:
+            sats = Pricing(**json.loads(row.sats_pricing))  # type: ignore
+            max_cost = sats.max_cost * 1000 * (1 - settings.tolerance_percentage / 100)
             logger.debug(
                 "Found model-specific max cost",
                 extra={"model": model, "max_cost_msats": max_cost},
             )
-            return int(max_cost)
+            calculated_msats = int(max_cost)
+            return max(settings.min_request_msat, calculated_msats)
+        except Exception:
+            pass
 
     logger.warning(
-        "Model pricing not found, using default",
-        extra={"model": model, "default_cost_msats": COST_PER_REQUEST},
+        "Model pricing not found, using fixed cost",
+        extra={
+            "model": model,
+            "default_cost_msats": settings.fixed_cost_per_request * 1000,
+        },
     )
-    return COST_PER_REQUEST
+    return max(settings.min_request_msat, settings.fixed_cost_per_request * 1000)
+
+
+async def calculate_discounted_max_cost(
+    max_cost_for_model: int, body: dict, session: AsyncSession | None = None
+) -> int:
+    """Calculate the discounted max cost for a request using model pricing when available."""
+    if settings.fixed_pricing or session is None:
+        return max_cost_for_model
+
+    model = body.get("model", "unknown")
+    model_pricing = await get_model_cost_info(model, session=session)
+    if not model_pricing:
+        return max_cost_for_model
+
+    tol = settings.tolerance_percentage
+    tol_factor = max(0.0, 1 - float(tol) / 100.0)
+    max_prompt_allowed_sats = model_pricing.max_prompt_cost * tol_factor
+    max_completion_allowed_sats = model_pricing.max_completion_cost * tol_factor
+
+    adjusted = max_cost_for_model
+
+    if messages := body.get("messages"):
+        prompt_tokens = estimate_tokens(messages)
+        estimated_prompt_delta_sats = (
+            max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
+        )
+        if estimated_prompt_delta_sats >= 0:
+            adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
+        else:
+            adjusted = adjusted + math.ceil(-estimated_prompt_delta_sats * 1000)
+
+    max_tokens_raw = body.get("max_tokens", None)
+    if max_tokens_raw is not None:
+        try:
+            max_tokens_int = int(max_tokens_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid max_tokens; ignoring in cost adjustment",
+                extra={"max_tokens": str(max_tokens_raw)[:64], "model": model},
+            )
+        else:
+            estimated_completion_delta_sats = (
+                max_completion_allowed_sats - max_tokens_int * model_pricing.completion
+            )
+            if estimated_completion_delta_sats >= 0:
+                adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
+            else:
+                adjusted = adjusted + math.ceil(-estimated_completion_delta_sats * 1000)
+
+    logger.debug(
+        "Discounted max cost computed",
+        extra={
+            "model": model,
+            "original_msats": max_cost_for_model,
+            "adjusted_msats": adjusted,
+            "tolerance_pct": tol,
+        },
+    )
+
+    return max(0, adjusted)
+
+
+def estimate_tokens(messages: list) -> int:
+    return len(str(messages)) // 3
+
+
+async def get_model_cost_info(
+    model_id: str, session: AsyncSession | None = None
+) -> Pricing | None:
+    if not model_id or model_id == "unknown":
+        return None
+    if session is None:
+        return None
+    row = await session.get(ModelRow, model_id)
+    if row and row.sats_pricing:
+        try:
+            return Pricing(**json.loads(row.sats_pricing))  # type: ignore
+        except Exception:
+            return None
+    return None
 
 
 def create_error_response(
@@ -161,11 +261,12 @@ def create_error_response(
 
 def prepare_upstream_headers(request_headers: dict) -> dict:
     """Prepare headers for upstream request, removing sensitive/problematic ones."""
+    upstream_api_key = settings.upstream_api_key
     logger.debug(
         "Preparing upstream headers",
         extra={
             "original_headers_count": len(request_headers),
-            "has_upstream_api_key": bool(UPSTREAM_API_KEY),
+            "has_upstream_api_key": bool(upstream_api_key),
         },
     )
 
@@ -184,8 +285,8 @@ def prepare_upstream_headers(request_headers: dict) -> dict:
             removed_headers.append(header)
 
     # Handle authorization
-    if UPSTREAM_API_KEY:
-        headers["Authorization"] = f"Bearer {UPSTREAM_API_KEY}"
+    if upstream_api_key:
+        headers["Authorization"] = f"Bearer {upstream_api_key}"
         if headers.pop("authorization", None) is not None:
             removed_headers.append("authorization (replaced with upstream key)")
     else:
@@ -198,7 +299,7 @@ def prepare_upstream_headers(request_headers: dict) -> dict:
         extra={
             "final_headers_count": len(headers),
             "removed_headers": removed_headers,
-            "added_upstream_auth": bool(UPSTREAM_API_KEY),
+            "added_upstream_auth": bool(upstream_api_key),
         },
     )
 
@@ -210,6 +311,7 @@ def prepare_upstream_params(
 ) -> dict[str, str]:
     """Prepare query params for upstream request, optionally adding api-version for chat/completions."""
     params: dict[str, str] = dict(query_params or {})
-    if path.endswith("chat/completions") and CHAT_COMPLETIONS_API_VERSION:
-        params["api-version"] = CHAT_COMPLETIONS_API_VERSION
+    chat_api_version = settings.chat_completions_api_version
+    if path.endswith("chat/completions") and chat_api_version:
+        params["api-version"] = chat_api_version
     return params

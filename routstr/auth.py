@@ -7,18 +7,14 @@ from sqlmodel import col, update
 
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession
+from .core.settings import settings
 from .payment.cost_caculation import (
     CostData,
     CostDataError,
     MaxCostData,
     calculate_cost,
 )
-from .wallet import (
-    PRIMARY_MINT_URL,
-    TRUSTED_MINTS,
-    credit_balance,
-    deserialize_token_from_string,
-)
+from .wallet import credit_balance, deserialize_token_from_string
 
 logger = get_logger(__name__)
 
@@ -165,12 +161,12 @@ async def validate_bearer_key(
                     "has_expiry_time": bool(key_expiry_time),
                 },
             )
-            if token_obj.mint in TRUSTED_MINTS:
+            if token_obj.mint in settings.cashu_mints:
                 refund_currency = token_obj.unit
                 refund_mint_url = token_obj.mint
             else:
                 refund_currency = "sat"
-                refund_mint_url = PRIMARY_MINT_URL
+                refund_mint_url = settings.primary_mint
 
             new_key = ApiKey(
                 hashed_key=hashed_key,
@@ -426,7 +422,7 @@ async def adjust_payment_for_tokens(
         },
     )
 
-    match calculate_cost(response_data, deducted_max_cost):
+    match await calculate_cost(response_data, deducted_max_cost, session):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",
@@ -637,3 +633,10 @@ async def adjust_payment_for_tokens(
                     }
                 },
             )
+    # Fallback return to satisfy type checker; execution should not reach here
+    return {
+        "base_msats": deducted_max_cost,
+        "input_msats": 0,
+        "output_msats": 0,
+        "total_msats": deducted_max_cost,
+    }

@@ -7,10 +7,11 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from ..core import get_logger
+from ..core.db import create_session
+from ..core.settings import settings
 from ..wallet import recieve_token, send_token
 from .cost_caculation import CostData, CostDataError, MaxCostData, calculate_cost
 from .helpers import (
-    UPSTREAM_BASE_URL,
     create_error_response,
     prepare_upstream_headers,
     prepare_upstream_params,
@@ -109,7 +110,7 @@ async def forward_to_upstream(
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    url = f"{settings.upstream_base_url}/{path}"
 
     logger.debug(
         "Forwarding request to upstream",
@@ -553,43 +554,45 @@ async def get_cost(
         extra={"model": model, "has_usage": "usage" in response_data},
     )
 
-    match calculate_cost(response_data, max_cost_for_model):
-        case MaxCostData() as cost:
-            logger.debug(
-                "Using max cost pricing",
-                extra={"model": model, "max_cost_msats": cost.total_msats},
-            )
-            return cost
-        case CostData() as cost:
-            logger.debug(
-                "Using token-based pricing",
-                extra={
-                    "model": model,
-                    "total_cost_msats": cost.total_msats,
-                    "input_msats": cost.input_msats,
-                    "output_msats": cost.output_msats,
-                },
-            )
-            return cost
-        case CostDataError() as error:
-            logger.error(
-                "Cost calculation error",
-                extra={
-                    "model": model,
-                    "error_message": error.message,
-                    "error_code": error.code,
-                },
-            )
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "message": error.message,
-                        "type": "invalid_request_error",
-                        "code": error.code,
-                    }
-                },
-            )
+    async with create_session() as session:
+        match await calculate_cost(response_data, max_cost_for_model, session):
+            case MaxCostData() as cost:
+                logger.debug(
+                    "Using max cost pricing",
+                    extra={"model": model, "max_cost_msats": cost.total_msats},
+                )
+                return cost
+            case CostData() as cost:
+                logger.debug(
+                    "Using token-based pricing",
+                    extra={
+                        "model": model,
+                        "total_cost_msats": cost.total_msats,
+                        "input_msats": cost.input_msats,
+                        "output_msats": cost.output_msats,
+                    },
+                )
+                return cost
+            case CostDataError() as error:
+                logger.error(
+                    "Cost calculation error",
+                    extra={
+                        "model": model,
+                        "error_message": error.message,
+                        "error_code": error.code,
+                    },
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "message": error.message,
+                            "type": "invalid_request_error",
+                            "code": error.code,
+                        }
+                    },
+                )
+    return None
 
 
 async def send_refund(amount: int, unit: str, mint: str | None = None) -> str:

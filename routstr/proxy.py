@@ -15,8 +15,9 @@ from .auth import (
 )
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession, create_session, get_session
+from .core.settings import settings
 from .payment.helpers import (
-    UPSTREAM_BASE_URL,
+    calculate_discounted_max_cost,
     check_token_balance,
     create_error_response,
     get_max_cost_for_model,
@@ -307,7 +308,7 @@ async def forward_to_upstream(
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    url = f"{settings.upstream_base_url}/{path}"
 
     logger.info(
         "Forwarding request to upstream",
@@ -554,7 +555,10 @@ async def proxy(
             )
 
     model = request_body_dict.get("model", "unknown")
-    max_cost_for_model = get_max_cost_for_model(model=model)
+    _max_cost_for_model = await get_max_cost_for_model(model=model, session=session)
+    max_cost_for_model = await calculate_discounted_max_cost(
+        _max_cost_for_model, request_body_dict, session
+    )
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     # Handle authentication
@@ -756,7 +760,7 @@ async def forward_get_to_upstream(
     if path.startswith("v1/"):
         path = path.replace("v1/", "")
 
-    url = f"{UPSTREAM_BASE_URL}/{path}"
+    url = f"{settings.upstream_base_url}/{path}"
 
     logger.info(
         "Forwarding GET request to upstream",

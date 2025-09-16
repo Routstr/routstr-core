@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -11,20 +10,27 @@ from starlette.exceptions import HTTPException
 from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
-from ..payment.models import MODELS, models_router, update_sats_pricing
+from ..payment.models import (
+    ensure_models_bootstrapped,
+    models_router,
+    refresh_models_periodically,
+    update_sats_pricing,
+)
 from ..proxy import proxy_router
 from ..wallet import periodic_payout
 from .admin import admin_router
-from .db import init_db, run_migrations
+from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
+from .settings import SettingsService
+from .settings import settings as global_settings
 
 # Initialize logging first
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 @asynccontextmanager
@@ -35,6 +41,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     payout_task = None
     nip91_task = None
     providers_task = None
+    models_refresh_task = None
 
     try:
         # Run database migrations on startup
@@ -47,7 +54,21 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # This creates any tables that might not be tracked by migrations yet
         await init_db()
 
+        # Initialize application settings (env -> computed -> DB precedence)
+        async with create_session() as session:
+            s = await SettingsService.initialize(session)
+
+        # Apply app metadata from settings
+        try:
+            app.title = s.name
+            app.description = s.description
+        except Exception:
+            pass
+
+        await ensure_models_bootstrapped()
         pricing_task = asyncio.create_task(update_sats_pricing())
+        if global_settings.models_refresh_interval_seconds > 0:
+            models_refresh_task = asyncio.create_task(refresh_models_periodically())
         payout_task = asyncio.create_task(periodic_payout())
         nip91_task = asyncio.create_task(announce_provider())
         providers_task = asyncio.create_task(providers_cache_refresher())
@@ -71,6 +92,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             nip91_task.cancel()
         if providers_task is not None:
             providers_task.cancel()
+        if models_refresh_task is not None:
+            models_refresh_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -82,6 +105,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(nip91_task)
             if providers_task is not None:
                 tasks_to_wait.append(providers_task)
+            if models_refresh_task is not None:
+                tasks_to_wait.append(models_refresh_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -93,18 +118,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             )
 
 
-app = FastAPI(
-    version=__version__,
-    title=os.environ.get("NAME", "ARoutstrNode" + __version__),
-    description=os.environ.get("DESCRIPTION", "A Routstr Node"),
-    contact={"name": os.environ.get("NAME", ""), "npub": os.environ.get("NPUB", "")},
-    lifespan=lifespan,
-)
+app = FastAPI(version=__version__, lifespan=lifespan)
 
-# Configure CORS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=global_settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -123,14 +142,14 @@ app.add_exception_handler(Exception, general_exception_handler)
 @app.get("/v1/info")
 async def info() -> dict:
     return {
-        "name": app.title,
-        "description": app.description,
+        "name": global_settings.name,
+        "description": global_settings.description,
         "version": __version__,
-        "npub": os.environ.get("NPUB", ""),
-        "mints": os.environ.get("CASHU_MINTS", "").split(","),
-        "http_url": os.environ.get("HTTP_URL", ""),
-        "onion_url": os.environ.get("ONION_URL", ""),
-        "models": MODELS,
+        "npub": global_settings.npub,
+        "mints": global_settings.cashu_mints,
+        "http_url": global_settings.http_url,
+        "onion_url": global_settings.onion_url,
+        "models": [],  # kept for back-compat; prefer /v1/models
     }
 
 

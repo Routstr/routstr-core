@@ -102,7 +102,7 @@ Configure which relays to publish to:
 DEFAULT_RELAYS = [
     "wss://relay.damus.io",
     "wss://relay.nostr.band",
-    "wss://nostr.mom",
+    "wss://relay.routstr.com",
     "wss://nos.lol"
 ]
 

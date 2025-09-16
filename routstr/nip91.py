@@ -19,6 +19,7 @@ from nostr.message_type import ClientMessageType
 from nostr.relay_manager import RelayManager
 
 from .core import get_logger
+from .core.settings import settings
 
 logger = get_logger(__name__)
 
@@ -286,23 +287,32 @@ def discover_onion_url_from_tor(base_dir: str = "/var/lib/tor") -> str | None:
 
 
 async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> str:
-    explicit = os.getenv("PROVIDER_ID") or os.getenv("NIP91_PROVIDER_ID")
+    explicit = settings.provider_id
     if explicit:
         logger.info(f"Using configured provider_id from env: {explicit}")
         return explicit
 
-    latest_event: dict[str, Any] | None = None
-    latest_ts = -1
-    for relay_url in relay_urls:
+    async def query_single_relay(relay_url: str) -> list[dict[str, Any]]:
         try:
             events, _ok = await query_nip91_events(relay_url, public_key_hex, None)
-            for ev in events:
-                ts = int(ev.get("created_at", 0))
-                if ts > latest_ts:
-                    latest_event = ev
-                    latest_ts = ts
+            return events
         except Exception:
-            continue
+            return []
+
+    # Query all relays concurrently
+    all_events_lists = await asyncio.gather(
+        *[query_single_relay(relay_url) for relay_url in relay_urls]
+    )
+
+    latest_event: dict[str, Any] | None = None
+    latest_ts = -1
+
+    for events_list in all_events_lists:
+        for ev in events_list:
+            ts = int(ev.get("created_at", 0))
+            if ts > latest_ts:
+                latest_event = ev
+                latest_ts = ts
 
     existing_d = _get_single_tag_value(latest_event, "d") if latest_event else None
     if existing_d:
@@ -352,7 +362,7 @@ async def announce_provider() -> None:
     Checks for existing announcements and creates new ones if needed.
     """
     # Check for NSEC in environment (use NSEC only)
-    nsec = os.getenv("NSEC")
+    nsec = settings.nsec
     if not nsec:
         logger.info("Nostr private key not found (NSEC), skipping NIP-91 announcement")
         return
@@ -366,38 +376,26 @@ async def announce_provider() -> None:
     private_key_hex, public_key_hex = keypair
     logger.info(f"Using Nostr pubkey: {public_key_hex}")
 
-    # Configure relays first (RELAYS only)
-    relay_urls_env = os.getenv("RELAYS") or ""
-    logger.debug(f"Configured relays: {relay_urls_env}")
-    relay_urls = [url.strip() for url in relay_urls_env.split(",") if url.strip()]
-    if not relay_urls:
-        relay_urls = [
-            "wss://relay.nostr.band",
-            "wss://relay.damus.io",
-            "wss://nos.lol",
-        ]
-
-    # Determine a stable provider_id
-    provider_id = await _determine_provider_id(public_key_hex, relay_urls)
-    logger.info(f"Using provider_id: {provider_id}")
-
-    # Core settings only (no ROUTSTR_* vars)
-    base_url = os.getenv("HTTP_URL")
-    onion_url = os.getenv("ONION_URL")
+    # Resolve settings and determine if we can publish BEFORE touching relays
+    try:
+        base_url: str | None = settings.http_url
+        onion_url: str | None = settings.onion_url
+        provider_name = settings.name or "Routstr Proxy"
+        provider_about = settings.description or "Privacy-preserving AI proxy via Nostr"
+        cashu_mints = [m.strip() for m in settings.cashu_mints if m.strip()]
+    except Exception:
+        base_url = settings.http_url or None
+        onion_url = settings.onion_url or None
+        provider_name = settings.name or "Routstr Proxy"
+        provider_about = settings.description or "Privacy-preserving AI proxy via Nostr"
+        cashu_mints = [m.strip() for m in settings.cashu_mints if m.strip()]
     if not onion_url:
         discovered = discover_onion_url_from_tor()
         if discovered:
             onion_url = discovered
             logger.info(f"Discovered onion URL via Tor volume: {onion_url}")
-    provider_name = os.getenv("NAME", "Routstr Proxy")
-    provider_about = os.getenv("DESCRIPTION", "Privacy-preserving AI proxy via Nostr")
-    # Mint URLs optional: include all CASHU_MINTS entries if available
-    cashu_mints = [
-        m.strip() for m in os.getenv("CASHU_MINTS", "").split(",") if m.strip()
-    ]
     mint_urls = cashu_mints if cashu_mints else None
 
-    # Build endpoint URLs (skip defaults like localhost)
     endpoint_urls: list[str] = []
     if base_url and base_url.strip() and base_url.strip() != "http://localhost:8000":
         endpoint_urls.append(base_url.strip())
@@ -414,6 +412,19 @@ async def announce_provider() -> None:
             "No valid endpoints configured (HTTP_URL/ONION_URL). Skipping NIP-91 publish."
         )
         return
+
+    # Only now configure relays and determine provider_id (may query relays)
+    relay_urls = [u.strip() for u in getattr(settings, "relays", []) if u.strip()]
+    if not relay_urls:
+        relay_urls = [
+            "wss://relay.nostr.band",
+            "wss://relay.damus.io",
+            "wss://relay.routstr.com",
+            "wss://nos.lol",
+        ]
+
+    provider_id = await _determine_provider_id(public_key_hex, relay_urls)
+    logger.info(f"Using provider_id: {provider_id}")
 
     # Build metadata
     metadata = {
@@ -432,10 +443,10 @@ async def announce_provider() -> None:
         metadata=metadata,
     )
 
-    # Backoff configuration and state
-    backoff_base = float(os.getenv("NIP91_BACKOFF_BASE_SECONDS", "5"))
-    backoff_max = float(os.getenv("NIP91_BACKOFF_MAX_SECONDS", "900"))
-    backoff_jitter_ratio = float(os.getenv("NIP91_BACKOFF_JITTER_RATIO", "0.2"))
+    # Backoff configuration and state (sensible defaults)
+    backoff_base = 5.0
+    backoff_max = 900.0
+    backoff_jitter_ratio = 0.2
     relay_next_allowed: dict[str, float] = {}
     relay_current_delay: dict[str, float] = {}
 
@@ -499,9 +510,7 @@ async def announce_provider() -> None:
         )
 
     # Re-announce periodically (every 24 hours)
-    announcement_interval = int(
-        os.getenv("NIP91_ANNOUNCEMENT_INTERVAL", str(24 * 60 * 60))
-    )
+    announcement_interval = 24 * 60 * 60
 
     while True:
         try:

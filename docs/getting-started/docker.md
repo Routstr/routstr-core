@@ -115,8 +115,8 @@ NPUB=npub1...
 HTTP_URL=https://api.mynode.com
 ONION_URL=http://mynode.onion
 
-# Pricing
-MODEL_BASED_PRICING=true
+# Pricing (optional)
+FIXED_PRICING=false
 EXCHANGE_FEE=1.005
 UPSTREAM_PROVIDER_FEE=1.05
 ```
