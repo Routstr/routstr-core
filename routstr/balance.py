@@ -5,6 +5,7 @@ from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlmodel import col, update
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
@@ -102,6 +103,59 @@ async def topup_wallet_endpoint(
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}
+
+
+class DeductRequest(BaseModel):
+    msats: int
+
+
+@router.post("/deduct")
+async def deduct_wallet_endpoint(
+    deduct: DeductRequest,
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, int]:
+    """Deduct a specified amount (in msats) from the API key's available balance.
+
+    Requires Authorization: Bearer <api-key or cashu token> header.
+    Ensures atomic deduction only when available (unreserved) balance is sufficient.
+    Returns the new balance on success.
+    """
+
+    amount = int(deduct.msats)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="msats must be a positive integer")
+
+    # Atomically deduct from balance if available (unreserved) funds are sufficient
+    stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= amount)
+        .values(
+            balance=col(ApiKey.balance) - amount,
+            total_spent=col(ApiKey.total_spent) + amount,
+        )
+    )
+
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+
+    if result.rowcount == 0:
+        # Either insufficient available balance or a concurrent operation depleted it
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": {
+                    "message": f"Insufficient balance: {amount} mSats required. {key.total_balance} available. (reserved: {key.reserved_balance})",
+                    "type": "insufficient_quota",
+                    "code": "insufficient_balance",
+                }
+            },
+        )
+
+    # Refresh key to return updated balance
+    await session.refresh(key)
+    return {"balance": key.balance}
 
 
 _REFUND_CACHE_TTL_SECONDS: int = settings.refund_cache_ttl_seconds
