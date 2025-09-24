@@ -28,7 +28,7 @@ async def recieve_token(
     wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
     wallet.keyset_id = token_obj.keysets[0]
 
-    if token_obj.mint not in settings.cashu_mints:
+    if token_obj.mint.rstrip("/") not in [mint.rstrip("/") for mint in settings.cashu_mints]:
         return await swap_to_primary_mint(token_obj, wallet)
 
     wallet.verify_proofs_dleq(token_obj.proofs)
