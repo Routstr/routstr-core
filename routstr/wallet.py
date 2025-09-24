@@ -153,7 +153,7 @@ async def get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Wal
     id = f"{mint_url}_{unit}"
     if id not in _wallets:
         _wallets[id] = await Wallet.with_db(
-            mint_url, db=".wallet", load_all_keysets=True, unit=unit
+            mint_url, db=".wallet", unit=unit
         )
 
     if load:
