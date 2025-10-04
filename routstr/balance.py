@@ -151,6 +151,11 @@ async def refund_wallet_endpoint(
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
     remaining_balance_msats: int = key.balance
+    refund_currency = key.refund_currency or "sat"
+    if refund_currency == "sat":
+        remaining_balance = remaining_balance_msats // 1000
+    else:
+        remaining_balance = remaining_balance_msats
 
     if remaining_balance_msats <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
@@ -158,33 +163,25 @@ async def refund_wallet_endpoint(
     # Perform refund operation first, before modifying balance
     try:
         if key.refund_address:
-            if key.refund_currency == "sat":
-                remaining_balance = remaining_balance_msats // 1000
             from .core.settings import settings as global_settings
 
             await send_to_lnurl(
                 remaining_balance,
-                key.refund_currency or "sat",
+                refund_currency,
                 key.refund_mint_url or global_settings.primary_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}
         else:
-            refund_amount = (
-                remaining_balance_msats // 1000
-                if key.refund_currency == "sat"
-                else remaining_balance_msats
-            )
-            refund_currency = key.refund_currency or "sat"
             token = await send_token(
-                refund_amount, refund_currency, key.refund_mint_url
+                remaining_balance, refund_currency, key.refund_mint_url
             )
             result = {"token": token}
-
-        if key.refund_currency == "sat":
-            result["sats"] = str(remaining_balance_msats // 1000)
+        
+        if refund_currency == "sat":
+            result["sats"] = str(remaining_balance)
         else:
-            result["msats"] = str(remaining_balance_msats)
+            result["msats"] = str(remaining_balance)
 
     except HTTPException:
         # Re-raise HTTP exceptions (like 400 for balance too small)
@@ -200,6 +197,13 @@ async def refund_wallet_endpoint(
         ):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
+            from .core.logging import get_logger
+
+            logger = get_logger(__name__)
+            logger.error(
+                "Refund failed",
+                extra={"error": error_msg},
+            )
             raise HTTPException(status_code=500, detail="Refund failed")
 
     await _refund_cache_set(bearer_value, result)
