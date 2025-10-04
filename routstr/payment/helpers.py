@@ -1,6 +1,5 @@
 import json
 import math
-from typing import Mapping
 
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
@@ -257,61 +256,3 @@ def create_error_response(
         media_type="application/json",
         headers={"X-Cashu": token} if token else {},
     )
-
-
-def prepare_upstream_headers(request_headers: dict) -> dict:
-    """Prepare headers for upstream request, removing sensitive/problematic ones."""
-    upstream_api_key = settings.upstream_api_key
-    logger.debug(
-        "Preparing upstream headers",
-        extra={
-            "original_headers_count": len(request_headers),
-            "has_upstream_api_key": bool(upstream_api_key),
-        },
-    )
-
-    headers = dict(request_headers)
-
-    # Remove headers that shouldn't be forwarded
-    removed_headers = []
-    for header in [
-        "host",
-        "content-length",
-        "refund-lnurl",
-        "key-expiry-time",
-        "x-cashu",
-    ]:
-        if headers.pop(header, None) is not None:
-            removed_headers.append(header)
-
-    # Handle authorization
-    if upstream_api_key:
-        headers["Authorization"] = f"Bearer {upstream_api_key}"
-        if headers.pop("authorization", None) is not None:
-            removed_headers.append("authorization (replaced with upstream key)")
-    else:
-        for auth_header in ["Authorization", "authorization"]:
-            if headers.pop(auth_header, None) is not None:
-                removed_headers.append(auth_header)
-
-    logger.debug(
-        "Headers prepared for upstream",
-        extra={
-            "final_headers_count": len(headers),
-            "removed_headers": removed_headers,
-            "added_upstream_auth": bool(upstream_api_key),
-        },
-    )
-
-    return headers
-
-
-def prepare_upstream_params(
-    path: str, query_params: Mapping[str, str] | None
-) -> dict[str, str]:
-    """Prepare query params for upstream request, optionally adding api-version for chat/completions."""
-    params: dict[str, str] = dict(query_params or {})
-    chat_api_version = settings.chat_completions_api_version
-    if path.endswith("chat/completions") and chat_api_version:
-        params["api-version"] = chat_api_version
-    return params
