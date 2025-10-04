@@ -152,9 +152,7 @@ async def get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Wal
     global _wallets
     id = f"{mint_url}_{unit}"
     if id not in _wallets:
-        _wallets[id] = await Wallet.with_db(
-            mint_url, db=".wallet", unit=unit
-        )
+        _wallets[id] = await Wallet.with_db(mint_url, db=".wallet", unit=unit)
 
     if load:
         await _wallets[id].load_mint()
