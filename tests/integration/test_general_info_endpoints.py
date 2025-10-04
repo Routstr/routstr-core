@@ -271,36 +271,23 @@ async def test_models_endpoint_accept_headers(integration_client: AsyncClient) -
 async def test_admin_endpoint_unauthenticated(
     integration_client: AsyncClient, db_snapshot: Any
 ) -> None:
-    """Test GET /admin/ endpoint without authentication"""
-
-    # Capture initial database state
+    """Test GET /admin/ endpoint without authentication shows setup form"""
     await db_snapshot.capture()
 
     response = await integration_client.get("/admin/")
 
-    # Should return 200 with login form (not 401/403)
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
 
-    # Response should be HTML
     html_content = response.text
     assert "<!DOCTYPE html>" in html_content
     assert "<html>" in html_content
+    assert "<form" in html_content
+    assert 'type="password"' in html_content
+    assert "password" in html_content.lower()
+    assert "<script>" in html_content or "<script " in html_content
+    assert "Initial Admin Setup" in html_content or "setup" in html_content.lower()
 
-    # Either shows login form or message about setting ADMIN_PASSWORD
-    if "ADMIN_PASSWORD" in html_content:
-        # When ADMIN_PASSWORD is not set, it shows a message
-        assert "Please set a secure ADMIN_PASSWORD" in html_content
-    else:
-        # When ADMIN_PASSWORD is set, it shows a login form
-        assert "<form" in html_content
-        assert 'type="password"' in html_content
-        assert "password" in html_content.lower()
-        assert "login" in html_content.lower()
-        # Should have JavaScript for form handling
-        assert "<script>" in html_content or "<script " in html_content
-
-    # Verify no database state changes
     diff = await db_snapshot.diff()
     assert len(diff["api_keys"]["added"]) == 0
     assert len(diff["api_keys"]["removed"]) == 0
