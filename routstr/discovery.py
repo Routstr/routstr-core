@@ -320,18 +320,20 @@ async def fetch_provider_health(endpoint_url: str) -> dict[str, Any]:
         is_onion = ".onion" in endpoint_url
 
         # Set up client arguments conditionally
-        proxies = None
+        proxies: dict[str, str] | None = None
         if is_onion:
             try:
                 tor_proxy = settings.tor_proxy_url
             except Exception:
                 tor_proxy = "socks5://127.0.0.1:9050"
-            proxies = {"http://": tor_proxy, "https://": tor_proxy}  # type: ignore[assignment]
+            proxies = {"http://": tor_proxy, "https://": tor_proxy}
 
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             follow_redirects=True,
-            proxies=proxies,  # type: ignore[arg-type]
+            # NOTE: httpx < 0.28 supports the 'proxies' kwarg, 0.28+ removed it.
+            # We ignore the call-arg type here to keep compatibility across versions.
+            proxies=proxies,  # type: ignore[call-arg]
         ) as client:
             # Prefer provider's /v1/info for full details
             info_url = f"{endpoint_url.rstrip('/')}/v1/info"

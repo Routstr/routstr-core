@@ -35,12 +35,15 @@ jobs:
         run: |
           uv run mypy .
 
-      - name: Run tests with pytest
+      - name: Run tests with pytest (with coverage & junit)
         env:
           UPSTREAM_BASE_URL: "http://test"
           UPSTREAM_API_KEY: "test"
         run: |
-          uv run pytest --verbose --tb=short
+          uv run pytest \
+            --verbose --tb=short \
+            --junitxml=pytest.xml \
+            --cov=routstr --cov-report=term
 
       - name: Upload test results
         if: always()
