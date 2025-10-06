@@ -13,12 +13,7 @@ from .payment.helpers import (
     create_error_response,
     get_max_cost_for_model,
 )
-from .upstream import (
-    UpstreamProvider,
-    handle_non_streaming_chat_completion,
-    handle_streaming_chat_completion,
-    map_upstream_error_response,
-)
+from .upstream import UpstreamProvider
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
@@ -128,9 +123,7 @@ async def proxy(
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
         # TODO: why is this needed? can we remove it?
         headers = upstream.prepare_headers(dict(request.headers))
-        return await upstream.forward_get_request(
-            request, path, headers, map_upstream_error_response
-        )
+        return await upstream.forward_get_request(request, path, headers)
 
     # Only pay for request if we have request body data (for completions endpoints)
     if request_body_dict:
@@ -179,9 +172,6 @@ async def proxy(
         key,
         max_cost_for_model,
         session,
-        map_upstream_error_response,
-        handle_streaming_chat_completion,
-        handle_non_streaming_chat_completion,
     )
 
     if response.status_code != 200:
