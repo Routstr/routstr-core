@@ -13,16 +13,13 @@ from .payment.helpers import (
     create_error_response,
     get_max_cost_for_model,
 )
-from .upstream import UpstreamProvider
+from .upstream import init_upstreams
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
 
-upstream = UpstreamProvider(
-    base_url=settings.upstream_base_url,
-    api_key=settings.upstream_api_key,
-    chat_completions_api_version=settings.chat_completions_api_version,
-)
+upstreams = init_upstreams(settings.upstream_base_url, settings.upstream_api_key)
+upstream = upstreams[0]
 
 
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)

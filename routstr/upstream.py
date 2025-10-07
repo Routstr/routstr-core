@@ -18,19 +18,67 @@ from .auth import adjust_payment_for_tokens
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession, create_session
 from .payment.helpers import create_error_response
+from .payment.models import Model
 
 logger = get_logger(__name__)
 
 
+def init_upstreams(
+    base_url: str, api_key: str, api_version: str | None = None
+) -> list[UpstreamProvider]:
+    """Initialize upstream providers based on settings.
+
+    Args:
+        base_url: Base URL of the upstream API endpoint
+        api_key: API key for authenticating with the upstream service
+        api_version: API version for Azure OpenAI
+    """
+    from .core.settings import settings
+
+    upstreams: list[UpstreamProvider] = []
+    if settings.chat_completions_api_version:
+        upstreams.append(
+            AzureUpstreamProvider(
+                settings.upstream_base_url,
+                settings.upstream_api_key,
+                settings.chat_completions_api_version,
+            )
+        )
+
+    if "api.openai.com" in settings.upstream_base_url.lower():
+        upstreams.append(OpenAIUpstreamProvider(settings.upstream_api_key))
+    elif "openrouter.ai/api/v1" in settings.upstream_base_url.lower():
+        upstreams.append(OpenRouterUpstreamProvider(settings.upstream_api_key))
+    else:
+        upstreams.append(
+            UpstreamProvider(settings.upstream_base_url, settings.upstream_api_key)
+        )
+
+    return upstreams
+
+
 class UpstreamProvider:
-    def __init__(
-        self, base_url: str, api_key: str, chat_completions_api_version: str = ""
-    ):
+    """Provider for forwarding requests to an upstream AI service API."""
+
+    def __init__(self, base_url: str, api_key: str):
+        """Initialize the upstream provider.
+
+        Args:
+            base_url: Base URL of the upstream API endpoint
+            api_key: API key for authenticating with the upstream service
+        """
         self.base_url = base_url
         self.api_key = api_key
-        self.chat_completions_api_version = chat_completions_api_version
 
     def prepare_headers(self, request_headers: dict) -> dict:
+        """Prepare headers for upstream request by removing proxy-specific headers and adding authentication.
+
+        Args:
+            request_headers: Original request headers from the client
+
+        Returns:
+            Headers dict ready for upstream forwarding with authentication added
+        """
         logger.debug(
             "Preparing upstream headers",
             extra={
@@ -74,15 +122,31 @@ class UpstreamProvider:
 
     def prepare_params(
         self, path: str, query_params: Mapping[str, str] | None
-    ) -> dict[str, str]:
-        params: dict[str, str] = dict(query_params or {})
-        if path.endswith("chat/completions") and self.chat_completions_api_version:
-            params["api-version"] = self.chat_completions_api_version
-        return params
+    ) -> Mapping[str, str]:
+        """Prepare query parameters for upstream request.
+
+        Base implementation passes through query params unchanged. Override in subclasses for provider-specific params.
+
+        Args:
+            path: Request path
+            query_params: Original query parameters from the client
+
+        Returns:
+            Query parameters dict ready for upstream forwarding
+        """
+        return query_params or {}
 
     def _extract_upstream_error_message(
         self, body_bytes: bytes
     ) -> tuple[str, str | None]:
+        """Extract error message and code from upstream error response body.
+
+        Args:
+            body_bytes: Raw response body bytes from upstream
+
+        Returns:
+            Tuple of (error_message, error_code), where error_code may be None
+        """
         message: str = "Upstream request failed"
         upstream_code: str | None = None
         if not body_bytes:
@@ -115,6 +179,16 @@ class UpstreamProvider:
     async def map_upstream_error_response(
         self, request: Request, path: str, upstream_response: httpx.Response
     ) -> Response:
+        """Map upstream error responses to appropriate proxy error responses.
+
+        Args:
+            request: Original FastAPI request
+            path: Request path
+            upstream_response: Response from upstream service
+
+        Returns:
+            Mapped error response with appropriate status code and error type
+        """
         status_code = upstream_response.status_code
         headers = dict(upstream_response.headers)
         content_type = headers.get("content-type", "")
@@ -176,6 +250,16 @@ class UpstreamProvider:
     async def handle_streaming_chat_completion(
         self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
     ) -> StreamingResponse:
+        """Handle streaming chat completion responses with token usage tracking and cost adjustment.
+
+        Args:
+            response: Streaming response from upstream
+            key: API key for the authenticated user
+            max_cost_for_model: Maximum cost deducted upfront for the model
+
+        Returns:
+            StreamingResponse with cost data injected at the end
+        """
         logger.info(
             "Processing streaming chat completion",
             extra={
@@ -351,6 +435,17 @@ class UpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
     ) -> Response:
+        """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
+
+        Args:
+            response: Response from upstream
+            key: API key for the authenticated user
+            session: Database session for updating balance
+            deducted_max_cost: Maximum cost deducted upfront
+
+        Returns:
+            Response with cost data added to JSON body
+        """
         logger.info(
             "Processing non-streaming chat completion",
             extra={
@@ -446,6 +541,20 @@ class UpstreamProvider:
         max_cost_for_model: int,
         session: AsyncSession,
     ) -> Response | StreamingResponse:
+        """Forward authenticated request to upstream service with cost tracking.
+
+        Args:
+            request: Original FastAPI request
+            path: Request path
+            headers: Prepared headers for upstream
+            request_body: Request body bytes, if any
+            key: API key for authenticated user
+            max_cost_for_model: Maximum cost deducted upfront
+            session: Database session for balance updates
+
+        Returns:
+            Response or StreamingResponse from upstream with cost tracking
+        """
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -647,6 +756,16 @@ class UpstreamProvider:
         path: str,
         headers: dict,
     ) -> Response | StreamingResponse:
+        """Forward unauthenticated GET request to upstream service.
+
+        Args:
+            request: Original FastAPI request
+            path: Request path
+            headers: Prepared headers for upstream
+
+        Returns:
+            StreamingResponse from upstream
+        """
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -714,6 +833,15 @@ class UpstreamProvider:
     async def get_x_cashu_cost(
         self, response_data: dict, max_cost_for_model: int
     ) -> MaxCostData | CostData | None:
+        """Calculate cost for X-Cashu payment based on response data.
+
+        Args:
+            response_data: Response data containing model and usage information
+            max_cost_for_model: Maximum cost for the model
+
+        Returns:
+            Cost data object (MaxCostData or CostData) or None if calculation fails
+        """
         from .payment.cost_caculation import (
             CostData,
             CostDataError,
@@ -768,6 +896,16 @@ class UpstreamProvider:
         return None
 
     async def send_refund(self, amount: int, unit: str, mint: str | None = None) -> str:
+        """Create and send a refund token to the user.
+
+        Args:
+            amount: Refund amount
+            unit: Unit of the refund (sat or msat)
+            mint: Optional mint URL for the refund token
+
+        Returns:
+            Refund token string
+        """
         from .wallet import send_token
 
         logger.debug(
@@ -844,6 +982,18 @@ class UpstreamProvider:
         unit: str,
         max_cost_for_model: int,
     ) -> StreamingResponse:
+        """Handle streaming response for X-Cashu payment, calculating refund if needed.
+
+        Args:
+            content_str: Response content as string
+            response: Original httpx response
+            amount: Payment amount received
+            unit: Payment unit (sat or msat)
+            max_cost_for_model: Maximum cost for the model
+
+        Returns:
+            StreamingResponse with refund token in header if applicable
+        """
         logger.debug(
             "Processing streaming response",
             extra={
@@ -964,6 +1114,18 @@ class UpstreamProvider:
         unit: str,
         max_cost_for_model: int,
     ) -> Response:
+        """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
+
+        Args:
+            content_str: Response content as string
+            response: Original httpx response
+            amount: Payment amount received
+            unit: Payment unit (sat or msat)
+            max_cost_for_model: Maximum cost for the model
+
+        Returns:
+            Response with refund token in header if applicable
+        """
         logger.debug(
             "Processing non-streaming response",
             extra={"amount": amount, "unit": unit, "content_length": len(content_str)},
@@ -1079,6 +1241,17 @@ class UpstreamProvider:
     async def handle_x_cashu_chat_completion(
         self, response: httpx.Response, amount: int, unit: str, max_cost_for_model: int
     ) -> StreamingResponse | Response:
+        """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
+
+        Args:
+            response: Response from upstream
+            amount: Payment amount received
+            unit: Payment unit (sat or msat)
+            max_cost_for_model: Maximum cost for the model
+
+        Returns:
+            StreamingResponse or Response depending on response type
+        """
         logger.debug(
             "Handling chat completion response",
             extra={"amount": amount, "unit": unit, "status_code": response.status_code},
@@ -1135,6 +1308,19 @@ class UpstreamProvider:
         unit: str,
         max_cost_for_model: int,
     ) -> Response | StreamingResponse:
+        """Forward request paid with X-Cashu token to upstream service.
+
+        Args:
+            request: Original FastAPI request
+            path: Request path
+            headers: Prepared headers for upstream
+            amount: Payment amount from X-Cashu token
+            unit: Payment unit (sat or msat)
+            max_cost_for_model: Maximum cost for the model
+
+        Returns:
+            Response or StreamingResponse with refund if applicable
+        """
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -1271,6 +1457,17 @@ class UpstreamProvider:
     async def handle_x_cashu(
         self, request: Request, x_cashu_token: str, path: str, max_cost_for_model: int
     ) -> Response | StreamingResponse:
+        """Handle request with X-Cashu token payment, redeeming token and forwarding request.
+
+        Args:
+            request: Original FastAPI request
+            x_cashu_token: X-Cashu token from request header
+            path: Request path
+            max_cost_for_model: Maximum cost for the model
+
+        Returns:
+            Response or StreamingResponse from upstream with refund if applicable
+        """
         from .wallet import recieve_token
 
         logger.info(
@@ -1348,3 +1545,82 @@ class UpstreamProvider:
                 request=request,
                 token=x_cashu_token,
             )
+
+
+class OpenAIUpstreamProvider(UpstreamProvider):
+    """Upstream provider specifically configured for OpenAI API."""
+
+    def __init__(self, api_key: str):
+        super().__init__(base_url="https://api.openai.com", api_key=api_key)
+
+
+class AzureUpstreamProvider(UpstreamProvider):
+    """Upstream provider specifically configured for Azure OpenAI Service."""
+
+    def __init__(self, base_url: str, api_key: str, api_version: str):
+        """Initialize Azure provider with API key and version.
+
+        Args:
+            base_url: Azure OpenAI endpoint base URL
+            api_key: Azure OpenAI API key for authentication
+            api_version: Azure OpenAI API version (e.g., "2024-02-15-preview")
+        """
+        super().__init__(base_url=base_url, api_key=api_key)
+        self.api_version = api_version
+
+    def prepare_params(
+        self, path: str, query_params: Mapping[str, str] | None
+    ) -> Mapping[str, str]:
+        """Prepare query parameters for Azure OpenAI, adding API version.
+
+        Args:
+            path: Request path
+            query_params: Original query parameters from the client
+
+        Returns:
+            Query parameters dict with Azure API version added for chat completions
+        """
+        params = dict(query_params or {})
+        if path.endswith("chat/completions"):
+            params["api-version"] = self.api_version
+        return params
+
+
+class OpenRouterUpstreamProvider(UpstreamProvider):
+    """Upstream provider specifically configured for OpenRouter API."""
+
+    def __init__(self, api_key: str):
+        """Initialize OpenRouter provider with API key.
+
+        Args:
+            api_key: OpenRouter API key for authentication
+        """
+        super().__init__(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+
+    async def fetch_models(self) -> dict:
+        """Fetch available models from OpenRouter API.
+
+        Returns:
+            Raw JSON response containing model data
+        """
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+            return response.json()
+
+    async def models(self) -> list[Model]:
+        """Get list of available models from OpenRouter.
+
+        Returns:
+            List of Model objects representing available models
+        """
+        response_data = await self.fetch_models()
+        models_list: list[Model] = []
+        for model_data in response_data.get("data", []):
+            try:
+                models_list.append(Model(**model_data))  # type: ignore
+            except Exception:
+                continue
+        return models_list
