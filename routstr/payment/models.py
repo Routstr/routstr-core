@@ -192,6 +192,22 @@ def _row_to_model(row: ModelRow) -> Model:
 
 
 def _model_to_row_payload(model: Model) -> dict[str, str | int | None]:
+    # Apply fees to USD pricing when storing in database
+    exchange_fee = settings.exchange_fee
+    upstream_provider_fee = settings.upstream_provider_fee
+    total_fee_multiplier = exchange_fee * upstream_provider_fee
+
+    # Create adjusted pricing with fees applied
+    adjusted_pricing = model.pricing.dict()
+    for key in ['prompt', 'completion', 'request', 'image', 'web_search', 'internal_reasoning']:
+        if key in adjusted_pricing:
+            adjusted_pricing[key] = adjusted_pricing[key] * total_fee_multiplier
+
+    # Also adjust max costs if present
+    for key in ['max_prompt_cost', 'max_completion_cost', 'max_cost']:
+        if key in adjusted_pricing:
+            adjusted_pricing[key] = adjusted_pricing[key] * total_fee_multiplier
+
     return {
         "id": model.id,
         "name": model.name,
@@ -199,7 +215,7 @@ def _model_to_row_payload(model: Model) -> dict[str, str | int | None]:
         "description": model.description,
         "context_length": model.context_length,
         "architecture": json.dumps(model.architecture.dict()),
-        "pricing": json.dumps(model.pricing.dict()),
+        "pricing": json.dumps(adjusted_pricing),
         "sats_pricing": json.dumps(model.sats_pricing.dict())
         if model.sats_pricing
         else None,
