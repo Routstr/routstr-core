@@ -30,7 +30,7 @@ from .settings import settings as global_settings
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.1.5-dev"
+__version__ = "0.2.0-dev"
 
 
 @asynccontextmanager
