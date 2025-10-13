@@ -58,6 +58,39 @@ class Model(BaseModel):
     top_provider: TopProvider | None = None
 
 
+def compute_effective_max_cost_msats(
+    pricing: Pricing | dict | None,
+) -> int:
+    if pricing is None:
+        try:
+            return max(1, int(settings.min_request_msat))
+        except Exception:
+            return 1
+
+    pricing_obj = (
+        pricing if isinstance(pricing, Pricing) else Pricing.parse_obj(pricing)  # type: ignore[arg-type]
+    )
+
+    try:
+        tolerance = float(getattr(settings, "tolerance_percentage", 0.0))
+    except Exception:
+        tolerance = 0.0
+
+    tolerance_factor = max(0.0, 1.0 - tolerance / 100.0)
+
+    try:
+        min_request_msat = max(1, int(settings.min_request_msat))
+    except Exception:
+        min_request_msat = 1
+
+    base_msats = int(float(pricing_obj.max_cost or 0.0) * 1000.0 * tolerance_factor)
+
+    if base_msats <= 0:
+        return min_request_msat
+
+    return max(min_request_msat, base_msats)
+
+
 def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     """Fetches model information from OpenRouter API."""
     base_url = "https://openrouter.ai/api/v1"
@@ -176,6 +209,10 @@ def _row_to_model(row: ModelRow) -> Model:
                 )
     except Exception:
         pass
+
+    if isinstance(sats_pricing, dict):
+        effective_msats = compute_effective_max_cost_msats(sats_pricing)
+        sats_pricing["max_cost"] = effective_msats / 1000.0
 
     return Model(
         id=row.id,

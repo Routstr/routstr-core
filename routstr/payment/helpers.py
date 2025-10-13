@@ -11,7 +11,7 @@ from ..core import get_logger
 from ..core.db import ModelRow
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
-from .models import Pricing
+from .models import Pricing, compute_effective_max_cost_msats
 
 logger = get_logger(__name__)
 
@@ -72,7 +72,8 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000
     )
 
-    if max_cost_for_model > amount_msat:
+    fee_buffer = getattr(settings, "cashu_mint_fee_msat", 60)
+    if max_cost_for_model > amount_msat + fee_buffer:
         raise HTTPException(
             status_code=413,
             detail={
@@ -133,16 +134,17 @@ async def get_max_cost_for_model(
     row = await session.get(ModelRow, model)
     if row and row.sats_pricing:
         try:
-            sats = Pricing(**json.loads(row.sats_pricing))  # type: ignore
-            max_cost = sats.max_cost * 1000 * (1 - settings.tolerance_percentage / 100)
-            logger.debug(
-                "Found model-specific max cost",
-                extra={"model": model, "max_cost_msats": max_cost},
-            )
-            calculated_msats = int(max_cost)
-            return max(settings.min_request_msat, calculated_msats)
+            sats_dict = json.loads(row.sats_pricing)
         except Exception:
-            pass
+            sats_dict = None
+        if isinstance(sats_dict, dict):
+            effective_msats = compute_effective_max_cost_msats(sats_dict)
+            if effective_msats > 0:
+                logger.debug(
+                    "Found model-specific max cost",
+                    extra={"model": model, "max_cost_msats": effective_msats},
+                )
+                return effective_msats
 
     logger.warning(
         "Model pricing not found, using fixed cost",
@@ -200,6 +202,8 @@ async def calculate_discounted_max_cost(
                 adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
             else:
                 adjusted = adjusted + math.ceil(-estimated_completion_delta_sats * 1000)
+
+    adjusted = min(max_cost_for_model, adjusted)
 
     logger.debug(
         "Discounted max cost computed",
