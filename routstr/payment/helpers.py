@@ -72,7 +72,7 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000
     )
 
-    fee_buffer = getattr(settings, "cashu_mint_fee_msat", 60)
+    fee_buffer = 60
     if max_cost_for_model > amount_msat + fee_buffer:
         raise HTTPException(
             status_code=413,

@@ -139,10 +139,9 @@ async def test_check_token_balance_with_fee_buffer(
     monkeypatch.setattr(
         "routstr.payment.helpers.deserialize_token_from_string", mock_deserialize
     )
-    with patch.object(settings, "cashu_mint_fee_msat", 100):
-        headers = {"x-cashu": "token"}
-        body = {"model": "gpt-4"}
-        check_token_balance(headers, body, max_cost_for_model=320450)
+    headers = {"x-cashu": "token"}
+    body = {"model": "gpt-4"}
+    check_token_balance(headers, body, max_cost_for_model=320450)
 
 
 def test_check_token_balance_insufficient(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,12 +155,11 @@ def test_check_token_balance_insufficient(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         "routstr.payment.helpers.deserialize_token_from_string", mock_deserialize
     )
-    with patch.object(settings, "cashu_mint_fee_msat", 100):
-        headers = {"x-cashu": "token"}
-        body = {"model": "gpt-4"}
-        with pytest.raises(HTTPException) as exc:
-            check_token_balance(headers, body, max_cost_for_model=320450)
-        assert exc.value.status_code == 413
-        detail = exc.value.detail  # type: ignore[assignment]
-        assert isinstance(detail, dict)
-        assert detail.get("type") == "minimum_balance_required"
+    headers = {"x-cashu": "token"}
+    body = {"model": "gpt-4"}
+    with pytest.raises(HTTPException) as exc:
+        check_token_balance(headers, body, max_cost_for_model=320450)
+    assert exc.value.status_code == 413
+    detail = exc.value.detail  # type: ignore[assignment]
+    assert isinstance(detail, dict)
+    assert detail.get("type") == "minimum_balance_required"
