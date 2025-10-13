@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Mapping
 import httpx
 
 if TYPE_CHECKING:
+    from .core.settings import Settings
     from .payment.cost_caculation import CostData, MaxCostData
 
 from fastapi import BackgroundTasks, HTTPException, Request
@@ -16,49 +17,414 @@ from fastapi.responses import Response, StreamingResponse
 
 from .auth import adjust_payment_for_tokens
 from .core import get_logger
-from .core.db import ApiKey, AsyncSession, create_session
+from .core.db import ApiKey, AsyncSession, ModelRow, UpstreamProviderRow, create_session
 from .payment.helpers import create_error_response
-from .payment.models import Model
+from .payment.models import Model, async_fetch_openrouter_models
 
 logger = get_logger(__name__)
 
 
-def init_upstreams(
-    base_url: str, api_key: str, api_version: str | None = None
-) -> list[UpstreamProvider]:
-    """Initialize upstream providers based on settings.
+def resolve_model_alias(model_id: str, canonical_slug: str | None = None) -> list[str]:
+    """Resolve model ID to all possible aliases.
+
+    Returns list of aliases including canonical slug and variations without provider prefix.
 
     Args:
-        base_url: Base URL of the upstream API endpoint
-        api_key: API key for authenticating with the upstream service
-        api_version: API version for Azure OpenAI
+        model_id: Model identifier (e.g., "gpt-5-mini" or "openai/gpt-5-mini")
+        canonical_slug: Optional canonical slug from provider (e.g., "openai/gpt-5-pro-2025-10-06")
+
+    Returns:
+        List of possible model ID aliases
     """
+    aliases = [model_id]
+
+    base_model = model_id
+    if "/" in model_id:
+        without_prefix = model_id.split("/", 1)[1]
+        aliases.append(without_prefix)
+        base_model = without_prefix
+
+    date_pattern = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+    if date_pattern.search(base_model):
+        base_without_date = date_pattern.sub("", base_model)
+        if base_without_date not in aliases:
+            aliases.append(base_without_date)
+        if "/" in model_id:
+            prefix = model_id.split("/", 1)[0]
+            prefixed_without_date = f"{prefix}/{base_without_date}"
+            if prefixed_without_date not in aliases:
+                aliases.append(prefixed_without_date)
+
+    if canonical_slug and canonical_slug not in aliases:
+        aliases.append(canonical_slug)
+        if "/" in canonical_slug:
+            canonical_without_prefix = canonical_slug.split("/", 1)[1]
+            if canonical_without_prefix not in aliases:
+                aliases.append(canonical_without_prefix)
+            if date_pattern.search(canonical_without_prefix):
+                canonical_base = date_pattern.sub("", canonical_without_prefix)
+                if canonical_base not in aliases:
+                    aliases.append(canonical_base)
+
+    return aliases
+
+
+async def get_all_models_with_overrides(
+    upstreams: list[UpstreamProvider],
+) -> list[Model]:
+    """Get all models from all providers with database overrides applied.
+
+    Models in the database with upstream_provider_id set are treated as overrides
+    that replace the provider's model with the same ID.
+
+    Args:
+        upstreams: List of upstream provider instances
+
+    Returns:
+        List of Model objects with overrides applied
+    """
+    from sqlmodel import select
+
+    from .payment.models import _row_to_model
+
+    async with create_session() as session:
+        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
+        override_rows = result.all()
+        overrides_by_id = {
+            row.id: row for row in override_rows if row.upstream_provider_id is not None
+        }
+
+    all_models: dict[str, Model] = {}
+
+    for upstream in upstreams:
+        for model in upstream.get_cached_models():
+            if model.id in overrides_by_id:
+                all_models[model.id] = _row_to_model(overrides_by_id[model.id])
+            elif model.enabled:
+                all_models[model.id] = model
+
+    return list(all_models.values())
+
+
+async def get_model_with_override(
+    model_id: str,
+    upstreams: list[UpstreamProvider],
+) -> Model | None:
+    """Get a specific model from providers with database override applied.
+
+    Resolves model aliases automatically (e.g., both "gpt-5-mini" and "openai/gpt-5-mini").
+
+    Args:
+        model_id: Model identifier (with or without provider prefix)
+        upstreams: List of upstream provider instances
+
+    Returns:
+        Model object or None if not found
+    """
+    from sqlmodel import select
+
+    from .payment.models import _row_to_model
+
+    aliases = resolve_model_alias(model_id)
+
+    async with create_session() as session:
+        for alias in aliases:
+            result = await session.exec(
+                select(ModelRow).where(
+                    ModelRow.id == alias,
+                    ModelRow.upstream_provider_id.isnot(None),  # type: ignore
+                    ModelRow.enabled,
+                )
+            )
+            override_row = result.first()
+            if override_row:
+                return _row_to_model(override_row)
+
+    for alias in aliases:
+        for upstream in upstreams:
+            model = upstream.get_cached_model_by_id(alias)
+            if model and model.enabled:
+                return model
+
+    return None
+
+
+async def refresh_upstreams_models_periodically(
+    upstreams: list[UpstreamProvider],
+) -> None:
+    """Background task to periodically refresh models cache for all providers.
+
+    Args:
+        upstreams: List of upstream provider instances
+    """
+    import asyncio
+    import random
+
     from .core.settings import settings
 
-    upstreams: list[UpstreamProvider] = []
-    if settings.chat_completions_api_version:
-        upstreams.append(
-            AzureUpstreamProvider(
-                settings.upstream_base_url,
-                settings.upstream_api_key,
-                settings.chat_completions_api_version,
+    interval = getattr(settings, "models_refresh_interval_seconds", 0)
+    if not interval or interval <= 0:
+        logger.info("Provider models refresh disabled (interval <= 0)")
+        return
+
+    while True:
+        try:
+            for upstream in upstreams:
+                try:
+                    await upstream.refresh_models_cache()
+                except Exception as e:
+                    logger.error(
+                        f"Error refreshing models for {upstream.upstream_name or upstream.base_url}",
+                        extra={"error": str(e), "error_type": type(e).__name__},
+                    )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(
+                "Error in provider models refresh loop",
+                extra={"error": str(e), "error_type": type(e).__name__},
             )
+
+        try:
+            jitter = max(0.0, float(interval) * 0.1)
+            await asyncio.sleep(interval + random.uniform(0, jitter))
+        except asyncio.CancelledError:
+            break
+
+
+import os
+
+
+async def init_upstreams() -> list[UpstreamProvider]:
+    """Initialize upstream providers from database.
+
+    Seeds database with providers from settings if empty, then loads and instantiates
+    provider instances from database records, and refreshes their models cache.
+    """
+    from sqlmodel import select
+
+    from .core.settings import settings
+
+    async with create_session() as session:
+        result = await session.exec(select(UpstreamProviderRow))
+        existing_providers = result.all()
+
+        if not existing_providers:
+            logger.info(
+                "No upstream providers found in database, seeding from settings"
+            )
+            await _seed_providers_from_settings(session, settings)
+            await session.commit()
+            result = await session.exec(select(UpstreamProviderRow))
+            existing_providers = result.all()
+
+        upstreams: list[UpstreamProvider] = []
+        for provider_row in existing_providers:
+            if not provider_row.enabled:
+                logger.debug(f"Skipping disabled provider: {provider_row.base_url}")
+                continue
+
+            provider = _instantiate_provider(provider_row)
+            if provider:
+                await provider.refresh_models_cache()
+                upstreams.append(provider)
+                logger.info(
+                    f"Initialized {provider_row.provider_type} provider",
+                    extra={
+                        "base_url": provider_row.base_url,
+                        "models_cached": len(provider.get_cached_models()),
+                    },
+                )
+
+        return upstreams
+
+
+async def _seed_providers_from_settings(
+    session: AsyncSession, settings: "Settings"
+) -> None:
+    """Seed database with upstream providers from environment variables.
+
+    Args:
+        session: Database session
+    """
+    from sqlmodel import select
+
+    from .core.settings import settings
+
+    providers_to_add: list[UpstreamProviderRow] = []
+    seeded_base_urls: set[str] = set()
+
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if openai_api_key:
+        base_url = "https://api.openai.com/v1"
+        result = await session.exec(
+            select(UpstreamProviderRow).where(UpstreamProviderRow.base_url == base_url)
+        )
+        if not result.first():
+            providers_to_add.append(
+                UpstreamProviderRow(
+                    provider_type="openai",
+                    base_url=base_url,
+                    api_key=openai_api_key,
+                    enabled=True,
+                )
+            )
+            seeded_base_urls.add(base_url)
+
+    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_api_key:
+        base_url = "https://api.anthropic.com/v1"
+        result = await session.exec(
+            select(UpstreamProviderRow).where(UpstreamProviderRow.base_url == base_url)
+        )
+        if not result.first():
+            providers_to_add.append(
+                UpstreamProviderRow(
+                    provider_type="anthropic",
+                    base_url=base_url,
+                    api_key=anthropic_api_key,
+                    enabled=True,
+                )
+            )
+            seeded_base_urls.add(base_url)
+
+    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
+    if openrouter_api_key:
+        base_url = "https://openrouter.ai/api/v1"
+        result = await session.exec(
+            select(UpstreamProviderRow).where(UpstreamProviderRow.base_url == base_url)
+        )
+        if not result.first():
+            providers_to_add.append(
+                UpstreamProviderRow(
+                    provider_type="openrouter",
+                    base_url=base_url,
+                    api_key=openrouter_api_key,
+                    enabled=True,
+                )
+            )
+            seeded_base_urls.add(base_url)
+
+    if settings.chat_completions_api_version and settings.upstream_base_url:
+        base_url = settings.upstream_base_url
+        if base_url not in seeded_base_urls:
+            result = await session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == base_url
+                )
+            )
+            if not result.first():
+                providers_to_add.append(
+                    UpstreamProviderRow(
+                        provider_type="azure",
+                        base_url=base_url,
+                        api_key=settings.upstream_api_key,
+                        api_version=settings.chat_completions_api_version,
+                        enabled=True,
+                    )
+                )
+                seeded_base_urls.add(base_url)
+
+    if settings.upstream_base_url and settings.upstream_api_key:
+        base_url = settings.upstream_base_url
+        if base_url not in seeded_base_urls:
+            result = await session.exec(
+                select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == base_url
+                )
+            )
+            if not result.first():
+                if "api.openai.com" in base_url.lower():
+                    providers_to_add.append(
+                        UpstreamProviderRow(
+                            provider_type="openai",
+                            base_url=base_url,
+                            api_key=settings.upstream_api_key,
+                            enabled=True,
+                        )
+                    )
+                elif "openrouter.ai/api/v1" in base_url.lower():
+                    providers_to_add.append(
+                        UpstreamProviderRow(
+                            provider_type="openrouter",
+                            base_url=base_url,
+                            api_key=settings.upstream_api_key,
+                            enabled=True,
+                        )
+                    )
+                else:
+                    providers_to_add.append(
+                        UpstreamProviderRow(
+                            provider_type="generic",
+                            base_url=base_url,
+                            api_key=settings.upstream_api_key,
+                            enabled=True,
+                        )
+                    )
+                seeded_base_urls.add(base_url)
+
+    for provider in providers_to_add:
+        session.add(provider)
+        logger.info(
+            f"Seeding {provider.provider_type} provider",
+            extra={"base_url": provider.base_url},
         )
 
-    if "api.openai.com" in settings.upstream_base_url.lower():
-        upstreams.append(OpenAIUpstreamProvider(settings.upstream_api_key))
-    elif "openrouter.ai/api/v1" in settings.upstream_base_url.lower():
-        upstreams.append(OpenRouterUpstreamProvider(settings.upstream_api_key))
-    else:
-        upstreams.append(
-            UpstreamProvider(settings.upstream_base_url, settings.upstream_api_key)
-        )
 
-    return upstreams
+def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider | None:
+    """Instantiate an UpstreamProvider from a database row.
+
+    Args:
+        provider_row: Database row containing provider configuration
+
+    Returns:
+        Instantiated provider or None if provider type is unknown
+    """
+    try:
+        if provider_row.provider_type == "openai":
+            return OpenAIUpstreamProvider(provider_row.api_key)
+        elif provider_row.provider_type == "azure":
+            if not provider_row.api_version:
+                logger.error(
+                    "Azure provider missing api_version",
+                    extra={"base_url": provider_row.base_url},
+                )
+                return None
+            return AzureUpstreamProvider(
+                provider_row.base_url,
+                provider_row.api_key,
+                provider_row.api_version,
+            )
+        elif provider_row.provider_type == "openrouter":
+            return OpenRouterUpstreamProvider(provider_row.api_key)
+        elif provider_row.provider_type == "generic":
+            return UpstreamProvider(provider_row.base_url, provider_row.api_key)
+        else:
+            logger.error(
+                f"Unknown provider type: {provider_row.provider_type}",
+                extra={"base_url": provider_row.base_url},
+            )
+            return None
+    except Exception as e:
+        logger.error(
+            f"Failed to instantiate provider: {e}",
+            extra={
+                "provider_type": provider_row.provider_type,
+                "base_url": provider_row.base_url,
+                "error": str(e),
+            },
+        )
+        return None
 
 
 class UpstreamProvider:
     """Provider for forwarding requests to an upstream AI service API."""
+
+    base_url: str
+    api_key: str
+    upstream_name: str | None = None
+    _models_cache: list[Model] = []
+    _models_by_id: dict[str, Model] = {}
 
     def __init__(self, base_url: str, api_key: str):
         """Initialize the upstream provider.
@@ -69,6 +435,8 @@ class UpstreamProvider:
         """
         self.base_url = base_url
         self.api_key = api_key
+        self._models_cache = []
+        self._models_by_id = {}
 
     def prepare_headers(self, request_headers: dict) -> dict:
         """Prepare headers for upstream request by removing proxy-specific headers and adding authentication.
@@ -135,6 +503,60 @@ class UpstreamProvider:
             Query parameters dict ready for upstream forwarding
         """
         return query_params or {}
+
+    def transform_model_name(self, model_id: str) -> str:
+        """Transform model ID for this provider's API format.
+
+        Base implementation returns model_id unchanged. Override in subclasses for provider-specific transformations.
+
+        Args:
+            model_id: Model identifier (may include provider prefix)
+
+        Returns:
+            Transformed model ID for this provider
+        """
+        return model_id
+
+    def prepare_request_body(self, body: bytes | None) -> bytes | None:
+        """Transform request body for provider-specific requirements.
+
+        Automatically transforms model names in the request body.
+
+        Args:
+            body: Original request body bytes
+
+        Returns:
+            Transformed request body bytes
+        """
+        if not body:
+            return body
+
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict) and "model" in data:
+                original_model = data["model"]
+                transformed_model = self.transform_model_name(original_model)
+                if transformed_model != original_model:
+                    data["model"] = transformed_model
+                    logger.debug(
+                        "Transformed model name in request",
+                        extra={
+                            "original": original_model,
+                            "transformed": transformed_model,
+                            "provider": self.upstream_name or self.base_url,
+                        },
+                    )
+                    return json.dumps(data).encode()
+        except Exception as e:
+            logger.debug(
+                "Could not transform request body",
+                extra={
+                    "error": str(e),
+                    "provider": self.upstream_name or self.base_url,
+                },
+            )
+
+        return body
 
     def _extract_upstream_error_message(
         self, body_bytes: bytes
@@ -560,6 +982,8 @@ class UpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
+        transformed_body = self.prepare_request_body(request_body)
+
         logger.info(
             "Forwarding request to upstream",
             extra={
@@ -578,13 +1002,13 @@ class UpstreamProvider:
         )
 
         try:
-            if request_body is not None:
+            if transformed_body is not None:
                 response = await client.send(
                     client.build_request(
                         request.method,
                         url,
                         headers=headers,
-                        content=request_body,
+                        content=transformed_body,
                         params=self.prepare_params(path, request.query_params),
                     ),
                     stream=True,
@@ -1326,6 +1750,9 @@ class UpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
+        request_body = await request.body()
+        transformed_body = self.prepare_request_body(request_body)
+
         logger.debug(
             "Forwarding request to upstream",
             extra={
@@ -1347,7 +1774,7 @@ class UpstreamProvider:
                         request.method,
                         url,
                         headers=headers,
-                        content=request.stream(),
+                        content=transformed_body if transformed_body else request_body,
                         params=self.prepare_params(path, request.query_params),
                     ),
                     stream=True,
@@ -1546,12 +1973,66 @@ class UpstreamProvider:
                 token=x_cashu_token,
             )
 
+    async def fetch_models(self) -> list[Model]:
+        """Fetch available models from upstream API and update cache.
+
+        Returns:
+            List of Model objects with pricing
+        """
+        logger.debug(f"Fetching models for {self.upstream_name or self.base_url}")
+        return []
+
+    async def refresh_models_cache(self) -> None:
+        """Refresh the in-memory models cache from upstream API."""
+        try:
+            models = await self.fetch_models()
+            self._models_cache = models
+            self._models_by_id = {m.id: m for m in models}
+            logger.info(
+                f"Refreshed models cache for {self.upstream_name or self.base_url}",
+                extra={"model_count": len(models)},
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to refresh models cache for {self.upstream_name or self.base_url}",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
+
+    def get_cached_models(self) -> list[Model]:
+        """Get cached models for this provider.
+
+        Returns:
+            List of cached Model objects
+        """
+        return self._models_cache
+
+    def get_cached_model_by_id(self, model_id: str) -> Model | None:
+        """Get a specific cached model by ID.
+
+        Args:
+            model_id: Model identifier
+
+        Returns:
+            Model object or None if not found
+        """
+        return self._models_by_id.get(model_id)
+
 
 class OpenAIUpstreamProvider(UpstreamProvider):
     """Upstream provider specifically configured for OpenAI API."""
 
     def __init__(self, api_key: str):
-        super().__init__(base_url="https://api.openai.com", api_key=api_key)
+        self.upstream_name = "openai"
+        super().__init__(base_url="https://api.openai.com/v1", api_key=api_key)
+
+    def transform_model_name(self, model_id: str) -> str:
+        """Strip 'openai/' prefix for OpenAI API compatibility."""
+        return model_id.removeprefix("openai/")
+
+    async def fetch_models(self) -> list[Model]:
+        """Fetch OpenAI models from OpenRouter API filtered by openai source."""
+        models_data = await async_fetch_openrouter_models(source_filter="openai")
+        return [Model(**model) for model in models_data]  # type: ignore
 
 
 class AzureUpstreamProvider(UpstreamProvider):
@@ -1595,32 +2076,10 @@ class OpenRouterUpstreamProvider(UpstreamProvider):
         Args:
             api_key: OpenRouter API key for authentication
         """
+        self.upstream_name = "openrouter"
         super().__init__(base_url="https://openrouter.ai/api/v1", api_key=api_key)
 
-    async def fetch_models(self) -> dict:
-        """Fetch available models from OpenRouter API.
-
-        Returns:
-            Raw JSON response containing model data
-        """
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://openrouter.ai/api/v1/models",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-            )
-            return response.json()
-
-    async def models(self) -> list[Model]:
-        """Get list of available models from OpenRouter.
-
-        Returns:
-            List of Model objects representing available models
-        """
-        response_data = await self.fetch_models()
-        models_list: list[Model] = []
-        for model_data in response_data.get("data", []):
-            try:
-                models_list.append(Model(**model_data))  # type: ignore
-            except Exception:
-                continue
-        return models_list
+    async def fetch_models(self) -> list[Model]:
+        """Fetch all OpenRouter models."""
+        models_data = await async_fetch_openrouter_models()
+        return [Model(**model) for model in models_data]  # type: ignore

@@ -1,33 +1,173 @@
 import json
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
+from sqlmodel import select
 
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
-from .core.db import ApiKey, AsyncSession, get_session
-from .core.settings import settings
+from .core.db import ApiKey, AsyncSession, ModelRow, create_session, get_session
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
     create_error_response,
     get_max_cost_for_model,
 )
-from .upstream import init_upstreams
+from .payment.models import Model, _row_to_model
+from .upstream import UpstreamProvider, init_upstreams, resolve_model_alias
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
 
-upstreams = init_upstreams(settings.upstream_base_url, settings.upstream_api_key)
-upstream = upstreams[0]
+_upstreams: list[UpstreamProvider] = []
+_model_instances: dict[str, Model] = {}  # All aliases -> Model
+_provider_map: dict[str, UpstreamProvider] = {}  # All aliases -> Provider
+_unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
+
+
+async def initialize_upstreams() -> None:
+    """Initialize upstream providers from database during application startup."""
+    global _upstreams
+    _upstreams = await init_upstreams()
+    logger.info(f"Initialized {len(_upstreams)} upstream providers")
+    await refresh_model_maps()
+
+
+async def reinitialize_upstreams() -> None:
+    """Re-initialize upstream providers from database (called after admin changes)."""
+    global _upstreams
+    _upstreams = await init_upstreams()
+    logger.info(
+        "Re-initialized upstream providers from admin action",
+        extra={"provider_count": len(_upstreams)},
+    )
+    await refresh_model_maps()
+
+
+def get_upstreams() -> list[UpstreamProvider]:
+    """Get the initialized upstream providers.
+
+    Returns:
+        List of upstream provider instances
+    """
+    return _upstreams
+
+
+def get_model_instance(model_id: str) -> Model | None:
+    """Get Model instance by ID from global cache."""
+    return _model_instances.get(model_id)
+
+
+def get_provider_for_model(model_id: str) -> UpstreamProvider | None:
+    """Get UpstreamProvider for model ID from global cache."""
+    return _provider_map.get(model_id)
+
+
+def get_unique_models() -> list[Model]:
+    """Get list of unique models (no duplicates from aliases)."""
+    return list(_unique_models.values())
+
+
+async def refresh_model_maps() -> None:
+    """Refresh global model and provider maps in-place."""
+    global _model_instances, _provider_map, _unique_models
+
+    model_instances: dict[str, Model] = {}
+    provider_map: dict[str, UpstreamProvider] = {}
+    unique_models: dict[str, Model] = {}
+    openrouter: UpstreamProvider | None = None
+    other_upstreams: list[UpstreamProvider] = []
+
+    async with create_session() as session:
+        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
+        override_rows = result.all()
+        overrides_by_id = {
+            row.id: row for row in override_rows if row.upstream_provider_id is not None
+        }
+
+    for upstream in _upstreams:
+        if upstream.base_url == "https://openrouter.ai/api/v1":
+            openrouter = upstream
+        else:
+            other_upstreams.append(upstream)
+
+    def get_base_model_id(model_id: str) -> str:
+        """Get base model ID by removing provider prefix."""
+        return model_id.split("/", 1)[1] if "/" in model_id else model_id
+
+    if openrouter:
+        for model in openrouter.get_cached_models():
+            if model.enabled:
+                model_to_use = (
+                    _row_to_model(overrides_by_id[model.id])
+                    if model.id in overrides_by_id
+                    else model
+                )
+                base_id = get_base_model_id(model_to_use.id)
+                if base_id not in unique_models:
+                    unique_models[base_id] = model_to_use
+                for alias in resolve_model_alias(model.id, model_to_use.canonical_slug):
+                    model_instances[alias] = model_to_use
+                    provider_map[alias] = openrouter
+
+    for upstream in other_upstreams:
+        upstream_prefix = getattr(upstream, "upstream_name", None)
+        for model in upstream.get_cached_models():
+            if model.enabled:
+                model_to_use = (
+                    _row_to_model(overrides_by_id[model.id])
+                    if model.id in overrides_by_id
+                    else model
+                )
+                base_id = get_base_model_id(model_to_use.id)
+                unique_models[base_id] = model_to_use
+
+                aliases = resolve_model_alias(model.id, model_to_use.canonical_slug)
+
+                if upstream_prefix and "/" not in model.id:
+                    prefixed_id = f"{upstream_prefix}/{model.id}"
+                    if prefixed_id not in aliases:
+                        aliases.append(prefixed_id)
+
+                for alias in aliases:
+                    model_instances[alias] = model_to_use
+                    provider_map[alias] = upstream
+
+    _model_instances = model_instances
+    _provider_map = provider_map
+    _unique_models = unique_models
+
+    logger.debug(
+        "Refreshed model maps",
+        extra={
+            "unique_model_count": len(_unique_models),
+            "total_alias_count": len(_model_instances),
+        },
+    )
+
+
+async def refresh_model_maps_periodically() -> None:
+    """Background task to refresh model maps every minute."""
+    import asyncio
+
+    while True:
+        try:
+            await asyncio.sleep(60)
+            await refresh_model_maps()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(
+                "Error refreshing model maps",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
 
 
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
 ) -> Response | StreamingResponse:
-    """Main proxy endpoint handler."""
-    request_body = await request.body()
     headers = dict(request.headers)
 
     if "x-cashu" not in headers and "authorization" not in headers.keys():
@@ -35,7 +175,7 @@ async def proxy(
             "unauthorized", "Unauthorized", 401, request=request
         )
 
-    logger.info(
+    logger.info(  # TODO: move to middleware, async
         "Received proxy request",
         extra={
             "method": request.method,
@@ -45,76 +185,47 @@ async def proxy(
         },
     )
 
-    # Parse JSON body if present, handle empty/invalid JSON
-    request_body_dict = {}
-    if request_body:
-        try:
-            request_body_dict = json.loads(request_body)
-            logger.debug(
-                "Request body parsed",
-                extra={
-                    "path": path,
-                    "body_keys": list(request_body_dict.keys()),
-                    "model": request_body_dict.get("model", "not_specified"),
-                },
-            )
-        except json.JSONDecodeError as e:
-            logger.error(
-                "Invalid JSON in request body",
-                extra={
-                    "error": str(e),
-                    "path": path,
-                    "body_preview": request_body[:200].decode(errors="ignore")
-                    if request_body
-                    else "empty",
-                },
-            )
-            return Response(
-                content=json.dumps(
-                    {"error": {"type": "invalid_request_error", "code": "invalid_json"}}
-                ),
-                status_code=400,
-                media_type="application/json",
-            )
+    request_body = await request.body()
+    request_body_dict = parse_request_body_json(request_body, path)
 
-    model = request_body_dict.get("model", "unknown")
-    _max_cost_for_model = await get_max_cost_for_model(model=model, session=session)
+    model_id = request_body_dict.get("model", "unknown")
+
+    model_obj = get_model_instance(model_id)
+    if not model_obj:
+        return create_error_response(
+            "invalid_model", f"Model '{model_id}' not found", 400, request=request
+        )
+
+    upstream = get_provider_for_model(model_id)
+    if not upstream:
+        return create_error_response(
+            "invalid_model",
+            f"No provider found for model '{model_id}'",
+            400,
+            request=request,
+        )
+
+    _max_cost_for_model = await get_max_cost_for_model(
+        model=model_id, session=session, model_obj=model_obj
+    )
     max_cost_for_model = await calculate_discounted_max_cost(
         _max_cost_for_model, request_body_dict, session
     )
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
-    # Handle authentication
     if x_cashu := headers.get("x-cashu", None):
-        logger.info(
-            "Processing X-Cashu payment",
-            extra={
-                "path": path,
-                "token_preview": x_cashu[:20] + "..." if len(x_cashu) > 20 else x_cashu,
-            },
-        )
         return await upstream.handle_x_cashu(request, x_cashu, path, max_cost_for_model)
 
     elif auth := headers.get("authorization", None):
-        logger.debug(
-            "Processing bearer token authentication",
-            extra={
-                "path": path,
-                "token_preview": auth[:20] + "..." if len(auth) > 20 else auth,
-            },
-        )
         key = await get_bearer_token_key(headers, path, session, auth)
 
     else:
         if request.method not in ["GET"]:
-            logger.warning(
-                "Unauthorized request - no authentication provided",
-                extra={"method": request.method, "path": path},
-            )
-            return Response(
-                content=json.dumps({"detail": "Unauthorized"}),
+            raise HTTPException(
                 status_code=401,
-                media_type="application/json",
+                detail={
+                    "error": {"type": "invalid_request_error", "code": "unauthorized"}
+                },
             )
 
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
@@ -124,38 +235,13 @@ async def proxy(
 
     # Only pay for request if we have request body data (for completions endpoints)
     if request_body_dict:
-        logger.info(
-            "Processing payment for request",
-            extra={
-                "path": path,
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance_before": key.balance,
-                "model": request_body_dict.get("model", "unknown"),
-            },
-        )
-
         try:
             await pay_for_request(key, max_cost_for_model, session)
-            logger.info(
-                "Payment processed successfully",
-                extra={
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "key_balance_after": key.balance,
-                    "model": request_body_dict.get("model", "unknown"),
-                },
+        except Exception:
+            raise HTTPException(
+                status_code=402,
+                detail={"error": {"type": "payment_error", "code": "payment_error"}},
             )
-        except Exception as e:
-            logger.error(
-                "Payment processing failed",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-            raise
 
     # Prepare headers for upstream
     headers = upstream.prepare_headers(dict(request.headers))
@@ -270,3 +356,37 @@ async def get_bearer_token_key(
             },
         )
         raise
+
+
+def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
+    request_body_dict = {}
+    if request_body:
+        try:
+            request_body_dict = json.loads(request_body)
+            logger.debug(
+                "Request body parsed",
+                extra={
+                    "path": path,
+                    "body_keys": list(request_body_dict.keys()),
+                    "model": request_body_dict.get("model", "not_specified"),
+                },
+            )
+        except json.JSONDecodeError as e:
+            logger.error(
+                "Invalid JSON in request body",
+                extra={
+                    "error": str(e),
+                    "path": path,
+                    "body_preview": request_body[:200].decode(errors="ignore")
+                    if request_body
+                    else "empty",
+                },
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {"type": "invalid_request_error", "code": "invalid_json"}
+                },
+            )
+
+    return request_body_dict

@@ -11,12 +11,10 @@ from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
 from ..payment.models import (
-    ensure_models_bootstrapped,
     models_router,
-    refresh_models_periodically,
     update_sats_pricing,
 )
-from ..proxy import proxy_router
+from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..wallet import periodic_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
@@ -42,6 +40,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     nip91_task = None
     providers_task = None
     models_refresh_task = None
+    model_maps_refresh_task = None
 
     try:
         # Run database migrations on startup
@@ -65,10 +64,18 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             pass
 
-        await ensure_models_bootstrapped()
+        # await ensure_models_bootstrapped()
+        await initialize_upstreams()
+
+        from ..proxy import get_upstreams
+        from ..upstream import refresh_upstreams_models_periodically
+
         pricing_task = asyncio.create_task(update_sats_pricing())
         if global_settings.models_refresh_interval_seconds > 0:
-            models_refresh_task = asyncio.create_task(refresh_models_periodically())
+            models_refresh_task = asyncio.create_task(
+                refresh_upstreams_models_periodically(get_upstreams())
+            )
+        model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
         nip91_task = asyncio.create_task(announce_provider())
         providers_task = asyncio.create_task(providers_cache_refresher())
@@ -94,6 +101,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             providers_task.cancel()
         if models_refresh_task is not None:
             models_refresh_task.cancel()
+        if model_maps_refresh_task is not None:
+            model_maps_refresh_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -107,6 +116,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:
                 tasks_to_wait.append(models_refresh_task)
+            if model_maps_refresh_task is not None:
+                tasks_to_wait.append(model_maps_refresh_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)

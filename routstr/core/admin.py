@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from ..payment.models import Model, get_model_by_id, list_models
+from ..payment.models import Model, _row_to_model, list_models
+from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -16,7 +17,7 @@ from ..wallet import (
     send_token,
     slow_filter_spend_proofs,
 )
-from .db import ApiKey, ModelRow, create_session
+from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
 from .logging import get_logger
 from .settings import SettingsService, settings
 
@@ -613,8 +614,8 @@ async def dashboard(request: Request) -> str:
             <button class="investigate-btn" onclick="openInvestigateModal()">
                 🔍 Investigate Logs
             </button>
-            <button onclick="window.location.href='/admin/models'">
-                🧩 Edit Models
+            <button onclick="window.location.href='/admin/upstream-providers'">
+                🔌 Upstream Providers
             </button>
             <button onclick="openSettingsModal()">
                 ⚙️ Settings
@@ -1384,31 +1385,735 @@ async def admin_models(request: Request) -> str:
     return admin_auth()
 
 
+UPSTREAM_PROVIDERS_JS: str = """<!--html-->
+<script>
+    let providersList = [];
+    let selectedProviderId = null;
+    let providerModels = { db_models: [], remote_models: [] };
+
+    async function fetchProviders() {
+        const tableBody = document.getElementById('providers-tbody');
+        tableBody.innerHTML = '<tr><td colspan="5" style="color:#718096;">Loading…</td></tr>';
+        try {
+            const resp = await fetch('/admin/api/upstream-providers', { credentials: 'same-origin' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            providersList = await resp.json();
+            renderProvidersTable();
+        } catch (e) {
+            tableBody.innerHTML = '<tr><td colspan="5" style="color:#e53e3e;">Failed to load providers: ' + e.message + '</td></tr>';
+        }
+    }
+
+    function renderProvidersTable() {
+        const tableBody = document.getElementById('providers-tbody');
+        if (!Array.isArray(providersList) || !providersList.length) {
+            tableBody.innerHTML = '<tr><td colspan="5" style="color:#718096;">No providers found</td></tr>';
+            return;
+        }
+        const rows = providersList.map(p => `
+            <tr>
+                <td>${p.id}</td>
+                <td>${p.provider_type}</td>
+                <td style="word-break: break-all;">${p.base_url}</td>
+                <td><span style="padding:2px 8px; border-radius:4px; background:${p.enabled ? '#22c55e' : '#ef4444'}; color:white; font-size:12px;">${p.enabled ? 'Enabled' : 'Disabled'}</span></td>
+                <td>
+                    <button onclick="viewProviderModels(${p.id})">📋 Models</button>
+                    <button onclick="openProviderEditor(${p.id})">Edit</button>
+                    <button onclick="deleteProvider(event, ${p.id})" style="background:#e53e3e;">Delete</button>
+                </td>
+            </tr>
+        `).join('');
+        tableBody.innerHTML = rows;
+    }
+
+    async function viewProviderModels(providerId) {
+        selectedProviderId = providerId;
+        const modelsSection = document.getElementById('models-section');
+        const modelsLoading = document.getElementById('models-loading');
+        const modelsContent = document.getElementById('models-content');
+        
+        modelsSection.style.display = 'block';
+        modelsLoading.style.display = 'block';
+        modelsContent.style.display = 'none';
+        
+        try {
+            const resp = await fetch(`/admin/api/upstream-providers/${providerId}/models`, { credentials: 'same-origin' });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            providerModels = data;
+            
+            document.getElementById('provider-name-display').textContent = data.provider.base_url;
+            renderProviderModels();
+            
+            modelsLoading.style.display = 'none';
+            modelsContent.style.display = 'block';
+        } catch (e) {
+            modelsLoading.innerHTML = '<p style="color:#e53e3e;">Failed to load models: ' + e.message + '</p>';
+        }
+    }
+
+    function renderProviderModels() {
+        const dbModelsBody = document.getElementById('db-models-tbody');
+        const remoteModelsBody = document.getElementById('remote-models-tbody');
+        
+        if (providerModels.db_models && providerModels.db_models.length > 0) {
+            dbModelsBody.innerHTML = '';
+            providerModels.db_models.forEach(m => {
+                const row = document.createElement('tr');
+                const enabledBadge = m.enabled 
+                    ? '<span style="padding:2px 8px; border-radius:4px; background:#22c55e; color:white; font-size:12px;">Enabled</span>'
+                    : '<span style="padding:2px 8px; border-radius:4px; background:#ef4444; color:white; font-size:12px;">Disabled</span>';
+                row.innerHTML = `
+                    <td style="font-family:monospace; word-break: break-all;">${m.id}</td>
+                    <td>${m.name} ${enabledBadge}</td>
+                    <td>
+                        <button class="toggle-btn">${m.enabled ? '🚫 Disable' : '✅ Enable'}</button>
+                        <button class="edit-btn" ${!m.enabled ? 'disabled' : ''}>Edit</button>
+                        <button class="delete-btn" style="background:#e53e3e;">Delete</button>
+                    </td>
+                `;
+                const toggleBtn = row.querySelector('.toggle-btn');
+                const editBtn = row.querySelector('.edit-btn');
+                const deleteBtn = row.querySelector('.delete-btn');
+                toggleBtn.onclick = () => toggleModelEnabled(m.id, !m.enabled);
+                if (m.enabled) {
+                    editBtn.onclick = () => editModelOverride(m.id);
+                }
+                deleteBtn.onclick = () => deleteModelOverride(m.id);
+                dbModelsBody.appendChild(row);
+            });
+        } else {
+            dbModelsBody.innerHTML = '<tr><td colspan="3" style="color:#718096;">No model overrides</td></tr>';
+        }
+        
+        if (providerModels.remote_models && providerModels.remote_models.length > 0) {
+            remoteModelsBody.innerHTML = '';
+            providerModels.remote_models.forEach(m => {
+                const isInDb = providerModels.db_models.some(db => db.id === m.id);
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td style="font-family:monospace; word-break: break-all;">${m.id}</td>
+                    <td>${m.name}</td>
+                    <td>
+                        <button class="override-btn" ${isInDb ? 'disabled' : ''}>+ Override</button>
+                        <button class="disable-btn" style="background:#ef4444;" ${isInDb ? 'disabled' : ''}>🚫 Disable</button>
+                    </td>
+                `;
+                const overrideBtn = row.querySelector('.override-btn');
+                const disableBtn = row.querySelector('.disable-btn');
+                if (!isInDb) {
+                    overrideBtn.onclick = () => createModelOverride(m, true);
+                    disableBtn.onclick = () => createModelOverride(m, false);
+                }
+                remoteModelsBody.appendChild(row);
+            });
+        } else {
+            remoteModelsBody.innerHTML = '<tr><td colspan="3" style="color:#718096;">No remote models available</td></tr>';
+        }
+    }
+
+    function closeModelsSection() {
+        document.getElementById('models-section').style.display = 'none';
+        selectedProviderId = null;
+    }
+
+    const PROVIDER_CONFIGS = {
+        'openai': { baseUrl: 'https://api.openai.com/v1', showApiVersion: false },
+        'openrouter': { baseUrl: 'https://openrouter.ai/api/v1', showApiVersion: false },
+        'anthropic': { baseUrl: 'https://api.anthropic.com/v1', showApiVersion: false },
+        'azure': { baseUrl: '', showApiVersion: true },
+        'generic': { baseUrl: '', showApiVersion: false }
+    };
+
+    function updateProviderFields() {
+        const providerType = document.getElementById('provider-type').value;
+        const config = PROVIDER_CONFIGS[providerType] || { baseUrl: '', showApiVersion: false };
+        const baseUrlField = document.getElementById('provider-base-url');
+        const apiVersionRow = document.getElementById('api-version-row');
+        const providerId = document.getElementById('provider-id').value;
+        
+        if (config.baseUrl && !providerId) {
+            baseUrlField.value = config.baseUrl;
+            baseUrlField.readOnly = true;
+            baseUrlField.style.backgroundColor = '#f0f0f0';
+        } else if (!providerId) {
+            baseUrlField.readOnly = false;
+            baseUrlField.style.backgroundColor = '';
+        }
+        
+        apiVersionRow.style.display = config.showApiVersion ? 'block' : 'none';
+    }
+
+    async function openProviderEditor(providerId) {
+        const modal = document.getElementById('provider-edit-modal');
+        const errorBox = document.getElementById('provider-error');
+        errorBox.style.display = 'none';
+        
+        if (providerId) {
+            document.getElementById('modal-title').textContent = 'Edit Upstream Provider';
+            document.getElementById('provider-save-btn').textContent = 'Save';
+            document.getElementById('provider-id').value = providerId;
+            
+            try {
+                const resp = await fetch(`/admin/api/upstream-providers/${providerId}`, { credentials: 'same-origin' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const p = await resp.json();
+                
+                document.getElementById('provider-type').value = p.provider_type;
+                document.getElementById('provider-base-url').value = p.base_url;
+                document.getElementById('provider-base-url').readOnly = false;
+                document.getElementById('provider-base-url').style.backgroundColor = '';
+                document.getElementById('provider-api-key').value = '';
+                document.getElementById('provider-api-key').placeholder = '[Keep existing]';
+                document.getElementById('provider-api-version').value = p.api_version || '';
+                document.getElementById('provider-enabled').checked = p.enabled;
+                updateProviderFields();
+            } catch (e) {
+                errorBox.style.display = 'block';
+                errorBox.textContent = 'Failed to load provider: ' + e.message;
+            }
+        } else {
+            document.getElementById('modal-title').textContent = 'Create Upstream Provider';
+            document.getElementById('provider-save-btn').textContent = 'Create';
+            document.getElementById('provider-id').value = '';
+            document.getElementById('provider-type').value = 'openrouter';
+            document.getElementById('provider-api-key').value = '';
+            document.getElementById('provider-api-key').placeholder = 'API Key';
+            document.getElementById('provider-api-version').value = '';
+            document.getElementById('provider-enabled').checked = true;
+            updateProviderFields();
+        }
+        
+        modal.style.display = 'block';
+    }
+
+    function closeProviderEditor() {
+        document.getElementById('provider-edit-modal').style.display = 'none';
+    }
+
+    async function saveProvider() {
+        const providerId = document.getElementById('provider-id').value;
+        const errorBox = document.getElementById('provider-error');
+        errorBox.style.display = 'none';
+        
+        const payload = {
+            provider_type: document.getElementById('provider-type').value,
+            base_url: document.getElementById('provider-base-url').value,
+            api_version: document.getElementById('provider-api-version').value || null,
+            enabled: document.getElementById('provider-enabled').checked,
+        };
+        
+        const apiKey = document.getElementById('provider-api-key').value;
+        if (apiKey) {
+            payload.api_key = apiKey;
+        }
+        
+        const saveBtn = document.getElementById('provider-save-btn');
+        const originalText = saveBtn.textContent;
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+        
+        try {
+            let resp;
+            if (providerId) {
+                resp = await fetch(`/admin/api/upstream-providers/${providerId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                });
+            } else {
+                if (!apiKey) {
+                    throw new Error('API Key is required for new providers');
+                }
+                resp = await fetch('/admin/api/upstream-providers', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                });
+            }
+            
+            if (!resp.ok) {
+                let errText = 'Failed to save provider';
+                try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                throw new Error(errText);
+            }
+            
+            closeProviderEditor();
+            await fetchProviders();
+        } catch (e) {
+            errorBox.style.display = 'block';
+            errorBox.textContent = e.message;
+        } finally {
+            saveBtn.disabled = false;
+            saveBtn.textContent = originalText;
+        }
+    }
+
+    async function deleteProvider(ev, providerId) {
+        if (!confirm('Are you sure you want to delete this provider?')) return;
+        
+        const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+        if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+        
+        try {
+            const resp = await fetch(`/admin/api/upstream-providers/${providerId}`, {
+                method: 'DELETE',
+                credentials: 'same-origin'
+            });
+            if (!resp.ok) {
+                let errText = 'Failed to delete provider';
+                try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                throw new Error(errText);
+            }
+            await fetchProviders();
+        } catch (e) {
+            alert(e.message);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+        }
+    }
+
+    async function createModelOverride(modelData, enabled) {
+        if (enabled) {
+            const modal = document.getElementById('model-override-modal');
+            const errorBox = document.getElementById('model-override-error');
+            errorBox.style.display = 'none';
+            
+            document.getElementById('override-model-id').value = modelData.id || '';
+            document.getElementById('override-model-name').value = modelData.name || '';
+            document.getElementById('override-description').value = modelData.description || '';
+            document.getElementById('override-context').value = modelData.context_length || 8192;
+            
+            const architecture = modelData.architecture || {
+                modality: 'text',
+                input_modalities: ['text'],
+                output_modalities: ['text'],
+                tokenizer: '',
+                instruct_type: null
+            };
+            document.getElementById('override-architecture').value = JSON.stringify(architecture, null, 2);
+            
+            const pricing = modelData.pricing || {
+                prompt: 0.0,
+                completion: 0.0,
+                request: 0.0,
+                image: 0.0
+            };
+            // Remove computed fields
+            delete pricing.max_prompt_cost;
+            delete pricing.max_completion_cost;
+            delete pricing.max_cost;
+            document.getElementById('override-pricing').value = JSON.stringify(pricing, null, 2);
+            
+            document.getElementById('override-enabled').value = 'true';
+            document.getElementById('override-mode').value = 'create';
+            document.getElementById('override-created').value = Math.floor(Date.now() / 1000);
+            document.getElementById('override-upstream-provider-id').value = selectedProviderId;
+            document.getElementById('modal-title').textContent = 'Create Model Override';
+            document.getElementById('override-save-btn').textContent = 'Create Override';
+            document.getElementById('override-model-name').disabled = false;
+            
+            modal.style.display = 'block';
+        } else {
+            await quickDisableModel(modelData);
+        }
+    }
+
+    async function quickDisableModel(modelData) {
+        try {
+            const payload = {
+                id: modelData.id,
+                name: modelData.name,
+                description: modelData.description || '',
+                created: modelData.created || Math.floor(Date.now() / 1000),
+                context_length: modelData.context_length || 0,
+                architecture: modelData.architecture || {},
+                pricing: modelData.pricing || {},
+                upstream_provider_id: selectedProviderId,
+                enabled: false
+            };
+            
+            const resp = await fetch('/admin/api/models', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify(payload)
+            });
+            
+            if (!resp.ok) {
+                let errText = 'Failed to disable model';
+                try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                throw new Error(errText);
+            }
+            
+            await viewProviderModels(selectedProviderId);
+        } catch (e) {
+            alert(e.message);
+        }
+    }
+
+    async function toggleModelEnabled(modelId, newEnabledState) {
+        try {
+            const resp = await fetch(`/admin/api/models/${encodeURIComponent(modelId)}`, {
+                credentials: 'same-origin'
+            });
+            if (!resp.ok) throw new Error('Failed to fetch model');
+            const model = await resp.json();
+            
+            model.enabled = newEnabledState;
+            
+            const updateResp = await fetch(`/admin/api/models/${encodeURIComponent(modelId)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify(model)
+            });
+            
+            if (!updateResp.ok) throw new Error('Failed to update model');
+            await viewProviderModels(selectedProviderId);
+        } catch (e) {
+            alert(e.message);
+        }
+    }
+
+    function closeModelOverrideModal() {
+        document.getElementById('model-override-modal').style.display = 'none';
+    }
+
+    async function saveModelOverride() {
+        const errorBox = document.getElementById('model-override-error');
+        errorBox.style.display = 'none';
+        
+        const btn = document.getElementById('override-save-btn');
+        const mode = document.getElementById('override-mode').value;
+        const isEdit = mode === 'edit';
+        
+        btn.disabled = true;
+        btn.textContent = isEdit ? 'Saving…' : 'Creating…';
+        
+        try {
+            const modelId = document.getElementById('override-model-id').value;
+            const upstreamProviderId = parseInt(document.getElementById('override-upstream-provider-id').value);
+            const payload = {
+                id: modelId,
+                name: document.getElementById('override-model-name').value,
+                description: document.getElementById('override-description').value,
+                created: parseInt(document.getElementById('override-created').value),
+                context_length: parseInt(document.getElementById('override-context').value),
+                architecture: JSON.parse(document.getElementById('override-architecture').value),
+                pricing: JSON.parse(document.getElementById('override-pricing').value),
+                upstream_provider_id: upstreamProviderId,
+                enabled: document.getElementById('override-enabled').value === 'true'
+            };
+            
+            const resp = await fetch(
+                isEdit ? `/admin/api/models/${encodeURIComponent(modelId)}` : '/admin/api/models',
+                {
+                    method: isEdit ? 'PATCH' : 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                }
+            );
+            
+            if (!resp.ok) {
+                let errText = isEdit ? 'Failed to update override' : 'Failed to create override';
+                try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                throw new Error(errText);
+            }
+            
+            closeModelOverrideModal();
+            await viewProviderModels(selectedProviderId);
+        } catch (e) {
+            errorBox.style.display = 'block';
+            errorBox.textContent = e.message;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = isEdit ? 'Save Changes' : 'Create Override';
+        }
+    }
+
+    async function editModelOverride(modelId) {
+        const modal = document.getElementById('model-override-modal');
+        const errorBox = document.getElementById('model-override-error');
+        errorBox.style.display = 'none';
+        
+        try {
+            const resp = await fetch(`/admin/api/models/${encodeURIComponent(modelId)}`, {
+                credentials: 'same-origin'
+            });
+            if (!resp.ok) throw new Error('Failed to fetch model');
+            const modelData = await resp.json();
+            
+            document.getElementById('override-model-id').value = modelData.id;
+            document.getElementById('override-model-name').value = modelData.name;
+            document.getElementById('override-model-name').disabled = false;
+            document.getElementById('override-description').value = modelData.description || '';
+            document.getElementById('override-context').value = modelData.context_length || 8192;
+            document.getElementById('override-created').value = modelData.created || Math.floor(Date.now() / 1000);
+            
+            const architecture = modelData.architecture || {
+                modality: 'text',
+                input_modalities: ['text'],
+                output_modalities: ['text'],
+                tokenizer: '',
+                instruct_type: null
+            };
+            document.getElementById('override-architecture').value = JSON.stringify(architecture, null, 2);
+            
+            const pricing = modelData.pricing || {
+                prompt: 0.0,
+                completion: 0.0,
+                request: 0.0,
+                image: 0.0
+            };
+            // Remove computed fields
+            delete pricing.max_prompt_cost;
+            delete pricing.max_completion_cost;
+            delete pricing.max_cost;
+            document.getElementById('override-pricing').value = JSON.stringify(pricing, null, 2);
+            
+            document.getElementById('override-enabled').value = String(modelData.enabled !== false);
+            document.getElementById('override-mode').value = 'edit';
+            document.getElementById('override-upstream-provider-id').value = modelData.upstream_provider_id || selectedProviderId;
+            document.getElementById('modal-title').textContent = 'Edit Model Override';
+            document.getElementById('override-save-btn').textContent = 'Save Changes';
+            
+            modal.style.display = 'block';
+        } catch (e) {
+            alert('Failed to load model: ' + e.message);
+        }
+    }
+
+    async function deleteModelOverride(modelId) {
+        if (!confirm('Delete this model override?')) return;
+        
+        try {
+            const resp = await fetch(`/admin/api/models/${encodeURIComponent(modelId)}`, {
+                method: 'DELETE',
+                credentials: 'same-origin'
+            });
+            if (!resp.ok) throw new Error('Failed to delete');
+            await viewProviderModels(selectedProviderId);
+        } catch (e) {
+            alert(e.message);
+        }
+    }
+
+    window.addEventListener('DOMContentLoaded', fetchProviders);
+
+    window.onclick = function(event) {
+        const editModal = document.getElementById('provider-edit-modal');
+        const overrideModal = document.getElementById('model-override-modal');
+        if (event.target == editModal) closeProviderEditor();
+        if (event.target == overrideModal) closeModelOverrideModal();
+    }
+</script>
+"""
+
+
+def upstream_providers_page() -> str:
+    return (
+        f"""<!DOCTYPE html>
+<html>
+    <head>
+    <style>{DASHBOARD_CSS}</style>
+    {UPSTREAM_PROVIDERS_JS}
+    </head>
+    """
+        + """<!--html-->
+    <body>
+        <a href="/admin" class="back-btn">← Back to Dashboard</a>
+        <h1>Upstream Providers</h1>
+
+        <div class="balance-card">
+            <h2>Providers</h2>
+            <div style="margin-bottom: 12px;">
+                <button onclick="openProviderEditor(null)">➕ Add Provider</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Type</th>
+                        <th>Base URL</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="providers-tbody">
+                    <tr><td colspan="5" style="color:#718096;">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div id="models-section" class="balance-card" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
+                <h2>Models for <span id="provider-name-display"></span></h2>
+                <button onclick="closeModelsSection()" style="background:#718096;">Close</button>
+            </div>
+            
+            <div id="models-loading" style="color:#718096;">Loading models…</div>
+            
+            <div id="models-content" style="display:none;">
+                <h3>Database Overrides</h3>
+                <table style="margin-bottom: 2rem;">
+                    <thead>
+                        <tr>
+                            <th>Model ID</th>
+                            <th>Name</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="db-models-tbody">
+                        <tr><td colspan="3" style="color:#718096;">No overrides</td></tr>
+                    </tbody>
+                </table>
+                
+                <h3>Remote Models</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Model ID</th>
+                            <th>Name</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="remote-models-tbody">
+                        <tr><td colspan="3" style="color:#718096;">No remote models</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="provider-edit-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeProviderEditor()">&times;</span>
+                <h3 id="modal-title">Edit Upstream Provider</h3>
+                
+                <div id="provider-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
+                
+                <input type="hidden" id="provider-id">
+                
+                <label>Provider Type</label>
+                <select id="provider-type" onchange="updateProviderFields()">
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="azure">Azure OpenAI</option>
+                    <option value="generic">Generic</option>
+                </select>
+                
+                <label>Base URL</label>
+                <input type="text" id="provider-base-url" placeholder="https://api.example.com/v1">
+                
+                <label>API Key</label>
+                <input type="password" id="provider-api-key" placeholder="API Key">
+                
+                <div id="api-version-row" style="display:none;">
+                    <label>API Version</label>
+                    <input type="text" id="provider-api-version" placeholder="2024-02-15-preview">
+                </div>
+                
+                <label style="display:flex; align-items:center; gap:8px; margin:10px 0;">
+                    <input type="checkbox" id="provider-enabled" style="width:auto;">
+                    <span>Enabled</span>
+                </label>
+                
+                <div style="margin-top: 12px; display: flex; gap: 10px;">
+                    <button id="provider-save-btn" onclick="saveProvider()">Save</button>
+                    <button onclick="closeProviderEditor()" style="background-color: #718096;">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="model-override-modal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeModelOverrideModal()">&times;</span>
+                <h3 id="modal-title">Create Model Override</h3>
+                
+                <div id="model-override-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
+                
+                <label>Model ID</label>
+                <input type="text" id="override-model-id" disabled>
+                
+                <label>Name</label>
+                <input type="text" id="override-model-name">
+                
+                <label>Description</label>
+                <input type="text" id="override-description">
+                
+                <label>Context Length</label>
+                <input type="number" id="override-context" min="0">
+                
+                <label>Architecture (JSON)</label>
+                <textarea id="override-architecture" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+                
+                <label>Pricing (JSON)</label>
+                <textarea id="override-pricing" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+                
+                <input type="hidden" id="override-enabled" value="true">
+                <input type="hidden" id="override-mode" value="create">
+                <input type="hidden" id="override-created" value="">
+                <input type="hidden" id="override-upstream-provider-id" value="">
+                
+                <div style="margin-top: 12px; display: flex; gap: 10px;">
+                    <button id="override-save-btn" onclick="saveModelOverride()">Create Override</button>
+                    <button onclick="closeModelOverrideModal()" style="background-color: #718096;">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
+    """
+    )
+
+
+@admin_router.get("/upstream-providers", response_class=HTMLResponse)
+async def admin_upstream_providers(request: Request) -> str:
+    if is_admin_authenticated(request):
+        return upstream_providers_page()
+    return admin_auth()
+
+
 @admin_router.get("/api/models", dependencies=[Depends(require_admin_api)])
 async def get_models_admin_api(request: Request) -> list[dict[str, object]]:
     items = await list_models()
     return [m.dict() for m in items]  # type: ignore
 
 
+class ModelCreate(BaseModel):
+    id: str
+    name: str
+    description: str
+    created: int
+    context_length: int
+    architecture: dict[str, object]
+    pricing: dict[str, object]
+    per_request_limits: dict[str, object] | None = None
+    top_provider: dict[str, object] | None = None
+    upstream_provider_id: int | None = None
+    enabled: bool = True
+
+
 @admin_router.post("/api/models", dependencies=[Depends(require_admin_api)])
-async def create_model_admin_api(payload: Model) -> dict[str, object]:
+async def create_model_admin_api(payload: ModelCreate) -> dict[str, object]:
     async with create_session() as session:
         exists = await session.get(ModelRow, payload.id)
         if exists:
             raise HTTPException(
                 status_code=409, detail="Model with this ID already exists"
             )
-        pricing_dict = payload.pricing.dict()
-        for k in ("max_prompt_cost", "max_completion_cost", "max_cost"):
-            pricing_dict.pop(k, None)
         row = ModelRow(
             id=payload.id,
             name=payload.name,
             description=payload.description,
             created=int(payload.created),
             context_length=int(payload.context_length),
-            architecture=json.dumps(payload.architecture.dict()),
-            pricing=json.dumps(pricing_dict),
+            architecture=json.dumps(payload.architecture),
+            pricing=json.dumps(payload.pricing),
             sats_pricing=None,
             per_request_limits=(
                 json.dumps(payload.per_request_limits)
@@ -1416,16 +2121,17 @@ async def create_model_admin_api(payload: Model) -> dict[str, object]:
                 else None
             ),
             top_provider=(
-                json.dumps(payload.top_provider.dict())
-                if payload.top_provider
-                else None
+                json.dumps(payload.top_provider) if payload.top_provider else None
             ),
+            upstream_provider_id=payload.upstream_provider_id,
+            enabled=payload.enabled,
         )
         session.add(row)
         await session.commit()
+        await session.refresh(row)
 
-    created_model = await get_model_by_id(payload.id)
-    return created_model.dict() if created_model else {"id": payload.id}  # type: ignore
+    await refresh_model_maps()
+    return _row_to_model(row).dict()  # type: ignore
 
 
 @admin_router.post("/api/models/batch", dependencies=[Depends(require_admin_api)])
@@ -1475,6 +2181,8 @@ async def batch_create_models(payload: dict[str, object]) -> dict[str, int]:
             created += 1
         if created:
             await session.commit()
+    if created:
+        await refresh_model_maps()
     return {"created": created, "skipped": skipped}
 
 
@@ -1482,16 +2190,33 @@ async def batch_create_models(payload: dict[str, object]) -> dict[str, int]:
     "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
 )
 async def get_model_admin_api(model_id: str) -> dict[str, object]:
-    model = await get_model_by_id(model_id)
-    if not model:
-        raise HTTPException(status_code=404, detail="Model not found")
-    return model.dict()  # type: ignore
+    async with create_session() as session:
+        row = await session.get(ModelRow, model_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+        return _row_to_model(row).dict()  # type: ignore
+
+
+class ModelUpdate(BaseModel):
+    id: str
+    name: str
+    description: str
+    created: int
+    context_length: int
+    architecture: dict[str, object]
+    pricing: dict[str, object]
+    per_request_limits: dict[str, object] | None = None
+    top_provider: dict[str, object] | None = None
+    upstream_provider_id: int | None = None
+    enabled: bool = True
 
 
 @admin_router.patch(
     "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
 )
-async def update_model_admin_api(model_id: str, payload: Model) -> dict[str, object]:
+async def update_model_admin_api(
+    model_id: str, payload: ModelUpdate
+) -> dict[str, object]:
     if payload.id != model_id:
         raise HTTPException(status_code=400, detail="Path id does not match payload id")
 
@@ -1504,11 +2229,8 @@ async def update_model_admin_api(model_id: str, payload: Model) -> dict[str, obj
         row.description = payload.description
         row.created = int(payload.created)
         row.context_length = int(payload.context_length)
-        row.architecture = json.dumps(payload.architecture.dict())
-        pricing_dict = payload.pricing.dict()
-        for k in ("max_prompt_cost", "max_completion_cost", "max_cost"):
-            pricing_dict.pop(k, None)
-        row.pricing = json.dumps(pricing_dict)
+        row.architecture = json.dumps(payload.architecture)
+        row.pricing = json.dumps(payload.pricing)
         row.sats_pricing = None
         row.per_request_limits = (
             json.dumps(payload.per_request_limits)
@@ -1516,16 +2238,17 @@ async def update_model_admin_api(model_id: str, payload: Model) -> dict[str, obj
             else None
         )
         row.top_provider = (
-            json.dumps(payload.top_provider.dict()) if payload.top_provider else None
+            json.dumps(payload.top_provider) if payload.top_provider else None
         )
+        row.upstream_provider_id = payload.upstream_provider_id
+        row.enabled = payload.enabled
 
         session.add(row)
         await session.commit()
+        await session.refresh(row)
 
-    updated = await get_model_by_id(model_id)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Model not found after update")
-    return updated.dict()  # type: ignore
+    await refresh_model_maps()
+    return _row_to_model(row).dict()  # type: ignore
 
 
 @admin_router.delete(
@@ -1538,6 +2261,7 @@ async def delete_model_admin_api(model_id: str) -> dict[str, object]:
             raise HTTPException(status_code=404, detail="Model not found")
         await session.delete(row)
         await session.commit()
+    await refresh_model_maps()
     return {"ok": True, "deleted_id": model_id}
 
 
@@ -1549,7 +2273,186 @@ async def delete_all_models_admin_api() -> dict[str, object]:
         for row in rows:
             await session.delete(row)  # type: ignore
         await session.commit()
+    await refresh_model_maps()
     return {"ok": True, "deleted": "all"}
+
+
+class UpstreamProviderCreate(BaseModel):
+    provider_type: str
+    base_url: str
+    api_key: str
+    api_version: str | None = None
+    enabled: bool = True
+
+
+class UpstreamProviderUpdate(BaseModel):
+    provider_type: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    api_version: str | None = None
+    enabled: bool | None = None
+
+
+@admin_router.get("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
+async def get_upstream_providers() -> list[dict[str, object]]:
+    async with create_session() as session:
+        result = await session.exec(select(UpstreamProviderRow))
+        providers = result.all()
+        return [
+            {
+                "id": p.id,
+                "provider_type": p.provider_type,
+                "base_url": p.base_url,
+                "api_key": "[REDACTED]" if p.api_key else "",
+                "api_version": p.api_version,
+                "enabled": p.enabled,
+            }
+            for p in providers
+        ]
+
+
+@admin_router.post("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
+async def create_upstream_provider(
+    payload: UpstreamProviderCreate,
+) -> dict[str, object]:
+    async with create_session() as session:
+        result = await session.exec(
+            select(UpstreamProviderRow).where(
+                UpstreamProviderRow.base_url == payload.base_url
+            )
+        )
+        if result.first():
+            raise HTTPException(
+                status_code=409, detail="Provider with this base URL already exists"
+            )
+
+        provider = UpstreamProviderRow(
+            provider_type=payload.provider_type,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            api_version=payload.api_version,
+            enabled=payload.enabled,
+        )
+        session.add(provider)
+        await session.commit()
+        await session.refresh(provider)
+
+    await reinitialize_upstreams()
+    return {
+        "id": provider.id,
+        "provider_type": provider.provider_type,
+        "base_url": provider.base_url,
+        "api_key": "[REDACTED]",
+        "api_version": provider.api_version,
+        "enabled": provider.enabled,
+    }
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}", dependencies=[Depends(require_admin_api)]
+)
+async def get_upstream_provider(provider_id: int) -> dict[str, object]:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        return {
+            "id": provider.id,
+            "provider_type": provider.provider_type,
+            "base_url": provider.base_url,
+            "api_key": "[REDACTED]" if provider.api_key else "",
+            "api_version": provider.api_version,
+            "enabled": provider.enabled,
+        }
+
+
+@admin_router.patch(
+    "/api/upstream-providers/{provider_id}", dependencies=[Depends(require_admin_api)]
+)
+async def update_upstream_provider(
+    provider_id: int, payload: UpstreamProviderUpdate
+) -> dict[str, object]:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        if payload.provider_type is not None:
+            provider.provider_type = payload.provider_type
+        if payload.base_url is not None:
+            provider.base_url = payload.base_url
+        if payload.api_key is not None:
+            provider.api_key = payload.api_key
+        if payload.api_version is not None:
+            provider.api_version = payload.api_version
+        if payload.enabled is not None:
+            provider.enabled = payload.enabled
+
+        session.add(provider)
+        await session.commit()
+        await session.refresh(provider)
+
+    await reinitialize_upstreams()
+    return {
+        "id": provider.id,
+        "provider_type": provider.provider_type,
+        "base_url": provider.base_url,
+        "api_key": "[REDACTED]",
+        "api_version": provider.api_version,
+        "enabled": provider.enabled,
+    }
+
+
+@admin_router.delete(
+    "/api/upstream-providers/{provider_id}", dependencies=[Depends(require_admin_api)]
+)
+async def delete_upstream_provider(provider_id: int) -> dict[str, object]:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        await session.delete(provider)
+        await session.commit()
+    await reinitialize_upstreams()
+    return {"ok": True, "deleted_id": provider_id}
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/models",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_provider_models(provider_id: int) -> dict[str, object]:
+    from ..upstream import _instantiate_provider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        db_models = await list_models(
+            session=session, upstream_id=provider_id, include_disabled=True
+        )
+
+        remote_models = []
+        upstream_instance = _instantiate_provider(provider)
+        if upstream_instance:
+            try:
+                models = await upstream_instance.fetch_models()
+                remote_models = [m.dict() for m in models]
+            except Exception as e:
+                logger.error(
+                    f"Failed to fetch models from {provider.provider_type}: {e}"
+                )
+
+        return {
+            "provider": {
+                "id": provider.id,
+                "provider_type": provider.provider_type,
+                "base_url": provider.base_url,
+            },
+            "db_models": [m.dict() for m in db_models],
+            "remote_models": remote_models,
+        }
 
 
 DASHBOARD_CSS: str = """
@@ -1591,8 +2494,8 @@ button:disabled { background: #a0aec0; cursor: not-allowed; transform: none; }
 @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .close { color: #a0aec0; float: right; font-size: 28px; font-weight: bold; cursor: pointer; margin: -10px -10px 0 0; }
 .close:hover { color: #2d3748; }
-input[type="number"], input[type="text"], select { width: 100%; padding: 10px; margin: 10px 0; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }
-input[type="number"]:focus, input[type="text"]:focus, select:focus { outline: none; border-color: #4299e1; }
+input[type="number"], input[type="text"], input[type="password"], select { width: 100%; padding: 10px; margin: 10px 0; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }
+input[type="number"]:focus, input[type="text"]:focus, input[type="password"]:focus, select:focus { outline: none; border-color: #4299e1; }
 .warning { color: #e53e3e; font-weight: 600; margin: 10px 0; padding: 10px; background: #fff5f5; border-radius: 6px; }
 """
 

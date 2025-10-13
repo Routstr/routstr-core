@@ -1,13 +1,12 @@
 import json
 import math
+from typing import Any
 
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
-from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from ..core.db import ModelRow
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
 from .models import Pricing
@@ -84,19 +83,19 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
 
 
 async def get_max_cost_for_model(
-    model: str, session: AsyncSession | None = None
+    model: str,
+    session: AsyncSession | None = None,
+    model_obj: Any | None = None,
 ) -> int:
-    """Get the maximum cost for a specific model."""
+    """Get the maximum cost for a specific model from providers with overrides."""
     logger.debug(
         "Getting max cost for model",
         extra={
             "model": model,
             "fixed_pricing": settings.fixed_pricing,
-            "has_models": True,
         },
     )
 
-    # Fixed pricing: always use fixed_cost_per_request
     if settings.fixed_pricing:
         default_cost_msats = settings.fixed_cost_per_request * 1000
         logger.debug(
@@ -105,43 +104,42 @@ async def get_max_cost_for_model(
         )
         return max(settings.min_request_msat, default_cost_msats)
 
-    if session is None:
-        # Without a DB session, we can't resolve model pricing; fall back to fixed cost
-        fallback_msats = settings.fixed_cost_per_request * 1000
-        logger.warning(
-            "No DB session provided for model pricing; using fixed cost",
-            extra={"requested_model": model, "using_default_cost": fallback_msats},
-        )
-        return max(settings.min_request_msat, fallback_msats)
+    if not model_obj:
+        from ..proxy import get_upstreams
+        from ..upstream import get_model_with_override
 
-    result = await session.exec(select(ModelRow.id))  # type: ignore
-    available_ids = [row[0] if isinstance(row, tuple) else row for row in result.all()]
-    if model not in available_ids:
-        # If no models or unknown model, fall back to fixed cost if provided, else minimal default
+        upstreams = get_upstreams()
+        model_obj = await get_model_with_override(model, upstreams)
+
+    if not model_obj:
         fallback_msats = settings.fixed_cost_per_request * 1000
         logger.warning(
-            "Model not found in available models",
+            "Model not found in providers or overrides",
             extra={
                 "requested_model": model,
-                "available_models": available_ids,
                 "using_default_cost": fallback_msats,
             },
         )
         return max(settings.min_request_msat, fallback_msats)
 
-    row = await session.get(ModelRow, model)
-    if row and row.sats_pricing:
+    if model_obj.sats_pricing:
         try:
-            sats = Pricing(**json.loads(row.sats_pricing))  # type: ignore
-            max_cost = sats.max_cost * 1000 * (1 - settings.tolerance_percentage / 100)
+            max_cost = (
+                model_obj.sats_pricing.max_cost
+                * 1000
+                * (1 - settings.tolerance_percentage / 100)
+            )
             logger.debug(
                 "Found model-specific max cost",
                 extra={"model": model, "max_cost_msats": max_cost},
             )
             calculated_msats = int(max_cost)
             return max(settings.min_request_msat, calculated_msats)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                "Error calculating max cost from model pricing",
+                extra={"model": model, "error": str(e)},
+            )
 
     logger.warning(
         "Model pricing not found, using fixed cost",
@@ -220,16 +218,19 @@ def estimate_tokens(messages: list) -> int:
 async def get_model_cost_info(
     model_id: str, session: AsyncSession | None = None
 ) -> Pricing | None:
+    """Get model pricing info from providers with database overrides."""
     if not model_id or model_id == "unknown":
         return None
-    if session is None:
-        return None
-    row = await session.get(ModelRow, model_id)
-    if row and row.sats_pricing:
-        try:
-            return Pricing(**json.loads(row.sats_pricing))  # type: ignore
-        except Exception:
-            return None
+
+    from ..proxy import get_upstreams
+    from ..upstream import get_model_with_override
+
+    upstreams = get_upstreams()
+    model_obj = await get_model_with_override(model_id, upstreams)
+
+    if model_obj and model_obj.sats_pricing:
+        return model_obj.sats_pricing
+
     return None
 
 
