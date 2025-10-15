@@ -64,10 +64,11 @@ class Settings(BaseSettings):
         default=120, env="PRICING_REFRESH_INTERVAL_SECONDS"
     )
     models_refresh_interval_seconds: int = Field(
-        default=0, env="MODELS_REFRESH_INTERVAL_SECONDS"
+        default=30, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
+    delete_removed_models: bool = Field(default=False, env="DELETE_REMOVED_MODELS")
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
 
     # Logging

@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..payment.models import sync_models_with_api
 from ..wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -417,6 +418,64 @@ async def dashboard(request: Request) -> str:
                     window.location.href = `/admin/logs/${requestId}`;
                 }
 
+                function openSyncModelsModal() {
+                    const modal = document.getElementById('sync-models-modal');
+                    modal.style.display = 'block';
+                }
+
+                function closeSyncModelsModal() {
+                    const modal = document.getElementById('sync-models-modal');
+                    modal.style.display = 'none';
+                }
+
+                async function syncModels() {
+                    const deleteRemoved = document.getElementById('delete-removed-models').checked;
+                    const button = document.getElementById('sync-models-btn');
+                    const resultDiv = document.getElementById('sync-models-result');
+                    
+                    button.disabled = true;
+                    button.textContent = 'Syncing...';
+                    resultDiv.style.display = 'none';
+                    
+                    try {
+                        const response = await fetch('/admin/api/sync_models', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({
+                                delete_removed: deleteRemoved
+                            })
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            resultDiv.innerHTML = `<strong>✅ Success!</strong><br>${data.message}`;
+                            resultDiv.style.display = 'block';
+                            resultDiv.style.backgroundColor = '#d4edda';
+                            resultDiv.style.borderColor = '#c3e6cb';
+                            resultDiv.style.color = '#155724';
+                        } else {
+                            const errorData = await response.json();
+                            resultDiv.innerHTML = `<strong>❌ Error:</strong><br>${errorData.detail || 'Unknown error'}`;
+                            resultDiv.style.display = 'block';
+                            resultDiv.style.backgroundColor = '#f8d7da';
+                            resultDiv.style.borderColor = '#f5c6cb';
+                            resultDiv.style.color = '#721c24';
+                        }
+                    } catch (error) {
+                        resultDiv.innerHTML = `<strong>❌ Error:</strong><br>${error.message}`;
+                        resultDiv.style.display = 'block';
+                        resultDiv.style.backgroundColor = '#f8d7da';
+                        resultDiv.style.borderColor = '#f5c6cb';
+                        resultDiv.style.color = '#721c24';
+                    } finally {
+                        button.disabled = false;
+                        button.textContent = 'Sync Models';
+                    }
+                }
+
                 async function openSettingsModal() {
                     const modal = document.getElementById('settings-modal');
                     const textarea = document.getElementById('settings-json');
@@ -498,12 +557,15 @@ async def dashboard(request: Request) -> str:
                     const withdrawModal = document.getElementById('withdraw-modal');
                     const investigateModal = document.getElementById('investigate-modal');
                     const settingsModal = document.getElementById('settings-modal');
+                    const syncModelsModal = document.getElementById('sync-models-modal');
                     if (event.target == withdrawModal) {
                         closeWithdrawModal();
                     } else if (event.target == investigateModal) {
                         closeInvestigateModal();
                     } else if (event.target == settingsModal) {
                         closeSettingsModal();
+                    } else if (event.target == syncModelsModal) {
+                        closeSyncModelsModal();
                     }
                 }
             </script>
@@ -532,6 +594,29 @@ async def dashboard(request: Request) -> str:
             <button onclick="openSettingsModal()">
                 ⚙️ Settings
             </button>
+            <button onclick="openSyncModelsModal()">
+                🔄 Sync Models
+            </button>
+            
+            <div id="sync-models-modal" class="modal">
+                <div class="modal-content">
+                    <span class="close" onclick="closeSyncModelsModal()">&times;</span>
+                    <h3>Sync Models from API</h3>
+                    <p>This will fetch the latest models from OpenRouter and update the database.</p>
+                    <div style="margin: 15px 0;">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="delete-removed-models" style="width: auto; margin: 0;">
+                            <span>Delete models that are no longer available</span>
+                        </label>
+                        <p style="font-size: 0.85rem; color: #718096; margin-top: 5px; margin-left: 30px;">
+                            ⚠️ Warning: This will permanently remove models that are no longer in the API.
+                        </p>
+                    </div>
+                    <div id="sync-models-result" style="display: none; padding: 12px; border-radius: 6px; margin: 15px 0; border: 1px solid;"></div>
+                    <button id="sync-models-btn" onclick="syncModels()">🔄 Sync Models</button>
+                    <button onclick="closeSyncModelsModal()" style="background-color: #718096;">Cancel</button>
+                </div>
+            </div>
             
             <div id="withdraw-modal" class="modal">
                 <div class="modal-content">
@@ -721,7 +806,6 @@ async def view_logs(request: Request, request_id: str) -> str:
 async def withdraw(
     request: Request, withdraw_request: WithdrawRequest
 ) -> dict[str, str]:
-    # Get wallet and check balance
     from .settings import settings as global_settings
 
     wallet = await get_wallet(
@@ -748,6 +832,36 @@ async def withdraw(
         withdraw_request.amount, withdraw_request.unit, withdraw_request.mint_url
     )
     return {"token": token}
+
+
+class SyncModelsRequest(BaseModel):
+    delete_removed: bool = False
+
+
+@admin_router.post("/api/sync_models", dependencies=[Depends(require_admin_api)])
+async def sync_models(request: Request, sync_request: SyncModelsRequest) -> dict:
+    try:
+        src = settings.source or None
+        source_filter = src if src and src.strip() else None
+    except Exception:
+        source_filter = None
+
+    logger.info(
+        "Manual models sync triggered",
+        extra={"delete_removed": sync_request.delete_removed},
+    )
+
+    counts = await sync_models_with_api(
+        source_filter=source_filter, delete_removed=sync_request.delete_removed
+    )
+
+    return {
+        "success": True,
+        "inserted": counts["inserted"],
+        "updated": counts["updated"],
+        "deleted": counts["deleted"],
+        "message": f"Synced: {counts['inserted']} inserted, {counts['updated']} updated, {counts['deleted']} deleted",
+    }
 
 
 DASHBOARD_CSS: str = """

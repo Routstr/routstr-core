@@ -379,11 +379,76 @@ async def update_sats_pricing() -> None:
             break
 
 
+async def sync_models_with_api(
+    source_filter: str | None = None, delete_removed: bool = False
+) -> dict[str, int]:
+    """Fetch models from OpenRouter and sync with database.
+
+    Args:
+        source_filter: Optional source filter (e.g., 'anthropic')
+        delete_removed: If True, delete models that no longer exist in API
+
+    Returns:
+        Dict with counts: inserted, updated, deleted
+    """
+    models = fetch_openrouter_models(source_filter=source_filter)
+    if not models:
+        return {"inserted": 0, "updated": 0, "deleted": 0}
+
+    async with create_session() as s:
+        result = await s.exec(select(ModelRow))  # type: ignore
+        existing_rows = {row.id: row for row in result.all()}
+
+        fetched_ids = set()
+        inserted = 0
+        updated = 0
+
+        for m in models:
+            try:
+                model = Model(**m)  # type: ignore
+            except Exception:
+                continue
+
+            fetched_ids.add(model.id)
+            payload = _model_to_row_payload(model)
+
+            if model.id not in existing_rows:
+                try:
+                    s.add(ModelRow(**payload))  # type: ignore
+                    inserted += 1
+                except Exception:
+                    pass
+            else:
+                existing_row = existing_rows[model.id]
+                changed = False
+                for key, value in payload.items():
+                    if getattr(existing_row, key) != value:
+                        setattr(existing_row, key, value)
+                        changed = True
+                if changed:
+                    s.add(existing_row)
+                    updated += 1
+
+        deleted = 0
+        if delete_removed:
+            for existing_id in existing_rows:
+                if existing_id not in fetched_ids:
+                    row_to_delete = existing_rows[existing_id]
+                    await s.delete(row_to_delete)
+                    deleted += 1
+
+        if inserted or updated or deleted:
+            await s.commit()
+
+        return {"inserted": inserted, "updated": updated, "deleted": deleted}
+
+
 async def refresh_models_periodically() -> None:
-    """Background task: periodically fetch OpenRouter models and insert new ones.
+    """Background task: periodically fetch OpenRouter models and sync with database.
 
     - Respects optional SOURCE filter from settings
-    - Does not overwrite existing rows
+    - Updates existing models with new information
+    - Optionally deletes models no longer in API (if settings.delete_removed_models)
     - Sleeps according to settings.models_refresh_interval_seconds; disabled when 0
     """
     interval = getattr(settings, "models_refresh_interval_seconds", 0)
@@ -403,33 +468,24 @@ async def refresh_models_periodically() -> None:
             except Exception:
                 source_filter = None
 
-            models = fetch_openrouter_models(source_filter=source_filter)
-            if not models:
-                await asyncio.sleep(interval)
-                continue
+            try:
+                delete_removed = getattr(settings, "delete_removed_models", False)
+            except Exception:
+                delete_removed = False
 
-            async with create_session() as s:
-                result = await s.exec(select(ModelRow.id))  # type: ignore
-                existing_ids = {
-                    row[0] if isinstance(row, tuple) else row for row in result.all()
-                }
-                inserted = 0
-                for m in models:
-                    try:
-                        model = Model(**m)  # type: ignore
-                    except Exception:
-                        continue
-                    if model.id in existing_ids:
-                        continue
-                    payload = _model_to_row_payload(model)
-                    try:
-                        s.add(ModelRow(**payload))  # type: ignore
-                    except Exception:
-                        pass
-                    inserted += 1
-                if inserted:
-                    await s.commit()
-                    logger.info(f"Inserted {inserted} new models from OpenRouter")
+            counts = await sync_models_with_api(
+                source_filter=source_filter, delete_removed=delete_removed
+            )
+
+            if counts["inserted"] or counts["updated"] or counts["deleted"]:
+                logger.info(
+                    "Models synced",
+                    extra={
+                        "inserted": counts["inserted"],
+                        "updated": counts["updated"],
+                        "deleted": counts["deleted"],
+                    },
+                )
         except asyncio.CancelledError:
             break
         except Exception as e:

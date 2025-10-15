@@ -67,8 +67,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         await ensure_models_bootstrapped()
         pricing_task = asyncio.create_task(update_sats_pricing())
-        if global_settings.models_refresh_interval_seconds > 0:
-            models_refresh_task = asyncio.create_task(refresh_models_periodically())
+        models_refresh_task = asyncio.create_task(refresh_models_periodically())
         payout_task = asyncio.create_task(periodic_payout())
         nip91_task = asyncio.create_task(announce_provider())
         providers_task = asyncio.create_task(providers_cache_refresher())
