@@ -58,6 +58,39 @@ class Model(BaseModel):
     top_provider: TopProvider | None = None
 
 
+def compute_effective_max_cost_msats(
+    pricing: Pricing | dict | None,
+) -> int:
+    if pricing is None:
+        try:
+            return max(1, int(settings.min_request_msat))
+        except Exception:
+            return 1
+
+    pricing_obj = (
+        pricing if isinstance(pricing, Pricing) else Pricing.parse_obj(pricing)  # type: ignore[arg-type]
+    )
+
+    try:
+        tolerance = float(getattr(settings, "tolerance_percentage", 0.0))
+    except Exception:
+        tolerance = 0.0
+
+    tolerance_factor = max(0.0, 1.0 - tolerance / 100.0)
+
+    try:
+        min_request_msat = max(1, int(settings.min_request_msat))
+    except Exception:
+        min_request_msat = 1
+
+    base_msats = int(float(pricing_obj.max_cost or 0.0) * 1000.0 * tolerance_factor)
+
+    if base_msats <= 0:
+        return min_request_msat
+
+    return max(min_request_msat, base_msats)
+
+
 def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     """Fetches model information from OpenRouter API."""
     base_url = "https://openrouter.ai/api/v1"
@@ -83,6 +116,9 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                     "(free)" in model.get("name", "")
                     or model_id == "openrouter/auto"
                     or model_id == "google/gemini-2.5-pro-exp-03-25"
+                    or model_id == "opengvlab/internvl3-78b"
+                    or model_id == "openrouter/sonoma-dusk-alpha"
+                    or model_id == "openrouter/sonoma-sky-alpha"
                 ):
                     continue
 
@@ -92,6 +128,14 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     except Exception as e:
         logger.error(f"Error fetching models from OpenRouter API: {e}")
         return []
+
+
+def is_openrouter_upstream() -> bool:
+    try:
+        base = (settings.upstream_base_url or "").strip().rstrip("/")
+    except Exception:
+        return False
+    return base.lower() == "https://openrouter.ai/api/v1"
 
 
 def load_models() -> list[Model]:
@@ -119,7 +163,13 @@ def load_models() -> list[Model]:
             logger.error(f"Error loading models from {models_path}: {e}")
             # Fall through to auto-generation
 
-    # Auto-generate models from OpenRouter API
+    # Only auto-generate from OpenRouter when upstream is OpenRouter
+    if not is_openrouter_upstream():
+        logger.info(
+            "Skipping auto-generation from OpenRouter because upstream_base_url is not https://openrouter.ai/api/v1"
+        )
+        return []
+
     logger.info("Auto-generating models from OpenRouter API")
     try:
         source_filter = settings.source or None
@@ -159,6 +209,10 @@ def _row_to_model(row: ModelRow) -> Model:
                 )
     except Exception:
         pass
+
+    if isinstance(sats_pricing, dict):
+        effective_msats = compute_effective_max_cost_msats(sats_pricing)
+        sats_pricing["max_cost"] = effective_msats / 1000.0
 
     return Model(
         id=row.id,
@@ -240,7 +294,7 @@ async def ensure_models_bootstrapped() -> None:
             except Exception as e:
                 logger.error(f"Error loading models from {models_path}: {e}")
 
-        if not models_to_insert:
+        if not models_to_insert and is_openrouter_upstream():
             logger.info("Bootstrapping models from OpenRouter API")
             source_filter = None
             try:
@@ -249,6 +303,10 @@ async def ensure_models_bootstrapped() -> None:
             except Exception:
                 pass
             models_to_insert = fetch_openrouter_models(source_filter=source_filter)
+        elif not models_to_insert:
+            logger.info(
+                "No models.json found and upstream is not OpenRouter; skipping bootstrap"
+            )
 
         for m in models_to_insert:
             try:
@@ -453,6 +511,11 @@ async def refresh_models_periodically() -> None:
     """
     interval = getattr(settings, "models_refresh_interval_seconds", 0)
     if not interval or interval <= 0:
+        return
+
+    # Only refresh from OpenRouter when upstream is OpenRouter
+    if not is_openrouter_upstream():
+        logger.info("Skipping models refresh: upstream_base_url is not OpenRouter")
         return
 
     while True:

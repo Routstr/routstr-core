@@ -230,7 +230,11 @@ async def get_lnurl_invoice(
 
 
 async def raw_send_to_lnurl(
-    wallet: Wallet, proofs: list[Proof], lnurl: str, unit: str
+    wallet: Wallet,
+    proofs: list[Proof],
+    lnurl: str,
+    unit: str,
+    amount: int | None = None,
 ) -> int:
     """Send funds to an LNURL address.
 
@@ -255,6 +259,11 @@ async def raw_send_to_lnurl(
         paid = await wallet.send_to_lnurl("user@getalby.com", 50, unit="usd")
     """
     total_balance = sum(proof.amount for proof in proofs)
+    if amount and total_balance < amount:
+        raise ValueError("Amount to send is higher than available proofs.")
+    else:
+        assert isinstance(amount, int)
+        total_balance = amount
     lnurl_data = await get_lnurl_data(lnurl)
 
     if unit == "sat":
@@ -285,6 +294,10 @@ async def raw_send_to_lnurl(
     melt_quote_resp = await wallet.melt_quote(
         invoice=bolt11_invoice, amount_msat=final_amount
     )
+
+    if amount:
+        proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
+
     _ = await wallet.melt(
         proofs=proofs,
         invoice=bolt11_invoice,

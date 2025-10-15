@@ -152,9 +152,7 @@ async def get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Wal
     global _wallets
     id = f"{mint_url}_{unit}"
     if id not in _wallets:
-        _wallets[id] = await Wallet.with_db(
-            mint_url, db=".wallet", unit=unit
-        )
+        _wallets[id] = await Wallet.with_db(mint_url, db=".wallet", unit=unit)
 
     if load:
         await _wallets[id].load_mint()
@@ -299,7 +297,7 @@ async def periodic_payout() -> None:
         logger.error("RECEIVE_LN_ADDRESS is not set, skipping payout")
         return
     while True:
-        await asyncio.sleep(60 * 5)
+        await asyncio.sleep(60 * 15)
         try:
             async with db.create_session() as session:
                 for mint_url in settings.cashu_mints:
@@ -319,7 +317,11 @@ async def periodic_payout() -> None:
                         min_amount = 210 if unit == "sat" else 210000
                         if available_balance > min_amount:
                             amount_received = await raw_send_to_lnurl(
-                                wallet, proofs, settings.receive_ln_address, unit
+                                wallet,
+                                proofs,
+                                settings.receive_ln_address,
+                                unit,
+                                amount=available_balance,
                             )
                             logger.info(
                                 "Payout sent successfully",

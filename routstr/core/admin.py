@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..payment.models import Model, get_model_by_id, list_models
 from ..payment.models import sync_models_with_api
 from ..wallet import (
     fetch_all_balances,
@@ -16,7 +17,7 @@ from ..wallet import (
     send_token,
     slow_filter_spend_proofs,
 )
-from .db import ApiKey, create_session
+from .db import ApiKey, ModelRow, create_session
 from .logging import get_logger
 from .settings import SettingsService, settings
 
@@ -164,6 +165,28 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     return data
 
 
+class SetupRequest(BaseModel):
+    password: str
+
+
+@admin_router.post("/api/setup")
+async def initial_setup(request: Request, payload: SetupRequest) -> dict[str, object]:
+    try:
+        current = SettingsService.get()
+    except Exception:
+        current = settings
+    if getattr(current, "admin_password", ""):
+        raise HTTPException(status_code=409, detail="Admin password already set")
+    pw = (payload.password or "").strip()
+    if len(pw) < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters"
+        )
+    async with create_session() as session:
+        await SettingsService.update({"admin_password": pw}, session)
+    return {"ok": True}
+
+
 class WithdrawRequest(BaseModel):
     amount: int
     mint_url: str | None = None
@@ -206,6 +229,67 @@ def login_form() -> str:
     """
 
 
+def setup_form() -> str:
+    return """<!DOCTYPE html>
+    <html>
+        <head>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f5f7fa; }
+                .setup-card { background: white; padding: 2.5rem; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 360px; }
+                h2 { margin-bottom: 1.25rem; color: #1a202c; text-align: center; }
+                p { color: #4a5568; font-size: 0.95rem; margin-bottom: 1rem; text-align: center; }
+                input[type="password"] { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }
+                input[type="password"]:focus { outline: none; border-color: #4299e1; }
+                button { width: 100%; padding: 12px; margin-top: 1rem; background: #4299e1; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+                button:hover { background: #3182ce; transform: translateY(-1px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                .error { color: #e53e3e; margin-top: 10px; text-align: center; }
+            </style>
+            <script>
+                async function handleSetupSubmit(e) {
+                    e.preventDefault();
+                    const pw = document.getElementById('password').value;
+                    const pw2 = document.getElementById('password2').value;
+                    const err = document.getElementById('error');
+                    err.textContent = '';
+                    if (pw.length < 8) { err.textContent = 'Password must be at least 8 characters'; return; }
+                    if (pw !== pw2) { err.textContent = 'Passwords do not match'; return; }
+                    try {
+                        const resp = await fetch('/admin/api/setup', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'same-origin',
+                            body: JSON.stringify({ password: pw })
+                        });
+                        if (!resp.ok) {
+                            let msg = 'Failed to set password';
+                            try { const j = await resp.json(); if (j && j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch(_) {}
+                            throw new Error(msg);
+                        }
+                        document.cookie = `admin_password=${pw}; path=/; max-age=86400; samesite=lax`;
+                        window.location.replace('/admin');
+                    } catch (e) {
+                        err.textContent = e.message || String(e);
+                    }
+                }
+            </script>
+        </head>
+        <body>
+            <div class="setup-card">
+                <h2>🔧 Initial Admin Setup</h2>
+                <p>Create a secure password for your admin dashboard.</p>
+                <form onsubmit="handleSetupSubmit(event)">
+                    <input type="password" id="password" placeholder="New Password" required autofocus>
+                    <input type="password" id="password2" placeholder="Confirm Password" required style="margin-top:10px;">
+                    <button type="submit">Set Password</button>
+                    <div id="error" class="error"></div>
+                </form>
+            </div>
+        </body>
+    </html>
+    """
+
+
 def info(content: str) -> str:
     return f"""<!DOCTYPE html>
     <html>
@@ -233,7 +317,7 @@ def admin_auth() -> str:
     except Exception:
         admin_pw = os.getenv("ADMIN_PASSWORD", "")
     if admin_pw == "":
-        return info("Please set a secure ADMIN_PASSWORD= in your ENV variables.")
+        return setup_form()
     else:
         return login_form()
 
@@ -591,6 +675,9 @@ async def dashboard(request: Request) -> str:
             <button class="investigate-btn" onclick="openInvestigateModal()">
                 🔍 Investigate Logs
             </button>
+            <button onclick="window.location.href='/admin/models'">
+                🧩 Edit Models
+            </button>
             <button onclick="openSettingsModal()">
                 ⚙️ Settings
             </button>
@@ -833,7 +920,6 @@ async def withdraw(
     )
     return {"token": token}
 
-
 class SyncModelsRequest(BaseModel):
     delete_removed: bool = False
 
@@ -862,6 +948,721 @@ async def sync_models(request: Request, sync_request: SyncModelsRequest) -> dict
         "deleted": counts["deleted"],
         "message": f"Synced: {counts['inserted']} inserted, {counts['updated']} updated, {counts['deleted']} deleted",
     }
+
+
+DASHBOARD_MODELS_JS: str = """<!--html-->
+    <script>
+        let modelsList = [];
+        let currentQuery = '';
+        let editModelCreated = 0;
+
+        async function fetchModels() {
+            const tableBody = document.getElementById('models-tbody');
+            tableBody.innerHTML = '<tr><td colspan="1" style="color:#718096;">Loading…</td></tr>';
+            try {
+                const resp = await fetch('/admin/api/models', { credentials: 'same-origin' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                modelsList = data;
+                renderModelsTable();
+            } catch (e) {
+                tableBody.innerHTML = '<tr><td colspan="1" style="color:#e53e3e;">Failed to load models: ' + e.message + '</td></tr>';
+            }
+        }
+
+        function renderModelsTable() {
+            const tableBody = document.getElementById('models-tbody');
+            if (!Array.isArray(modelsList) || !modelsList.length) {
+                tableBody.innerHTML = '<tr><td colspan="1" style="color:#718096;">No models found</td></tr>';
+                return;
+            }
+            const q = (currentQuery || '').trim().toLowerCase();
+            const items = q ? modelsList.filter(m => {
+                const id = (m.id || '').toLowerCase();
+                return id.includes(q);
+            }) : modelsList;
+            if (!items.length) {
+                tableBody.innerHTML = '<tr><td colspan="1" style="color:#718096;">No models match your search</td></tr>';
+                return;
+            }
+            const rows = items.map(m => `
+                <tr>
+                    <td>
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                            <span style="font-family:monospace; word-break: break-all;">${m.id}</span>
+                            <span>
+                                <button onclick=\"openModelEditor('${m.id}')\">Edit</button>
+                                <button onclick=\"deleteModel(event, '${m.id}')\" style=\"background:#e53e3e;\">Delete</button>
+                            </span>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+            tableBody.innerHTML = rows;
+        }
+
+        function handleSearch(query) {
+            currentQuery = String(query || '');
+            renderModelsTable();
+        }
+
+        async function deleteModel(ev, modelId) {
+            if (!confirm('Are you sure you want to delete model: ' + modelId + '?')) return;
+            const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+            if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+            const errorBox = document.getElementById('models-error');
+            if (errorBox) { errorBox.style.display = 'none'; errorBox.textContent = ''; }
+            try {
+                const resp = await fetch('/admin/api/models/' + encodeURIComponent(modelId), {
+                    method: 'DELETE',
+                    credentials: 'same-origin'
+                });
+                if (!resp.ok) {
+                    let errText = 'Failed to delete model';
+                    try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                    throw new Error(errText);
+                }
+                await fetchModels();
+            } catch (e) {
+                if (errorBox) { errorBox.style.display = 'block'; errorBox.textContent = e.message; }
+                else { alert(e.message); }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+            }
+        }
+
+        async function deleteAllModels() {
+            if (!confirm('Are you absolutely sure you want to delete ALL models?')) return;
+            const errorBox = document.getElementById('models-error');
+            if (errorBox) { errorBox.style.display = 'none'; errorBox.textContent = ''; }
+            try {
+                const resp = await fetch('/admin/api/models', { method: 'DELETE', credentials: 'same-origin' });
+                if (!resp.ok) {
+                    let errText = 'Failed to delete all models';
+                    try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                    throw new Error(errText);
+                }
+                await fetchModels();
+            } catch (e) {
+                if (errorBox) { errorBox.style.display = 'block'; errorBox.textContent = e.message; }
+                else { alert(e.message); }
+            }
+        }
+
+        async function openModelEditor(modelId) {
+            const modal = document.getElementById('model-edit-modal');
+            const errorBox = document.getElementById('model-error');
+            errorBox.style.display = 'none';
+            errorBox.textContent = '';
+            document.getElementById('model-id').value = modelId;
+            try {
+                const resp = await fetch('/admin/api/models/' + encodeURIComponent(modelId), { credentials: 'same-origin' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const m = await resp.json();
+                document.getElementById('model-name').value = m.name || '';
+                document.getElementById('model-description').value = m.description || '';
+                editModelCreated = m.created || Math.floor(Date.now()/1000);
+                document.getElementById('model-context').value = m.context_length || 0;
+                document.getElementById('model-architecture').value = JSON.stringify(m.architecture || {
+                    modality: '',
+                    input_modalities: [],
+                    output_modalities: [],
+                    tokenizer: '',
+                    instruct_type: null
+                }, null, 2);
+                const pricingObj = m.pricing || {
+                    prompt: 0.0,
+                    completion: 0.0,
+                    request: 0.0,
+                    image: 0.0,
+                    web_search: 0.0,
+                    internal_reasoning: 0.0
+                };
+                delete pricingObj.max_prompt_cost;
+                delete pricingObj.max_completion_cost;
+                delete pricingObj.max_cost;
+                document.getElementById('model-pricing').value = JSON.stringify(pricingObj, null, 2);
+                document.getElementById('model-per-request-limits').value = m.per_request_limits ? JSON.stringify(m.per_request_limits, null, 2) : '';
+                document.getElementById('model-top-provider').value = m.top_provider ? JSON.stringify(m.top_provider, null, 2) : '';
+            } catch (e) {
+                errorBox.style.display = 'block';
+                errorBox.textContent = 'Failed to load model: ' + e.message;
+            }
+            modal.style.display = 'block';
+        }
+
+        function closeModelEditor() {
+            const modal = document.getElementById('model-edit-modal');
+            modal.style.display = 'none';
+        }
+
+        async function saveModel() {
+            const modelId = document.getElementById('model-id').value;
+            const errorBox = document.getElementById('model-error');
+            errorBox.style.display = 'none';
+            errorBox.style.color = '#e53e3e';
+            let payload = {};
+            try {
+                const name = document.getElementById('model-name').value;
+                const description = document.getElementById('model-description').value;
+                const contextLength = parseInt(document.getElementById('model-context').value) || 0;
+                const architecture = JSON.parse(document.getElementById('model-architecture').value || '{}');
+                const pricing = JSON.parse(document.getElementById('model-pricing').value || '{}');
+                const perReqLimitsStr = document.getElementById('model-per-request-limits').value.trim();
+                const topProviderStr = document.getElementById('model-top-provider').value.trim();
+
+                payload = {
+                    id: modelId,
+                    name: name,
+                    description: description,
+                    created: editModelCreated,
+                    context_length: contextLength,
+                    architecture: architecture,
+                    pricing: pricing,
+                    per_request_limits: perReqLimitsStr === '' ? null : JSON.parse(perReqLimitsStr),
+                    top_provider: topProviderStr === '' ? null : JSON.parse(topProviderStr)
+                };
+            } catch (e) {
+                errorBox.style.display = 'block';
+                errorBox.textContent = 'Invalid input: ' + e.message;
+                return;
+            }
+
+            const saveBtn = document.getElementById('model-save-btn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving…';
+            try {
+                const resp = await fetch('/admin/api/models/' + encodeURIComponent(modelId), {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                });
+                if (!resp.ok) {
+                    let errText = 'Failed to save model';
+                    try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                    throw new Error(errText);
+                }
+                await resp.json();
+                closeModelEditor();
+                fetchModels();
+            } catch (e) {
+                errorBox.style.display = 'block';
+                errorBox.textContent = e.message;
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Save';
+            }
+        }
+
+        async function deleteAllModels() {
+            if (!confirm('Are you absolutely sure you want to delete ALL models?')) return;
+            const errorBox = document.getElementById('models-error');
+            if (errorBox) { errorBox.style.display = 'none'; errorBox.textContent = ''; }
+            try {
+                const resp = await fetch('/admin/api/models', { method: 'DELETE', credentials: 'same-origin' });
+                if (!resp.ok) {
+                    let errText = 'Failed to delete all models';
+                    try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
+                    throw new Error(errText);
+                }
+                await fetchModels();
+            } catch (e) {
+                if (errorBox) { errorBox.style.display = 'block'; errorBox.textContent = e.message; }
+                else { alert(e.message); }
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', fetchModels);
+
+        window.onclick = function(event) {
+            const modal = document.getElementById('model-edit-modal');
+            if (event.target == modal) {
+                closeModelEditor();
+            }
+            const createModal = document.getElementById('model-create-modal');
+            if (event.target == createModal) {
+                closeCreateModel();
+            }
+            const batchModal = document.getElementById('model-batch-modal');
+            if (event.target == batchModal) {
+                closeBatchModal();
+            }
+        }
+
+        function openCreateModel() {
+            const modal = document.getElementById('model-create-modal');
+            const err = document.getElementById('model-create-error');
+            err.style.display = 'none';
+            err.textContent = '';
+            const defaults = {
+                architecture: {
+                    modality: 'text',
+                    input_modalities: ['text'],
+                    output_modalities: ['text'],
+                    tokenizer: '',
+                    instruct_type: null
+                },
+                pricing: {
+                    prompt: 0.0,
+                    completion: 0.0,
+                    request: 0.0,
+                    image: 0.0,
+                    web_search: 0.0,
+                    internal_reasoning: 0.0
+                }
+            };
+            document.getElementById('create-id').value = '';
+            document.getElementById('create-name').value = '';
+            document.getElementById('create-description').value = '';
+            document.getElementById('create-context').value = 0;
+            document.getElementById('create-architecture').value = JSON.stringify(defaults.architecture, null, 2);
+            document.getElementById('create-pricing').value = JSON.stringify(defaults.pricing, null, 2);
+            document.getElementById('create-per-request-limits').value = '';
+            document.getElementById('create-top-provider').value = '';
+            modal.style.display = 'block';
+        }
+
+        function closeCreateModel() {
+            const modal = document.getElementById('model-create-modal');
+            modal.style.display = 'none';
+        }
+
+        async function createModel() {
+            const err = document.getElementById('model-create-error');
+            err.style.display = 'none';
+            err.textContent = '';
+            const btn = document.getElementById('model-create-btn');
+            btn.disabled = true;
+            btn.textContent = 'Creating…';
+            try {
+                const id = document.getElementById('create-id').value.trim();
+                const name = document.getElementById('create-name').value.trim();
+                const description = document.getElementById('create-description').value.trim();
+                const contextStr = document.getElementById('create-context').value.trim();
+                const architectureStr = document.getElementById('create-architecture').value.trim();
+                const pricingStr = document.getElementById('create-pricing').value.trim();
+                const perReqLimitsStr = document.getElementById('create-per-request-limits').value.trim();
+                const topProviderStr = document.getElementById('create-top-provider').value.trim();
+
+                if (!id) throw new Error('ID is required');
+                if (!name) throw new Error('Name is required');
+                if (!description) throw new Error('Description is required');
+                const created = Math.floor(Date.now()/1000);
+                if (!contextStr) throw new Error('Context length is required');
+                const context_length = parseInt(contextStr);
+                if (!architectureStr) throw new Error('Architecture JSON is required');
+                const architecture = JSON.parse(architectureStr);
+                if (!pricingStr) throw new Error('Pricing JSON is required');
+                const pricing = JSON.parse(pricingStr);
+
+                const payload = {
+                    id: id,
+                    name: name,
+                    description: description,
+                    created: created,
+                    context_length: context_length,
+                    architecture: architecture,
+                    pricing: pricing,
+                    per_request_limits: perReqLimitsStr ? JSON.parse(perReqLimitsStr) : null,
+                    top_provider: topProviderStr ? JSON.parse(topProviderStr) : null
+                };
+
+                const resp = await fetch('/admin/api/models', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(payload)
+                });
+                if (!resp.ok) {
+                    let errText = 'Failed to create model';
+                    try { const e = await resp.json(); if (e && e.detail) errText = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail); } catch(_) {}
+                    throw new Error(errText);
+                }
+                closeCreateModel();
+                await fetchModels();
+            } catch (e) {
+                err.style.display = 'block';
+                err.textContent = e.message || String(e);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '➕ Create';
+            }
+        }
+
+        function openBatchModal() {
+            const modal = document.getElementById('model-batch-modal');
+            if (!modal) { alert('Batch modal not found'); return; }
+            const err = document.getElementById('batch-error');
+            if (err) { err.style.display = 'none'; err.textContent = ''; }
+            const textarea = document.getElementById('batch-json');
+            if (textarea && !textarea.value.trim()) {
+                const sample = {
+                    models: [
+                        {
+                            id: 'provider/model-id',
+                            name: 'Model Name',
+                            description: 'Description',
+                            created: Math.floor(Date.now()/1000),
+                            context_length: 0,
+                            architecture: { modality: 'text', input_modalities: ['text'], output_modalities: ['text'], tokenizer: '', instruct_type: null },
+                            pricing: { prompt: 0.0, completion: 0.0, request: 0.0, image: 0.0, web_search: 0.0, internal_reasoning: 0.0 },
+                            per_request_limits: null,
+                            top_provider: null
+                        }
+                    ]
+                };
+                textarea.value = JSON.stringify(sample, null, 2);
+            }
+            modal.style.display = 'block';
+        }
+
+        function closeBatchModal() {
+            const modal = document.getElementById('model-batch-modal');
+            if (modal) modal.style.display = 'none';
+        }
+
+        async function performBatchAdd() {
+            const textarea = document.getElementById('batch-json');
+            const err = document.getElementById('batch-error');
+            const btn = document.getElementById('batch-submit-btn');
+            if (err) { err.style.display = 'none'; err.textContent = ''; }
+            if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+            try {
+                if (!textarea) throw new Error('Input not found');
+                const data = JSON.parse(textarea.value);
+                if (!data || !Array.isArray(data.models) || data.models.length === 0) {
+                    throw new Error('Payload must include a non-empty "models" array');
+                }
+                const resp = await fetch('/admin/api/models/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify(data)
+                });
+                if (!resp.ok) {
+                    let errText = 'Failed to add models';
+                    try { const e = await resp.json(); if (e && e.detail) errText = typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail); } catch(_) {}
+                    throw new Error(errText);
+                }
+                closeBatchModal();
+                await fetchModels();
+            } catch (e) {
+                if (err) { err.style.display = 'block'; err.textContent = e.message || String(e); }
+                else { alert(e.message || String(e)); }
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = '➕ Add Models'; }
+            }
+        }
+    </script>
+"""
+
+
+def models_page() -> str:
+    return (
+        f"""<!DOCTYPE html>
+    <html>
+        <head>
+        <style>{DASHBOARD_CSS}</style>
+        {DASHBOARD_MODELS_JS}
+        </head>
+        """
+        + """<!--html-->
+        <body>
+            <a href="/admin" class="back-btn">← Back to Dashboard</a>
+            <h1>Models</h1>
+
+            <div class="balance-card">
+                <h2>Models Table</h2>
+                <div style="display:flex; gap:10px; align-items:center; margin: 8px 0 12px;">
+                    <input type="text" id="models-search" placeholder="Search by id" oninput="handleSearch(this.value)" style="flex:1; padding: 10px; border: 2px solid #e2e8f0; border-radius: 6px;">
+                    <button onclick="openCreateModel()">➕ Create Model</button>
+                </div>
+                <div id="models-error" style="display:none; margin: 8px 0; color:#e53e3e;"></div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                        </tr>
+                    </thead>
+                    <tbody id="models-tbody">
+                        <tr><td colspan="1" style="color:#718096;">Loading…</td></tr>
+                    </tbody>
+                </table>
+                <div style="margin-top: 12px; display:flex; justify-content:flex-end;">
+                    <button onclick="deleteAllModels()" style="background:#e53e3e;">🗑️ Delete All</button>
+                    <button onclick="openBatchModal()" style="background:#4a5568;">📥 Batch Add</button>
+                </div>
+            </div>
+
+            <div id="model-edit-modal" class="modal">
+                <div class="modal-content" style="max-width: 720px;">
+                    <span class="close" onclick="closeModelEditor()">&times;</span>
+                    <h3>Edit Model: <span id="model-id" style="font-family:monospace;"></span></h3>
+
+                    <div id="model-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
+
+                    <label>ID</label>
+                    <input type="text" id="model-id" placeholder="model-id" disabled>
+
+                    <label>Name</label>
+                    <input type="text" id="model-name" placeholder="Name">
+
+                    <label>Description</label>
+                    <input type="text" id="model-description" placeholder="Description">
+
+                    <label>Context Length</label>
+                    <input type="number" id="model-context" min="0" placeholder="Context length">
+
+                    <h4 style="margin-top:10px;">Architecture (JSON)</h4>
+                    <textarea id="model-architecture" style="width:100%; min-height: 160px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <h4 style="margin-top:10px;">Pricing (JSON)</h4>
+                    <textarea id="model-pricing" style="width:100%; min-height: 160px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <h4 style="margin-top:10px;">Per Request Limits (JSON, optional) — leave blank to clear</h4>
+                    <textarea id="model-per-request-limits" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <h4 style="margin-top:10px;">Top Provider (JSON, optional) — leave blank to clear</h4>
+                    <textarea id="model-top-provider" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <div style="margin-top: 12px; display: flex; gap: 10px;">
+                        <button id="model-save-btn" onclick="saveModel()">💾 Save</button>
+                        <button onclick="closeModelEditor()" style="background-color: #718096;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="model-create-modal" class="modal">
+                <div class="modal-content" style="max-width: 720px;">
+                    <span class="close" onclick="closeCreateModel()">&times;</span>
+                    <h3>Create Model</h3>
+
+                    <div id="model-create-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
+
+                    <label>ID</label>
+                    <input type="text" id="create-id" placeholder="model-id">
+
+                    <label>Name</label>
+                    <input type="text" id="create-name" placeholder="Name">
+
+                    <label>Description</label>
+                    <input type="text" id="create-description" placeholder="Description">
+
+                    <label>Context Length</label>
+                    <input type="number" id="create-context" min="0" placeholder="Context length">
+
+                    <h4 style="margin-top:10px;">Architecture (JSON)</h4>
+                    <textarea id="create-architecture" style="width:100%; min-height: 160px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <h4 style="margin-top:10px;">Pricing (JSON)</h4>
+                    <textarea id="create-pricing" style="width:100%; min-height: 160px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <h4 style="margin-top:10px;">Per Request Limits (JSON, optional)</h4>
+                    <textarea id="create-per-request-limits" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <h4 style="margin-top:10px;">Top Provider (JSON, optional)</h4>
+                    <textarea id="create-top-provider" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+
+                    <div style="margin-top: 12px; display: flex; gap: 10px;">
+                        <button id="model-create-btn" onclick="createModel()">➕ Create</button>
+                        <button onclick="closeCreateModel()" style="background-color: #718096;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="model-batch-modal" class="modal">
+                <div class="modal-content" style="max-width: 840px;">
+                    <span class="close" onclick="closeBatchModal()">&times;</span>
+                    <h3>Batch Add Models</h3>
+                    <p style="font-size: 0.9rem; color: #718096; margin: 6px 0 10px;">Paste JSON in the format like models.example.json</p>
+                    <div id="batch-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
+                    <textarea id="batch-json" style="width:100%; min-height: 320px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
+                    <div style="margin-top: 12px; display:flex; gap:10px;">
+                        <button id="batch-submit-btn" onclick="performBatchAdd()">➕ Add Models</button>
+                        <button onclick="closeBatchModal()" style="background-color:#718096;">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+    )
+
+
+@admin_router.get("/models", response_class=HTMLResponse)
+async def admin_models(request: Request) -> str:
+    if is_admin_authenticated(request):
+        return models_page()
+    return admin_auth()
+
+
+@admin_router.get("/api/models", dependencies=[Depends(require_admin_api)])
+async def get_models_admin_api(request: Request) -> list[dict[str, object]]:
+    items = await list_models()
+    return [m.dict() for m in items]  # type: ignore
+
+
+@admin_router.post("/api/models", dependencies=[Depends(require_admin_api)])
+async def create_model_admin_api(payload: Model) -> dict[str, object]:
+    async with create_session() as session:
+        exists = await session.get(ModelRow, payload.id)
+        if exists:
+            raise HTTPException(
+                status_code=409, detail="Model with this ID already exists"
+            )
+        pricing_dict = payload.pricing.dict()
+        for k in ("max_prompt_cost", "max_completion_cost", "max_cost"):
+            pricing_dict.pop(k, None)
+        row = ModelRow(
+            id=payload.id,
+            name=payload.name,
+            description=payload.description,
+            created=int(payload.created),
+            context_length=int(payload.context_length),
+            architecture=json.dumps(payload.architecture.dict()),
+            pricing=json.dumps(pricing_dict),
+            sats_pricing=None,
+            per_request_limits=(
+                json.dumps(payload.per_request_limits)
+                if payload.per_request_limits is not None
+                else None
+            ),
+            top_provider=(
+                json.dumps(payload.top_provider.dict())
+                if payload.top_provider
+                else None
+            ),
+        )
+        session.add(row)
+        await session.commit()
+
+    created_model = await get_model_by_id(payload.id)
+    return created_model.dict() if created_model else {"id": payload.id}  # type: ignore
+
+
+@admin_router.post("/api/models/batch", dependencies=[Depends(require_admin_api)])
+async def batch_create_models(payload: dict[str, object]) -> dict[str, int]:
+    models = payload.get("models")
+    if not isinstance(models, list) or not models:
+        raise HTTPException(
+            status_code=400, detail="Payload must include non-empty 'models' array"
+        )
+    created = 0
+    skipped = 0
+    async with create_session() as session:
+        for m in models:
+            try:
+                model = Model(**m)  # type: ignore[arg-type]
+            except Exception:
+                skipped += 1
+                continue
+            exists = await session.get(ModelRow, model.id)
+            if exists:
+                skipped += 1
+                continue
+            pricing_dict = model.pricing.dict()
+            for k in ("max_prompt_cost", "max_completion_cost", "max_cost"):
+                pricing_dict.pop(k, None)
+            row = ModelRow(
+                id=model.id,
+                name=model.name,
+                description=model.description,
+                created=int(model.created),
+                context_length=int(model.context_length),
+                architecture=json.dumps(model.architecture.dict()),
+                pricing=json.dumps(pricing_dict),
+                sats_pricing=None,
+                per_request_limits=(
+                    json.dumps(model.per_request_limits)
+                    if model.per_request_limits is not None
+                    else None
+                ),
+                top_provider=(
+                    json.dumps(model.top_provider.dict())
+                    if model.top_provider
+                    else None
+                ),
+            )
+            session.add(row)
+            created += 1
+        if created:
+            await session.commit()
+    return {"created": created, "skipped": skipped}
+
+
+@admin_router.get(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
+async def get_model_admin_api(model_id: str) -> dict[str, object]:
+    model = await get_model_by_id(model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    return model.dict()  # type: ignore
+
+
+@admin_router.patch(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
+async def update_model_admin_api(model_id: str, payload: Model) -> dict[str, object]:
+    if payload.id != model_id:
+        raise HTTPException(status_code=400, detail="Path id does not match payload id")
+
+    async with create_session() as session:
+        row = await session.get(ModelRow, model_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        row.name = payload.name
+        row.description = payload.description
+        row.created = int(payload.created)
+        row.context_length = int(payload.context_length)
+        row.architecture = json.dumps(payload.architecture.dict())
+        pricing_dict = payload.pricing.dict()
+        for k in ("max_prompt_cost", "max_completion_cost", "max_cost"):
+            pricing_dict.pop(k, None)
+        row.pricing = json.dumps(pricing_dict)
+        row.sats_pricing = None
+        row.per_request_limits = (
+            json.dumps(payload.per_request_limits)
+            if payload.per_request_limits is not None
+            else None
+        )
+        row.top_provider = (
+            json.dumps(payload.top_provider.dict()) if payload.top_provider else None
+        )
+
+        session.add(row)
+        await session.commit()
+
+    updated = await get_model_by_id(model_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Model not found after update")
+    return updated.dict()  # type: ignore
+
+
+@admin_router.delete(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
+async def delete_model_admin_api(model_id: str) -> dict[str, object]:
+    async with create_session() as session:
+        row = await session.get(ModelRow, model_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+        await session.delete(row)
+        await session.commit()
+    return {"ok": True, "deleted_id": model_id}
+
+
+@admin_router.delete("/api/models", dependencies=[Depends(require_admin_api)])
+async def delete_all_models_admin_api() -> dict[str, object]:
+    async with create_session() as session:
+        result = await session.exec(select(ModelRow))  # type: ignore
+        rows = result.all()
+        for row in rows:
+            await session.delete(row)  # type: ignore
+        await session.commit()
+    return {"ok": True, "deleted": "all"}
 
 
 DASHBOARD_CSS: str = """
@@ -899,7 +1700,7 @@ button:disabled { background: #a0aec0; cursor: not-allowed; transform: none; }
 .copy-btn { background: #38a169; padding: 6px 12px; font-size: 14px; }
 .copy-btn:hover { background: #2f855a; }
 .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
-.modal-content { background: white; margin: 10% auto; padding: 2rem; width: 90%; max-width: 400px; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); animation: slideIn 0.3s ease; }
+.modal-content { background: white; margin: 5% auto; padding: 0.75rem 1rem 2.25rem; width: 90%; max-width: 720px; max-height: 85vh; overflow-y: auto; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); animation: slideIn 0.3s ease; }
 @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .close { color: #a0aec0; float: right; font-size: 28px; font-weight: bold; cursor: pointer; margin: -10px -10px 0 0; }
 .close:hover { color: #2d3748; }

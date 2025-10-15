@@ -30,7 +30,7 @@ from .settings import settings as global_settings
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.1.3"
+__version__ = "0.1.4-dev"
 
 
 @asynccontextmanager
@@ -155,6 +155,11 @@ async def info() -> dict:
 @app.get("/admin")
 async def admin_redirect() -> RedirectResponse:
     return RedirectResponse("/admin/")
+
+
+@app.get("/v1/providers")
+async def providers() -> RedirectResponse:
+    return RedirectResponse("/v1/providers/")
 
 
 app.include_router(models_router)
