@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlmodel import select
+from sqlmodel import select, desc
 
 from ..wallet import (
     fetch_all_balances,
@@ -14,8 +14,9 @@ from ..wallet import (
     get_wallet,
     send_token,
     slow_filter_spend_proofs,
+    send_to_lnurl,
 )
-from .db import ApiKey, create_session
+from .db import ApiKey, PendingWithdrawal, create_session
 from .logging import get_logger
 from .settings import SettingsService, settings
 
@@ -127,6 +128,64 @@ async def partial_apikeys(request: Request) -> str:
     """
 
 
+@admin_router.get(
+    "/partials/pending-withdrawals",
+    dependencies=[Depends(require_admin_api)],
+    response_class=HTMLResponse,
+)
+async def partial_pending_withdrawals(request: Request) -> str:
+    async with create_session() as session:
+        result = await session.exec(
+            select(PendingWithdrawal)
+            .where(PendingWithdrawal.claimed == False)
+            .order_by(desc(PendingWithdrawal.created_at))
+            .limit(20)
+        )
+        pending_withdrawals = result.all()
+
+    if not pending_withdrawals:
+        return """
+            <h2>Pending Withdrawals</h2>
+            <p style="color: #718096; font-style: italic;">No pending withdrawals</p>
+        """
+
+    rows = "".join(
+        [
+            f"""<tr>
+                <td>{withdrawal.amount} {withdrawal.unit.upper()}</td>
+                <td>{withdrawal.mint_url.replace("https://", "").replace("http://", "")}</td>
+                <td>{withdrawal.created_at.strftime('%Y-%m-%d %H:%M:%S')} UTC</td>
+                <td>{"✅ Auto-sent" if withdrawal.auto_sent else "⏳ Manual"}</td>
+                <td>{withdrawal.ln_address or "-"}</td>
+                <td>
+                    <button class="copy-token-btn" onclick="copyWithdrawalToken('{withdrawal.token}')">📋 Copy Token</button>
+                    <button class="claim-btn" onclick="markWithdrawalClaimed({withdrawal.id})">✅ Mark Claimed</button>
+                </td>
+            </tr>"""
+            for withdrawal in pending_withdrawals
+        ]
+    )
+    
+    return f"""
+        <h2>Pending Withdrawals</h2>
+        <p style="margin-bottom: 1rem; font-size: 0.9rem; color: #718096;">
+            These are cashu tokens that have been generated but not yet claimed. 
+            Copy the token to use it, or mark as claimed when used.
+        </p>
+        <table>
+            <tr>
+                <th>Amount</th>
+                <th>Mint</th>
+                <th>Created</th>
+                <th>Status</th>
+                <th>LN Address</th>
+                <th>Actions</th>
+            </tr>
+            {rows}
+        </table>
+    """
+
+
 @admin_router.get("/api/balances", dependencies=[Depends(require_admin_api)])
 async def get_balances_api(request: Request) -> list[dict[str, object]]:
     balance_details, _tw, _tu, _ow = await fetch_all_balances()
@@ -167,6 +226,30 @@ class WithdrawRequest(BaseModel):
     amount: int
     mint_url: str | None = None
     unit: str = "sat"
+    auto_send_to_ln: bool = False
+
+
+@admin_router.post("/api/mark-withdrawal-claimed/{withdrawal_id}", dependencies=[Depends(require_admin_api)])
+async def mark_withdrawal_claimed(withdrawal_id: int) -> dict[str, str]:
+    async with create_session() as session:
+        result = await session.exec(
+            select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+        )
+        withdrawal = result.first()
+        
+        if not withdrawal:
+            raise HTTPException(status_code=404, detail="Withdrawal not found")
+        
+        withdrawal.claimed = True
+        session.add(withdrawal)
+        await session.commit()
+        
+        logger.info(
+            "Withdrawal marked as claimed",
+            extra={"withdrawal_id": withdrawal_id, "amount": withdrawal.amount, "unit": withdrawal.unit}
+        )
+        
+        return {"status": "success", "message": "Withdrawal marked as claimed"}
 
 
 def login_form() -> str:
@@ -325,6 +408,7 @@ async def dashboard(request: Request) -> str:
                     const amount = parseInt(document.getElementById('withdraw-amount').value);
                     const select = document.getElementById('mint-unit-select');
                     const selectedValue = select.value;
+                    const autoSendCheckbox = document.getElementById('auto-send-ln');
                     const button = document.getElementById('confirm-withdraw-btn');
                     const tokenResult = document.getElementById('token-result');
 
@@ -359,15 +443,23 @@ async def dashboard(request: Request) -> str:
                             body: JSON.stringify({
                                 amount: amount,
                                 mint_url: mint,
-                                unit: unit
+                                unit: unit,
+                                auto_send_to_ln: autoSendCheckbox.checked
                             })
                         });
 
                         if (response.ok) {
                             const data = await response.json();
-                            document.getElementById('token-text').textContent = data.token;
-                            tokenResult.style.display = 'block';
-                            closeWithdrawModal();
+                            if (data.auto_sent) {
+                                alert(`Successfully sent ${amount} ${unit} to ${data.ln_address}!`);
+                                closeWithdrawModal();
+                                refreshPendingWithdrawals();
+                            } else {
+                                document.getElementById('token-text').textContent = data.token;
+                                tokenResult.style.display = 'block';
+                                closeWithdrawModal();
+                                refreshPendingWithdrawals();
+                            }
                         } else {
                             const errorData = await response.json();
                             alert('Failed to withdraw balance: ' + (errorData.detail || 'Unknown error'));
@@ -392,6 +484,44 @@ async def dashboard(request: Request) -> str:
                     }).catch(err => {
                         alert('Failed to copy token');
                     });
+                }
+
+                function copyWithdrawalToken(token) {
+                    navigator.clipboard.writeText(token).then(() => {
+                        alert('Token copied to clipboard!');
+                    }).catch(err => {
+                        alert('Failed to copy token');
+                    });
+                }
+
+                async function markWithdrawalClaimed(withdrawalId) {
+                    if (!confirm('Mark this withdrawal as claimed? This action cannot be undone.')) {
+                        return;
+                    }
+
+                    try {
+                        const response = await fetch(`/admin/api/mark-withdrawal-claimed/${withdrawalId}`, {
+                            method: 'POST',
+                            credentials: 'same-origin'
+                        });
+
+                        if (response.ok) {
+                            alert('Withdrawal marked as claimed');
+                            refreshPendingWithdrawals();
+                        } else {
+                            const errorData = await response.json();
+                            alert('Failed to mark withdrawal as claimed: ' + (errorData.detail || 'Unknown error'));
+                        }
+                    } catch (error) {
+                        alert('Error: ' + error.message);
+                    }
+                }
+
+                function refreshPendingWithdrawals() {
+                    const container = document.getElementById('pending-withdrawals-container');
+                    if (container) {
+                        htmx.trigger(container, 'refresh');
+                    }
                 }
 
                 function refreshPage() {
@@ -546,6 +676,12 @@ async def dashboard(request: Request) -> str:
                     <div id="withdraw-warning" class="warning" style="display: none;">
                         ⚠️ Warning: Withdrawing more than your balance will use user funds!
                     </div>
+                    <div style="margin: 10px 0;">
+                        <label>
+                            <input type="checkbox" id="auto-send-ln"> 
+                            Auto-send to Lightning address (if configured)
+                        </label>
+                    </div>
                     <button id="confirm-withdraw-btn" onclick="performWithdraw()">💸 Withdraw</button>
                     <button onclick="closeWithdrawModal()" style="background-color: #718096;">Cancel</button>
                 </div>
@@ -580,7 +716,15 @@ async def dashboard(request: Request) -> str:
                 <strong>Withdrawal Token:</strong>
                 <div id="token-text"></div>
                 <button id="copy-btn" class="copy-btn" onclick="copyToken()">Copy Token</button>
-                <p><em>Save this token! It represents your withdrawn balance.</em></p>
+                <p><em>Save this token! It represents your withdrawn balance and is now stored in pending withdrawals below.</em></p>
+            </div>
+            
+            <div id="pending-withdrawals-container"
+                 hx-get="/admin/partials/pending-withdrawals"
+                 hx-trigger="load, refresh"
+                 hx-swap="innerHTML">
+                <h2>Pending Withdrawals</h2>
+                <div style="color:#718096;">Loading pending withdrawals…</div>
             </div>
             
             <div id="apikeys-table"
@@ -720,7 +864,7 @@ async def view_logs(request: Request, request_id: str) -> str:
 @admin_router.post("/withdraw", dependencies=[Depends(require_admin_api)])
 async def withdraw(
     request: Request, withdraw_request: WithdrawRequest
-) -> dict[str, str]:
+) -> dict[str, object]:
     # Get wallet and check balance
     from .settings import settings as global_settings
 
@@ -744,10 +888,91 @@ async def withdraw(
     if withdraw_request.amount > current_balance:
         raise HTTPException(status_code=400, detail="Insufficient wallet balance")
 
+    # Generate the token
     token = await send_token(
         withdraw_request.amount, withdraw_request.unit, withdraw_request.mint_url
     )
-    return {"token": token}
+    
+    # Store the withdrawal in the database
+    async with create_session() as session:
+        pending_withdrawal = PendingWithdrawal(
+            token=token,
+            amount=withdraw_request.amount,
+            unit=withdraw_request.unit,
+            mint_url=withdraw_request.mint_url or global_settings.primary_mint,
+            claimed=False,
+            auto_sent=False,
+            ln_address=None,
+            notes=None
+        )
+        
+        # If auto-send is requested and LN address is configured, try to send
+        if withdraw_request.auto_send_to_ln and global_settings.receive_ln_address:
+            try:
+                amount_received = await send_to_lnurl(
+                    withdraw_request.amount,
+                    withdraw_request.unit,
+                    withdraw_request.mint_url or global_settings.primary_mint,
+                    global_settings.receive_ln_address
+                )
+                
+                pending_withdrawal.auto_sent = True
+                pending_withdrawal.ln_address = global_settings.receive_ln_address
+                pending_withdrawal.claimed = True
+                pending_withdrawal.notes = f"Auto-sent {amount_received} to {global_settings.receive_ln_address}"
+                
+                session.add(pending_withdrawal)
+                await session.commit()
+                
+                logger.info(
+                    "Withdrawal auto-sent to Lightning address",
+                    extra={
+                        "amount": withdraw_request.amount,
+                        "unit": withdraw_request.unit,
+                        "ln_address": global_settings.receive_ln_address,
+                        "amount_received": amount_received
+                    }
+                )
+                
+                return {
+                    "auto_sent": True,
+                    "ln_address": global_settings.receive_ln_address,
+                    "amount_received": amount_received,
+                    "withdrawal_id": pending_withdrawal.id
+                }
+                
+            except Exception as e:
+                logger.error(
+                    "Failed to auto-send withdrawal to Lightning address",
+                    extra={
+                        "error": str(e),
+                        "ln_address": global_settings.receive_ln_address,
+                        "amount": withdraw_request.amount,
+                        "unit": withdraw_request.unit
+                    }
+                )
+                # Continue with manual token storage if auto-send fails
+                pending_withdrawal.notes = f"Auto-send failed: {str(e)}"
+        
+        session.add(pending_withdrawal)
+        await session.commit()
+        
+        logger.info(
+            "Withdrawal token generated and stored",
+            extra={
+                "withdrawal_id": pending_withdrawal.id,
+                "amount": withdraw_request.amount,
+                "unit": withdraw_request.unit,
+                "mint_url": withdraw_request.mint_url or global_settings.primary_mint,
+                "auto_send_requested": withdraw_request.auto_send_to_ln
+            }
+        )
+        
+        return {
+            "token": token,
+            "withdrawal_id": pending_withdrawal.id,
+            "auto_sent": False
+        }
 
 
 DASHBOARD_CSS: str = """
@@ -767,6 +992,10 @@ button:disabled { background: #a0aec0; cursor: not-allowed; transform: none; }
 .refresh-btn { background: #48bb78; }
 .refresh-btn:hover { background: #38a169; }
 .investigate-btn { background: #4299e1; }
+.copy-token-btn { background: #38a169; padding: 6px 12px; font-size: 12px; margin-right: 5px; }
+.copy-token-btn:hover { background: #2f855a; }
+.claim-btn { background: #e53e3e; padding: 6px 12px; font-size: 12px; }
+.claim-btn:hover { background: #c53030; }
 .balance-card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 2rem; }
 .balance-item { display: flex; justify-content: space-between; margin-bottom: 1rem; }
 .balance-label { color: #718096; }
@@ -789,7 +1018,8 @@ button:disabled { background: #a0aec0; cursor: not-allowed; transform: none; }
 @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 .close { color: #a0aec0; float: right; font-size: 28px; font-weight: bold; cursor: pointer; margin: -10px -10px 0 0; }
 .close:hover { color: #2d3748; }
-input[type="number"], input[type="text"], select { width: 100%; padding: 10px; margin: 10px 0; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }
+input[type="number"], input[type="text"], input[type="checkbox"], select { width: 100%; padding: 10px; margin: 10px 0; border: 2px solid #e2e8f0; border-radius: 6px; font-size: 16px; transition: border 0.2s; }
+input[type="checkbox"] { width: auto; margin-right: 8px; }
 input[type="number"]:focus, input[type="text"]:focus, select:focus { outline: none; border-color: #4299e1; }
 .warning { color: #e53e3e; font-weight: 600; margin: 10px 0; padding: 10px; background: #fff5f5; border-radius: 6px; }
 """
