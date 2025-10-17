@@ -79,10 +79,15 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                     model["id"] = model_id[len(source_prefix) :]
                     model_id = model["id"]
 
+                # Check if model should be excluded based on configuration
+                try:
+                    excluded_ids = getattr(settings, "excluded_model_ids", [])
+                except Exception:
+                    excluded_ids = []
+                
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id == "openrouter/auto"
-                    or model_id == "google/gemini-2.5-pro-exp-03-25"
+                    or model_id in excluded_ids
                 ):
                     continue
 
