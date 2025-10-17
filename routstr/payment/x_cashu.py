@@ -241,6 +241,49 @@ async def forward_to_upstream(
             )
 
 
+async def safe_read_response_content(response: httpx.Response) -> tuple[str | None, bool]:
+    """
+    Safely read response content, handling ReadableStream objects and other edge cases.
+    
+    Returns:
+        tuple: (content_str, is_readable_stream_error)
+    """
+    try:
+        content = await response.aread()
+        
+        # Handle bytes content
+        if isinstance(content, bytes):
+            content_str = content.decode("utf-8", errors="replace")
+        else:
+            content_str = str(content)
+        
+        # Check for ReadableStream object error
+        if content_str.strip() == "[object ReadableStream]" or "ReadableStream" in content_str:
+            logger.warning(
+                "Detected ReadableStream object in response content",
+                extra={
+                    "content_preview": content_str[:100],
+                    "content_type": response.headers.get("content-type", "unknown"),
+                    "status_code": response.status_code,
+                },
+            )
+            return None, True
+        
+        return content_str, False
+        
+    except Exception as e:
+        logger.error(
+            "Error reading response content",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "content_type": response.headers.get("content-type", "unknown"),
+                "status_code": response.status_code,
+            },
+        )
+        return None, False
+
+
 async def handle_x_cashu_chat_completion(
     response: httpx.Response, amount: int, unit: str, max_cost_for_model: int
 ) -> StreamingResponse | Response:
@@ -251,8 +294,73 @@ async def handle_x_cashu_chat_completion(
     )
 
     try:
-        content = await response.aread()
-        content_str = content.decode("utf-8") if isinstance(content, bytes) else content
+        content_str, is_readable_stream_error = await safe_read_response_content(response)
+        
+        # If we encountered a ReadableStream error, fall back to streaming the response
+        if is_readable_stream_error or content_str is None:
+            logger.warning(
+                "ReadableStream error detected, falling back to streaming response with emergency refund",
+                extra={
+                    "amount": amount,
+                    "unit": unit,
+                    "is_readable_stream_error": is_readable_stream_error,
+                },
+            )
+            
+            # Issue emergency refund to prevent fund loss
+            try:
+                emergency_refund_amount = amount - 60  # Small deduction for processing
+                refund_token = await send_refund(emergency_refund_amount, unit)
+                
+                logger.info(
+                    "Emergency refund issued due to ReadableStream error",
+                    extra={
+                        "original_amount": amount,
+                        "refund_amount": emergency_refund_amount,
+                        "unit": unit,
+                        "refund_token_preview": refund_token[:20] + "..."
+                        if len(refund_token) > 20
+                        else refund_token,
+                    },
+                )
+                
+                # Create a streaming response with refund header
+                response_headers = dict(response.headers)
+                response_headers["X-Cashu"] = refund_token
+                
+                return StreamingResponse(
+                    response.aiter_bytes(),
+                    status_code=response.status_code,
+                    headers=response_headers,
+                )
+                
+            except Exception as refund_error:
+                logger.error(
+                    "Failed to issue emergency refund for ReadableStream error",
+                    extra={
+                        "error": str(refund_error),
+                        "error_type": type(refund_error).__name__,
+                        "amount": amount,
+                        "unit": unit,
+                    },
+                )
+                
+                # Return error response to prevent fund loss
+                return Response(
+                    content=json.dumps({
+                        "error": {
+                            "message": "ReadableStream error encountered and refund failed. Please contact support.",
+                            "type": "stream_processing_error",
+                            "code": "readable_stream_error",
+                            "original_amount": amount,
+                            "unit": unit,
+                        }
+                    }),
+                    status_code=500,
+                    media_type="application/json",
+                )
+
+        # Determine if this is a streaming response
         is_streaming = content_str.startswith("data:") or "data:" in content_str
 
         logger.debug(
@@ -284,12 +392,58 @@ async def handle_x_cashu_chat_completion(
                 "unit": unit,
             },
         )
-        # Return the original response if we can't process it
-        return StreamingResponse(
-            response.aiter_bytes(),
-            status_code=response.status_code,
-            headers=dict(response.headers),
-        )
+        
+        # Issue emergency refund to prevent fund loss
+        try:
+            emergency_refund_amount = amount - 60  # Small deduction for processing
+            refund_token = await send_refund(emergency_refund_amount, unit)
+            
+            logger.info(
+                "Emergency refund issued due to processing error",
+                extra={
+                    "original_amount": amount,
+                    "refund_amount": emergency_refund_amount,
+                    "unit": unit,
+                    "error": str(e),
+                },
+            )
+            
+            # Return the original response with refund header
+            response_headers = dict(response.headers)
+            response_headers["X-Cashu"] = refund_token
+            
+            return StreamingResponse(
+                response.aiter_bytes(),
+                status_code=response.status_code,
+                headers=response_headers,
+            )
+            
+        except Exception as refund_error:
+            logger.error(
+                "Failed to issue emergency refund for processing error",
+                extra={
+                    "original_error": str(e),
+                    "refund_error": str(refund_error),
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
+            
+            # Return error response to prevent fund loss
+            return Response(
+                content=json.dumps({
+                    "error": {
+                        "message": "Response processing failed and refund failed. Please contact support.",
+                        "type": "processing_error",
+                        "code": "response_processing_failed",
+                        "original_amount": amount,
+                        "unit": unit,
+                        "original_error": str(e),
+                    }
+                }),
+                status_code=500,
+                media_type="application/json",
+            )
 
 
 async def handle_streaming_response(
@@ -518,9 +672,10 @@ async def handle_non_streaming_response(
         )
 
         # Emergency refund with small deduction for processing
-        emergency_refund = amount
+        emergency_refund = amount - 60
         refund_token = await send_token(emergency_refund, unit=unit)
-        response.headers["X-Cashu"] = refund_token
+        response_headers = dict(response.headers)
+        response_headers["X-Cashu"] = refund_token
 
         logger.warning(
             "Emergency refund issued due to JSON parse error",
@@ -535,7 +690,7 @@ async def handle_non_streaming_response(
         return Response(
             content=content_str,
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=response_headers,
             media_type="application/json",
         )
 
