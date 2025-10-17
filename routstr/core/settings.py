@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     upstream_api_key: str = Field(default="", env="UPSTREAM_API_KEY")
     admin_password: str = Field(default="", env="ADMIN_PASSWORD")
 
+    # Version Configuration
+    version_base: str = Field(default="", env="VERSION_BASE")
+    version_suffix: str = Field(default="", env="VERSION_SUFFIX")
+
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
     description: str = Field(default="A Routstr Node", env="DESCRIPTION")
