@@ -30,7 +30,24 @@ from .settings import settings as global_settings
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.1.3"
+# Base version from pyproject.toml
+__base_version__ = "0.1.4"
+
+
+def get_version() -> str:
+    """Get the application version with configurable suffix from environment variables."""
+    # Use VERSION_BASE if provided, otherwise use the hardcoded base version
+    base_version = global_settings.version_base or __base_version__
+    
+    # Add suffix if provided via environment variable
+    if global_settings.version_suffix:
+        return f"{base_version}{global_settings.version_suffix}"
+    
+    return base_version
+
+
+# Get the final version string
+__version__ = get_version()
 
 
 @asynccontextmanager
@@ -156,6 +173,11 @@ async def info() -> dict:
 @app.get("/admin")
 async def admin_redirect() -> RedirectResponse:
     return RedirectResponse("/admin/")
+
+
+@app.get("/v1/providers")
+async def providers() -> RedirectResponse:
+    return RedirectResponse("/v1/providers/")
 
 
 app.include_router(models_router)
