@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
+from datetime import datetime, timezone
 
 from alembic import command
 from alembic.config import Config
@@ -64,6 +65,21 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     sats_pricing: str | None = Field(default=None)
     per_request_limits: str | None = Field(default=None)
     top_provider: str | None = Field(default=None)
+
+
+class PendingWithdrawal(SQLModel, table=True):  # type: ignore
+    __tablename__ = "pending_withdrawals"
+    
+    id: int = Field(primary_key=True)
+    token: str = Field(description="The cashu token string")
+    amount: int = Field(description="Amount in the token's unit")
+    unit: str = Field(description="Currency unit (sat, msat)")
+    mint_url: str = Field(description="Mint URL where the token was created")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    claimed: bool = Field(default=False, description="Whether the token has been claimed/used")
+    auto_sent: bool = Field(default=False, description="Whether the token was automatically sent to LN address")
+    ln_address: str | None = Field(default=None, description="Lightning address where token was sent")
+    notes: str | None = Field(default=None, description="Optional notes about the withdrawal")
 
 
 async def balances_for_mint_and_unit(
