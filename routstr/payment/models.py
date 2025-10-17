@@ -285,8 +285,16 @@ async def update_sats_pricing() -> None:
                             if row.top_provider
                             else None
                         )
+                        
+                        # Apply upstream provider fee to USD pricing before converting to sats
+                        # This ensures consistent fee application across both USD and sat pricing
+                        upstream_fee_multiplier = settings.upstream_provider_fee
+                        pricing_with_fee = Pricing.parse_obj({
+                            k: v * upstream_fee_multiplier for k, v in pricing.dict().items()
+                        })
+                        
                         sats = Pricing.parse_obj(
-                            {k: v / sats_to_usd for k, v in pricing.dict().items()}
+                            {k: v / sats_to_usd for k, v in pricing_with_fee.dict().items()}
                         )
                         # Enforce minimum per-request charge floor in sats
                         try:
