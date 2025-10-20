@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import traceback
 from collections.abc import AsyncGenerator
@@ -90,8 +91,19 @@ async def get_all_models_with_overrides(
     async with create_session() as session:
         result = await session.exec(select(ModelRow).where(ModelRow.enabled))
         override_rows = result.all()
-        overrides_by_id = {
-            row.id: row for row in override_rows if row.upstream_provider_id is not None
+
+        provider_result = await session.exec(select(UpstreamProviderRow))
+        providers_by_id = {p.id: p for p in provider_result.all()}
+
+        overrides_by_id: dict[str, tuple[ModelRow, float]] = {
+            row.id: (
+                row,
+                providers_by_id[row.upstream_provider_id].provider_fee
+                if row.upstream_provider_id in providers_by_id
+                else 1.01,
+            )
+            for row in override_rows
+            if row.upstream_provider_id is not None
         }
 
     all_models: dict[str, Model] = {}
@@ -99,7 +111,10 @@ async def get_all_models_with_overrides(
     for upstream in upstreams:
         for model in upstream.get_cached_models():
             if model.id in overrides_by_id:
-                all_models[model.id] = _row_to_model(overrides_by_id[model.id])
+                override_row, provider_fee = overrides_by_id[model.id]
+                all_models[model.id] = _row_to_model(
+                    override_row, apply_provider_fee=True, provider_fee=provider_fee
+                )
             elif model.enabled:
                 all_models[model.id] = model
 
@@ -109,6 +124,7 @@ async def get_all_models_with_overrides(
 async def get_model_with_override(
     model_id: str,
     upstreams: list[UpstreamProvider],
+    session: AsyncSession,
 ) -> Model | None:
     """Get a specific model from providers with database override applied.
 
@@ -127,18 +143,23 @@ async def get_model_with_override(
 
     aliases = resolve_model_alias(model_id)
 
-    async with create_session() as session:
-        for alias in aliases:
-            result = await session.exec(
-                select(ModelRow).where(
-                    ModelRow.id == alias,
-                    ModelRow.upstream_provider_id.isnot(None),  # type: ignore
-                    ModelRow.enabled,
-                )
+    for alias in aliases:
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.id == alias,
+                ModelRow.upstream_provider_id.isnot(None),  # type: ignore
+                ModelRow.enabled,
             )
-            override_row = result.first()
-            if override_row:
-                return _row_to_model(override_row)
+        )
+        override_row = result.first()
+        if override_row:
+            provider = await session.get(
+                UpstreamProviderRow, override_row.upstream_provider_id
+            )
+            provider_fee = provider.provider_fee if provider else 1.01
+            return _row_to_model(
+                override_row, apply_provider_fee=True, provider_fee=provider_fee
+            )
 
     for alias in aliases:
         for upstream in upstreams:
@@ -190,9 +211,6 @@ async def refresh_upstreams_models_periodically(
             await asyncio.sleep(interval + random.uniform(0, jitter))
         except asyncio.CancelledError:
             break
-
-
-import os
 
 
 async def init_upstreams() -> list[UpstreamProvider]:
@@ -355,7 +373,7 @@ async def _seed_providers_from_settings(
                 else:
                     providers_to_add.append(
                         UpstreamProviderRow(
-                            provider_type="generic",
+                            provider_type="custom",
                             base_url=base_url,
                             api_key=settings.upstream_api_key,
                             enabled=True,
@@ -382,7 +400,9 @@ def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider
     """
     try:
         if provider_row.provider_type == "openai":
-            return OpenAIUpstreamProvider(provider_row.api_key)
+            return OpenAIUpstreamProvider(
+                provider_row.api_key, provider_row.provider_fee
+            )
         elif provider_row.provider_type == "azure":
             if not provider_row.api_version:
                 logger.error(
@@ -394,11 +414,16 @@ def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider
                 provider_row.base_url,
                 provider_row.api_key,
                 provider_row.api_version,
+                provider_row.provider_fee,
             )
         elif provider_row.provider_type == "openrouter":
-            return OpenRouterUpstreamProvider(provider_row.api_key)
-        elif provider_row.provider_type == "generic":
-            return UpstreamProvider(provider_row.base_url, provider_row.api_key)
+            return OpenRouterUpstreamProvider(
+                provider_row.api_key, provider_row.provider_fee
+            )
+        elif provider_row.provider_type == "custom":
+            return UpstreamProvider(
+                provider_row.base_url, provider_row.api_key, provider_row.provider_fee
+            )
         else:
             logger.error(
                 f"Unknown provider type: {provider_row.provider_type}",
@@ -423,18 +448,21 @@ class UpstreamProvider:
     base_url: str
     api_key: str
     upstream_name: str | None = None
+    provider_fee: float = 1.05
     _models_cache: list[Model] = []
     _models_by_id: dict[str, Model] = {}
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, provider_fee: float = 1.01):
         """Initialize the upstream provider.
 
         Args:
             base_url: Base URL of the upstream API endpoint
             api_key: API key for authenticating with the upstream service
+            provider_fee: Provider fee multiplier (default 1.01 for 1% fee)
         """
         self.base_url = base_url
         self.api_key = api_key
+        self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
 
@@ -1973,6 +2001,59 @@ class UpstreamProvider:
                 token=x_cashu_token,
             )
 
+    def _apply_provider_fee_to_model(self, model: Model) -> Model:
+        """Apply provider fee to model's USD pricing and calculate max costs.
+
+        Args:
+            model: Model object to update
+
+        Returns:
+            Model with provider fee applied to pricing and max costs calculated
+        """
+        from .payment.models import Pricing, _calculate_usd_max_costs
+
+        adjusted_pricing = Pricing.parse_obj(
+            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
+        )
+
+        temp_model = Model(
+            id=model.id,
+            name=model.name,
+            created=model.created,
+            description=model.description,
+            context_length=model.context_length,
+            architecture=model.architecture,
+            pricing=adjusted_pricing,
+            sats_pricing=None,
+            per_request_limits=model.per_request_limits,
+            top_provider=model.top_provider,
+            enabled=model.enabled,
+            upstream_provider_id=model.upstream_provider_id,
+            canonical_slug=model.canonical_slug,
+        )
+
+        (
+            adjusted_pricing.max_prompt_cost,
+            adjusted_pricing.max_completion_cost,
+            adjusted_pricing.max_cost,
+        ) = _calculate_usd_max_costs(temp_model)
+
+        return Model(
+            id=model.id,
+            name=model.name,
+            created=model.created,
+            description=model.description,
+            context_length=model.context_length,
+            architecture=model.architecture,
+            pricing=adjusted_pricing,
+            sats_pricing=model.sats_pricing,
+            per_request_limits=model.per_request_limits,
+            top_provider=model.top_provider,
+            enabled=model.enabled,
+            upstream_provider_id=model.upstream_provider_id,
+            canonical_slug=model.canonical_slug,
+        )
+
     async def fetch_models(self) -> list[Model]:
         """Fetch available models from upstream API and update cache.
 
@@ -1985,9 +2066,21 @@ class UpstreamProvider:
     async def refresh_models_cache(self) -> None:
         """Refresh the in-memory models cache from upstream API."""
         try:
+            from .payment.models import _update_model_sats_pricing
+            from .payment.price import sats_usd_price
+
             models = await self.fetch_models()
-            self._models_cache = models
-            self._models_by_id = {m.id: m for m in models}
+            models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
+
+            try:
+                sats_to_usd = sats_usd_price()
+                self._models_cache = [
+                    _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
+                ]
+            except Exception:
+                self._models_cache = models_with_fees
+
+            self._models_by_id = {m.id: m for m in self._models_cache}
             logger.info(
                 f"Refreshed models cache for {self.upstream_name or self.base_url}",
                 extra={"model_count": len(models)},
@@ -2021,9 +2114,13 @@ class UpstreamProvider:
 class OpenAIUpstreamProvider(UpstreamProvider):
     """Upstream provider specifically configured for OpenAI API."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, provider_fee: float = 1.01):
         self.upstream_name = "openai"
-        super().__init__(base_url="https://api.openai.com/v1", api_key=api_key)
+        super().__init__(
+            base_url="https://api.openai.com/v1",
+            api_key=api_key,
+            provider_fee=provider_fee,
+        )
 
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'openai/' prefix for OpenAI API compatibility."""
@@ -2038,15 +2135,26 @@ class OpenAIUpstreamProvider(UpstreamProvider):
 class AzureUpstreamProvider(UpstreamProvider):
     """Upstream provider specifically configured for Azure OpenAI Service."""
 
-    def __init__(self, base_url: str, api_key: str, api_version: str):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        api_version: str,
+        provider_fee: float = 1.01,
+    ):
         """Initialize Azure provider with API key and version.
 
         Args:
             base_url: Azure OpenAI endpoint base URL
             api_key: Azure OpenAI API key for authentication
             api_version: Azure OpenAI API version (e.g., "2024-02-15-preview")
+            provider_fee: Provider fee multiplier (default 1.01 for 1% fee)
         """
-        super().__init__(base_url=base_url, api_key=api_key)
+        super().__init__(
+            base_url=base_url,
+            api_key=api_key,
+            provider_fee=provider_fee,
+        )
         self.api_version = api_version
 
     def prepare_params(
@@ -2070,14 +2178,19 @@ class AzureUpstreamProvider(UpstreamProvider):
 class OpenRouterUpstreamProvider(UpstreamProvider):
     """Upstream provider specifically configured for OpenRouter API."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, provider_fee: float = 1.06):
         """Initialize OpenRouter provider with API key.
 
         Args:
             api_key: OpenRouter API key for authentication
+            provider_fee: Provider fee multiplier (default 1.06 for 6% fee)
         """
         self.upstream_name = "openrouter"
-        super().__init__(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+        super().__init__(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            provider_fee=provider_fee,
+        )
 
     async def fetch_models(self) -> list[Model]:
         """Fetch all OpenRouter models."""

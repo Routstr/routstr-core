@@ -3,6 +3,7 @@ import math
 from pydantic.v1 import BaseModel
 
 from ..core import get_logger
+from ..core.db import AsyncSession
 from ..core.settings import settings
 
 logger = get_logger(__name__)
@@ -25,7 +26,7 @@ class CostDataError(BaseModel):
 
 
 async def calculate_cost(
-    response_data: dict, max_cost: int, session: object | None = None
+    response_data: dict, max_cost: int, session: AsyncSession
 ) -> CostData | MaxCostData | CostDataError:
     """
     Calculate the cost of an API request based on token usage.
@@ -81,7 +82,9 @@ async def calculate_cost(
         from ..upstream import get_model_with_override
 
         upstreams = get_upstreams()
-        model_obj = await get_model_with_override(response_model, upstreams)
+        model_obj = await get_model_with_override(
+            response_model, upstreams, session=session
+        )
 
         if not model_obj:
             logger.error(

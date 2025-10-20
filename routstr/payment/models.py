@@ -13,7 +13,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ..core.db import ModelRow, create_session, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
-from .price import sats_usd_ask_price
+from .price import sats_usd_price
 
 logger = get_logger(__name__)
 
@@ -201,45 +201,55 @@ def load_models() -> list[Model]:
     return [Model(**model) for model in models_data]  # type: ignore
 
 
-def _row_to_model(row: ModelRow) -> Model:
+def _row_to_model(
+    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+) -> Model:
     architecture = json.loads(row.architecture)
     pricing = json.loads(row.pricing)
-    sats_pricing = json.loads(row.sats_pricing) if row.sats_pricing else None
     per_request_limits = (
         json.loads(row.per_request_limits) if row.per_request_limits else None
     )
-    top_provider = json.loads(row.top_provider) if row.top_provider else None
+    top_provider_dict = json.loads(row.top_provider) if row.top_provider else None
 
-    # Enforce minimum per-request fee on free/zero-priced models in API output
-    try:
-        if isinstance(pricing, dict):
-            if float(pricing.get("request", 0.0)) <= 0.0:
-                pricing["request"] = max(pricing.get("request", 0.0), 0.0)
-        if isinstance(sats_pricing, dict):
-            if float(sats_pricing.get("request", 0.0)) <= 0.0:
-                # Convert min_request_msat to sats for sats_pricing fields that are in sats
-                sats_min = max(1, int(settings.min_request_msat)) / 1000.0
-                sats_pricing["request"] = max(
-                    sats_pricing.get("request", 0.0), sats_min
-                )
-    except Exception:
-        pass
+    if apply_provider_fee and isinstance(pricing, dict):
+        pricing = {k: float(v) * provider_fee for k, v in pricing.items()}
 
-    return Model(
+    if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
+        pricing["request"] = max(pricing.get("request", 0.0), 0.0)
+
+    parsed_pricing = Pricing.parse_obj(pricing)
+    model = Model(
         id=row.id,
         name=row.name,
         created=row.created,
         description=row.description,
         context_length=row.context_length,
         architecture=Architecture.parse_obj(architecture),
-        pricing=Pricing.parse_obj(pricing),
-        sats_pricing=Pricing.parse_obj(sats_pricing) if sats_pricing else None,
+        pricing=parsed_pricing,
+        sats_pricing=None,
         per_request_limits=per_request_limits,
-        top_provider=TopProvider.parse_obj(top_provider) if top_provider else None,
+        top_provider=TopProvider.parse_obj(top_provider_dict)
+        if top_provider_dict
+        else None,
         enabled=row.enabled,
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
     )
+
+    if apply_provider_fee:
+        (
+            parsed_pricing.max_prompt_cost,
+            parsed_pricing.max_completion_cost,
+            parsed_pricing.max_cost,
+        ) = _calculate_usd_max_costs(model)
+
+    try:
+        sats_to_usd = sats_usd_price()
+        model = _update_model_sats_pricing(model, sats_to_usd)
+    except Exception as e:
+        logger.warning(f"Could not calculate sats pricing: {e}")
+
+    return model
 
 
 def _model_to_row_payload(model: Model) -> dict[str, str | int | bool | None]:
@@ -266,11 +276,13 @@ def _model_to_row_payload(model: Model) -> dict[str, str | int | bool | None]:
 
 
 async def list_models(
-    session: AsyncSession | None = None,
-    upstream_id: int | None = None,
+    session: AsyncSession,
+    upstream_id: int,
     include_disabled: bool = False,
 ) -> list[Model]:
     from sqlmodel import select
+
+    from ..core.db import UpstreamProviderRow
 
     query = select(ModelRow)
     if upstream_id is not None:
@@ -278,21 +290,86 @@ async def list_models(
     if not include_disabled:
         query = query.where(ModelRow.enabled)
 
-    if session is not None:
-        return [_row_to_model(r) for r in (await session.exec(query)).all()]  # type: ignore
-    async with create_session() as s:
-        return [_row_to_model(r) for r in (await s.exec(query)).all()]  # type: ignore
+    rows = (await session.exec(query)).all()  # type: ignore
+    provider_result = await session.exec(select(UpstreamProviderRow))
+    providers_by_id = {p.id: p for p in provider_result.all()}
+    return [
+        _row_to_model(
+            r,
+            apply_provider_fee=True,
+            provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
+            if r.upstream_provider_id in providers_by_id
+            else 1.01,
+        )
+        for r in rows
+    ]
 
 
 async def get_model_by_id(
-    model_id: str, session: AsyncSession | None = None
+    model_id: str, provider_id: int, session: AsyncSession
 ) -> Model | None:
-    if session is not None:
-        row = await session.get(ModelRow, model_id)
-        return _row_to_model(row) if row and row.enabled else None
-    async with create_session() as s:
-        row = await s.get(ModelRow, model_id)
-        return _row_to_model(row) if row and row.enabled else None
+    from ..core.db import UpstreamProviderRow
+
+    row = await session.get(ModelRow, (model_id, provider_id))
+    if not row or not row.enabled:
+        return None
+    provider = await session.get(UpstreamProviderRow, provider_id)
+    provider_fee = provider.provider_fee if provider else 1.01
+    return _row_to_model(row, apply_provider_fee=True, provider_fee=provider_fee)
+
+
+def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
+    """Calculate max costs in USD based on model context/token limits.
+
+    Args:
+        model: Model object
+
+    Returns:
+        Tuple of (max_prompt_cost, max_completion_cost, max_cost) in USD
+    """
+    min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
+    min_req_usd = float(min_req_msat) / 1_000_000.0
+
+    prompt_price = model.pricing.prompt
+    completion_price = model.pricing.completion
+
+    if model.top_provider and (
+        model.top_provider.context_length or model.top_provider.max_completion_tokens
+    ):
+        if (cl := model.top_provider.context_length) and (
+            mct := model.top_provider.max_completion_tokens
+        ):
+            return (
+                (cl - mct) * prompt_price,
+                mct * completion_price,
+                (cl - mct) * prompt_price + mct * completion_price,
+            )
+        elif cl := model.top_provider.context_length:
+            return (
+                cl * 0.8 * prompt_price,
+                cl * 0.2 * completion_price,
+                cl * prompt_price,
+            )
+        elif mct := model.top_provider.max_completion_tokens:
+            return (
+                mct * 4 * prompt_price,
+                mct * completion_price,
+                mct * 5 * prompt_price,
+            )
+    elif model.context_length:
+        return (
+            model.context_length * 0.8 * prompt_price,
+            model.context_length * 0.2 * completion_price,
+            model.context_length * prompt_price,
+        )
+
+    p = prompt_price * 1_000_000
+    c = completion_price * 32_000
+    r = model.pricing.request * 100_000
+    i = model.pricing.image * 100
+    w = model.pricing.web_search * 1000
+    ir = model.pricing.internal_reasoning * 100
+    return (p, c, max(p + c + r + i + w + ir, min_req_usd))
 
 
 def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
@@ -306,59 +383,15 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
         Updated Model object with new sats_pricing
     """
     try:
+        min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
+        min_req_sats = float(min_req_msat) / 1000.0
+
         sats = Pricing.parse_obj(
             {k: v / sats_to_usd for k, v in model.pricing.dict().items()}
         )
 
-        min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
-        min_req_sats = float(min_req_msat) / 1000.0
         if sats.request <= 0.0:
             sats.request = min_req_sats
-
-        mspp = sats.prompt
-        mspc = sats.completion
-
-        if model.top_provider and (
-            model.top_provider.context_length
-            or model.top_provider.max_completion_tokens
-        ):
-            if (cl := model.top_provider.context_length) and (
-                mct := model.top_provider.max_completion_tokens
-            ):
-                max_prompt_cost = (cl - mct) * mspp
-                max_completion_cost = mct * mspc
-                sats.max_prompt_cost = max_prompt_cost
-                sats.max_completion_cost = max_completion_cost
-                sats.max_cost = max_prompt_cost + max_completion_cost
-            elif cl := model.top_provider.context_length:
-                max_prompt_cost = cl * 0.8 * mspp
-                max_completion_cost = cl * 0.2 * mspc
-                sats.max_prompt_cost = max_prompt_cost
-                sats.max_completion_cost = max_completion_cost
-                sats.max_cost = max_prompt_cost + max_completion_cost
-            elif mct := model.top_provider.max_completion_tokens:
-                max_prompt_cost = mct * 4 * mspp
-                max_completion_cost = mct * mspc
-                sats.max_prompt_cost = max_prompt_cost
-                sats.max_completion_cost = max_completion_cost
-                sats.max_cost = max_prompt_cost + max_completion_cost
-        elif model.context_length:
-            max_prompt_cost = mspp * model.context_length * 0.8
-            max_completion_cost = mspc * model.context_length * 0.2
-            sats.max_prompt_cost = max_prompt_cost
-            sats.max_completion_cost = max_completion_cost
-            sats.max_cost = max_prompt_cost + max_completion_cost
-        else:
-            p = mspp * 1_000_000
-            c = mspc * 32_000
-            r = sats.request * 100_000
-            i = sats.image * 100
-            w = sats.web_search * 1000
-            ir = sats.internal_reasoning * 100
-            sats.max_prompt_cost = p
-            sats.max_completion_cost = c
-            sats.max_cost = p + c + r + i + w + ir
-
         if (sats.max_cost or 0.0) < min_req_sats:
             sats.max_cost = min_req_sats
 
@@ -373,6 +406,9 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             sats_pricing=sats,
             per_request_limits=model.per_request_limits,
             top_provider=model.top_provider,
+            enabled=model.enabled,
+            upstream_provider_id=model.upstream_provider_id,
+            canonical_slug=model.canonical_slug,
         )
     except Exception as e:
         logger.error(
@@ -438,14 +474,13 @@ async def ensure_models_bootstrapped() -> None:
 
 
 async def _update_sats_pricing_once() -> None:
-    """Update sats pricing once for all provider models and database overrides."""
+    """Update sats pricing once for all provider models (in-memory only)."""
     from ..proxy import get_upstreams
 
-    sats_to_usd = await sats_usd_ask_price()
     upstreams = get_upstreams()
+    sats_to_usd = sats_usd_price()
 
     updated_count = 0
-
     for upstream in upstreams:
         updated_models = [
             _update_model_sats_pricing(m, sats_to_usd)
@@ -455,103 +490,8 @@ async def _update_sats_pricing_once() -> None:
         upstream._models_by_id = {m.id: m for m in updated_models}
         updated_count += len(updated_models)
 
-    async with create_session() as s:
-        result = await s.exec(
-            select(ModelRow).where(ModelRow.upstream_provider_id.isnot(None))  # type: ignore
-        )  # type: ignore
-        rows = result.all()
-        changed = 0
-        for row in rows:
-            try:
-                pricing = Pricing.parse_obj(json.loads(row.pricing))
-                top_provider = (
-                    TopProvider.parse_obj(json.loads(row.top_provider))
-                    if row.top_provider
-                    else None
-                )
-                sats = Pricing.parse_obj(
-                    {k: v / sats_to_usd for k, v in pricing.dict().items()}
-                )
-                min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
-                min_req_sats = float(min_req_msat) / 1000.0
-                if sats.request <= 0.0:
-                    sats.request = min_req_sats
-                mspp = sats.prompt
-                mspc = sats.completion
-                if top_provider and (
-                    top_provider.context_length or top_provider.max_completion_tokens
-                ):
-                    if (cl := top_provider.context_length) and (
-                        mct := top_provider.max_completion_tokens
-                    ):
-                        max_prompt_cost = (cl - mct) * mspp
-                        max_completion_cost = mct * mspc
-                        sats.max_prompt_cost = max_prompt_cost
-                        sats.max_completion_cost = max_completion_cost
-                        sats.max_cost = max_prompt_cost + max_completion_cost
-                    elif cl := top_provider.context_length:
-                        max_prompt_cost = cl * 0.8 * mspp
-                        max_completion_cost = cl * 0.2 * mspc
-                        sats.max_prompt_cost = max_prompt_cost
-                        sats.max_completion_cost = max_completion_cost
-                        sats.max_cost = max_prompt_cost + max_completion_cost
-                    elif mct := top_provider.max_completion_tokens:
-                        max_prompt_cost = mct * 4 * mspp
-                        max_completion_cost = mct * mspc
-                        sats.max_prompt_cost = max_prompt_cost
-                        sats.max_completion_cost = max_completion_cost
-                        sats.max_cost = max_prompt_cost + max_completion_cost
-                    else:
-                        max_prompt_cost = 1_000_000 * mspp
-                        max_completion_cost = 32_000 * mspc
-                        sats.max_prompt_cost = max_prompt_cost
-                        sats.max_completion_cost = max_completion_cost
-                        sats.max_cost = max_prompt_cost + max_completion_cost
-                elif row.context_length:
-                    max_prompt_cost = mspp * row.context_length * 0.8
-                    max_completion_cost = mspc * row.context_length * 0.2
-                    sats.max_prompt_cost = max_prompt_cost
-                    sats.max_completion_cost = max_completion_cost
-                    sats.max_cost = max_prompt_cost + max_completion_cost
-                else:
-                    p = mspp * 1_000_000
-                    c = mspc * 32_000
-                    r = sats.request * 100_000
-                    i = sats.image * 100
-                    w = sats.web_search * 1000
-                    ir = sats.internal_reasoning * 100
-                    sats.max_prompt_cost = p
-                    sats.max_completion_cost = c
-                    sats.max_cost = p + c + r + i + w + ir
-
-                if (sats.max_cost or 0.0) < min_req_sats:
-                    sats.max_cost = min_req_sats
-
-                new_json = json.dumps(sats.dict())
-                if row.sats_pricing != new_json:
-                    row.sats_pricing = new_json
-                    s.add(row)
-                    changed += 1
-            except Exception as per_row_error:
-                logger.error(
-                    "Failed to update pricing for model",
-                    extra={
-                        "model_id": row.id,
-                        "error": str(per_row_error),
-                        "error_type": type(per_row_error).__name__,
-                    },
-                )
-        if changed:
-            await s.commit()
-
-    if updated_count > 0 or changed > 0:
-        logger.info(
-            "Updated sats pricing",
-            extra={
-                "provider_models_updated": updated_count,
-                "database_overrides_updated": changed,
-            },
-        )
+    if updated_count > 0:
+        logger.info("Updated sats pricing", extra={"models_updated": updated_count})
 
 
 async def update_sats_pricing() -> None:

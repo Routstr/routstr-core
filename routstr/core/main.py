@@ -14,6 +14,7 @@ from ..payment.models import (
     models_router,
     update_sats_pricing,
 )
+from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..wallet import periodic_payout
 from .admin import admin_router
@@ -35,6 +36,7 @@ __version__ = "0.2.0-dev"
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Application startup initiated", extra={"version": __version__})
 
+    btc_price_task = None
     pricing_task = None
     payout_task = None
     nip91_task = None
@@ -65,11 +67,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             pass
 
         # await ensure_models_bootstrapped()
-        await initialize_upstreams()
 
+        from ..payment.price import _update_prices
         from ..proxy import get_upstreams
         from ..upstream import refresh_upstreams_models_periodically
 
+        await _update_prices()
+        await initialize_upstreams()
+
+        btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
         if global_settings.models_refresh_interval_seconds > 0:
             models_refresh_task = asyncio.create_task(
@@ -91,6 +97,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         logger.info("Application shutdown initiated")
 
+        if btc_price_task is not None:
+            btc_price_task.cancel()
         if pricing_task is not None:
             pricing_task.cancel()
         if payout_task is not None:
@@ -106,6 +114,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         try:
             tasks_to_wait = []
+            if btc_price_task is not None:
+                tasks_to_wait.append(btc_price_task)
             if pricing_task is not None:
                 tasks_to_wait.append(pricing_task)
             if payout_task is not None:

@@ -84,7 +84,7 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
 
 async def get_max_cost_for_model(
     model: str,
-    session: AsyncSession | None = None,
+    session: AsyncSession,
     model_obj: Any | None = None,
 ) -> int:
     """Get the maximum cost for a specific model from providers with overrides."""
@@ -109,7 +109,7 @@ async def get_max_cost_for_model(
         from ..upstream import get_model_with_override
 
         upstreams = get_upstreams()
-        model_obj = await get_model_with_override(model, upstreams)
+        model_obj = await get_model_with_override(model, upstreams, session)
 
     if not model_obj:
         fallback_msats = settings.fixed_cost_per_request * 1000
@@ -152,10 +152,10 @@ async def get_max_cost_for_model(
 
 
 async def calculate_discounted_max_cost(
-    max_cost_for_model: int, body: dict, session: AsyncSession | None = None
+    max_cost_for_model: int, body: dict, session: AsyncSession
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available."""
-    if settings.fixed_pricing or session is None:
+    if settings.fixed_pricing:
         return max_cost_for_model
 
     model = body.get("model", "unknown")
@@ -215,9 +215,7 @@ def estimate_tokens(messages: list) -> int:
     return len(str(messages)) // 3
 
 
-async def get_model_cost_info(
-    model_id: str, session: AsyncSession | None = None
-) -> Pricing | None:
+async def get_model_cost_info(model_id: str, session: AsyncSession) -> Pricing | None:
     """Get model pricing info from providers with database overrides."""
     if not model_id or model_id == "unknown":
         return None
@@ -226,7 +224,7 @@ async def get_model_cost_info(
     from ..upstream import get_model_with_override
 
     upstreams = get_upstreams()
-    model_obj = await get_model_with_override(model_id, upstreams)
+    model_obj = await get_model_with_override(model_id, upstreams, session)
 
     if model_obj and model_obj.sats_pricing:
         return model_obj.sats_pricing

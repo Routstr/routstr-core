@@ -55,6 +55,9 @@ class ApiKey(SQLModel, table=True):  # type: ignore
 class ModelRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "models"
     id: str = Field(primary_key=True)
+    upstream_provider_id: int = Field(
+        primary_key=True, foreign_key="upstream_providers.id", ondelete="CASCADE"
+    )
     name: str = Field()
     created: int = Field()
     description: str = Field()
@@ -65,9 +68,6 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     per_request_limits: str | None = Field(default=None)
     top_provider: str | None = Field(default=None)
     enabled: bool = Field(default=True, description="Whether this model is enabled")
-    upstream_provider_id: int | None = Field(
-        default=None, foreign_key="upstream_providers.id"
-    )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
@@ -75,7 +75,7 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     id: int | None = Field(default=None, primary_key=True)
     provider_type: str = Field(
-        description="Provider type: generic, openai, azure, openrouter"
+        description="Provider type: custom, openai, azure, openrouter"
     )
     base_url: str = Field(unique=True, description="Base URL of the upstream API")
     api_key: str = Field(description="API key for the upstream provider")
@@ -83,7 +83,13 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         default=None, description="API version for Azure OpenAI"
     )
     enabled: bool = Field(default=True, description="Whether this provider is enabled")
-    models: list["ModelRow"] = Relationship(back_populates="upstream_provider")
+    provider_fee: float = Field(
+        default=1.01, description="Provider fee multiplier (default 1%)"
+    )
+    models: list["ModelRow"] = Relationship(
+        back_populates="upstream_provider",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
 
 
 async def balances_for_mint_and_unit(

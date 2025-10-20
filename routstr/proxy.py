@@ -7,7 +7,14 @@ from sqlmodel import select
 
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
-from .core.db import ApiKey, AsyncSession, ModelRow, create_session, get_session
+from .core.db import (
+    ApiKey,
+    AsyncSession,
+    ModelRow,
+    UpstreamProviderRow,
+    create_session,
+    get_session,
+)
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -82,8 +89,19 @@ async def refresh_model_maps() -> None:
     async with create_session() as session:
         result = await session.exec(select(ModelRow).where(ModelRow.enabled))
         override_rows = result.all()
-        overrides_by_id = {
-            row.id: row for row in override_rows if row.upstream_provider_id is not None
+
+        provider_result = await session.exec(select(UpstreamProviderRow))
+        providers_by_id = {p.id: p for p in provider_result.all()}
+
+        overrides_by_id: dict[str, tuple[ModelRow, float]] = {
+            row.id: (
+                row,
+                providers_by_id[row.upstream_provider_id].provider_fee
+                if row.upstream_provider_id in providers_by_id
+                else 1.01,
+            )
+            for row in override_rows
+            if row.upstream_provider_id is not None
         }
 
     for upstream in _upstreams:
@@ -99,15 +117,20 @@ async def refresh_model_maps() -> None:
     if openrouter:
         for model in openrouter.get_cached_models():
             if model.enabled:
-                model_to_use = (
-                    _row_to_model(overrides_by_id[model.id])
-                    if model.id in overrides_by_id
-                    else model
-                )
+                if model.id in overrides_by_id:
+                    override_row, provider_fee = overrides_by_id[model.id]
+                    model_to_use = _row_to_model(
+                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    )
+                else:
+                    model_to_use = model
                 base_id = get_base_model_id(model_to_use.id)
                 if base_id not in unique_models:
-                    unique_models[base_id] = model_to_use
-                for alias in resolve_model_alias(model.id, model_to_use.canonical_slug):
+                    unique_model = model_to_use.copy(update={"id": base_id})
+                    unique_models[base_id] = unique_model
+                for alias in resolve_model_alias(
+                    model_to_use.id, model_to_use.canonical_slug
+                ):
                     model_instances[alias] = model_to_use
                     provider_map[alias] = openrouter
 
@@ -115,18 +138,23 @@ async def refresh_model_maps() -> None:
         upstream_prefix = getattr(upstream, "upstream_name", None)
         for model in upstream.get_cached_models():
             if model.enabled:
-                model_to_use = (
-                    _row_to_model(overrides_by_id[model.id])
-                    if model.id in overrides_by_id
-                    else model
-                )
+                if model.id in overrides_by_id:
+                    override_row, provider_fee = overrides_by_id[model.id]
+                    model_to_use = _row_to_model(
+                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    )
+                else:
+                    model_to_use = model
                 base_id = get_base_model_id(model_to_use.id)
-                unique_models[base_id] = model_to_use
+                unique_model = model_to_use.copy(update={"id": base_id})
+                unique_models[base_id] = unique_model
 
-                aliases = resolve_model_alias(model.id, model_to_use.canonical_slug)
+                aliases = resolve_model_alias(
+                    model_to_use.id, model_to_use.canonical_slug
+                )
 
-                if upstream_prefix and "/" not in model.id:
-                    prefixed_id = f"{upstream_prefix}/{model.id}"
+                if upstream_prefix and "/" not in model_to_use.id:
+                    prefixed_id = f"{upstream_prefix}/{model_to_use.id}"
                     if prefixed_id not in aliases:
                         aliases.append(prefixed_id)
 
