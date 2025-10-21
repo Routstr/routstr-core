@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,14 +26,31 @@ logger = get_logger(__name__)
 
 admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
+admin_sessions: dict[str, int] = {}
+ADMIN_SESSION_DURATION = 3600
+
 
 def require_admin_api(request: Request) -> None:
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        expiry = admin_sessions.get(token)
+        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
+            return
+    
     admin_cookie = request.cookies.get("admin_password")
     if not admin_cookie or admin_cookie != settings.admin_password:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
 
 def is_admin_authenticated(request: Request) -> bool:
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        expiry = admin_sessions.get(token)
+        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
+            return True
+    
     admin_cookie = request.cookies.get("admin_password")
     return bool(admin_cookie and admin_cookie == settings.admin_password)
 
@@ -184,6 +202,53 @@ async def initial_setup(request: Request, payload: SetupRequest) -> dict[str, ob
         )
     async with create_session() as session:
         await SettingsService.update({"admin_password": pw}, session)
+    return {"ok": True}
+
+
+class AdminLoginRequest(BaseModel):
+    password: str
+
+
+@admin_router.post("/api/login")
+async def admin_login(request: Request, payload: AdminLoginRequest) -> dict[str, object]:
+    try:
+        current = SettingsService.get()
+        admin_pw = current.admin_password
+    except Exception:
+        admin_pw = os.getenv("ADMIN_PASSWORD", "")
+    
+    if not admin_pw:
+        raise HTTPException(status_code=500, detail="Admin password not configured")
+    
+    if payload.password != admin_pw:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    
+    token = secrets.token_urlsafe(32)
+    expiry_timestamp = int(datetime.now(timezone.utc).timestamp()) + ADMIN_SESSION_DURATION
+    admin_sessions[token] = expiry_timestamp
+    
+    expired_tokens = [
+        t for t, exp in admin_sessions.items() 
+        if exp <= int(datetime.now(timezone.utc).timestamp())
+    ]
+    for t in expired_tokens:
+        del admin_sessions[t]
+    
+    return {
+        "ok": True,
+        "token": token,
+        "expires_in": ADMIN_SESSION_DURATION
+    }
+
+
+@admin_router.post("/api/logout", dependencies=[Depends(require_admin_api)])
+async def admin_logout(request: Request) -> dict[str, object]:
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        if token in admin_sessions:
+            del admin_sessions[token]
+    
     return {"ok": True}
 
 
@@ -1378,6 +1443,198 @@ def models_page() -> str:
     )
 
 
+class ModelCreate(BaseModel):
+    id: str
+    name: str
+    description: str
+    created: int
+    context_length: int
+    architecture: dict[str, object]
+    pricing: dict[str, object]
+    per_request_limits: dict[str, object] | None = None
+    top_provider: dict[str, object] | None = None
+    upstream_provider_id: int | None = None
+    enabled: bool = True
+
+
+class ModelUpdate(BaseModel):
+    id: str
+    name: str
+    description: str
+    created: int
+    context_length: int
+    architecture: dict[str, object]
+    pricing: dict[str, object]
+    per_request_limits: dict[str, object] | None = None
+    top_provider: dict[str, object] | None = None
+    upstream_provider_id: int | None = None
+    enabled: bool = True
+
+
+@admin_router.get("/api/models", dependencies=[Depends(require_admin_api)])
+async def get_all_models() -> list[dict[str, object]]:
+    async with create_session() as session:
+        models = await list_models(session=session, include_disabled=True)
+        return [m.dict() for m in models]
+
+
+@admin_router.get("/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)])
+async def get_model(model_id: str) -> dict[str, object]:
+    async with create_session() as session:
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.id == model_id, 
+                ModelRow.upstream_provider_id.is_(None)
+            )
+        )
+        row = result.first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+        return _row_to_model(row, apply_provider_fee=False).dict()
+
+
+@admin_router.post("/api/models", dependencies=[Depends(require_admin_api)])
+async def create_model(payload: ModelCreate) -> dict[str, object]:
+    async with create_session() as session:
+        exists = await session.get(ModelRow, (payload.id, None))
+        if exists:
+            raise HTTPException(
+                status_code=409, detail="Model with this ID already exists"
+            )
+
+        row = ModelRow(
+            id=payload.id,
+            name=payload.name,
+            description=payload.description,
+            created=int(payload.created),
+            context_length=int(payload.context_length),
+            architecture=json.dumps(payload.architecture),
+            pricing=json.dumps(payload.pricing),
+            sats_pricing=None,
+            per_request_limits=(
+                json.dumps(payload.per_request_limits)
+                if payload.per_request_limits is not None
+                else None
+            ),
+            top_provider=(
+                json.dumps(payload.top_provider) if payload.top_provider else None
+            ),
+            upstream_provider_id=None,
+            enabled=payload.enabled,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+
+    await refresh_model_maps()
+    return _row_to_model(row, apply_provider_fee=False).dict()
+
+
+@admin_router.patch("/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)])
+async def update_model(model_id: str, payload: ModelUpdate) -> dict[str, object]:
+    if payload.id != model_id:
+        raise HTTPException(status_code=400, detail="Path id does not match payload id")
+
+    async with create_session() as session:
+        row = await session.get(ModelRow, (model_id, None))
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        row.name = payload.name
+        row.description = payload.description
+        row.created = int(payload.created)
+        row.context_length = int(payload.context_length)
+        row.architecture = json.dumps(payload.architecture)
+        row.pricing = json.dumps(payload.pricing)
+        row.sats_pricing = None
+        row.per_request_limits = (
+            json.dumps(payload.per_request_limits)
+            if payload.per_request_limits is not None
+            else None
+        )
+        row.top_provider = (
+            json.dumps(payload.top_provider) if payload.top_provider else None
+        )
+        row.enabled = payload.enabled
+
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+
+    await refresh_model_maps()
+    return _row_to_model(row, apply_provider_fee=False).dict()
+
+
+@admin_router.delete("/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)])
+async def delete_model(model_id: str) -> dict[str, object]:
+    async with create_session() as session:
+        row = await session.get(ModelRow, (model_id, None))
+        if not row:
+            raise HTTPException(status_code=404, detail="Model not found")
+        await session.delete(row)
+        await session.commit()
+    await refresh_model_maps()
+    return {"ok": True, "deleted_id": model_id}
+
+
+@admin_router.delete("/api/models", dependencies=[Depends(require_admin_api)])
+async def delete_all_models() -> dict[str, object]:
+    async with create_session() as session:
+        result = await session.exec(
+            select(ModelRow).where(ModelRow.upstream_provider_id.is_(None))
+        )
+        rows = result.all()
+        for row in rows:
+            await session.delete(row)
+        await session.commit()
+    await refresh_model_maps()
+    return {"ok": True, "deleted": len(rows)}
+
+
+class BatchModelsRequest(BaseModel):
+    models: list[ModelCreate]
+
+
+@admin_router.post("/api/models/batch", dependencies=[Depends(require_admin_api)])
+async def batch_add_models(payload: BatchModelsRequest) -> dict[str, object]:
+    async with create_session() as session:
+        created_models = []
+        for model_data in payload.models:
+            exists = await session.get(ModelRow, (model_data.id, None))
+            if exists:
+                continue
+
+            row = ModelRow(
+                id=model_data.id,
+                name=model_data.name,
+                description=model_data.description,
+                created=int(model_data.created),
+                context_length=int(model_data.context_length),
+                architecture=json.dumps(model_data.architecture),
+                pricing=json.dumps(model_data.pricing),
+                sats_pricing=None,
+                per_request_limits=(
+                    json.dumps(model_data.per_request_limits)
+                    if model_data.per_request_limits is not None
+                    else None
+                ),
+                top_provider=(
+                    json.dumps(model_data.top_provider)
+                    if model_data.top_provider
+                    else None
+                ),
+                upstream_provider_id=None,
+                enabled=model_data.enabled,
+            )
+            session.add(row)
+            created_models.append(model_data.id)
+
+        await session.commit()
+
+    await refresh_model_maps()
+    return {"ok": True, "created": len(created_models), "model_ids": created_models}
+
+
 @admin_router.get("/models", response_class=HTMLResponse)
 async def admin_models(request: Request) -> str:
     if is_admin_authenticated(request):
@@ -2280,20 +2537,6 @@ async def admin_upstream_providers(request: Request) -> str:
     return admin_auth()
 
 
-class ModelCreate(BaseModel):
-    id: str
-    name: str
-    description: str
-    created: int
-    context_length: int
-    architecture: dict[str, object]
-    pricing: dict[str, object]
-    per_request_limits: dict[str, object] | None = None
-    top_provider: dict[str, object] | None = None
-    upstream_provider_id: int | None = None
-    enabled: bool = True
-
-
 @admin_router.post(
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
@@ -2361,20 +2604,6 @@ async def get_provider_model(provider_id: int, model_id: str) -> dict[str, objec
         return _row_to_model(
             row, apply_provider_fee=True, provider_fee=provider.provider_fee
         ).dict()  # type: ignore
-
-
-class ModelUpdate(BaseModel):
-    id: str
-    name: str
-    description: str
-    created: int
-    context_length: int
-    architecture: dict[str, object]
-    pricing: dict[str, object]
-    per_request_limits: dict[str, object] | None = None
-    top_provider: dict[str, object] | None = None
-    upstream_provider_id: int | None = None
-    enabled: bool = True
 
 
 @admin_router.patch(

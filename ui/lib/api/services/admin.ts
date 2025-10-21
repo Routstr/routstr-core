@@ -8,6 +8,7 @@ export const UpstreamProviderSchema = z.object({
   api_key: z.string().optional(),
   api_version: z.string().nullable().optional(),
   enabled: z.boolean(),
+  provider_fee: z.number().optional(),
 });
 
 export const CreateUpstreamProviderSchema = z.object({
@@ -16,6 +17,7 @@ export const CreateUpstreamProviderSchema = z.object({
   api_key: z.string(),
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().default(true),
+  provider_fee: z.number().optional(),
 });
 
 export const UpdateUpstreamProviderSchema = z.object({
@@ -24,6 +26,7 @@ export const UpdateUpstreamProviderSchema = z.object({
   api_key: z.string().optional(),
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().optional(),
+  provider_fee: z.number().optional(),
 });
 
 export const AdminModelPricingSchema = z.object({
@@ -269,31 +272,16 @@ export class AdminService {
     };
   }
 
-  static async getAdminModels(): Promise<AdminModel[]> {
-    const models = await apiClient.get<AdminModel[]>('/admin/api/models');
-    return models.map((m) => ({
-      ...m,
-      pricing: this.convertPricingToPerMillionTokens(m.pricing),
-    }));
-  }
-
-  static async getAdminModel(modelId: string): Promise<AdminModel> {
-    const model = await apiClient.get<AdminModel>(
-      `/admin/api/models/${encodeURIComponent(modelId)}`
-    );
-    return {
-      ...model,
-      pricing: this.convertPricingToPerMillionTokens(model.pricing),
-    };
-  }
-
-  static async createAdminModel(data: AdminModel): Promise<AdminModel> {
+  static async createProviderModel(
+    providerId: number,
+    data: AdminModel
+  ): Promise<AdminModel> {
     const payload = {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
     const model = await apiClient.post<AdminModel>(
-      '/admin/api/models',
+      `/admin/api/upstream-providers/${providerId}/models`,
       payload
     );
     return {
@@ -302,7 +290,21 @@ export class AdminService {
     };
   }
 
-  static async updateAdminModel(
+  static async getProviderModel(
+    providerId: number,
+    modelId: string
+  ): Promise<AdminModel> {
+    const model = await apiClient.get<AdminModel>(
+      `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`
+    );
+    return {
+      ...model,
+      pricing: this.convertPricingToPerMillionTokens(model.pricing),
+    };
+  }
+
+  static async updateProviderModel(
+    providerId: number,
     modelId: string,
     data: AdminModel
   ): Promise<AdminModel> {
@@ -311,7 +313,7 @@ export class AdminService {
       pricing: this.convertPricingToPerToken(data.pricing),
     };
     const model = await apiClient.patch<AdminModel>(
-      `/admin/api/models/${encodeURIComponent(modelId)}`,
+      `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`,
       payload
     );
     return {
@@ -320,35 +322,20 @@ export class AdminService {
     };
   }
 
-  static async deleteAdminModel(
+  static async deleteProviderModel(
+    providerId: number,
     modelId: string
   ): Promise<{ ok: boolean; deleted_id: string }> {
     return await apiClient.delete<{ ok: boolean; deleted_id: string }>(
-      `/admin/api/models/${encodeURIComponent(modelId)}`
+      `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`
     );
   }
 
-  static async deleteAllAdminModels(): Promise<{
-    ok: boolean;
-    deleted: string;
-  }> {
-    return await apiClient.delete<{ ok: boolean; deleted: string }>(
-      '/admin/api/models'
-    );
-  }
-
-  static async batchCreateModels(
-    models: AdminModel[]
-  ): Promise<{ created: number; skipped: number }> {
-    const payload = {
-      models: models.map((m) => ({
-        ...m,
-        pricing: this.convertPricingToPerToken(m.pricing),
-      })),
-    };
-    return await apiClient.post<{ created: number; skipped: number }>(
-      '/admin/api/models/batch',
-      payload
+  static async deleteAllProviderModels(
+    providerId: number
+  ): Promise<{ ok: boolean; deleted: number }> {
+    return await apiClient.delete<{ ok: boolean; deleted: number }>(
+      `/admin/api/upstream-providers/${providerId}/models`
     );
   }
 
@@ -450,6 +437,10 @@ export class AdminService {
   static async createModel(
     data: Record<string, unknown>
   ): Promise<AdminModelAsModel> {
+    if (!data.provider_id) {
+      throw new Error('provider_id is required to create a model');
+    }
+
     const pricing = {
       prompt: (data.input_cost as number) / 1000000,
       completion: (data.output_cost as number) / 1000000,
@@ -475,13 +466,12 @@ export class AdminService {
       pricing,
       per_request_limits: null,
       top_provider: null,
-      upstream_provider_id: data.provider_id
-        ? parseInt(data.provider_id as string)
-        : null,
+      upstream_provider_id: parseInt(data.provider_id as string),
       enabled: data.isEnabled !== false,
     };
 
-    const created = await this.createAdminModel(adminModel);
+    const providerId = parseInt(data.provider_id as string);
+    const created = await this.createProviderModel(providerId, adminModel);
     return this.transformAdminModelToModel(created, data.provider as string);
   }
 
@@ -489,51 +479,75 @@ export class AdminService {
     modelId: string,
     data: Record<string, unknown>
   ): Promise<AdminModelAsModel> {
+    if (!data.provider_id) {
+      throw new Error('provider_id is required to update a model');
+    }
+
+    const providerId = parseInt(data.provider_id as string);
+    const existingModel = await this.getProviderModel(providerId, modelId);
+
     const pricing = {
       prompt: (data.input_cost as number) / 1000000,
       completion: (data.output_cost as number) / 1000000,
       request: (data.min_cost_per_request as number) || 0,
+      image: 0,
+      web_search: 0,
+      internal_reasoning: 0,
     };
 
-    const payload: Record<string, unknown> = {
+    const payload: AdminModel = {
+      ...existingModel,
       id: modelId,
       pricing,
     };
 
-    if (data.name) payload.name = data.name;
-    if (data.description) payload.description = data.description;
+    if (data.name) payload.name = data.name as string;
+    if (data.description) payload.description = data.description as string;
     if (data.contextLength !== undefined)
-      payload.context_length = data.contextLength;
-    if (data.provider_id)
-      payload.upstream_provider_id = parseInt(data.provider_id as string);
-    if (data.isEnabled !== undefined) payload.enabled = data.isEnabled;
+      payload.context_length = data.contextLength as number;
+    if (data.isEnabled !== undefined) payload.enabled = data.isEnabled as boolean;
 
-    const updated = await apiClient.post<AdminModel>(
-      '/admin/api/models/update',
-      payload
-    );
-
+    const updated = await this.updateProviderModel(providerId, modelId, payload);
     return this.transformAdminModelToModel(updated, data.provider as string);
   }
 
-  static async deleteModel(modelId: string): Promise<{ message: string }> {
-    await this.deleteAdminModel(modelId);
+  static async deleteModel(
+    modelId: string,
+    providerId?: string
+  ): Promise<{ message: string }> {
+    if (!providerId) {
+      throw new Error('provider_id is required to delete a model');
+    }
+    await this.deleteProviderModel(parseInt(providerId), modelId);
     return { message: 'Model deleted successfully' };
   }
 
-  static async softDeleteModel(modelId: string): Promise<{ message: string }> {
-    await apiClient.post('/admin/api/models/update', {
-      id: modelId,
+  static async softDeleteModel(
+    modelId: string,
+    providerId?: string
+  ): Promise<{ message: string }> {
+    if (!providerId) {
+      throw new Error('provider_id is required to soft delete a model');
+    }
+    const providerIdNum = parseInt(providerId);
+    const model = await this.getProviderModel(providerIdNum, modelId);
+    await this.updateProviderModel(providerIdNum, modelId, {
+      ...model,
       enabled: false,
     });
     return { message: 'Model soft deleted successfully' };
   }
 
   static async deleteModels(
-    modelIds: string[]
+    modelIds: string[],
+    providerId?: string
   ): Promise<{ deleted_count: number; message: string }> {
+    if (!providerId) {
+      throw new Error('provider_id is required to delete models');
+    }
+    const providerIdNum = parseInt(providerId);
     for (const id of modelIds) {
-      await this.deleteAdminModel(id);
+      await this.deleteProviderModel(providerIdNum, id);
     }
     return {
       deleted_count: modelIds.length,
@@ -542,11 +556,19 @@ export class AdminService {
   }
 
   static async softDeleteModels(
-    modelIds: string[]
+    modelIds: string[],
+    providerId?: string
   ): Promise<{ deleted_count: number; message: string }> {
+    if (!providerId) {
+      throw new Error('provider_id is required to soft delete models');
+    }
+    const providerIdNum = parseInt(providerId);
     for (const id of modelIds) {
-      const model = await this.getAdminModel(id);
-      await this.updateAdminModel(id, { ...model, enabled: false });
+      const model = await this.getProviderModel(providerIdNum, id);
+      await this.updateProviderModel(providerIdNum, id, {
+        ...model,
+        enabled: false,
+      });
     }
     return {
       deleted_count: modelIds.length,
@@ -556,22 +578,28 @@ export class AdminService {
 
   static async bulkUpdateModels(
     modelIds: string[],
-    updates: { api_key?: string; url?: string }
+    updates: { api_key?: string; url?: string },
+    providerId?: string
   ): Promise<{
     updated_count: number;
     total_count: number;
     message: string;
     errors: string[];
   }> {
+    if (!providerId) {
+      throw new Error('provider_id is required for bulk updates');
+    }
+
     const errors: string[] = [];
     let updated_count = 0;
+    const providerIdNum = parseInt(providerId);
 
     console.log('Bulk update not implemented, ignoring updates:', updates);
 
     for (const id of modelIds) {
       try {
-        const model = await this.getAdminModel(id);
-        await this.updateAdminModel(id, model);
+        const model = await this.getProviderModel(providerIdNum, id);
+        await this.updateProviderModel(providerIdNum, id, model);
         updated_count++;
       } catch (error: unknown) {
         const errorMessage =
@@ -592,10 +620,16 @@ export class AdminService {
     deleted_count: number;
     message: string;
   }> {
-    const models = await this.getAdminModels();
-    await this.deleteAllAdminModels();
+    const providers = await this.getUpstreamProviders();
+    let totalDeleted = 0;
+
+    for (const provider of providers) {
+      const result = await this.deleteAllProviderModels(provider.id);
+      totalDeleted += result.deleted;
+    }
+
     return {
-      deleted_count: models.length,
+      deleted_count: totalDeleted,
       message: 'All models deleted successfully',
     };
   }
@@ -603,25 +637,25 @@ export class AdminService {
   static async deleteModelsByProvider(
     providerId: string
   ): Promise<{ deleted_count: number; message: string }> {
-    const models = await this.getAdminModels();
-    const providerModels = models.filter(
-      (m) => m.upstream_provider_id === parseInt(providerId)
-    );
-    for (const model of providerModels) {
-      await this.deleteAdminModel(model.id);
-    }
+    const result = await this.deleteAllProviderModels(parseInt(providerId));
     return {
-      deleted_count: providerModels.length,
+      deleted_count: result.deleted,
       message: 'Provider models deleted successfully',
     };
   }
 
   static async restoreModels(
-    modelIds: string[]
+    modelIds: string[],
+    providerId?: string
   ): Promise<{ restored_count: number; message: string }> {
+    if (!providerId) {
+      throw new Error('provider_id is required to restore models');
+    }
+    const providerIdNum = parseInt(providerId);
     for (const id of modelIds) {
-      await apiClient.post('/admin/api/models/update', {
-        id,
+      const model = await this.getProviderModel(providerIdNum, id);
+      await this.updateProviderModel(providerIdNum, id, {
+        ...model,
         enabled: true,
       });
     }
@@ -643,5 +677,15 @@ export class AdminService {
       data
     );
     return { message: 'Refresh not implemented for admin API' };
+  }
+
+  static async getOpenRouterPresets(): Promise<AdminModel[]> {
+    const presets = await apiClient.get<AdminModel[]>(
+      '/admin/api/openrouter-presets'
+    );
+    return presets.map((m) => ({
+      ...m,
+      pricing: this.convertPricingToPerMillionTokens(m.pricing),
+    }));
   }
 }
