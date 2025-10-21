@@ -637,7 +637,9 @@ async def proxy(
         try:
             request_body_dict = json.loads(request_body)
 
-            if "max_tokens" in request_body_dict:
+            if "max_tokens" in request_body_dict and not isinstance(
+                request_body_dict["max_tokens"], int
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail={"error": "max_tokens must be an integer (without quotes)"},
