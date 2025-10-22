@@ -24,8 +24,8 @@ class TestPricingUpdateTask:
         mock_sats_usd = 0.00002  # 1 sat = $0.00002 (BTC at $50,000)
 
         with patch(
-            "routstr.payment.price.sats_usd_ask_price",
-            AsyncMock(return_value=mock_sats_usd),
+            "routstr.payment.price.sats_usd_price",
+            return_value=mock_sats_usd,
         ):
             # Create a test model
             test_model = Model(  # type: ignore[arg-type]
@@ -112,7 +112,7 @@ class TestPricingUpdateTask:
                 raise Exception("Price API error")
             return 0.00002
 
-        with patch("routstr.payment.price.sats_usd_ask_price", mock_price_func):
+        with patch("routstr.payment.price.sats_usd_price", mock_price_func):
             # Test the retry behavior directly
             # First call should fail
             try:
@@ -159,8 +159,8 @@ class TestPricingUpdateTask:
 
         # Initialize pricing once to ensure consistent state
         with patch(
-            "routstr.payment.price.sats_usd_ask_price",
-            AsyncMock(return_value=0.00002),
+            "routstr.payment.price.sats_usd_price",
+            return_value=0.00002,
         ):
             sats_to_usd = 0.00002
             _pdict = {k: v / sats_to_usd for k, v in test_model.pricing.dict().items()}
