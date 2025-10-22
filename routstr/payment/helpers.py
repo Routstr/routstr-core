@@ -9,7 +9,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ..core import get_logger
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
-from .models import Pricing
 
 logger = get_logger(__name__)
 
@@ -152,14 +151,17 @@ async def get_max_cost_for_model(
 
 
 async def calculate_discounted_max_cost(
-    max_cost_for_model: int, body: dict, session: AsyncSession
+    max_cost_for_model: int,
+    body: dict,
+    model_obj: Any | None = None,
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available."""
     if settings.fixed_pricing:
         return max_cost_for_model
 
     model = body.get("model", "unknown")
-    model_pricing = await get_model_cost_info(model, session=session)
+
+    model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
         return max_cost_for_model
 
@@ -213,23 +215,6 @@ async def calculate_discounted_max_cost(
 
 def estimate_tokens(messages: list) -> int:
     return len(str(messages)) // 3
-
-
-async def get_model_cost_info(model_id: str, session: AsyncSession) -> Pricing | None:
-    """Get model pricing info from providers with database overrides."""
-    if not model_id or model_id == "unknown":
-        return None
-
-    from ..proxy import get_upstreams
-    from ..upstream import get_model_with_override
-
-    upstreams = get_upstreams()
-    model_obj = await get_model_with_override(model_id, upstreams, session)
-
-    if model_obj and model_obj.sats_pricing:
-        return model_obj.sats_pricing
-
-    return None
 
 
 def create_error_response(
