@@ -263,13 +263,7 @@ async def proxy(
 
     # Only pay for request if we have request body data (for completions endpoints)
     if request_body_dict:
-        try:
-            await pay_for_request(key, max_cost_for_model, session)
-        except Exception:
-            raise HTTPException(
-                status_code=402,
-                detail={"error": {"type": "payment_error", "code": "payment_error"}},
-            )
+        await pay_for_request(key, max_cost_for_model, session)
 
     # Prepare headers for upstream
     headers = upstream.prepare_headers(dict(request.headers))
