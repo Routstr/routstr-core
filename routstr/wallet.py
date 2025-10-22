@@ -5,6 +5,7 @@ from typing import TypedDict
 from cashu.core.base import Proof, Token
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
+from sqlmodel import col, update
 
 from .core import db, get_logger
 from .core.settings import settings
@@ -124,9 +125,17 @@ async def credit_balance(
             "credit_balance: Updating balance",
             extra={"old_balance": key.balance, "credit_amount": amount},
         )
-        key.balance += amount
-        session.add(key)
+
+        # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
+        stmt = (
+            update(db.ApiKey)
+            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
+            .values(balance=(db.ApiKey.balance) + amount)
+        )
+        await session.exec(stmt)  # type: ignore[call-overload]
         await session.commit()
+        await session.refresh(key)
+
         logger.info(
             "credit_balance: Balance updated successfully",
             extra={"new_balance": key.balance},
