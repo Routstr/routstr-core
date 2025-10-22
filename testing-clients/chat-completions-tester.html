@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Routstr Chat Completions Tester</title>
+        <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .subtitle {
+            color: rgba(255,255,255,0.9);
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 1rem;
+        }
+
+        .card {
+            background: rgba(255,255,255,0.95);
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .card h2 {
+            margin-bottom: 20px;
+            color: #667eea;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+            font-size: 0.95rem;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: border-color 0.3s;
+            font-family: inherit;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 100px;
+            font-family: 'Monaco', 'Courier New', monospace;
+        }
+
+        .form-group small {
+            display: block;
+            margin-top: 5px;
+            color: #6b7280;
+            font-size: 0.85rem;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 14px 28px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            width: 100%;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .response-container {
+            margin-top: 20px;
+        }
+
+        .response-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .response-status {
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .response-status.success {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .response-status.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .response-body {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .response-body pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .copy-btn {
+            background: #374151;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: #4b5563;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .message-list {
+            margin-bottom: 20px;
+        }
+
+        .message-item {
+            background: #f9fafb;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 4px solid #667eea;
+        }
+
+        .message-item.system {
+            border-left-color: #10b981;
+        }
+
+        .message-item.user {
+            border-left-color: #667eea;
+        }
+
+        .message-item.assistant {
+            border-left-color: #f59e0b;
+        }
+
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .message-role {
+            font-weight: 600;
+            text-transform: capitalize;
+            color: #374151;
+        }
+
+        .message-content {
+            color: #1f2937;
+            white-space: pre-wrap;
+        }
+
+        .remove-message-btn {
+            background: #ef4444;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+
+        .add-message-btn {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+
+        .add-message-btn:hover {
+            background: #059669;
+        }
+
+        .curl-preview {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.85rem;
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+
+        .curl-preview pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            color: #6b7280;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.3s;
+        }
+
+        .tab:hover {
+            color: #667eea;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .preset-container {
+            margin-bottom: 20px;
+        }
+
+        .preset-btn {
+            display: inline-block;
+            margin: 5px;
+            padding: 8px 16px;
+            background: #f3f4f6;
+            border: 2px solid #e5e7eb;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.9rem;
+        }
+
+        .preset-btn:hover {
+            background: #e5e7eb;
+            border-color: #667eea;
+        }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Chat Completions Tester</h1>
+            <p class="subtitle">Test your /v1/chat/completions endpoint with Cashu authentication</p>
+            <div class="card">
+                <h2>Configuration</h2>
+                <div class="preset-container">
+                    <strong>Quick Presets:</strong>
+                    <button class="preset-btn" onclick="loadPreset('local')">Local Dev</button>
+                    <button class="preset-btn" onclick="loadPreset('production')">Production</button>
+                    <button class="preset-btn" onclick="loadPreset('example')">Example Token</button>
+                </div>
+                <div class="form-group">
+                    <label for="endpoint">API Endpoint</label>
+                    <input
+                        type="text"
+                        id="endpoint"
+                        placeholder="http://localhost:8000/v1/chat/completions"
+                        value="http://localhost:8000/v1/chat/completions"
+                    >
+                    <small>The full URL to the chat completions endpoint</small>
+                </div>
+                <div class="form-group">
+                    <label for="authToken">Authorization Token</label>
+                    <textarea id="authToken" rows="4" placeholder="cashuBo2FteCJodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2luYXVjc2F0YXSBomFpSABQBVDwSUFGYXCBpGFhBGFzeEBj..."></textarea>
+                    <small>Cashu token (without "Bearer " prefix - will be added automatically)</small>
+                </div>
+            </div>
+            <div class="card">
+                <h2>Request Parameters</h2>
+                <div class="tabs">
+                    <button class="tab active" onclick="switchTab('basic')">Basic</button>
+                    <button class="tab" onclick="switchTab('advanced')">Advanced</button>
+                    <button class="tab" onclick="switchTab('curl')">cURL Preview</button>
+                </div>
+                <div id="basic-tab" class="tab-content active">
+                    <div class="form-group">
+                        <label for="model">Model</label>
+                        <input
+                            type="text"
+                            id="model"
+                            placeholder="gpt-4o-mini"
+                            value="gpt-4o-mini"
+                        >
+                        <small>Model identifier (e.g., gpt-4o-mini, claude-3-haiku-20240307)</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Messages</label>
+                        <div class="message-list" id="messageList"></div>
+                        <button class="add-message-btn" onclick="addMessage()">+ Add Message</button>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="maxTokens">Max Tokens</label>
+                            <input
+                                type="number"
+                                id="maxTokens"
+                                placeholder="16"
+                                value="16"
+                                min="1"
+                            >
+                            <small>Maximum tokens to generate</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="temperature">Temperature</label>
+                            <input
+                                type="number"
+                                id="temperature"
+                                placeholder="1.0"
+                                value="1.0"
+                                min="0"
+                                max="2"
+                                step="0.1"
+                            >
+                            <small>Sampling temperature (0-2)</small>
+                        </div>
+                    </div>
+                </div>
+                <div id="advanced-tab" class="tab-content">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="topP">Top P</label>
+                            <input
+                                type="number"
+                                id="topP"
+                                placeholder="1.0"
+                                value="1.0"
+                                min="0"
+                                max="1"
+                                step="0.1"
+                            >
+                            <small>Nucleus sampling parameter</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="topK">Top K</label>
+                            <input
+                                type="number"
+                                id="topK"
+                                placeholder=""
+                                value=""
+                                min="0"
+                            >
+                            <small>Optional: Top-k sampling parameter</small>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="frequencyPenalty">Frequency Penalty</label>
+                            <input
+                                type="number"
+                                id="frequencyPenalty"
+                                placeholder="0"
+                                value="0"
+                                min="-2"
+                                max="2"
+                                step="0.1"
+                            >
+                            <small>Penalize repeated tokens (-2 to 2)</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="presencePenalty">Presence Penalty</label>
+                            <input
+                                type="number"
+                                id="presencePenalty"
+                                placeholder="0"
+                                value="0"
+                                min="-2"
+                                max="2"
+                                step="0.1"
+                            >
+                            <small>Penalize new topics (-2 to 2)</small>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="stream">Stream Response</label>
+                        <select id="stream">
+                            <option value="false">No (default)</option>
+                            <option value="true">Yes (SSE streaming)</option>
+                        </select>
+                        <small>Enable Server-Sent Events streaming</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="stop">Stop Sequences</label>
+                        <input type="text" id="stop" placeholder='["\\n", "user:"]'>
+                        <small>JSON array of stop sequences</small>
+                    </div>
+                </div>
+                <div id="curl-tab" class="tab-content">
+                    <div class="curl-preview">
+                        <pre id="curlPreview">Click "Send Request" to generate cURL command</pre>
+                    </div>
+                    <button class="copy-btn" onclick="copyCurl()" style="margin-top: 10px;">Copy cURL Command</button>
+                </div>
+                <button class="btn" onclick="sendRequest()" id="sendBtn">Send Request</button>
+            </div>
+            <div class="card" id="responseCard" style="display: none;">
+                <div class="response-header">
+                    <h2>Response</h2>
+                    <div>
+                        <span class="response-status" id="responseStatus"></span>
+                        <button class="copy-btn" onclick="copyResponse()" style="margin-left: 10px;">Copy Response</button>
+                    </div>
+                </div>
+                <div class="loading" id="loading">
+                    <div class="spinner"></div>
+                    <p style="margin-top: 10px; color: #6b7280;">Sending request...</p>
+                </div>
+                <div class="response-body" id="responseBody"></div>
+            </div>
+        </div>
+        <script>
+            let messages = [];
+
+            function switchTab(tabName) {
+                document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+                
+                document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
+                document.getElementById(`${tabName}-tab`).classList.add('active');
+
+                if (tabName === 'curl') {
+                    updateCurlPreview();
+                }
+            }
+
+            function loadPreset(preset) {
+                switch(preset) {
+                    case 'local':
+                        document.getElementById('endpoint').value = 'http://localhost:8000/v1/chat/completions';
+                        break;
+                    case 'production':
+                        document.getElementById('endpoint').value = 'https://your-production-url.com/v1/chat/completions';
+                        break;
+                    case 'example':
+                        document.getElementById('authToken').value = 'cashuBo2FteCJodHRwczovL21pbnQubWluaWJpdHMuY2FzaC9CaXRjb2luYXVjc2F0YXSBomFpSABQBVDwSUFGYXCBpGFhBGFzeEBjMDg1NDgzZDA3Njk0MDkwZDJmMGRkOTg5NmYxMGZmZDk2Y2Q5ODNhZWNlOGYyMmQ0ZmVlMmNhZGZhMGQzMDAyYWNYIQNcxP6wwsZ7_-dY45f-tXt-01xrgjNEVzZczbOmXb77iWFko2FlWCC45YfoOF48khLnTWNG3M-siukLc9I4zAV5awIZnNjbzWFzWCBwYixTGifYTMKSMq5fQEa7OiPqHOihIqYilqQZm60JsmFyWCCXLpDK8gxEPaP4X-QPBzAx3gVdXp-0FiSm3APNIxCA_A';
+                        break;
+                }
+            }
+
+            function addMessage(role = 'user', content = '') {
+                const message = { role, content };
+                messages.push(message);
+                renderMessages();
+            }
+
+            function removeMessage(index) {
+                messages.splice(index, 1);
+                renderMessages();
+            }
+
+            function renderMessages() {
+                const messageList = document.getElementById('messageList');
+                
+                if (messages.length === 0) {
+                    messageList.innerHTML = '<p style="color: #6b7280; padding: 10px;">No messages yet. Click "Add Message" to start.</p>';
+                    return;
+                }
+
+                messageList.innerHTML = messages.map((msg, index) => `
+                    <div class="message-item ${msg.role}">
+                        <div class="message-header">
+                            <select onchange="updateMessageRole(${index}, this.value)" style="border: 1px solid #e5e7eb; padding: 4px 8px; border-radius: 4px;">
+                                <option value="system" ${msg.role === 'system' ? 'selected' : ''}>System</option>
+                                <option value="user" ${msg.role === 'user' ? 'selected' : ''}>User</option>
+                                <option value="assistant" ${msg.role === 'assistant' ? 'selected' : ''}>Assistant</option>
+                            </select>
+                            <button class="remove-message-btn" onclick="removeMessage(${index})">Remove</button>
+                        </div>
+                        <textarea class="message-content" onchange="updateMessageContent(${index}, this.value)" style="width: 100%; min-height: 60px; border: 1px solid #e5e7eb; border-radius: 4px; padding: 8px; font-family: inherit;">${msg.content}</textarea>
+                    </div>
+                `).join('');
+            }
+
+            function updateMessageRole(index, role) {
+                messages[index].role = role;
+                renderMessages();
+            }
+
+            function updateMessageContent(index, content) {
+                messages[index].content = content;
+            }
+
+            function buildRequestBody() {
+                const body = {
+                    model: document.getElementById('model').value,
+                    messages: messages.filter(msg => msg.content.trim() !== '')
+                };
+
+                const maxTokens = parseInt(document.getElementById('maxTokens').value, 10);
+                if (!isNaN(maxTokens) && maxTokens > 0) {
+                    body.max_tokens = maxTokens;
+                }
+
+                const temperature = parseFloat(document.getElementById('temperature').value);
+                if (!isNaN(temperature)) body.temperature = temperature;
+
+                const topP = parseFloat(document.getElementById('topP').value);
+                if (!isNaN(topP)) body.top_p = topP;
+
+                const topK = parseInt(document.getElementById('topK').value, 10);
+                if (!isNaN(topK) && topK > 0) body.top_k = topK;
+
+                const frequencyPenalty = parseFloat(document.getElementById('frequencyPenalty').value);
+                if (!isNaN(frequencyPenalty) && frequencyPenalty !== 0) body.frequency_penalty = frequencyPenalty;
+
+                const presencePenalty = parseFloat(document.getElementById('presencePenalty').value);
+                if (!isNaN(presencePenalty) && presencePenalty !== 0) body.presence_penalty = presencePenalty;
+
+                const stream = document.getElementById('stream').value === 'true';
+                if (stream) body.stream = true;
+
+                const stop = document.getElementById('stop').value.trim();
+                if (stop) {
+                    try {
+                        body.stop = JSON.parse(stop);
+                    } catch (e) {
+                        console.warn('Invalid stop sequences JSON');
+                    }
+                }
+
+                return body;
+            }
+
+            function updateCurlPreview() {
+                const endpoint = document.getElementById('endpoint').value;
+                const token = document.getElementById('authToken').value.trim();
+                const body = buildRequestBody();
+
+                const curlCommand = `curl -i -X POST ${endpoint} \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${token}" \\
+  -d '${JSON.stringify(body, null, 2)}'`;
+
+                document.getElementById('curlPreview').textContent = curlCommand;
+            }
+
+            async function sendRequest() {
+                const endpoint = document.getElementById('endpoint').value.trim();
+                const token = document.getElementById('authToken').value.trim();
+
+                if (!endpoint) {
+                    alert('Please enter an API endpoint');
+                    return;
+                }
+
+                if (!token) {
+                    alert('Please enter an authorization token');
+                    return;
+                }
+
+                if (messages.length === 0 || messages.every(m => m.content.trim() === '')) {
+                    alert('Please add at least one message');
+                    return;
+                }
+
+                const body = buildRequestBody();
+                updateCurlPreview();
+
+                const responseCard = document.getElementById('responseCard');
+                const loading = document.getElementById('loading');
+                const responseBody = document.getElementById('responseBody');
+                const responseStatus = document.getElementById('responseStatus');
+                const sendBtn = document.getElementById('sendBtn');
+
+                responseCard.style.display = 'block';
+                loading.classList.add('active');
+                responseBody.innerHTML = '';
+                sendBtn.disabled = true;
+
+                const stream = document.getElementById('stream').value === 'true';
+
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify(body)
+                    });
+
+                    loading.classList.remove('active');
+
+                    const statusCode = response.status;
+                    const statusText = response.statusText;
+
+                    if (response.ok) {
+                        responseStatus.textContent = `${statusCode} ${statusText}`;
+                        responseStatus.className = 'response-status success';
+                    } else {
+                        responseStatus.textContent = `${statusCode} ${statusText}`;
+                        responseStatus.className = 'response-status error';
+                    }
+
+                    if (stream && response.ok) {
+                        responseBody.innerHTML = '<pre>Streaming response:\n\n</pre>';
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        
+                        while (true) {
+                            const {done, value} = await reader.read();
+                            if (done) break;
+                            
+                            const chunk = decoder.decode(value);
+                            responseBody.querySelector('pre').textContent += chunk;
+                        }
+                    } else {
+                        const responseData = await response.text();
+                        
+                        try {
+                            const jsonData = JSON.parse(responseData);
+                            responseBody.innerHTML = `<pre>${JSON.stringify(jsonData, null, 2)}</pre>`;
+                        } catch (e) {
+                            responseBody.innerHTML = `<pre>${responseData}</pre>`;
+                        }
+                    }
+                } catch (error) {
+                    loading.classList.remove('active');
+                    responseStatus.textContent = 'Error';
+                    responseStatus.className = 'response-status error';
+                    responseBody.innerHTML = `<pre>Error: ${error.message}</pre>`;
+                } finally {
+                    sendBtn.disabled = false;
+                }
+            }
+
+            function copyResponse() {
+                const responseText = document.getElementById('responseBody').innerText;
+                navigator.clipboard.writeText(responseText).then(() => {
+                    const btn = event.target;
+                    const originalText = btn.textContent;
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => btn.textContent = originalText, 2000);
+                });
+            }
+
+            function copyCurl() {
+                updateCurlPreview();
+                const curlText = document.getElementById('curlPreview').textContent;
+                navigator.clipboard.writeText(curlText).then(() => {
+                    const btn = event.target;
+                    const originalText = btn.textContent;
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => btn.textContent = originalText, 2000);
+                });
+            }
+
+            addMessage('user', 'what is cashubtc');
+        </script>
+    </body>
+</html>
