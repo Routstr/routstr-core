@@ -21,6 +21,7 @@ from .core import get_logger
 from .core.db import ApiKey, AsyncSession, ModelRow, UpstreamProviderRow, create_session
 from .payment.helpers import create_error_response
 from .payment.models import Model, async_fetch_openrouter_models
+from .upstreams import OllamaUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -323,6 +324,24 @@ async def _seed_providers_from_settings(
             )
             seeded_base_urls.add(base_url)
 
+    ollama_base_url = os.environ.get("OLLAMA_BASE_URL")
+    if ollama_base_url:
+        result = await session.exec(
+            select(UpstreamProviderRow).where(
+                UpstreamProviderRow.base_url == ollama_base_url
+            )
+        )
+        if not result.first():
+            providers_to_add.append(
+                UpstreamProviderRow(
+                    provider_type="ollama",
+                    base_url=ollama_base_url,
+                    api_key=os.environ.get("OLLAMA_API_KEY", ""),
+                    enabled=True,
+                )
+            )
+            seeded_base_urls.add(ollama_base_url)
+
     if settings.chat_completions_api_version and settings.upstream_base_url:
         base_url = settings.upstream_base_url
         if base_url not in seeded_base_urls:
@@ -432,6 +451,10 @@ def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider
         elif provider_row.provider_type == "openrouter":
             return OpenRouterUpstreamProvider(
                 provider_row.api_key, provider_row.provider_fee
+            )
+        elif provider_row.provider_type == "ollama":
+            return OllamaUpstreamProvider(
+                provider_row.base_url, provider_row.api_key, provider_row.provider_fee
             )
         elif provider_row.provider_type == "custom":
             return UpstreamProvider(

@@ -187,6 +187,7 @@ export default function ProvidersPage() {
       openai: 'https://api.openai.com/v1',
       anthropic: 'https://api.anthropic.com/v1',
       azure: '',
+      ollama: 'http://localhost:11434',
       generic: '',
     };
     return defaults[type] || '';
@@ -261,6 +262,7 @@ export default function ProvidersPage() {
                           <SelectItem value='openai'>OpenAI</SelectItem>
                           <SelectItem value='anthropic'>Anthropic</SelectItem>
                           <SelectItem value='azure'>Azure OpenAI</SelectItem>
+                          <SelectItem value='ollama'>Ollama</SelectItem>
                           <SelectItem value='generic'>Generic</SelectItem>
                         </SelectContent>
                       </Select>
@@ -475,18 +477,18 @@ export default function ProvidersPage() {
                               </div>
                             ) : providerModels &&
                               viewingModels === provider.id ? (
-                              <Tabs defaultValue='db' className='w-full'>
+                              <Tabs defaultValue='remote' className='w-full'>
                                 <TabsList className='grid w-full grid-cols-2'>
-                                  <TabsTrigger value='db'>
-                                    Database Models
-                                    <Badge variant='secondary' className='ml-2'>
-                                      {providerModels.db_models.length}
-                                    </Badge>
-                                  </TabsTrigger>
                                   <TabsTrigger value='remote'>
                                     Remote Models
                                     <Badge variant='secondary' className='ml-2'>
                                       {providerModels.remote_models.length}
+                                    </Badge>
+                                  </TabsTrigger>
+                                  <TabsTrigger value='db'>
+                                    Database Models
+                                    <Badge variant='secondary' className='ml-2'>
+                                      {providerModels.db_models.length}
                                     </Badge>
                                   </TabsTrigger>
                                 </TabsList>
@@ -612,6 +614,7 @@ export default function ProvidersPage() {
                     <SelectItem value='openai'>OpenAI</SelectItem>
                     <SelectItem value='anthropic'>Anthropic</SelectItem>
                     <SelectItem value='azure'>Azure OpenAI</SelectItem>
+                    <SelectItem value='ollama'>Ollama</SelectItem>
                     <SelectItem value='generic'>Generic</SelectItem>
                   </SelectContent>
                 </Select>
