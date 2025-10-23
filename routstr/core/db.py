@@ -75,7 +75,7 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     id: int | None = Field(default=None, primary_key=True)
     provider_type: str = Field(
-        description="Provider type: custom, openai, azure, openrouter"
+        description="Provider type: custom, openai, anthropic, azure, openrouter, etc."
     )
     base_url: str = Field(unique=True, description="Base URL of the upstream API")
     api_key: str = Field(description="API key for the upstream provider")
