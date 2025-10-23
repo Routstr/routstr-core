@@ -33,3 +33,4 @@ logs/*
 # deployment
 proof_backups
 
+*.todo

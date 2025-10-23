@@ -361,6 +361,15 @@ async def _seed_providers_from_settings(
                             enabled=True,
                         )
                     )
+                elif "api.anthropic.com" in base_url.lower():
+                    providers_to_add.append(
+                        UpstreamProviderRow(
+                            provider_type="anthropic",
+                            base_url=base_url,
+                            api_key=settings.upstream_api_key,
+                            enabled=True,
+                        )
+                    )
                 elif "openrouter.ai/api/v1" in base_url.lower():
                     providers_to_add.append(
                         UpstreamProviderRow(
@@ -401,6 +410,10 @@ def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider
     try:
         if provider_row.provider_type == "openai":
             return OpenAIUpstreamProvider(
+                provider_row.api_key, provider_row.provider_fee
+            )
+        elif provider_row.provider_type == "anthropic":
+            return AnthropicUpstreamProvider(
                 provider_row.api_key, provider_row.provider_fee
             )
         elif provider_row.provider_type == "azure":
@@ -2129,6 +2142,27 @@ class OpenAIUpstreamProvider(UpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch OpenAI models from OpenRouter API filtered by openai source."""
         models_data = await async_fetch_openrouter_models(source_filter="openai")
+        return [Model(**model) for model in models_data]  # type: ignore
+
+
+class AnthropicUpstreamProvider(UpstreamProvider):
+    """Upstream provider specifically configured for Anthropic API."""
+
+    def __init__(self, api_key: str, provider_fee: float = 1.01):
+        self.upstream_name = "anthropic"
+        super().__init__(
+            base_url="https://api.anthropic.com/v1",
+            api_key=api_key,
+            provider_fee=provider_fee,
+        )
+
+    def transform_model_name(self, model_id: str) -> str:
+        """Strip 'anthropic/' prefix for Anthropic API compatibility."""
+        return model_id.removeprefix("anthropic/")
+
+    async def fetch_models(self) -> list[Model]:
+        """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
+        models_data = await async_fetch_openrouter_models(source_filter="anthropic")
         return [Model(**model) for model in models_data]  # type: ignore
 
 

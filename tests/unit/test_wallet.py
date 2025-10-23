@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from routstr.core.db import ApiKey
 from routstr.wallet import credit_balance, get_balance, recieve_token, send_token
 
 
@@ -82,7 +83,14 @@ async def test_credit_balance() -> None:
 
     mock_key = Mock()
     mock_key.balance = 5000000
+    mock_key.hashed_key = "test_hash"
     mock_session = AsyncMock()
+
+    # Mock session.refresh to update the balance (simulates DB reload)
+    async def mock_refresh(key: ApiKey) -> None:
+        key.balance = 6000000
+
+    mock_session.refresh.side_effect = mock_refresh
 
     from routstr.core.settings import settings
 
@@ -93,9 +101,11 @@ async def test_credit_balance() -> None:
         ):
             amount = await credit_balance(token_str, mock_key, mock_session)
             assert amount == 1000000  # converted to msat
-            assert mock_key.balance == 6000000
-            mock_session.add.assert_called_once_with(mock_key)
-            mock_session.commit.assert_called_once()
+            assert mock_key.balance == 6000000  # Should be updated after refresh
+            # Verify atomic operations were used
+            assert mock_session.exec.called  # Atomic UPDATE statement
+            assert mock_session.commit.called
+            assert mock_session.refresh.called
 
 
 @pytest.mark.asyncio
