@@ -505,9 +505,14 @@ export class AdminService {
     if (data.description) payload.description = data.description as string;
     if (data.contextLength !== undefined)
       payload.context_length = data.contextLength as number;
-    if (data.isEnabled !== undefined) payload.enabled = data.isEnabled as boolean;
+    if (data.isEnabled !== undefined)
+      payload.enabled = data.isEnabled as boolean;
 
-    const updated = await this.updateProviderModel(providerId, modelId, payload);
+    const updated = await this.updateProviderModel(
+      providerId,
+      modelId,
+      payload
+    );
     return this.transformAdminModelToModel(updated, data.provider as string);
   }
 

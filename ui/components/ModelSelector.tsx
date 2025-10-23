@@ -372,14 +372,20 @@ export function ModelSelector({
     modelId: string,
     updatedModel: ManualModel
   ) => {
-    try {
-      await AdminService.updateModel(modelId, updatedModel);
-      await refetchModels(); // Ensure we refetch to get the latest data
-      toast.success(`Model "${updatedModel.name}" updated successfully!`);
-    } catch (error) {
-      console.error('Error updating model:', error);
-      throw error; // Re-throw to let the form handle the error
+    const existingModel = models.find((m) => m.id === modelId);
+    if (!existingModel) {
+      throw new Error('Model not found');
     }
+
+    const updateData = {
+      ...updatedModel,
+      provider_id: existingModel.provider_id,
+      isEnabled: !existingModel.soft_deleted,
+    };
+
+    await AdminService.updateModel(modelId, updateData);
+    await refetchModels();
+    setEditingModel(null);
   };
 
   // Handle group update
