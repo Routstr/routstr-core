@@ -177,7 +177,7 @@ async def info() -> dict:
 
 @app.get("/admin")
 async def admin_redirect() -> RedirectResponse:
-    ui_dist_path = Path(__file__).parent.parent.parent / "ui" / "out"
+    ui_dist_path = Path(__file__).parent.parent.parent / "ui_out"
     if ui_dist_path.exists():
         return RedirectResponse("/")
     return RedirectResponse("/admin/")
@@ -188,7 +188,7 @@ async def providers() -> RedirectResponse:
     return RedirectResponse("/v1/providers/")
 
 
-UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui" / "out"
+UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui_out"
 
 if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     logger.info(f"Serving static UI from {UI_DIST_PATH}")

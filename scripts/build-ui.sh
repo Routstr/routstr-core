@@ -33,6 +33,8 @@ else
     npm run build
 fi
 
+mv out ../ui_out
+
 echo ""
 echo "✓ UI build complete!"
 echo "Static files generated at: $UI_DIR/out"

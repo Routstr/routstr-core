@@ -1120,15 +1120,6 @@ export function ModelSelector({
                               <DropdownMenuItem
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setSelectedModelId(model.id);
-                                }}
-                              >
-                                <Check className='mr-2 h-4 w-4' />
-                                Select for Test
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={(e) => {
-                                  e.stopPropagation();
                                   setEditingModel(model);
                                 }}
                               >

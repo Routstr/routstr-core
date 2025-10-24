@@ -161,11 +161,12 @@ Once built, the UI is automatically served by the FastAPI backend:
 
 - **Dashboard**: `http://localhost:8000/`
 - **Login**: `http://localhost:8000/login`
-- **Models Management**: `http://localhost:8000/models`
+- **Models Management**: `http://localhost:8000/model
 - **Providers Management**: `http://localhost:8000/providers`
 - **Settings**: `http://localhost:8000/settings`
 
 The dashboard provides:
+
 - Real-time wallet balance monitoring
 - Model pricing configuration
 - Upstream provider management
