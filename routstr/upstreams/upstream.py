@@ -140,7 +140,7 @@ class UpstreamProvider:
         """
         return model_id
 
-    def prepare_request_body(self, body: bytes | None) -> bytes | None:
+    def prepare_request_body(self, body: bytes | None, model_obj: Model) -> bytes | None:
         """Transform request body for provider-specific requirements.
 
         Automatically transforms model names in the request body.
@@ -157,19 +157,18 @@ class UpstreamProvider:
         try:
             data = json.loads(body)
             if isinstance(data, dict) and "model" in data:
-                original_model = data["model"]
+                original_model = model_obj.id
                 transformed_model = self.transform_model_name(original_model)
-                if transformed_model != original_model:
-                    data["model"] = transformed_model
-                    logger.debug(
-                        "Transformed model name in request",
-                        extra={
-                            "original": original_model,
-                            "transformed": transformed_model,
-                            "provider": self.upstream_name or self.base_url,
-                        },
-                    )
-                    return json.dumps(data).encode()
+                data["model"] = transformed_model
+                logger.debug(
+                    "Transformed model name in request",
+                    extra={
+                        "original": original_model,
+                        "transformed": transformed_model,
+                        "provider": self.upstream_name or self.base_url,
+                    },
+                )
+                return json.dumps(data).encode()
         except Exception as e:
             logger.debug(
                 "Could not transform request body",
@@ -585,6 +584,7 @@ class UpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         session: AsyncSession,
+        model_obj: Model,
     ) -> Response | StreamingResponse:
         """Forward authenticated request to upstream service with cost tracking.
 
@@ -605,7 +605,7 @@ class UpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
-        transformed_body = self.prepare_request_body(request_body)
+        transformed_body = self.prepare_request_body(request_body, model_obj)
 
         logger.info(
             "Forwarding request to upstream",

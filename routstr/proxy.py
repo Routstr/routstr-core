@@ -277,6 +277,7 @@ async def proxy(
         key,
         max_cost_for_model,
         session,
+        model_obj
     )
 
     if response.status_code != 200:
