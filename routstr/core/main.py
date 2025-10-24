@@ -192,48 +192,59 @@ UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui" / "out"
 
 if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     logger.info(f"Serving static UI from {UI_DIST_PATH}")
-    
+
     app.mount("/_next", StaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True), name="next-static")
-    
+
     @app.get("/", include_in_schema=False)
     async def serve_root_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
-    
+
     @app.get("/dashboard", include_in_schema=False)
     @app.get("/dashboard/{path:path}", include_in_schema=False)
     async def serve_dashboard_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
-    
+
     @app.get("/login", include_in_schema=False)
     @app.get("/login/{path:path}", include_in_schema=False)
     async def serve_login_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "login" / "index.html")
-    
+
     @app.get("/models", include_in_schema=False)
     @app.get("/models/{path:path}", include_in_schema=False)
     async def serve_models_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "models" / "index.html")
-    
+
     @app.get("/providers", include_in_schema=False)
     @app.get("/providers/{path:path}", include_in_schema=False)
     async def serve_providers_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "providers" / "index.html")
-    
+
     @app.get("/settings", include_in_schema=False)
     @app.get("/settings/{path:path}", include_in_schema=False)
     async def serve_settings_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "settings" / "index.html")
-    
+
     @app.get("/transactions", include_in_schema=False)
     @app.get("/transactions/{path:path}", include_in_schema=False)
     async def serve_transactions_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
-    
+
     @app.get("/unauthorized", include_in_schema=False)
     @app.get("/unauthorized/{path:path}", include_in_schema=False)
     async def serve_unauthorized_ui(path: str = "") -> FileResponse:
         return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
-    
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def serve_favicon() -> FileResponse:
+        icon_path = UI_DIST_PATH / "icon.ico"
+        if icon_path.exists():
+            return FileResponse(icon_path)
+        return FileResponse(UI_DIST_PATH / "favicon.ico")
+
+    @app.get("/icon.ico", include_in_schema=False)
+    async def serve_icon() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "icon.ico")
+
     app.mount("/static", StaticFiles(directory=UI_DIST_PATH, check_dir=True), name="ui-static")
 else:
     logger.warning(f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving")

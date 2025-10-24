@@ -7,6 +7,7 @@ import {
   ServerIcon,
   SettingsIcon,
 } from 'lucide-react';
+import Image from 'next/image';
 
 import { NavSecondary } from '@/components/nav-secondary';
 import {
@@ -82,7 +83,16 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               asChild
               className='data-[slot=sidebar-menu-button]:!p-1.5'
             >
-              <span className='text-base font-semibold'>Routstr</span>
+              <div className='flex items-center gap-2'>
+                <Image
+                  src='/icon.ico'
+                  alt='Routstr'
+                  width={24}
+                  height={24}
+                  className='rounded'
+                />
+                <span className='text-base font-semibold'>Routstr</span>
+              </div>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>

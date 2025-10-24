@@ -16,6 +16,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'Routstr',
   description: 'Routstr model management',
+  icons: {
+    icon: '/icon.ico',
+  },
 };
 
 export default function RootLayout({
