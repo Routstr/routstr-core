@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
@@ -811,10 +811,8 @@ async def dashboard(request: Request) -> str:
 
 
 @admin_router.get("/", response_class=HTMLResponse)
-async def admin(request: Request) -> str:
-    if is_admin_authenticated(request):
-        return await dashboard(request)
-    return admin_auth()
+async def admin(request: Request) -> RedirectResponse:
+    return RedirectResponse("/")
 
 
 @admin_router.get("/logs/{request_id}", response_class=HTMLResponse)

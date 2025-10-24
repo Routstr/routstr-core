@@ -175,14 +175,6 @@ async def info() -> dict:
     }
 
 
-@app.get("/admin")
-async def admin_redirect() -> RedirectResponse:
-    ui_dist_path = Path(__file__).parent.parent.parent / "ui_out"
-    if ui_dist_path.exists():
-        return RedirectResponse("/")
-    return RedirectResponse("/admin/")
-
-
 @app.get("/v1/providers")
 async def providers() -> RedirectResponse:
     return RedirectResponse("/v1/providers/")
@@ -202,6 +194,15 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     @app.get("/", include_in_schema=False)
     async def serve_root_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
+    
+    # Add explicit route for /index.txt to redirect to /
+    @app.get("/index.txt", include_in_schema=False)
+    async def redirect_index_txt() -> RedirectResponse:
+        return RedirectResponse("/")
+
+    @app.get("/admin")
+    async def admin_redirect() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "index.html")
 
     @app.get("/dashboard", include_in_schema=False)
     async def serve_dashboard_ui() -> FileResponse:
@@ -210,26 +211,56 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     @app.get("/login", include_in_schema=False)
     async def serve_login_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "login" / "index.html")
+    
+    # Add explicit route for /login/index.txt to redirect to /login
+    @app.get("/login/index.txt", include_in_schema=False)
+    async def redirect_login_index_txt() -> RedirectResponse:
+        return RedirectResponse("/login")
 
     @app.get("/model", include_in_schema=False)
     async def serve_models_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "model" / "index.html")
+    
+    # Add explicit route for /model/index.txt to redirect to /model
+    @app.get("/model/index.txt", include_in_schema=False)
+    async def redirect_model_index_txt() -> RedirectResponse:
+        return RedirectResponse("/model")
 
     @app.get("/providers", include_in_schema=False)
     async def serve_providers_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "providers" / "index.html")
+    
+    # Add explicit route for /providers/index.txt to redirect to /providers
+    @app.get("/providers/index.txt", include_in_schema=False)
+    async def redirect_providers_index_txt() -> RedirectResponse:
+        return RedirectResponse("/providers")
 
     @app.get("/settings", include_in_schema=False)
     async def serve_settings_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "settings" / "index.html")
+    
+    # Add explicit route for /settings/index.txt to redirect to /settings
+    @app.get("/settings/index.txt", include_in_schema=False)
+    async def redirect_settings_index_txt() -> RedirectResponse:
+        return RedirectResponse("/settings")
 
     @app.get("/transactions", include_in_schema=False)
     async def serve_transactions_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
+    
+    # Add explicit route for /transactions/index.txt to redirect to /transactions
+    @app.get("/transactions/index.txt", include_in_schema=False)
+    async def redirect_transactions_index_txt() -> RedirectResponse:
+        return RedirectResponse("/transactions")
 
     @app.get("/unauthorized", include_in_schema=False)
     async def serve_unauthorized_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
+    
+    # Add explicit route for /unauthorized/index.txt to redirect to /unauthorized
+    @app.get("/unauthorized/index.txt", include_in_schema=False)
+    async def redirect_unauthorized_index_txt() -> RedirectResponse:
+        return RedirectResponse("/unauthorized")
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon() -> FileResponse:
