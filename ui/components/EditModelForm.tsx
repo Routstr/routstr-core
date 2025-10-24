@@ -40,6 +40,13 @@ const EditModelFormSchema = z.object({
 
 type EditModelFormData = z.infer<typeof EditModelFormSchema>;
 
+const roundToFiveDecimals = (value: number | undefined | null): number => {
+  if (value === undefined || value === null || isNaN(value)) {
+    return 0;
+  }
+  return Math.round(value * 100000) / 100000;
+};
+
 interface EditModelFormProps {
   model: Model;
   providerId?: number;
@@ -65,8 +72,8 @@ export function EditModelForm({
       name: model.name,
       description: model.description || '',
       context_length: model.contextLength || 4096,
-      prompt: model.input_cost,
-      completion: model.output_cost,
+      prompt: roundToFiveDecimals(model.input_cost),
+      completion: roundToFiveDecimals(model.output_cost),
       enabled: model.isEnabled !== false,
     },
   });
@@ -107,8 +114,8 @@ export function EditModelForm({
         name: adminModel.name,
         description: adminModel.description || '',
         context_length: adminModel.context_length,
-        prompt: adminModel.pricing.prompt || 0,
-        completion: adminModel.pricing.completion || 0,
+        prompt: roundToFiveDecimals(adminModel.pricing.prompt),
+        completion: roundToFiveDecimals(adminModel.pricing.completion),
         enabled: adminModel.enabled !== false,
       });
     } catch (error: any) {
@@ -128,8 +135,8 @@ export function EditModelForm({
           instruct_type: null,
         },
         pricing: {
-          prompt: model.input_cost,
-          completion: model.output_cost,
+          prompt: roundToFiveDecimals(model.input_cost),
+          completion: roundToFiveDecimals(model.output_cost),
           request: 0,
           image: 0,
           web_search: 0,
@@ -145,8 +152,8 @@ export function EditModelForm({
         name: model.name,
         description: model.description || '',
         context_length: model.contextLength || 4096,
-        prompt: model.input_cost,
-        completion: model.output_cost,
+        prompt: roundToFiveDecimals(model.input_cost),
+        completion: roundToFiveDecimals(model.output_cost),
         enabled: model.isEnabled !== false,
       });
     }
@@ -188,8 +195,8 @@ export function EditModelForm({
           instruct_type: null,
         },
         pricing: {
-          prompt: data.prompt,
-          completion: data.completion,
+          prompt: roundToFiveDecimals(data.prompt),
+          completion: roundToFiveDecimals(data.completion),
           request: 0,
           image: 0,
           web_search: 0,
@@ -330,35 +337,14 @@ export function EditModelForm({
                         step='0.00001'
                         min='0'
                         placeholder='5.00000'
-                        value={
-                          typeof field.value === 'number'
-                            ? field.value.toFixed(5)
-                            : ''
-                        }
+                        value={field.value ?? ''}
                         onChange={(e) => {
                           const value = e.target.value;
-                          if (value === '') {
-                            field.onChange(0);
-                            return;
-                          }
-                          const numValue = parseFloat(value);
-                          if (!isNaN(numValue)) {
-                            field.onChange(numValue);
-                          } else if (
-                            value.endsWith('.') ||
-                            value.match(/^\d+\.0*$/)
-                          ) {
-                            field.onChange(parseFloat(value) || 0);
-                          }
+                          field.onChange(value === '' ? 0 : parseFloat(value));
                         }}
                         onBlur={(e) => {
                           const value = parseFloat(e.target.value);
-                          if (!isNaN(value)) {
-                            const rounded = Math.round(value * 100000) / 100000;
-                            field.onChange(rounded);
-                          } else {
-                            field.onChange(0);
-                          }
+                          field.onChange(roundToFiveDecimals(value));
                         }}
                         className='w-full'
                       />
@@ -383,35 +369,14 @@ export function EditModelForm({
                         step='0.00001'
                         min='0'
                         placeholder='15.00000'
-                        value={
-                          typeof field.value === 'number'
-                            ? field.value.toFixed(5)
-                            : ''
-                        }
+                        value={field.value ?? ''}
                         onChange={(e) => {
                           const value = e.target.value;
-                          if (value === '') {
-                            field.onChange(0);
-                            return;
-                          }
-                          const numValue = parseFloat(value);
-                          if (!isNaN(numValue)) {
-                            field.onChange(numValue);
-                          } else if (
-                            value.endsWith('.') ||
-                            value.match(/^\d+\.0*$/)
-                          ) {
-                            field.onChange(parseFloat(value) || 0);
-                          }
+                          field.onChange(value === '' ? 0 : parseFloat(value));
                         }}
                         onBlur={(e) => {
                           const value = parseFloat(e.target.value);
-                          if (!isNaN(value)) {
-                            const rounded = Math.round(value * 100000) / 100000;
-                            field.onChange(rounded);
-                          } else {
-                            field.onChange(0);
-                          }
+                          field.onChange(roundToFiveDecimals(value));
                         }}
                         className='w-full'
                       />
