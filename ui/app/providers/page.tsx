@@ -368,32 +368,34 @@ export default function ProvidersPage() {
                 {providers.map((provider) => (
                   <Card key={provider.id}>
                     <CardHeader>
-                      <div className='flex items-start justify-between'>
-                        <div className='flex-1'>
-                          <div className='flex items-center gap-2'>
-                            <CardTitle className='text-lg'>
+                      <div className='flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between'>
+                        <div className='min-w-0 flex-1'>
+                          <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
+                            <CardTitle className='truncate text-lg'>
                               {provider.provider_type}
                             </CardTitle>
                             <Badge
                               variant={
                                 provider.enabled ? 'default' : 'secondary'
                               }
+                              className='w-fit sm:ml-2'
                             >
                               {provider.enabled ? 'Enabled' : 'Disabled'}
                             </Badge>
                           </div>
-                          <CardDescription className='mt-1'>
+                          <CardDescription className='mt-1 break-all'>
                             {provider.base_url}
                           </CardDescription>
                         </div>
-                        <div className='flex items-center gap-2'>
+                        <div className='grid grid-cols-3 gap-2 sm:flex sm:flex-nowrap'>
                           <Button
                             variant='outline'
                             size='sm'
                             onClick={() => toggleProviderExpansion(provider.id)}
+                            className='w-full sm:w-auto'
                           >
                             <Database className='mr-1 h-4 w-4' />
-                            Models
+                            <span className='hidden sm:inline'>Models</span>
                             {expandedProviders.has(provider.id) ? (
                               <ChevronUp className='ml-1 h-4 w-4' />
                             ) : (
@@ -404,6 +406,7 @@ export default function ProvidersPage() {
                             variant='outline'
                             size='sm'
                             onClick={() => handleEdit(provider)}
+                            className='w-full sm:w-auto'
                           >
                             <Pencil className='h-4 w-4' />
                           </Button>
@@ -411,6 +414,7 @@ export default function ProvidersPage() {
                             variant='outline'
                             size='sm'
                             onClick={() => handleDelete(provider.id)}
+                            className='w-full sm:w-auto'
                           >
                             <Trash2 className='h-4 w-4' />
                           </Button>
@@ -479,15 +483,33 @@ export default function ProvidersPage() {
                               viewingModels === provider.id ? (
                               <Tabs defaultValue='remote' className='w-full'>
                                 <TabsList className='grid w-full grid-cols-2'>
-                                  <TabsTrigger value='remote'>
-                                    Remote Models
-                                    <Badge variant='secondary' className='ml-2'>
+                                  <TabsTrigger
+                                    value='remote'
+                                    className='text-xs sm:text-sm'
+                                  >
+                                    <span className='hidden sm:inline'>
+                                      Remote Models
+                                    </span>
+                                    <span className='sm:hidden'>Remote</span>
+                                    <Badge
+                                      variant='secondary'
+                                      className='ml-1 text-xs sm:ml-2'
+                                    >
                                       {providerModels.remote_models.length}
                                     </Badge>
                                   </TabsTrigger>
-                                  <TabsTrigger value='db'>
-                                    Database Models
-                                    <Badge variant='secondary' className='ml-2'>
+                                  <TabsTrigger
+                                    value='db'
+                                    className='text-xs sm:text-sm'
+                                  >
+                                    <span className='hidden sm:inline'>
+                                      Database Models
+                                    </span>
+                                    <span className='sm:hidden'>DB</span>
+                                    <Badge
+                                      variant='secondary'
+                                      className='ml-1 text-xs sm:ml-2'
+                                    >
                                       {providerModels.db_models.length}
                                     </Badge>
                                   </TabsTrigger>
@@ -505,11 +527,11 @@ export default function ProvidersPage() {
                                       {providerModels.db_models.map((model) => (
                                         <div
                                           key={model.id}
-                                          className='hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors'
+                                          className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
                                         >
-                                          <div className='flex-1'>
-                                            <div className='flex items-center gap-2'>
-                                              <span className='font-mono text-sm font-medium'>
+                                          <div className='min-w-0 flex-1'>
+                                            <div className='flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2'>
+                                              <span className='truncate font-mono text-sm font-medium'>
                                                 {model.id}
                                               </span>
                                               <Badge
@@ -518,18 +540,18 @@ export default function ProvidersPage() {
                                                     ? 'default'
                                                     : 'secondary'
                                                 }
-                                                className='text-xs'
+                                                className='w-fit text-xs'
                                               >
                                                 {model.enabled
                                                   ? 'Enabled'
                                                   : 'Disabled'}
                                               </Badge>
                                             </div>
-                                            <div className='text-muted-foreground mt-1 text-xs'>
+                                            <div className='text-muted-foreground mt-1 text-xs break-words'>
                                               {model.description || model.name}
                                             </div>
                                           </div>
-                                          <div className='text-muted-foreground text-xs'>
+                                          <div className='text-muted-foreground text-xs whitespace-nowrap'>
                                             {model.context_length?.toLocaleString()}{' '}
                                             tokens
                                           </div>
@@ -552,18 +574,18 @@ export default function ProvidersPage() {
                                         (model) => (
                                           <div
                                             key={model.id}
-                                            className='hover:bg-accent flex items-center justify-between rounded-lg border p-3 transition-colors'
+                                            className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
                                           >
-                                            <div className='flex-1'>
-                                              <div className='font-mono text-sm font-medium'>
+                                            <div className='min-w-0 flex-1'>
+                                              <div className='truncate font-mono text-sm font-medium'>
                                                 {model.id}
                                               </div>
-                                              <div className='text-muted-foreground mt-1 text-xs'>
+                                              <div className='text-muted-foreground mt-1 text-xs break-words'>
                                                 {model.description ||
                                                   model.name}
                                               </div>
                                             </div>
-                                            <div className='text-muted-foreground text-xs'>
+                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
                                               {model.context_length?.toLocaleString()}{' '}
                                               tokens
                                             </div>

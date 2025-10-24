@@ -76,14 +76,14 @@ export function TemporaryBalances({
               <Key className='h-5 w-5' />
               Temporary Balances
             </CardTitle>
-            <div className='flex gap-2'>
-              <div className='relative'>
+            <div className='flex flex-col gap-2 sm:flex-row sm:gap-2'>
+              <div className='relative flex-1 sm:flex-initial'>
                 <input
                   type='text'
                   placeholder='Search by key or address...'
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  className='focus:ring-primary/20 w-64 rounded-md border py-2 pr-3 pl-8 text-sm focus:ring-2 focus:outline-none'
+                  className='focus:ring-primary/20 w-full rounded-md border py-2 pr-3 pl-8 text-sm focus:ring-2 focus:outline-none sm:w-64'
                 />
                 <Key className='text-muted-foreground absolute top-2.5 left-2 h-4 w-4' />
               </div>
@@ -167,7 +167,8 @@ export function TemporaryBalances({
 
               {/* Table */}
               <div className='overflow-hidden rounded-lg border'>
-                <div className='bg-muted grid grid-cols-6 gap-2 p-3 text-sm font-semibold'>
+                {/* Desktop Table Header */}
+                <div className='bg-muted hidden grid-cols-6 gap-2 p-3 text-sm font-semibold md:grid'>
                   <div>Hashed Key</div>
                   <div className='text-right'>Balance</div>
                   <div className='text-right'>Total Spent</div>
@@ -181,37 +182,112 @@ export function TemporaryBalances({
                     <div
                       key={index}
                       className={cn(
-                        'hover:bg-muted/50 grid grid-cols-6 gap-2 border-t p-3 text-sm transition-colors',
+                        'hover:bg-muted/50 border-t p-3 text-sm transition-colors',
                         balance.balance === 0 && 'opacity-60'
                       )}
                     >
-                      <div className='max-w-32 truncate font-mono text-xs break-all'>
-                        {balance.hashed_key}
+                      {/* Desktop Layout */}
+                      <div className='hidden grid-cols-6 gap-2 md:grid'>
+                        <div className='max-w-32 truncate font-mono text-xs break-all'>
+                          {balance.hashed_key}
+                        </div>
+                        <div className='text-right font-mono'>
+                          {formatBalance(balance.balance)}
+                        </div>
+                        <div className='text-right font-mono'>
+                          {formatBalance(balance.total_spent)}
+                        </div>
+                        <div className='text-right font-mono'>
+                          {balance.total_requests.toLocaleString()}
+                        </div>
+                        <div className='max-w-32 truncate font-mono text-xs break-all'>
+                          {balance.refund_address || '-'}
+                        </div>
+                        <div className='text-right font-mono text-xs'>
+                          {balance.key_expiry_time ? (
+                            <div className='flex items-center justify-end gap-1'>
+                              <Clock className='h-3 w-3' />
+                              <span>
+                                {new Date(
+                                  balance.key_expiry_time * 1000
+                                ).toLocaleDateString()}
+                              </span>
+                            </div>
+                          ) : (
+                            '-'
+                          )}
+                        </div>
                       </div>
-                      <div className='text-right font-mono'>
-                        {formatBalance(balance.balance)}
-                      </div>
-                      <div className='text-right font-mono'>
-                        {formatBalance(balance.total_spent)}
-                      </div>
-                      <div className='text-right font-mono'>
-                        {balance.total_requests.toLocaleString()}
-                      </div>
-                      <div className='max-w-32 truncate font-mono text-xs break-all'>
-                        {balance.refund_address || '-'}
-                      </div>
-                      <div className='text-right font-mono text-xs'>
-                        {balance.key_expiry_time ? (
-                          <div className='flex items-center justify-end gap-1'>
-                            <Clock className='h-3 w-3' />
-                            <span>
-                              {new Date(
-                                balance.key_expiry_time * 1000
-                              ).toLocaleDateString()}
-                            </span>
+
+                      {/* Mobile Layout */}
+                      <div className='space-y-3 md:hidden'>
+                        <div className='space-y-1'>
+                          <span className='text-muted-foreground text-xs font-medium'>
+                            Key
+                          </span>
+                          <div className='font-mono text-xs break-all'>
+                            {balance.hashed_key}
                           </div>
-                        ) : (
-                          '-'
+                        </div>
+
+                        <div className='grid grid-cols-2 gap-3'>
+                          <div className='space-y-1'>
+                            <div className='text-muted-foreground text-xs font-medium'>
+                              Balance
+                            </div>
+                            <div className='truncate font-mono text-sm'>
+                              {formatBalance(balance.balance)}
+                            </div>
+                          </div>
+                          <div className='space-y-1'>
+                            <div className='text-muted-foreground text-xs font-medium'>
+                              Spent
+                            </div>
+                            <div className='truncate font-mono text-sm'>
+                              {formatBalance(balance.total_spent)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className='grid grid-cols-2 gap-3'>
+                          <div className='space-y-1'>
+                            <div className='text-muted-foreground text-xs font-medium'>
+                              Requests
+                            </div>
+                            <div className='truncate font-mono text-sm'>
+                              {balance.total_requests.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className='space-y-1'>
+                            <div className='text-muted-foreground text-xs font-medium'>
+                              Expires
+                            </div>
+                            <div className='font-mono text-xs'>
+                              {balance.key_expiry_time ? (
+                                <div className='flex items-center gap-1'>
+                                  <Clock className='h-3 w-3 flex-shrink-0' />
+                                  <span className='truncate'>
+                                    {new Date(
+                                      balance.key_expiry_time * 1000
+                                    ).toLocaleDateString()}
+                                  </span>
+                                </div>
+                              ) : (
+                                '-'
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {balance.refund_address && (
+                          <div className='space-y-1 border-t pt-2'>
+                            <div className='text-muted-foreground text-xs font-medium'>
+                              Refund Address
+                            </div>
+                            <div className='font-mono text-xs break-all'>
+                              {balance.refund_address}
+                            </div>
+                          </div>
                         )}
                       </div>
                     </div>

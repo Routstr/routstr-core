@@ -97,7 +97,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent className='flex-1 overflow-y-auto'>
         <NavSecondary items={data.navSecondary} className='mt-auto' />
       </SidebarContent>
       {/*

@@ -131,7 +131,8 @@ export function DetailedWalletBalance({
               </p>
 
               <div className='overflow-hidden rounded-lg border'>
-                <div className='bg-muted grid grid-cols-4 gap-2 p-3 text-sm font-semibold'>
+                {/* Desktop Table Header */}
+                <div className='bg-muted hidden grid-cols-4 gap-2 p-3 text-sm font-semibold md:grid'>
                   <div>Mint / Unit</div>
                   <div className='text-right'>Wallet</div>
                   <div className='text-right'>Users</div>
@@ -149,37 +150,94 @@ export function DetailedWalletBalance({
                       <div
                         key={index}
                         className={cn(
-                          'grid grid-cols-4 gap-2 border-t p-3 text-sm',
+                          'border-t p-3 text-sm',
                           detail.error && 'bg-destructive/10 text-destructive'
                         )}
                       >
-                        <div className='text-xs break-all'>
-                          {detail.mint_url
-                            .replace('https://', '')
-                            .replace('http://', '')}{' '}
-                          • {detail.unit.toUpperCase()}
+                        {/* Desktop Layout */}
+                        <div className='hidden grid-cols-4 gap-2 md:grid'>
+                          <div className='text-xs break-all'>
+                            {detail.mint_url
+                              .replace('https://', '')
+                              .replace('http://', '')}{' '}
+                            • {detail.unit.toUpperCase()}
+                          </div>
+                          <div className='text-right font-mono'>
+                            {detail.error
+                              ? 'error'
+                              : detail.wallet_balance.toLocaleString()}
+                          </div>
+                          <div className='text-right font-mono'>
+                            {detail.error
+                              ? '-'
+                              : detail.user_balance.toLocaleString()}
+                          </div>
+                          <div
+                            className={cn(
+                              'text-right font-mono',
+                              !detail.error &&
+                                detail.owner_balance > 0 &&
+                                'font-semibold text-green-600'
+                            )}
+                          >
+                            {detail.error
+                              ? '-'
+                              : detail.owner_balance.toLocaleString()}
+                          </div>
                         </div>
-                        <div className='text-right font-mono'>
-                          {detail.error
-                            ? 'error'
-                            : detail.wallet_balance.toLocaleString()}
-                        </div>
-                        <div className='text-right font-mono'>
-                          {detail.error
-                            ? '-'
-                            : detail.user_balance.toLocaleString()}
-                        </div>
-                        <div
-                          className={cn(
-                            'text-right font-mono',
-                            !detail.error &&
-                              detail.owner_balance > 0 &&
-                              'font-semibold text-green-600'
-                          )}
-                        >
-                          {detail.error
-                            ? '-'
-                            : detail.owner_balance.toLocaleString()}
+
+                        {/* Mobile Layout */}
+                        <div className='space-y-3 md:hidden'>
+                          <div className='space-y-1'>
+                            <span className='text-muted-foreground text-xs font-medium'>
+                              Mint / Unit
+                            </span>
+                            <div className='font-mono text-xs break-all'>
+                              {detail.mint_url
+                                .replace('https://', '')
+                                .replace('http://', '')}{' '}
+                              • {detail.unit.toUpperCase()}
+                            </div>
+                          </div>
+                          <div className='grid grid-cols-3 gap-2'>
+                            <div className='space-y-1'>
+                              <div className='text-muted-foreground text-xs font-medium'>
+                                Wallet
+                              </div>
+                              <div className='truncate font-mono text-sm'>
+                                {detail.error
+                                  ? 'error'
+                                  : detail.wallet_balance.toLocaleString()}
+                              </div>
+                            </div>
+                            <div className='space-y-1'>
+                              <div className='text-muted-foreground text-xs font-medium'>
+                                Users
+                              </div>
+                              <div className='truncate font-mono text-sm'>
+                                {detail.error
+                                  ? '-'
+                                  : detail.user_balance.toLocaleString()}
+                              </div>
+                            </div>
+                            <div className='space-y-1'>
+                              <div className='text-muted-foreground text-xs font-medium'>
+                                Owner
+                              </div>
+                              <div
+                                className={cn(
+                                  'truncate font-mono text-sm',
+                                  !detail.error &&
+                                    detail.owner_balance > 0 &&
+                                    'font-semibold text-green-600'
+                                )}
+                              >
+                                {detail.error
+                                  ? '-'
+                                  : detail.owner_balance.toLocaleString()}
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     ))

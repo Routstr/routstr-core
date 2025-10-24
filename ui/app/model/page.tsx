@@ -108,15 +108,16 @@ export default function ModelsPage() {
                   <Tabs defaultValue='all' className='w-full'>
                     <div className='space-y-4'>
                       {/* Provider Tabs Navigation */}
-                      <div className='rounded-lg border p-1'>
-                        <TabsList className='grid w-full max-w-full auto-cols-fr grid-flow-col overflow-x-auto'>
+                      <div className='overflow-x-auto rounded-lg border p-1'>
+                        <TabsList className='grid w-full max-w-full min-w-max auto-cols-fr grid-flow-col gap-1 sm:gap-2'>
                           <TabsTrigger
                             value='all'
-                            className='flex items-center gap-2'
+                            className='flex items-center gap-1 text-xs whitespace-nowrap sm:gap-2 sm:text-sm'
                           >
-                            <Globe className='h-4 w-4' />
-                            All Models
-                            <Badge variant='secondary' className='ml-1'>
+                            <Globe className='h-3 w-3 sm:h-4 sm:w-4' />
+                            <span className='hidden sm:inline'>All Models</span>
+                            <span className='sm:hidden'>All</span>
+                            <Badge variant='secondary' className='ml-1 text-xs'>
                               {models.length}
                             </Badge>
                           </TabsTrigger>
@@ -125,12 +126,17 @@ export default function ModelsPage() {
                               <TabsTrigger
                                 key={provider}
                                 value={provider}
-                                className='flex min-w-fit items-center gap-2'
+                                className='flex min-w-fit items-center gap-1 text-xs whitespace-nowrap sm:gap-2 sm:text-sm'
                               >
-                                <Users className='h-4 w-4' />
-                                {provider}
+                                <Users className='h-3 w-3 sm:h-4 sm:w-4' />
+                                <span className='max-w-20 truncate sm:max-w-none'>
+                                  {provider}
+                                </span>
                                 <div className='flex items-center gap-1'>
-                                  <Badge variant='secondary' className='ml-1'>
+                                  <Badge
+                                    variant='secondary'
+                                    className='ml-1 text-xs'
+                                  >
                                     {activeModels}/{totalModels}
                                   </Badge>
                                 </div>
