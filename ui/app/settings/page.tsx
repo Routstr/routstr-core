@@ -3,6 +3,7 @@
 import * as React from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ServerConfigSettings } from '@/components/settings/server-config-settings';
+import { AdminSettings } from '@/components/settings/admin-settings';
 import { SiteHeader } from '@/components/site-header';
 import { AppSidebar } from '@/components/app-sidebar';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
@@ -22,9 +23,13 @@ export default function SettingsPage() {
             <Tabs defaultValue='server' className='w-full'>
               <TabsList className='mb-4'>
                 <TabsTrigger value='server'>Server Configuration</TabsTrigger>
+                <TabsTrigger value='admin'>Admin Settings</TabsTrigger>
               </TabsList>
               <TabsContent value='server'>
                 <ServerConfigSettings />
+              </TabsContent>
+              <TabsContent value='admin'>
+                <AdminSettings />
               </TabsContent>
             </Tabs>
           </div>

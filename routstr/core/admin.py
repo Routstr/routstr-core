@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from ..payment.models import Model, _row_to_model, list_models
+from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import (
     fetch_all_balances,
@@ -37,7 +37,7 @@ def require_admin_api(request: Request) -> None:
         expiry = admin_sessions.get(token)
         if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
             return
-    
+
     admin_cookie = request.cookies.get("admin_password")
     if not admin_cookie or admin_cookie != settings.admin_password:
         raise HTTPException(status_code=403, detail="Unauthorized")
@@ -50,7 +50,7 @@ def is_admin_authenticated(request: Request) -> bool:
         expiry = admin_sessions.get(token)
         if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
             return True
-    
+
     admin_cookie = request.cookies.get("admin_password")
     return bool(admin_cookie and admin_cookie == settings.admin_password)
 
@@ -210,35 +210,36 @@ class AdminLoginRequest(BaseModel):
 
 
 @admin_router.post("/api/login")
-async def admin_login(request: Request, payload: AdminLoginRequest) -> dict[str, object]:
+async def admin_login(
+    request: Request, payload: AdminLoginRequest
+) -> dict[str, object]:
     try:
         current = SettingsService.get()
         admin_pw = current.admin_password
     except Exception:
         admin_pw = os.getenv("ADMIN_PASSWORD", "")
-    
+
     if not admin_pw:
         raise HTTPException(status_code=500, detail="Admin password not configured")
-    
+
     if payload.password != admin_pw:
         raise HTTPException(status_code=401, detail="Invalid password")
-    
+
     token = secrets.token_urlsafe(32)
-    expiry_timestamp = int(datetime.now(timezone.utc).timestamp()) + ADMIN_SESSION_DURATION
+    expiry_timestamp = (
+        int(datetime.now(timezone.utc).timestamp()) + ADMIN_SESSION_DURATION
+    )
     admin_sessions[token] = expiry_timestamp
-    
+
     expired_tokens = [
-        t for t, exp in admin_sessions.items() 
+        t
+        for t, exp in admin_sessions.items()
         if exp <= int(datetime.now(timezone.utc).timestamp())
     ]
     for t in expired_tokens:
         del admin_sessions[t]
-    
-    return {
-        "ok": True,
-        "token": token,
-        "expires_in": ADMIN_SESSION_DURATION
-    }
+
+    return {"ok": True, "token": token, "expires_in": ADMIN_SESSION_DURATION}
 
 
 @admin_router.post("/api/logout", dependencies=[Depends(require_admin_api)])
@@ -248,7 +249,7 @@ async def admin_logout(request: Request) -> dict[str, object]:
         token = auth_header.split(" ", 1)[1]
         if token in admin_sessions:
             del admin_sessions[token]
-    
+
     return {"ok": True}
 
 
@@ -398,7 +399,7 @@ async def dashboard(request: Request) -> str:
         + """<!--html-->
             <script>
                 let balanceDetails = [];
-                
+
                 async function openWithdrawModal() {
                     const modal = document.getElementById('withdraw-modal');
                     try {
@@ -662,14 +663,14 @@ async def dashboard(request: Request) -> str:
         + """<!--html-->
         <body>
             <h1>Admin Dashboard</h1>
-            
+
             <div class="balance-card" id="balances-card"
                  hx-get="/admin/partials/balances"
                  hx-trigger="load"
                  hx-swap="innerHTML">
                 <div style="color:#718096;">Loading balances…</div>
             </div>
-            
+
             <button id="withdraw-btn" onclick="openWithdrawModal()">
                 💸 Withdraw Balance
             </button>
@@ -685,7 +686,7 @@ async def dashboard(request: Request) -> str:
             <button onclick="openSettingsModal()">
                 ⚙️ Settings
             </button>
-            
+
             <div id="withdraw-modal" class="modal">
                 <div class="modal-content">
                     <span class="close" onclick="closeWithdrawModal()">&times;</span>
@@ -703,7 +704,7 @@ async def dashboard(request: Request) -> str:
                     <button onclick="closeWithdrawModal()" style="background-color: #718096;">Cancel</button>
                 </div>
             </div>
-            
+
             <div id="settings-modal" class="modal">
                 <div class="modal-content">
                     <span class="close" onclick="closeSettingsModal()">&times;</span>
@@ -728,14 +729,14 @@ async def dashboard(request: Request) -> str:
                     <button onclick="closeInvestigateModal()" style="background-color: #718096;">Cancel</button>
                 </div>
             </div>
-            
+
             <div id="token-result">
                 <strong>Withdrawal Token:</strong>
                 <div id="token-text"></div>
                 <button id="copy-btn" class="copy-btn" onclick="copyToken()">Copy Token</button>
                 <p><em>Save this token! It represents your withdrawn balance.</em></p>
             </div>
-            
+
             <div id="apikeys-table"
                  hx-get="/admin/partials/apikeys"
                  hx-trigger="load"
@@ -1471,6 +1472,49 @@ class ModelUpdate(BaseModel):
     enabled: bool = True
 
 
+class ModelIdentifier(BaseModel):
+    model_id: str
+    provider_id: int | None = None
+
+
+class ModelGetRequest(BaseModel):
+    model_id: str
+    provider_id: int | None = None
+
+
+class ModelDeleteRequest(BaseModel):
+    model_id: str
+    provider_id: int | None = None
+
+
+class ModelUpdateRequest(BaseModel):
+    model_id: str
+    provider_id: int | None = None
+    name: str
+    description: str
+    created: int
+    context_length: int
+    architecture: dict[str, object]
+    pricing: dict[str, object]
+    per_request_limits: dict[str, object] | None = None
+    top_provider: dict[str, object] | None = None
+    enabled: bool = True
+
+
+class ModelCreateRequest(BaseModel):
+    model_id: str
+    provider_id: int | None = None
+    name: str
+    description: str
+    created: int
+    context_length: int
+    architecture: dict[str, object]
+    pricing: dict[str, object]
+    per_request_limits: dict[str, object] | None = None
+    top_provider: dict[str, object] | None = None
+    enabled: bool = True
+
+
 @admin_router.get("/api/models", dependencies=[Depends(require_admin_api)])
 async def get_all_models() -> list[dict[str, object]]:
     async with create_session() as session:
@@ -1478,13 +1522,14 @@ async def get_all_models() -> list[dict[str, object]]:
         return [m.dict() for m in models]
 
 
-@admin_router.get("/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)])
+@admin_router.get(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
 async def get_model(model_id: str) -> dict[str, object]:
     async with create_session() as session:
         result = await session.exec(
             select(ModelRow).where(
-                ModelRow.id == model_id, 
-                ModelRow.upstream_provider_id.is_(None)
+                ModelRow.id == model_id, ModelRow.upstream_provider_id.is_(None)
             )
         )
         row = result.first()
@@ -1530,7 +1575,9 @@ async def create_model(payload: ModelCreate) -> dict[str, object]:
     return _row_to_model(row, apply_provider_fee=False).dict()
 
 
-@admin_router.patch("/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)])
+@admin_router.patch(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
 async def update_model(model_id: str, payload: ModelUpdate) -> dict[str, object]:
     if payload.id != model_id:
         raise HTTPException(status_code=400, detail="Path id does not match payload id")
@@ -1565,7 +1612,16 @@ async def update_model(model_id: str, payload: ModelUpdate) -> dict[str, object]
     return _row_to_model(row, apply_provider_fee=False).dict()
 
 
-@admin_router.delete("/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)])
+@admin_router.put(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
+async def update_model_put(model_id: str, payload: ModelUpdate) -> dict[str, object]:
+    return await update_model(model_id, payload)
+
+
+@admin_router.delete(
+    "/api/models/{model_id:path}", dependencies=[Depends(require_admin_api)]
+)
 async def delete_model(model_id: str) -> dict[str, object]:
     async with create_session() as session:
         row = await session.get(ModelRow, (model_id, None))
@@ -1635,6 +1691,218 @@ async def batch_add_models(payload: BatchModelsRequest) -> dict[str, object]:
     return {"ok": True, "created": len(created_models), "model_ids": created_models}
 
 
+@admin_router.post("/api/models/get", dependencies=[Depends(require_admin_api)])
+async def get_model_by_id(payload: ModelGetRequest) -> dict[str, object]:
+    print(payload)
+    from ..upstream import _instantiate_provider
+
+    async with create_session() as session:
+        if payload.provider_id is None:
+            result = await session.exec(
+                select(ModelRow).where(
+                    ModelRow.id == payload.model_id,
+                    ModelRow.upstream_provider_id.is_(None),
+                )
+            )
+            row = result.first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Model not found")
+            return _row_to_model(row, apply_provider_fee=False).dict()
+        else:
+            provider = await session.get(UpstreamProviderRow, payload.provider_id)
+            if not provider:
+                raise HTTPException(status_code=404, detail="Provider not found")
+
+            row = await session.get(ModelRow, (payload.model_id, payload.provider_id))
+            if row:
+                return _row_to_model(
+                    row, apply_provider_fee=True, provider_fee=provider.provider_fee
+                ).dict()
+
+            upstream_instance = _instantiate_provider(provider)
+            if upstream_instance:
+                try:
+                    remote_models = await upstream_instance.fetch_models()
+                    for model in remote_models:
+                        if model.id == payload.model_id:
+                            model_with_fee = upstream_instance._apply_provider_fee_to_model(model)
+                            return model_with_fee.dict()
+                except Exception as e:
+                    logger.error(
+                        f"Failed to fetch models from {provider.provider_type}: {e}"
+                    )
+
+            raise HTTPException(
+                status_code=404, detail="Model not found for this provider"
+            )
+
+
+@admin_router.post("/api/models/create", dependencies=[Depends(require_admin_api)])
+async def create_model_v2(payload: ModelCreateRequest) -> dict[str, object]:
+    async with create_session() as session:
+        if payload.provider_id is None:
+            exists = await session.get(ModelRow, (payload.model_id, None))
+            if exists:
+                raise HTTPException(
+                    status_code=409, detail="Model with this ID already exists"
+                )
+
+            row = ModelRow(
+                id=payload.model_id,
+                name=payload.name,
+                description=payload.description,
+                created=int(payload.created),
+                context_length=int(payload.context_length),
+                architecture=json.dumps(payload.architecture),
+                pricing=json.dumps(payload.pricing),
+                sats_pricing=None,
+                per_request_limits=(
+                    json.dumps(payload.per_request_limits)
+                    if payload.per_request_limits is not None
+                    else None
+                ),
+                top_provider=(
+                    json.dumps(payload.top_provider) if payload.top_provider else None
+                ),
+                upstream_provider_id=None,
+                enabled=payload.enabled,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            await refresh_model_maps()
+            return _row_to_model(row, apply_provider_fee=False).dict()
+        else:
+            provider = await session.get(UpstreamProviderRow, payload.provider_id)
+            if not provider:
+                raise HTTPException(status_code=404, detail="Provider not found")
+
+            exists = await session.get(ModelRow, (payload.model_id, payload.provider_id))
+            if exists:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Model with this ID already exists for this provider",
+                )
+
+            row = ModelRow(
+                id=payload.model_id,
+                name=payload.name,
+                description=payload.description,
+                created=int(payload.created),
+                context_length=int(payload.context_length),
+                architecture=json.dumps(payload.architecture),
+                pricing=json.dumps(payload.pricing),
+                sats_pricing=None,
+                per_request_limits=(
+                    json.dumps(payload.per_request_limits)
+                    if payload.per_request_limits is not None
+                    else None
+                ),
+                top_provider=(
+                    json.dumps(payload.top_provider) if payload.top_provider else None
+                ),
+                upstream_provider_id=payload.provider_id,
+                enabled=payload.enabled,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            await refresh_model_maps()
+            return _row_to_model(
+                row, apply_provider_fee=True, provider_fee=provider.provider_fee
+            ).dict()
+
+
+@admin_router.post("/api/models/update", dependencies=[Depends(require_admin_api)])
+async def update_model_v2(payload: ModelUpdateRequest) -> dict[str, object]:
+    async with create_session() as session:
+        if payload.provider_id is None:
+            row = await session.get(ModelRow, (payload.model_id, None))
+            if not row:
+                raise HTTPException(status_code=404, detail="Model not found")
+
+            row.name = payload.name
+            row.description = payload.description
+            row.created = int(payload.created)
+            row.context_length = int(payload.context_length)
+            row.architecture = json.dumps(payload.architecture)
+            row.pricing = json.dumps(payload.pricing)
+            row.sats_pricing = None
+            row.per_request_limits = (
+                json.dumps(payload.per_request_limits)
+                if payload.per_request_limits is not None
+                else None
+            )
+            row.top_provider = (
+                json.dumps(payload.top_provider) if payload.top_provider else None
+            )
+            row.enabled = payload.enabled
+
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            await refresh_model_maps()
+            return _row_to_model(row, apply_provider_fee=False).dict()
+        else:
+            provider = await session.get(UpstreamProviderRow, payload.provider_id)
+            if not provider:
+                raise HTTPException(status_code=404, detail="Provider not found")
+
+            row = await session.get(ModelRow, (payload.model_id, payload.provider_id))
+            if not row:
+                raise HTTPException(
+                    status_code=404, detail="Model not found for this provider"
+                )
+
+            row.name = payload.name
+            row.description = payload.description
+            row.created = int(payload.created)
+            row.context_length = int(payload.context_length)
+            row.architecture = json.dumps(payload.architecture)
+            row.pricing = json.dumps(payload.pricing)
+            row.sats_pricing = None
+            row.per_request_limits = (
+                json.dumps(payload.per_request_limits)
+                if payload.per_request_limits is not None
+                else None
+            )
+            row.top_provider = (
+                json.dumps(payload.top_provider) if payload.top_provider else None
+            )
+            row.enabled = payload.enabled
+
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            await refresh_model_maps()
+            return _row_to_model(
+                row, apply_provider_fee=True, provider_fee=provider.provider_fee
+            ).dict()
+
+
+@admin_router.post("/api/models/delete", dependencies=[Depends(require_admin_api)])
+async def delete_model_v2(payload: ModelDeleteRequest) -> dict[str, object]:
+    async with create_session() as session:
+        if payload.provider_id is None:
+            row = await session.get(ModelRow, (payload.model_id, None))
+            if not row:
+                raise HTTPException(status_code=404, detail="Model not found")
+            await session.delete(row)
+            await session.commit()
+            await refresh_model_maps()
+            return {"ok": True, "deleted_id": payload.model_id}
+        else:
+            row = await session.get(ModelRow, (payload.model_id, payload.provider_id))
+            if not row:
+                raise HTTPException(
+                    status_code=404, detail="Model not found for this provider"
+                )
+            await session.delete(row)
+            await session.commit()
+            await refresh_model_maps()
+            return {"ok": True, "deleted_id": payload.model_id}
+
+
 @admin_router.get("/models", response_class=HTMLResponse)
 async def admin_models(request: Request) -> str:
     if is_admin_authenticated(request):
@@ -1688,20 +1956,20 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const modelsSection = document.getElementById('models-section');
         const modelsLoading = document.getElementById('models-loading');
         const modelsContent = document.getElementById('models-content');
-        
+
         modelsSection.style.display = 'block';
         modelsLoading.style.display = 'block';
         modelsContent.style.display = 'none';
-        
+
         try {
             const resp = await fetch(`/admin/api/upstream-providers/${providerId}/models`, { credentials: 'same-origin' });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const data = await resp.json();
             providerModels = data;
-            
+
             document.getElementById('provider-name-display').textContent = data.provider.base_url;
             renderProviderModels();
-            
+
             modelsLoading.style.display = 'none';
             modelsContent.style.display = 'block';
         } catch (e) {
@@ -1715,12 +1983,12 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const remoteModelsSection = document.getElementById('remote-models-section');
         const customProviderActions = document.getElementById('custom-provider-actions');
         const isCustomProvider = providerModels.provider && providerModels.provider.provider_type === 'custom';
-        
+
         if (providerModels.db_models && providerModels.db_models.length > 0) {
             dbModelsBody.innerHTML = '';
             providerModels.db_models.forEach(m => {
                 const row = document.createElement('tr');
-                const enabledBadge = m.enabled 
+                const enabledBadge = m.enabled
                     ? '<span style="padding:2px 8px; border-radius:4px; background:#22c55e; color:white; font-size:12px;">Enabled</span>'
                     : '<span style="padding:2px 8px; border-radius:4px; background:#ef4444; color:white; font-size:12px;">Disabled</span>';
                 row.innerHTML = `
@@ -1745,14 +2013,14 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         } else {
             dbModelsBody.innerHTML = '<tr><td colspan="3" style="color:#718096;">No models defined</td></tr>';
         }
-        
+
         if (isCustomProvider) {
             remoteModelsSection.style.display = 'none';
             customProviderActions.style.display = 'block';
         } else {
             remoteModelsSection.style.display = 'block';
             customProviderActions.style.display = 'none';
-            
+
             if (providerModels.remote_models && providerModels.remote_models.length > 0) {
                 remoteModelsBody.innerHTML = '';
                 providerModels.remote_models.forEach(m => {
@@ -1804,7 +2072,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const apiVersionRow = document.getElementById('api-version-row');
         const providerId = document.getElementById('provider-id').value;
         const feeField = document.getElementById('provider-fee');
-        
+
         if (config.baseUrl && !providerId) {
             baseUrlField.value = config.baseUrl;
             baseUrlField.readOnly = true;
@@ -1813,9 +2081,9 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             baseUrlField.readOnly = false;
             baseUrlField.style.backgroundColor = '';
         }
-        
+
         apiVersionRow.style.display = config.showApiVersion ? 'block' : 'none';
-        
+
         if (!feeField.value) {
             feeField.placeholder = getProviderFeePlaceholder(providerType);
         }
@@ -1825,17 +2093,17 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const modal = document.getElementById('provider-edit-modal');
         const errorBox = document.getElementById('provider-error');
         errorBox.style.display = 'none';
-        
+
         if (providerId) {
             document.getElementById('modal-title').textContent = 'Edit Upstream Provider';
             document.getElementById('provider-save-btn').textContent = 'Save';
             document.getElementById('provider-id').value = providerId;
-            
+
             try {
                 const resp = await fetch(`/admin/api/upstream-providers/${providerId}`, { credentials: 'same-origin' });
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 const p = await resp.json();
-                
+
                 document.getElementById('provider-type').value = p.provider_type;
                 document.getElementById('provider-base-url').value = p.base_url;
                 document.getElementById('provider-base-url').readOnly = false;
@@ -1863,7 +2131,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             document.getElementById('provider-fee').placeholder = getProviderFeePlaceholder('openrouter');
             updateProviderFields();
         }
-        
+
         modal.style.display = 'block';
     }
 
@@ -1875,11 +2143,11 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const providerId = document.getElementById('provider-id').value;
         const errorBox = document.getElementById('provider-error');
         errorBox.style.display = 'none';
-        
+
         const providerType = document.getElementById('provider-type').value;
         const feeValue = document.getElementById('provider-fee').value;
         const defaultFee = providerType === 'openrouter' ? 1.06 : 1.01;
-        
+
         const payload = {
             provider_type: providerType,
             base_url: document.getElementById('provider-base-url').value,
@@ -1887,17 +2155,17 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             enabled: document.getElementById('provider-enabled').checked,
             provider_fee: feeValue ? parseFloat(feeValue) : defaultFee,
         };
-        
+
         const apiKey = document.getElementById('provider-api-key').value;
         if (apiKey) {
             payload.api_key = apiKey;
         }
-        
+
         const saveBtn = document.getElementById('provider-save-btn');
         const originalText = saveBtn.textContent;
         saveBtn.disabled = true;
         saveBtn.textContent = 'Saving…';
-        
+
         try {
             let resp;
             if (providerId) {
@@ -1918,13 +2186,13 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                     body: JSON.stringify(payload)
                 });
             }
-            
+
             if (!resp.ok) {
                 let errText = 'Failed to save provider';
                 try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
                 throw new Error(errText);
             }
-            
+
             closeProviderEditor();
             await fetchProviders();
         } catch (e) {
@@ -1938,10 +2206,10 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
 
     async function deleteProvider(ev, providerId) {
         if (!confirm('Are you sure you want to delete this provider?')) return;
-        
+
         const btn = ev && ev.currentTarget ? ev.currentTarget : null;
         if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
-        
+
         try {
             const resp = await fetch(`/admin/api/upstream-providers/${providerId}`, {
                 method: 'DELETE',
@@ -1964,13 +2232,13 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const modal = document.getElementById('model-override-modal');
         const errorBox = document.getElementById('model-override-error');
         errorBox.style.display = 'none';
-        
+
         document.getElementById('override-model-id').value = '';
         document.getElementById('override-model-id').disabled = false;
         document.getElementById('override-model-name').value = '';
         document.getElementById('override-description').value = '';
         document.getElementById('override-context').value = 8192;
-        
+
         const architecture = {
             modality: 'text',
             input_modalities: ['text'],
@@ -1979,7 +2247,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             instruct_type: null
         };
         document.getElementById('override-architecture').value = JSON.stringify(architecture, null, 2);
-        
+
         const pricing = {
             prompt: 0.0,
             completion: 0.0,
@@ -1989,7 +2257,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             internal_reasoning: 0.0
         };
         document.getElementById('override-pricing').value = JSON.stringify(pricing, null, 2);
-        
+
         document.getElementById('override-enabled').value = 'true';
         document.getElementById('override-mode').value = 'create';
         document.getElementById('override-created').value = Math.floor(Date.now() / 1000);
@@ -1997,7 +2265,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         document.getElementById('modal-title').textContent = 'Create Custom Model';
         document.getElementById('override-save-btn').textContent = 'Create Model';
         document.getElementById('override-model-name').disabled = false;
-        
+
         modal.style.display = 'block';
     }
 
@@ -2007,13 +2275,13 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const searchInput = document.getElementById('preset-search');
         errorBox.style.display = 'none';
         searchInput.value = '';
-        
+
         if (!openrouterPresets.length) {
             const loadingDiv = document.getElementById('preset-loading');
             const presetsDiv = document.getElementById('presets-list');
             loadingDiv.style.display = 'block';
             presetsDiv.style.display = 'none';
-            
+
             try {
                 const resp = await fetch('/admin/api/openrouter-presets', { credentials: 'same-origin' });
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -2029,7 +2297,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         } else {
             renderPresets('');
         }
-        
+
         modal.style.display = 'block';
     }
 
@@ -2041,12 +2309,12 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             const name = (m.name || '').toLowerCase();
             return id.includes(q) || name.includes(q);
         }) : openrouterPresets;
-        
+
         if (!filtered.length) {
             presetsBody.innerHTML = '<tr><td colspan="3" style="color:#718096;">No models match your search</td></tr>';
             return;
         }
-        
+
         presetsBody.innerHTML = '';
         filtered.slice(0, 100).forEach(m => {
             const row = document.createElement('tr');
@@ -2079,13 +2347,13 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             const modal = document.getElementById('model-override-modal');
             const errorBox = document.getElementById('model-override-error');
             errorBox.style.display = 'none';
-            
+
             document.getElementById('override-model-id').value = modelData.id || '';
             document.getElementById('override-model-id').disabled = !isCustomModel;
             document.getElementById('override-model-name').value = modelData.name || '';
             document.getElementById('override-description').value = modelData.description || '';
             document.getElementById('override-context').value = modelData.context_length || 8192;
-            
+
             const architecture = modelData.architecture || {
                 modality: 'text',
                 input_modalities: ['text'],
@@ -2094,7 +2362,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                 instruct_type: null
             };
             document.getElementById('override-architecture').value = JSON.stringify(architecture, null, 2);
-            
+
             const pricing = modelData.pricing || {
                 prompt: 0.0,
                 completion: 0.0,
@@ -2107,7 +2375,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             delete pricing.max_completion_cost;
             delete pricing.max_cost;
             document.getElementById('override-pricing').value = JSON.stringify(pricing, null, 2);
-            
+
             document.getElementById('override-enabled').value = 'true';
             document.getElementById('override-mode').value = 'create';
             document.getElementById('override-created').value = Math.floor(Date.now() / 1000);
@@ -2116,7 +2384,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             document.getElementById('modal-title').textContent = isCustomProvider ? 'Create Model from Preset' : 'Create Model Override';
             document.getElementById('override-save-btn').textContent = isCustomProvider ? 'Create Model' : 'Create Override';
             document.getElementById('override-model-name').disabled = false;
-            
+
             modal.style.display = 'block';
         } else {
             await quickDisableModel(modelData);
@@ -2136,20 +2404,20 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                 upstream_provider_id: selectedProviderId,
                 enabled: false
             };
-            
+
             const resp = await fetch(`/admin/api/upstream-providers/${selectedProviderId}/models`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
                 body: JSON.stringify(payload)
             });
-            
+
             if (!resp.ok) {
                 let errText = 'Failed to disable model';
                 try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
                 throw new Error(errText);
             }
-            
+
             await viewProviderModels(selectedProviderId);
         } catch (e) {
             alert(e.message);
@@ -2163,16 +2431,16 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             });
             if (!resp.ok) throw new Error('Failed to fetch model');
             const model = await resp.json();
-            
+
             model.enabled = newEnabledState;
-            
+
             const updateResp = await fetch(`/admin/api/upstream-providers/${selectedProviderId}/models/${encodeURIComponent(modelId)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
                 body: JSON.stringify(model)
             });
-            
+
             if (!updateResp.ok) throw new Error('Failed to update model');
             await viewProviderModels(selectedProviderId);
         } catch (e) {
@@ -2187,14 +2455,14 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
     async function saveModelOverride() {
         const errorBox = document.getElementById('model-override-error');
         errorBox.style.display = 'none';
-        
+
         const btn = document.getElementById('override-save-btn');
         const mode = document.getElementById('override-mode').value;
         const isEdit = mode === 'edit';
-        
+
         btn.disabled = true;
         btn.textContent = isEdit ? 'Saving…' : 'Creating…';
-        
+
         try {
             const modelId = document.getElementById('override-model-id').value;
             const upstreamProviderId = parseInt(document.getElementById('override-upstream-provider-id').value);
@@ -2209,7 +2477,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                 upstream_provider_id: upstreamProviderId,
                 enabled: document.getElementById('override-enabled').value === 'true'
             };
-            
+
             const resp = await fetch(
                 isEdit ? `/admin/api/upstream-providers/${selectedProviderId}/models/${encodeURIComponent(modelId)}` : `/admin/api/upstream-providers/${selectedProviderId}/models`,
                 {
@@ -2219,13 +2487,13 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                     body: JSON.stringify(payload)
                 }
             );
-            
+
             if (!resp.ok) {
                 let errText = isEdit ? 'Failed to update override' : 'Failed to create override';
                 try { const err = await resp.json(); if (err && err.detail) errText = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail); } catch (_) {}
                 throw new Error(errText);
             }
-            
+
             closeModelOverrideModal();
             await viewProviderModels(selectedProviderId);
         } catch (e) {
@@ -2241,21 +2509,21 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         const modal = document.getElementById('model-override-modal');
         const errorBox = document.getElementById('model-override-error');
         errorBox.style.display = 'none';
-        
+
         try {
             const resp = await fetch(`/admin/api/upstream-providers/${selectedProviderId}/models/${encodeURIComponent(modelId)}`, {
                 credentials: 'same-origin'
             });
             if (!resp.ok) throw new Error('Failed to fetch model');
             const modelData = await resp.json();
-            
+
             document.getElementById('override-model-id').value = modelData.id;
             document.getElementById('override-model-name').value = modelData.name;
             document.getElementById('override-model-name').disabled = false;
             document.getElementById('override-description').value = modelData.description || '';
             document.getElementById('override-context').value = modelData.context_length || 8192;
             document.getElementById('override-created').value = modelData.created || Math.floor(Date.now() / 1000);
-            
+
             const architecture = modelData.architecture || {
                 modality: 'text',
                 input_modalities: ['text'],
@@ -2264,7 +2532,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                 instruct_type: null
             };
             document.getElementById('override-architecture').value = JSON.stringify(architecture, null, 2);
-            
+
             const pricing = modelData.pricing || {
                 prompt: 0.0,
                 completion: 0.0,
@@ -2276,13 +2544,13 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             delete pricing.max_completion_cost;
             delete pricing.max_cost;
             document.getElementById('override-pricing').value = JSON.stringify(pricing, null, 2);
-            
+
             document.getElementById('override-enabled').value = String(modelData.enabled !== false);
             document.getElementById('override-mode').value = 'edit';
             document.getElementById('override-upstream-provider-id').value = modelData.upstream_provider_id || selectedProviderId;
             document.getElementById('modal-title').textContent = 'Edit Model Override';
             document.getElementById('override-save-btn').textContent = 'Save Changes';
-            
+
             modal.style.display = 'block';
         } catch (e) {
             alert('Failed to load model: ' + e.message);
@@ -2291,7 +2559,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
 
     async function deleteModelOverride(modelId) {
         if (!confirm('Delete this model override?')) return;
-        
+
         try {
             const resp = await fetch(`/admin/api/upstream-providers/${selectedProviderId}/models/${encodeURIComponent(modelId)}`, {
                 method: 'DELETE',
@@ -2357,9 +2625,9 @@ def upstream_providers_page() -> str:
                 <h2>Models for <span id="provider-name-display"></span></h2>
                 <button onclick="closeModelsSection()" style="background:#718096;">Close</button>
             </div>
-            
+
             <div id="models-loading" style="color:#718096;">Loading models…</div>
-            
+
             <div id="models-content" style="display:none;">
                 <div id="custom-provider-actions" style="display:none; margin-bottom: 1rem;">
                     <button onclick="openCustomModelCreator()">➕ Add Model</button>
@@ -2368,7 +2636,7 @@ def upstream_providers_page() -> str:
                         Custom providers don't fetch models from an API. Add models manually or use OpenRouter presets.
                     </p>
                 </div>
-                
+
                 <h3>Models</h3>
                 <table style="margin-bottom: 2rem;">
                     <thead>
@@ -2382,7 +2650,7 @@ def upstream_providers_page() -> str:
                         <tr><td colspan="3" style="color:#718096;">No models defined</td></tr>
                     </tbody>
                 </table>
-                
+
                 <div id="remote-models-section">
                     <h3>Remote Models</h3>
                     <table>
@@ -2405,11 +2673,11 @@ def upstream_providers_page() -> str:
             <div class="modal-content">
                 <span class="close" onclick="closeProviderEditor()">&times;</span>
                 <h3 id="modal-title">Edit Upstream Provider</h3>
-                
+
                 <div id="provider-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
-                
+
                 <input type="hidden" id="provider-id">
-                
+
                 <label>Provider Type</label>
                 <select id="provider-type" onchange="updateProviderFields()">
                     <option value="openrouter">OpenRouter</option>
@@ -2418,27 +2686,27 @@ def upstream_providers_page() -> str:
                     <option value="azure">Azure OpenAI</option>
                     <option value="custom">Custom</option>
                 </select>
-                
+
                 <label>Base URL</label>
                 <input type="text" id="provider-base-url" placeholder="https://api.example.com/v1">
-                
+
                 <label>API Key</label>
                 <input type="password" id="provider-api-key" placeholder="API Key">
-                
+
                 <div id="api-version-row" style="display:none;">
                     <label>API Version</label>
                     <input type="text" id="provider-api-version" placeholder="2024-02-15-preview">
                 </div>
-                
+
                 <label>Provider Fee (Multiplier)</label>
                 <input type="number" id="provider-fee" step="0.001" min="1.0" placeholder="Default: 1.01 (1%)">
                 <small style="color:#718096; font-size:0.85rem;">Leave empty to use default (OpenRouter: 1.06, Others: 1.01)</small>
-                
+
                 <label style="display:flex; align-items:center; gap:8px; margin:10px 0;">
                     <input type="checkbox" id="provider-enabled" style="width:auto;">
                     <span>Enabled</span>
                 </label>
-                
+
                 <div style="margin-top: 12px; display: flex; gap: 10px;">
                     <button id="provider-save-btn" onclick="saveProvider()">Save</button>
                     <button onclick="closeProviderEditor()" style="background-color: #718096;">Cancel</button>
@@ -2450,32 +2718,32 @@ def upstream_providers_page() -> str:
             <div class="modal-content">
                 <span class="close" onclick="closeModelOverrideModal()">&times;</span>
                 <h3 id="modal-title">Create Model Override</h3>
-                
+
                 <div id="model-override-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
-                
+
                 <label>Model ID</label>
                 <input type="text" id="override-model-id" disabled>
-                
+
                 <label>Name</label>
                 <input type="text" id="override-model-name">
-                
+
                 <label>Description</label>
                 <input type="text" id="override-description">
-                
+
                 <label>Context Length</label>
                 <input type="number" id="override-context" min="0">
-                
+
                 <label>Architecture (JSON)</label>
                 <textarea id="override-architecture" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
-                
+
                 <label>Pricing (JSON)</label>
                 <textarea id="override-pricing" style="width:100%; min-height: 120px; font-family: 'Monaco', monospace; font-size: 13px; background:#f8fafc; color:#2d3748; padding: 12px; border: 2px solid #e2e8f0; border-radius: 6px;"></textarea>
-                
+
                 <input type="hidden" id="override-enabled" value="true">
                 <input type="hidden" id="override-mode" value="create">
                 <input type="hidden" id="override-created" value="">
                 <input type="hidden" id="override-upstream-provider-id" value="">
-                
+
                 <div style="margin-top: 12px; display: flex; gap: 10px;">
                     <button id="override-save-btn" onclick="saveModelOverride()">Create Override</button>
                     <button onclick="closeModelOverrideModal()" style="background-color: #718096;">Cancel</button>
@@ -2487,18 +2755,18 @@ def upstream_providers_page() -> str:
             <div class="modal-content" style="max-width: 900px;">
                 <span class="close" onclick="closePresetSelector()">&times;</span>
                 <h3>Load Model from OpenRouter Preset</h3>
-                
+
                 <div id="preset-error" style="display:none; margin: 10px 0; color:#e53e3e;"></div>
-                
+
                 <div id="preset-loading" style="color:#718096; padding: 20px; text-align: center;">
                     Loading OpenRouter models...
                 </div>
-                
+
                 <div id="presets-list" style="display:none;">
-                    <input type="text" id="preset-search" placeholder="Search models by ID or name..." 
-                           oninput="searchPresets(this.value)" 
+                    <input type="text" id="preset-search" placeholder="Search models by ID or name..."
+                           oninput="searchPresets(this.value)"
                            style="width:100%; padding:10px; margin-bottom:12px; border:2px solid #e2e8f0; border-radius:6px;">
-                    
+
                     <div style="max-height: 60vh; overflow-y: auto;">
                         <table style="margin: 0;">
                             <thead style="position: sticky; top: 0; z-index: 10;">
@@ -2513,12 +2781,12 @@ def upstream_providers_page() -> str:
                             </tbody>
                         </table>
                     </div>
-                    
+
                     <p style="font-size: 0.85rem; color: #718096; margin-top: 10px;">
                         Showing up to 100 models. Use search to find specific models.
                     </p>
                 </div>
-                
+
                 <div style="margin-top: 12px;">
                     <button onclick="closePresetSelector()" style="background-color: #718096;">Cancel</button>
                 </div>
@@ -2652,6 +2920,16 @@ async def update_provider_model(
     return _row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
+
+
+@admin_router.put(
+    "/api/upstream-providers/{provider_id}/models/{model_id:path}",
+    dependencies=[Depends(require_admin_api)],
+)
+async def update_provider_model_put(
+    provider_id: int, model_id: str, payload: ModelUpdate
+) -> dict[str, object]:
+    return await update_provider_model(provider_id, model_id, payload)
 
 
 @admin_router.delete(

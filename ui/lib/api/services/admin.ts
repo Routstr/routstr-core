@@ -303,6 +303,20 @@ export class AdminService {
     };
   }
 
+  static async getModel(
+    modelId: string,
+    providerId: number | null = null
+  ): Promise<AdminModel> {
+    const model = await apiClient.post<AdminModel>('/admin/api/models/get', {
+      model_id: modelId,
+      provider_id: providerId,
+    });
+    return {
+      ...model,
+      pricing: this.convertPricingToPerMillionTokens(model.pricing),
+    };
+  }
+
   static async updateProviderModel(
     providerId: number,
     modelId: string,
@@ -437,9 +451,9 @@ export class AdminService {
   static async createModel(
     data: Record<string, unknown>
   ): Promise<AdminModelAsModel> {
-    if (!data.provider_id) {
-      throw new Error('provider_id is required to create a model');
-    }
+    const providerId = data.provider_id
+      ? parseInt(data.provider_id as string)
+      : null;
 
     const pricing = {
       prompt: (data.input_cost as number) / 1000000,
@@ -450,8 +464,11 @@ export class AdminService {
       internal_reasoning: 0,
     };
 
-    const adminModel: AdminModel = {
-      id: (data.id as string) || (data.full_name as string),
+    const modelId = (data.id as string) || (data.full_name as string);
+
+    const payload = {
+      model_id: modelId,
+      provider_id: providerId,
       name: (data.name as string) || (data.full_name as string),
       description: (data.description as string) || '',
       created: Math.floor(Date.now() / 1000),
@@ -463,28 +480,35 @@ export class AdminService {
         tokenizer: '',
         instruct_type: null,
       },
-      pricing,
+      pricing: this.convertPricingToPerToken(pricing),
       per_request_limits: null,
       top_provider: null,
-      upstream_provider_id: parseInt(data.provider_id as string),
       enabled: data.isEnabled !== false,
     };
 
-    const providerId = parseInt(data.provider_id as string);
-    const created = await this.createProviderModel(providerId, adminModel);
-    return this.transformAdminModelToModel(created, data.provider as string);
+    const created = await apiClient.post<AdminModel>(
+      '/admin/api/models/create',
+      payload
+    );
+
+    return this.transformAdminModelToModel(
+      {
+        ...created,
+        pricing: this.convertPricingToPerMillionTokens(created.pricing),
+      },
+      data.provider as string
+    );
   }
 
   static async updateModel(
     modelId: string,
     data: Record<string, unknown>
   ): Promise<AdminModelAsModel> {
-    if (!data.provider_id) {
-      throw new Error('provider_id is required to update a model');
-    }
+    const providerId = data.provider_id
+      ? parseInt(data.provider_id as string)
+      : null;
 
-    const providerId = parseInt(data.provider_id as string);
-    const existingModel = await this.getProviderModel(providerId, modelId);
+    const existingModel = await this.getModel(modelId, providerId);
 
     const pricing = {
       prompt: (data.input_cost as number) / 1000000,
@@ -495,9 +519,13 @@ export class AdminService {
       internal_reasoning: 0,
     };
 
-    const payload: AdminModel = {
+    const payload: AdminModel & {
+      model_id: string;
+      provider_id: number | null;
+    } = {
       ...existingModel,
-      id: modelId,
+      model_id: modelId,
+      provider_id: providerId,
       pricing,
     };
 
@@ -508,22 +536,32 @@ export class AdminService {
     if (data.isEnabled !== undefined)
       payload.enabled = data.isEnabled as boolean;
 
-    const updated = await this.updateProviderModel(
-      providerId,
-      modelId,
-      payload
+    const updated = await apiClient.post<AdminModel>(
+      '/admin/api/models/update',
+      {
+        ...payload,
+        pricing: this.convertPricingToPerToken(payload.pricing),
+      }
     );
-    return this.transformAdminModelToModel(updated, data.provider as string);
+
+    return this.transformAdminModelToModel(
+      {
+        ...updated,
+        pricing: this.convertPricingToPerMillionTokens(updated.pricing),
+      },
+      data.provider as string
+    );
   }
 
   static async deleteModel(
     modelId: string,
     providerId?: string
   ): Promise<{ message: string }> {
-    if (!providerId) {
-      throw new Error('provider_id is required to delete a model');
-    }
-    await this.deleteProviderModel(parseInt(providerId), modelId);
+    const providerIdNum = providerId ? parseInt(providerId) : null;
+    await apiClient.post('/admin/api/models/delete', {
+      model_id: modelId,
+      provider_id: providerIdNum,
+    });
     return { message: 'Model deleted successfully' };
   }
 
@@ -531,15 +569,17 @@ export class AdminService {
     modelId: string,
     providerId?: string
   ): Promise<{ message: string }> {
-    if (!providerId) {
-      throw new Error('provider_id is required to soft delete a model');
-    }
-    const providerIdNum = parseInt(providerId);
-    const model = await this.getProviderModel(providerIdNum, modelId);
-    await this.updateProviderModel(providerIdNum, modelId, {
+    const providerIdNum = providerId ? parseInt(providerId) : null;
+    const model = await this.getModel(modelId, providerIdNum);
+
+    await apiClient.post('/admin/api/models/update', {
+      model_id: modelId,
+      provider_id: providerIdNum,
       ...model,
       enabled: false,
+      pricing: this.convertPricingToPerToken(model.pricing),
     });
+
     return { message: 'Model soft deleted successfully' };
   }
 
@@ -692,5 +732,34 @@ export class AdminService {
       ...m,
       pricing: this.convertPricingToPerMillionTokens(m.pricing),
     }));
+  }
+
+  static async getSettings(): Promise<Record<string, unknown>> {
+    return await apiClient.get<Record<string, unknown>>('/admin/api/settings');
+  }
+
+  static async updateSettings(
+    settings: Record<string, unknown>
+  ): Promise<Record<string, unknown>> {
+    return await apiClient.patch<Record<string, unknown>>(
+      '/admin/api/settings',
+      settings
+    );
+  }
+
+  static async login(password: string): Promise<{
+    ok: boolean;
+    token: string;
+    expires_in: number;
+  }> {
+    return await apiClient.post<{
+      ok: boolean;
+      token: string;
+      expires_in: number;
+    }>('/admin/api/login', { password });
+  }
+
+  static async logout(): Promise<{ ok: boolean }> {
+    return await apiClient.post<{ ok: boolean }>('/admin/api/logout', {});
   }
 }
