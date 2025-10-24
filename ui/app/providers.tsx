@@ -6,6 +6,7 @@ import { useState, type ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import { AuthProvider } from '@/lib/auth/AuthContext';
 import { ProtectedRoute } from '@/lib/auth/ProtectedRoute';
+import { ThemeProvider } from '@/components/theme-provider';
 
 interface ProvidersProps {
   children: ReactNode;
@@ -27,13 +28,20 @@ export function Providers({ children }: ProvidersProps) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <ProtectedRoute>
-          {children}
-          <Toaster position='top-right' />
-        </ProtectedRoute>
-      </AuthProvider>
-      <ReactQueryDevtools initialIsOpen={false} />
+      <ThemeProvider
+        attribute='class'
+        defaultTheme='system'
+        enableSystem
+        disableTransitionOnChange
+      >
+        <AuthProvider>
+          <ProtectedRoute>
+            {children}
+            <Toaster position='top-right' />
+          </ProtectedRoute>
+        </AuthProvider>
+        <ReactQueryDevtools initialIsOpen={false} />
+      </ThemeProvider>
     </QueryClientProvider>
   );
 }

@@ -7,6 +7,7 @@ import { LogOut } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { adminLogout } from '@/lib/api/services/auth';
 import { toast } from 'sonner';
+import { ThemeToggle } from '@/components/theme-toggle';
 
 export function SiteHeader() {
   const router = useRouter();
@@ -33,15 +34,18 @@ export function SiteHeader() {
           />
           <h1 className='text-base font-medium'>Routstr</h1>
         </div>
-        <Button
-          variant='ghost'
-          size='sm'
-          onClick={handleLogout}
-          className='gap-2'
-        >
-          <LogOut className='h-4 w-4' />
-          <span className='hidden sm:inline'>Logout</span>
-        </Button>
+        <div className='flex items-center gap-2'>
+          <ThemeToggle />
+          <Button
+            variant='ghost'
+            size='sm'
+            onClick={handleLogout}
+            className='gap-2'
+          >
+            <LogOut className='h-4 w-4' />
+            <span className='hidden sm:inline'>Logout</span>
+          </Button>
+        </div>
       </div>
     </header>
   );
