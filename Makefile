@@ -38,6 +38,10 @@ help:
 	@echo "  make check-deps         - Check system dependencies"
 	@echo "  make setup              - First-time project setup"
 	@echo ""
+	@echo "UI targets:"
+	@echo "  make ui-build           - Build UI for production (static export)"
+	@echo "  make ui-dev             - Start UI development server"
+	@echo ""
 	@echo "Database migration shortcuts:"
 	@echo "  make create-migration   - Auto-generate new migration"
 	@echo "  make db-upgrade         - Apply all pending migrations"
@@ -261,3 +265,12 @@ docs-deploy:
 docs-install:
 	@echo "📚 Installing documentation dependencies..."
 	pip install -r docs/requirements.txt
+
+# UI build
+ui-build:
+	@echo "🎨 Building UI for static deployment..."
+	./scripts/build-ui.sh
+
+ui-dev:
+	@echo "🎨 Starting UI development server..."
+	cd ui && (command -v pnpm >/dev/null 2>&1 && pnpm run dev || npm run dev)

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
+    "export": "next build",
     "start": "next start",
     "lint": "next lint",
     "format-check": "prettier --check --ignore-path .gitignore .",
