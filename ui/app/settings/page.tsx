@@ -20,9 +20,8 @@ export default function SettingsPage() {
             <div className='flex items-center'>
               <h1 className='text-2xl font-bold tracking-tight'>Settings</h1>
             </div>
-            <Tabs defaultValue='server' className='w-full'>
+            <Tabs defaultValue='admin' className='w-full'>
               <TabsList className='mb-4'>
-                <TabsTrigger value='server'>Server Configuration</TabsTrigger>
                 <TabsTrigger value='admin'>Admin Settings</TabsTrigger>
               </TabsList>
               <TabsContent value='server'>

@@ -1,7 +1,12 @@
 'use client';
 
 import * as React from 'react';
-import { DatabaseIcon, LayoutDashboardIcon, ServerIcon } from 'lucide-react';
+import {
+  DatabaseIcon,
+  LayoutDashboardIcon,
+  ServerIcon,
+  SettingsIcon,
+} from 'lucide-react';
 
 import { NavSecondary } from '@/components/nav-secondary';
 import {
@@ -38,15 +43,15 @@ const data = {
       url: '/providers',
       icon: ServerIcon,
     },
+    {
+      title: 'Settings',
+      url: '/settings',
+      icon: SettingsIcon,
+    },
     // {
     //   title: 'Transactions',
     //   url: '/transactions',
     //   icon: ReceiptIcon,
-    // },
-    // {
-    //   title: 'Settings',
-    //   url: '/settings',
-    //   icon: SettingsIcon,
     // },
     // {
     //   title: 'Credit',
