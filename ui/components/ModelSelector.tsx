@@ -13,6 +13,7 @@ import { AddModelForm } from '@/components/AddModelForm';
 import { EditModelForm } from '@/components/EditModelForm';
 import { EditGroupForm } from '@/components/EditGroupForm';
 import { CollectModelsDialog } from '@/components/CollectModelsDialog';
+import { ModelSearchFilter } from '@/components/ModelSearchFilter';
 import { formatCost } from '@/lib/services/costValidation';
 import { Button } from '@/components/ui/button';
 import {
@@ -64,12 +65,14 @@ interface ModelSelectorProps {
   filterProvider?: string;
   groupData?: ModelGroup;
   showProviderActions?: boolean;
+  filteredModels?: Model[];
 }
 
 export function ModelSelector({
   filterProvider,
   groupData,
   showProviderActions = false,
+  filteredModels: propFilteredModels,
 }: ModelSelectorProps) {
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [, setHoveredModelId] = useState<string | null>(null);
@@ -91,6 +94,9 @@ export function ModelSelector({
     setBulkApplyGroupSettingsDialogOpen,
   ] = useState(false);
 
+  // Search and filter state
+  const [filteredModels, setFilteredModels] = useState<Model[]>([]);
+
   const queryClient = useQueryClient();
 
   // Fetch models and groups
@@ -108,7 +114,7 @@ export function ModelSelector({
   const { models = [], groups = [] } = modelsData || {};
 
   // Filter models by provider if specified
-  const filteredModels = useMemo(() => {
+  const providerFilteredModels = useMemo(() => {
     if (!filterProvider) return models;
     return models.filter((model) => model.provider === filterProvider);
   }, [models, filterProvider]);
@@ -418,14 +424,21 @@ export function ModelSelector({
 
   // Group models by provider for better organization (only if not filtering)
   const groupedModels = useMemo(() => {
+    const modelsToGroup =
+      propFilteredModels && propFilteredModels.length > 0
+        ? propFilteredModels
+        : filteredModels.length > 0
+          ? filteredModels
+          : providerFilteredModels;
+
     if (filterProvider) {
       // If filtering by provider, return single group
-      return { [filterProvider]: filteredModels };
+      return { [filterProvider]: modelsToGroup };
     }
 
-    if (!models) return {};
+    if (!modelsToGroup) return {};
 
-    return models.reduce<Record<string, Model[]>>((acc, model) => {
+    return modelsToGroup.reduce<Record<string, Model[]>>((acc, model) => {
       const provider = model.provider;
       if (!acc[provider]) {
         acc[provider] = [];
@@ -433,7 +446,12 @@ export function ModelSelector({
       acc[provider].push(model);
       return acc;
     }, {});
-  }, [models, filteredModels, filterProvider]);
+  }, [
+    providerFilteredModels,
+    filteredModels,
+    propFilteredModels,
+    filterProvider,
+  ]);
 
   // Create a map of provider names to group data
   const groupDataMap = useMemo(() => {
@@ -622,7 +640,13 @@ export function ModelSelector({
   };
 
   const selectAllModels = () => {
-    setSelectedModels(new Set(filteredModels.map((m) => m.id)));
+    const modelsToSelect =
+      propFilteredModels && propFilteredModels.length > 0
+        ? propFilteredModels
+        : filteredModels.length > 0
+          ? filteredModels
+          : providerFilteredModels;
+    setSelectedModels(new Set(modelsToSelect.map((m) => m.id)));
   };
 
   const deselectAllModels = () => {
@@ -630,7 +654,13 @@ export function ModelSelector({
   };
 
   const selectProviderModels = (provider: string) => {
-    const providerModelIds = filteredModels
+    const modelsToFilter =
+      propFilteredModels && propFilteredModels.length > 0
+        ? propFilteredModels
+        : filteredModels.length > 0
+          ? filteredModels
+          : providerFilteredModels;
+    const providerModelIds = modelsToFilter
       .filter((m) => m.provider === provider)
       .map((m) => m.id);
     const newSelected = new Set(selectedModels);
@@ -795,7 +825,6 @@ export function ModelSelector({
 
   return (
     <div className='grid gap-6'>
-      {/* Action buttons */}
       <div className='flex flex-wrap items-center gap-2'>
         {/* Model Management Actions
         <Button onClick={() => setIsAddFormOpen(true)} className='gap-2'>
@@ -817,7 +846,13 @@ export function ModelSelector({
 
             <Button
               onClick={() => {
-                const allModelIds = filteredModels.map((m) => m.id);
+                const modelsToSelect =
+                  propFilteredModels && propFilteredModels.length > 0
+                    ? propFilteredModels
+                    : filteredModels.length > 0
+                      ? filteredModels
+                      : providerFilteredModels;
+                const allModelIds = modelsToSelect.map((m) => m.id);
                 const newSelected = new Set(selectedModels);
                 allModelIds.forEach((id) => newSelected.add(id));
                 setSelectedModels(newSelected);
@@ -827,7 +862,13 @@ export function ModelSelector({
               className='gap-2'
             >
               <CheckSquare className='h-4 w-4' />
-              Select All ({filteredModels.length})
+              Select All (
+              {propFilteredModels && propFilteredModels.length > 0
+                ? propFilteredModels.length
+                : filteredModels.length > 0
+                  ? filteredModels.length
+                  : providerFilteredModels.length}
+              )
             </Button>
 
             {selectedModels.size > 0 && (
@@ -835,7 +876,13 @@ export function ModelSelector({
                 onClick={() => {
                   if (filterProvider) {
                     // If in provider view, deselect only models from this provider
-                    const groupModelIds = filteredModels.map((m) => m.id);
+                    const modelsToFilter =
+                      propFilteredModels && propFilteredModels.length > 0
+                        ? propFilteredModels
+                        : filteredModels.length > 0
+                          ? filteredModels
+                          : providerFilteredModels;
+                    const groupModelIds = modelsToFilter.map((m) => m.id);
                     const newSelected = new Set(selectedModels);
                     groupModelIds.forEach((id) => newSelected.delete(id));
                     setSelectedModels(newSelected);
@@ -864,7 +911,13 @@ export function ModelSelector({
             </span>
 
             {(() => {
-              const selectedSoftDeletedModels = filteredModels.filter(
+              const modelsToFilter =
+                propFilteredModels && propFilteredModels.length > 0
+                  ? propFilteredModels
+                  : filteredModels.length > 0
+                    ? filteredModels
+                    : providerFilteredModels;
+              const selectedSoftDeletedModels = modelsToFilter.filter(
                 (m) => selectedModels.has(m.id) && m.soft_deleted
               );
               return (

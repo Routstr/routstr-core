@@ -3,6 +3,7 @@
 import { ModelSelector } from '@/components/ModelSelector';
 import { ModelTester } from '@/components/ModelTester';
 import { ApiEndpointTester } from '@/components/ApiEndpointTester';
+import { ModelSearchFilter } from '@/components/ModelSearchFilter';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { AppSidebar } from '@/components/app-sidebar';
 import { SiteHeader } from '@/components/site-header';
@@ -13,9 +14,12 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, Users, Globe } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import type { Model } from '@/lib/api/schemas/models';
 
 export default function ModelsPage() {
+  const [filteredModels, setFilteredModels] = useState<Model[]>([]);
+
   const {
     data: modelsData,
     isLoading: isLoadingModels,
@@ -142,7 +146,11 @@ export default function ModelsPage() {
                           <div className='text-muted-foreground text-sm'>
                             Overview of all models across all provider groups.
                           </div>
-                          <ModelSelector />
+                          <ModelSearchFilter
+                            models={models}
+                            onFilteredModelsChange={setFilteredModels}
+                          />
+                          <ModelSelector filteredModels={filteredModels} />
                         </div>
                       </TabsContent>
 
