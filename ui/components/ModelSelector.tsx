@@ -1243,12 +1243,6 @@ export function ModelSelector({
                               {formatCost(model.output_cost)}/1M tokens
                             </span>
                           </div>
-                          <div className='flex justify-between'>
-                            <span className='truncate'>Min cost:</span>
-                            <span className='ml-2 truncate'>
-                              {formatCost(model.min_cost_per_request)}
-                            </span>
-                          </div>
                         </div>
                       )}
 
