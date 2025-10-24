@@ -2,6 +2,7 @@ import { AppSidebar } from '@/components/app-sidebar';
 import { SiteHeader } from '@/components/site-header';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { DetailedWalletBalance } from '@/components/detailed-wallet-balance';
+import { TemporaryBalances } from '@/components/temporary-balances';
 
 export default function Page() {
   return (
@@ -22,6 +23,9 @@ export default function Page() {
           <div className='grid gap-6'>
             <div className='col-span-full'>
               <DetailedWalletBalance refreshInterval={5000} />
+            </div>
+            <div className='col-span-full'>
+              <TemporaryBalances refreshInterval={10000} />
             </div>
           </div>
         </div>

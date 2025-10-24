@@ -783,4 +783,21 @@ export class AdminService {
   static async logout(): Promise<{ ok: boolean }> {
     return await apiClient.post<{ ok: boolean }>('/admin/api/logout', {});
   }
+
+  static async getTemporaryBalances(): Promise<TemporaryBalance[]> {
+    return await apiClient.get<TemporaryBalance[]>(
+      '/admin/api/temporary-balances'
+    );
+  }
 }
+
+export const TemporaryBalanceSchema = z.object({
+  hashed_key: z.string(),
+  balance: z.number(),
+  total_spent: z.number(),
+  total_requests: z.number(),
+  refund_address: z.string().nullable(),
+  key_expiry_time: z.number().nullable(),
+});
+
+export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;

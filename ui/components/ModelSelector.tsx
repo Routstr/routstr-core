@@ -42,7 +42,6 @@ import {
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
 import {
-  Check,
   Cpu,
   Zap,
   Edit3,

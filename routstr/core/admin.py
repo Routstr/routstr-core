@@ -147,6 +147,25 @@ async def partial_apikeys(request: Request) -> str:
     """
 
 
+@admin_router.get("/api/temporary-balances", dependencies=[Depends(require_admin_api)])
+async def get_temporary_balances_api(request: Request) -> list[dict[str, object]]:
+    async with create_session() as session:
+        result = await session.exec(select(ApiKey))
+        api_keys = result.all()
+
+    return [
+        {
+            "hashed_key": key.hashed_key,
+            "balance": key.balance,
+            "total_spent": key.total_spent,
+            "total_requests": key.total_requests,
+            "refund_address": key.refund_address,
+            "key_expiry_time": key.key_expiry_time,
+        }
+        for key in api_keys
+    ]
+
+
 @admin_router.get("/api/balances", dependencies=[Depends(require_admin_api)])
 async def get_balances_api(request: Request) -> list[dict[str, object]]:
     balance_details, _tw, _tu, _ow = await fetch_all_balances()
