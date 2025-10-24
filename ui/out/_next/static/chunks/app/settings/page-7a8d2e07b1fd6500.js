@@ -1,0 +1,856 @@
+(self.webpackChunk_N_E = self.webpackChunk_N_E || []).push([
+  [662],
+  {
+    834: (e, s, a) => {
+      'use strict';
+      a.d(s, { T: () => t });
+      var r = a(3422);
+      a(4398);
+      var n = a(9183);
+      function t(e) {
+        let { className: s, ...a } = e;
+        return (0, r.jsx)('textarea', {
+          'data-slot': 'textarea',
+          className: (0, n.cn)(
+            'border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:bg-input/30 flex field-sizing-content min-h-16 w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm',
+            s
+          ),
+          ...a,
+        });
+      }
+    },
+    2739: (e, s, a) => {
+      Promise.resolve().then(a.bind(a, 4961));
+    },
+    4961: (e, s, a) => {
+      'use strict';
+      (a.r(s), a.d(s, { default: () => R }));
+      var r = a(3422),
+        n = a(4398),
+        t = a(6839),
+        i = a(3234),
+        l = a(3831),
+        c = a(2738),
+        d = a(268),
+        o = a(3130),
+        h = a(3648),
+        u = a(8561),
+        x = a(9675),
+        p = a(246),
+        m = a(4717);
+      function j() {
+        let {
+            config: e,
+            updateField: s,
+            saveConfig: a,
+            isSyncing: t,
+          } = (function () {
+            let [e, s] = (0, n.useState)({
+                endpoint: '',
+                apiKey: '',
+                enabled: !1,
+              }),
+              [a, r] = (0, n.useState)(!1),
+              [t, c] = (0, n.useState)(!1);
+            (0, n.useEffect)(() => {
+              (async () => {
+                (s(i.s.getServerConfig()), r(!0));
+                try {
+                  c(!0);
+                  let e = await i.s.loadServerConfigFromBackend();
+                  e && s(e);
+                } catch (e) {
+                  console.error('Error loading configuration from backend:', e);
+                } finally {
+                  c(!1);
+                }
+              })();
+            }, []);
+            let d = (0, n.useCallback)(async (e) => {
+                (i.s.saveServerConfig(e), s(e));
+                try {
+                  (c(!0),
+                    (await i.s.saveServerConfigToBackend(e)) ||
+                      l.oR.warning(
+                        'Configuration saved locally, but failed to sync with server'
+                      ));
+                } catch (e) {
+                  (console.error('Error saving configuration to backend:', e),
+                    l.oR.error('Failed to sync configuration with server'));
+                } finally {
+                  c(!1);
+                }
+              }, []),
+              o = (0, n.useCallback)(
+                (s, a) => {
+                  d({ ...e, [s]: a });
+                },
+                [e, d]
+              ),
+              h = (0, n.useCallback)(() => {
+                d({ ...e, enabled: !e.enabled });
+              }, [e, d]);
+            return {
+              config: e,
+              isLoaded: a,
+              isSyncing: t,
+              saveConfig: d,
+              updateField: o,
+              toggleEnabled: h,
+              isConfigValid: (0, n.useCallback)(
+                () => i.s.isServerConfigValid(),
+                []
+              ),
+            };
+          })(),
+          [j, v] = (0, n.useState)('idle'),
+          f = (e, a) => {
+            (s(e, a), v('idle'));
+          },
+          g = async () => {
+            if (e.endpoint) {
+              v('testing');
+              try {
+                (await i.s.testConnection(e))
+                  ? (v('success'), l.oR.success('Connection successful!'))
+                  : (v('error'),
+                    l.oR.error(
+                      'Connection failed. Please check your settings.'
+                    ));
+              } catch (e) {
+                (console.error('Connection test error:', e),
+                  v('error'),
+                  l.oR.error('Connection failed. Please check your settings.'));
+              }
+            }
+          };
+        return (0, r.jsxs)(r.Fragment, {
+          children: [
+            (0, r.jsxs)('div', {
+              className: 'mb-6 flex items-center justify-between',
+              children: [
+                (0, r.jsx)('h2', {
+                  className: 'text-xl font-semibold tracking-tight',
+                  children: 'External Server Configuration',
+                }),
+                t &&
+                  (0, r.jsxs)(u.E, {
+                    variant: 'outline',
+                    className: 'flex items-center gap-1',
+                    children: [
+                      (0, r.jsx)(x.A, {
+                        className: 'h-4 w-4 animate-spin text-blue-500',
+                      }),
+                      'Syncing...',
+                    ],
+                  }),
+              ],
+            }),
+            (0, r.jsxs)(c.Zp, {
+              children: [
+                (0, r.jsx)(c.aR, {
+                  children: (0, r.jsxs)('div', {
+                    className: 'flex items-center justify-between',
+                    children: [
+                      (0, r.jsxs)('div', {
+                        children: [
+                          (0, r.jsx)(c.ZB, {
+                            children: 'Request Forwarding Settings',
+                          }),
+                          (0, r.jsx)(c.BT, {
+                            children:
+                              'Configure external server endpoint and authentication for API request forwarding',
+                          }),
+                        ],
+                      }),
+                      e.enabled &&
+                        ('idle' === j
+                          ? (0, r.jsxs)(u.E, {
+                              variant: 'outline',
+                              className: 'flex items-center gap-1',
+                              children: [
+                                (0, r.jsx)(x.A, {
+                                  className: 'h-4 w-4 text-yellow-500',
+                                }),
+                                'Not tested',
+                              ],
+                            })
+                          : 'testing' === j
+                            ? (0, r.jsxs)(u.E, {
+                                variant: 'outline',
+                                className: 'flex items-center gap-1',
+                                children: [
+                                  (0, r.jsx)(x.A, {
+                                    className:
+                                      'h-4 w-4 animate-pulse text-blue-500',
+                                  }),
+                                  'Testing...',
+                                ],
+                              })
+                            : 'success' === j
+                              ? (0, r.jsxs)(u.E, {
+                                  variant: 'outline',
+                                  className: 'flex items-center gap-1',
+                                  children: [
+                                    (0, r.jsx)(p.A, {
+                                      className: 'h-4 w-4 text-green-500',
+                                    }),
+                                    'Connected',
+                                  ],
+                                })
+                              : (0, r.jsxs)(u.E, {
+                                  variant: 'outline',
+                                  className: 'flex items-center gap-1',
+                                  children: [
+                                    (0, r.jsx)(m.A, {
+                                      className: 'h-4 w-4 text-red-500',
+                                    }),
+                                    'Failed',
+                                  ],
+                                })),
+                    ],
+                  }),
+                }),
+                (0, r.jsx)(c.Wu, {
+                  className: 'space-y-4',
+                  children: (0, r.jsxs)('div', {
+                    className: 'space-y-2',
+                    children: [
+                      (0, r.jsx)(o.J, {
+                        htmlFor: 'server-endpoint',
+                        children: 'Server Endpoint URL',
+                      }),
+                      (0, r.jsxs)('div', {
+                        className: 'relative',
+                        children: [
+                          (0, r.jsx)(d.p, {
+                            id: 'server-endpoint',
+                            placeholder: 'https://ecash.routstr.info',
+                            value: e.endpoint,
+                            onChange: (e) => f('endpoint', e.target.value),
+                            className: 'pr-24',
+                          }),
+                          (0, r.jsx)(h.$, {
+                            type: 'button',
+                            variant: 'ghost',
+                            size: 'sm',
+                            className:
+                              'absolute top-0 right-0 h-full px-3 py-2 text-xs',
+                            onClick: () =>
+                              f('endpoint', 'https://ecash.routstr.info'),
+                            children: 'Use Default',
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
+                }),
+                (0, r.jsxs)(c.wL, {
+                  className: 'flex justify-between',
+                  children: [
+                    (0, r.jsx)(h.$, {
+                      variant: 'outline',
+                      onClick: g,
+                      disabled: !e.endpoint || 'testing' === j,
+                      children: 'Test Connection',
+                    }),
+                    (0, r.jsx)(h.$, {
+                      onClick: () => {
+                        try {
+                          (a(e),
+                            l.oR.success(
+                              'Server configuration saved successfully'
+                            ));
+                        } catch (e) {
+                          (l.oR.error('Failed to save configuration'),
+                            console.error('Configuration save error:', e));
+                        }
+                      },
+                      children: 'Save Configuration',
+                    }),
+                  ],
+                }),
+              ],
+            }),
+          ],
+        });
+      }
+      var v = a(9119),
+        f = a(834),
+        g = a(9442),
+        w = a(989),
+        N = a(7137),
+        y = a(3728),
+        b = a(7829);
+      function C() {
+        let [e, s] = (0, n.useState)({}),
+          [t, i] = (0, n.useState)(!0),
+          [u, p] = (0, n.useState)(!1),
+          [m, j] = (0, n.useState)(''),
+          [C, _] = (0, n.useState)(!1),
+          [S, k] = (0, n.useState)(''),
+          [R, A] = (0, n.useState)({
+            current_password: '',
+            new_password: '',
+            confirm_password: '',
+          }),
+          [F, E] = (0, n.useState)(''),
+          [P, B] = (0, n.useState)(!1);
+        (0, n.useEffect)(() => {
+          T();
+        }, []);
+        let T = async () => {
+            try {
+              (i(!0), j(''));
+              let e = await v.zQ.getSettings();
+              s(e);
+            } catch (s) {
+              let e =
+                s instanceof Error ? s.message : 'Failed to load settings';
+              (j(e), l.oR.error(e));
+            } finally {
+              i(!1);
+            }
+          },
+          Z = async () => {
+            try {
+              (p(!0), j(''));
+              let a = await v.zQ.updateSettings(e);
+              (s(a), l.oR.success('Settings saved successfully'));
+            } catch (s) {
+              let e =
+                s instanceof Error ? s.message : 'Failed to save settings';
+              (j(e), l.oR.error(e));
+            } finally {
+              p(!1);
+            }
+          },
+          J = async () => {
+            try {
+              if ((B(!0), E(''), R.new_password !== R.confirm_password))
+                return void E('New passwords do not match');
+              if (R.new_password.length < 6)
+                return void E('New password must be at least 6 characters');
+              let { apiClient: e } = await Promise.resolve().then(
+                a.bind(a, 7916)
+              );
+              (await e.patch('/admin/api/password', {
+                current_password: R.current_password,
+                new_password: R.new_password,
+              }),
+                A({
+                  current_password: '',
+                  new_password: '',
+                  confirm_password: '',
+                }),
+                l.oR.success('Password updated successfully'));
+            } catch (s) {
+              let e =
+                s instanceof Error ? s.message : 'Failed to update password';
+              (E(e), l.oR.error(e));
+            } finally {
+              B(!1);
+            }
+          },
+          U = (e, a) => {
+            s((s) => ({ ...s, [e]: a }));
+          },
+          $ = (e) => {
+            s((s) => {
+              var a;
+              return {
+                ...s,
+                cashu_mints:
+                  (null == (a = s.cashu_mints)
+                    ? void 0
+                    : a.filter((s, a) => a !== e)) || [],
+              };
+            });
+          },
+          L = (s, a, n) => {
+            let t = e[s] || '';
+            return (0, r.jsxs)('div', {
+              className: 'space-y-2',
+              children: [
+                (0, r.jsx)(o.J, { htmlFor: s, children: a }),
+                (0, r.jsxs)('div', {
+                  className: 'flex gap-2',
+                  children: [
+                    (0, r.jsx)(d.p, {
+                      id: s,
+                      type: C ? 'text' : 'password',
+                      value: C ? t : t ? '••••••••' : '',
+                      onChange: (e) => U(s, e.target.value),
+                      placeholder: n,
+                      className: 'flex-1',
+                    }),
+                    (0, r.jsx)(h.$, {
+                      type: 'button',
+                      variant: 'outline',
+                      size: 'icon',
+                      onClick: () => _(!C),
+                      children: C
+                        ? (0, r.jsx)(w.A, { className: 'h-4 w-4' })
+                        : (0, r.jsx)(N.A, { className: 'h-4 w-4' }),
+                    }),
+                  ],
+                }),
+              ],
+            });
+          };
+        return t
+          ? (0, r.jsx)('div', {
+              className: 'flex items-center justify-center py-8',
+              children: (0, r.jsx)('div', {
+                className: 'text-muted-foreground',
+                children: 'Loading settings...',
+              }),
+            })
+          : (0, r.jsxs)(r.Fragment, {
+              children: [
+                (0, r.jsxs)('div', {
+                  className: 'mb-6',
+                  children: [
+                    (0, r.jsx)('h2', {
+                      className: 'text-xl font-semibold tracking-tight',
+                      children: 'Admin Settings',
+                    }),
+                    (0, r.jsx)('p', {
+                      className: 'text-muted-foreground',
+                      children: 'Configure your Routstr node settings',
+                    }),
+                  ],
+                }),
+                m &&
+                  (0, r.jsxs)(g.Fc, {
+                    variant: 'destructive',
+                    className: 'mb-6',
+                    children: [
+                      (0, r.jsx)(x.A, { className: 'h-4 w-4' }),
+                      (0, r.jsx)(g.TN, { children: m }),
+                    ],
+                  }),
+                (0, r.jsxs)('div', {
+                  className: 'space-y-6',
+                  children: [
+                    (0, r.jsxs)(c.Zp, {
+                      children: [
+                        (0, r.jsxs)(c.aR, {
+                          children: [
+                            (0, r.jsx)(c.ZB, { children: 'Basic Information' }),
+                            (0, r.jsx)(c.BT, {
+                              children:
+                                'Configure the basic node information and branding',
+                            }),
+                          ],
+                        }),
+                        (0, r.jsxs)(c.Wu, {
+                          className: 'space-y-4',
+                          children: [
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'name',
+                                  children: 'Node Name',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'name',
+                                  value: e.name || '',
+                                  onChange: (e) => U('name', e.target.value),
+                                  placeholder: 'ARoutstrNode',
+                                }),
+                              ],
+                            }),
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'description',
+                                  children: 'Description',
+                                }),
+                                (0, r.jsx)(f.T, {
+                                  id: 'description',
+                                  value: e.description || '',
+                                  onChange: (e) =>
+                                    U('description', e.target.value),
+                                  placeholder: 'A Routstr Node',
+                                  rows: 3,
+                                }),
+                              ],
+                            }),
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'http_url',
+                                  children: 'HTTP URL',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'http_url',
+                                  value: e.http_url || '',
+                                  onChange: (e) =>
+                                    U('http_url', e.target.value),
+                                  placeholder: 'https://your-node.com',
+                                }),
+                              ],
+                            }),
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'onion_url',
+                                  children: 'Onion URL (Optional)',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'onion_url',
+                                  value: e.onion_url || '',
+                                  onChange: (e) =>
+                                    U('onion_url', e.target.value),
+                                  placeholder: 'http://your-node.onion',
+                                }),
+                              ],
+                            }),
+                          ],
+                        }),
+                      ],
+                    }),
+                    (0, r.jsxs)(c.Zp, {
+                      children: [
+                        (0, r.jsxs)(c.aR, {
+                          children: [
+                            (0, r.jsx)(c.ZB, {
+                              children: 'Nostr Configuration',
+                            }),
+                            (0, r.jsx)(c.BT, {
+                              children:
+                                'Configure Nostr public and private keys',
+                            }),
+                          ],
+                        }),
+                        (0, r.jsxs)(c.Wu, {
+                          className: 'space-y-4',
+                          children: [
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'npub',
+                                  children: 'Public Key (npub)',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'npub',
+                                  value: e.npub || '',
+                                  onChange: (e) => U('npub', e.target.value),
+                                  placeholder: 'npub1...',
+                                }),
+                              ],
+                            }),
+                            L('nsec', 'Private Key (nsec)', 'nsec1...'),
+                          ],
+                        }),
+                      ],
+                    }),
+                    (0, r.jsxs)(c.Zp, {
+                      children: [
+                        (0, r.jsxs)(c.aR, {
+                          children: [
+                            (0, r.jsx)(c.ZB, { children: 'Security Settings' }),
+                            (0, r.jsx)(c.BT, {
+                              children:
+                                'Configure authentication and API access',
+                            }),
+                          ],
+                        }),
+                        (0, r.jsx)(c.Wu, {
+                          className: 'space-y-4',
+                          children: L(
+                            'upstream_api_key',
+                            'Upstream API Key',
+                            'Enter API key'
+                          ),
+                        }),
+                      ],
+                    }),
+                    (0, r.jsxs)(c.Zp, {
+                      children: [
+                        (0, r.jsxs)(c.aR, {
+                          children: [
+                            (0, r.jsx)(c.ZB, { children: 'Cashu Mints' }),
+                            (0, r.jsx)(c.BT, {
+                              children:
+                                'Configure Cashu mint endpoints for payments',
+                            }),
+                          ],
+                        }),
+                        (0, r.jsxs)(c.Wu, {
+                          className: 'space-y-4',
+                          children: [
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'newMint',
+                                  children: 'Add Mint URL',
+                                }),
+                                (0, r.jsxs)('div', {
+                                  className: 'flex gap-2',
+                                  children: [
+                                    (0, r.jsx)(d.p, {
+                                      id: 'newMint',
+                                      value: S,
+                                      onChange: (e) => k(e.target.value),
+                                      placeholder: 'https://mint.example.com',
+                                    }),
+                                    (0, r.jsx)(h.$, {
+                                      onClick: () => {
+                                        S.trim() &&
+                                          (s((e) => ({
+                                            ...e,
+                                            cashu_mints: [
+                                              ...(e.cashu_mints || []),
+                                              S.trim(),
+                                            ],
+                                          })),
+                                          k(''));
+                                      },
+                                      disabled: !S.trim(),
+                                      children: 'Add Mint',
+                                    }),
+                                  ],
+                                }),
+                              ],
+                            }),
+                            e.cashu_mints &&
+                              e.cashu_mints.length > 0 &&
+                              (0, r.jsxs)('div', {
+                                className: 'space-y-2',
+                                children: [
+                                  (0, r.jsx)(o.J, {
+                                    children: 'Configured Mints',
+                                  }),
+                                  (0, r.jsx)('div', {
+                                    className: 'space-y-2',
+                                    children: e.cashu_mints.map((e, s) =>
+                                      (0, r.jsxs)(
+                                        'div',
+                                        {
+                                          className:
+                                            'flex items-center gap-2 rounded border p-2',
+                                          children: [
+                                            (0, r.jsx)('span', {
+                                              className: 'flex-1 text-sm',
+                                              children: e,
+                                            }),
+                                            (0, r.jsx)(h.$, {
+                                              variant: 'outline',
+                                              size: 'sm',
+                                              onClick: () => $(s),
+                                              children: 'Remove',
+                                            }),
+                                          ],
+                                        },
+                                        s
+                                      )
+                                    ),
+                                  }),
+                                ],
+                              }),
+                          ],
+                        }),
+                      ],
+                    }),
+                    (0, r.jsx)(c.Zp, {
+                      className: 'mt-6',
+                      children: (0, r.jsxs)(c.wL, {
+                        className: 'flex justify-between',
+                        children: [
+                          (0, r.jsxs)(h.$, {
+                            variant: 'outline',
+                            onClick: T,
+                            disabled: t || u,
+                            children: [
+                              (0, r.jsx)(y.A, { className: 'mr-2 h-4 w-4' }),
+                              'Reload',
+                            ],
+                          }),
+                          (0, r.jsxs)(h.$, {
+                            onClick: Z,
+                            disabled: t || u,
+                            children: [
+                              (0, r.jsx)(b.A, { className: 'mr-2 h-4 w-4' }),
+                              u ? 'Saving...' : 'Save Settings',
+                            ],
+                          }),
+                        ],
+                      }),
+                    }),
+                    (0, r.jsxs)(c.Zp, {
+                      children: [
+                        (0, r.jsxs)(c.aR, {
+                          children: [
+                            (0, r.jsx)(c.ZB, {
+                              children: 'Change Admin Password',
+                            }),
+                            (0, r.jsx)(c.BT, {
+                              children:
+                                'Update your admin password for enhanced security',
+                            }),
+                          ],
+                        }),
+                        (0, r.jsxs)(c.Wu, {
+                          className: 'space-y-4',
+                          children: [
+                            F &&
+                              (0, r.jsxs)(g.Fc, {
+                                variant: 'destructive',
+                                children: [
+                                  (0, r.jsx)(x.A, { className: 'h-4 w-4' }),
+                                  (0, r.jsx)(g.TN, { children: F }),
+                                ],
+                              }),
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'current_password',
+                                  children: 'Current Password',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'current_password',
+                                  type: 'password',
+                                  value: R.current_password,
+                                  onChange: (e) =>
+                                    A((s) => ({
+                                      ...s,
+                                      current_password: e.target.value,
+                                    })),
+                                  placeholder: 'Enter current password',
+                                }),
+                              ],
+                            }),
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'new_password',
+                                  children: 'New Password',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'new_password',
+                                  type: 'password',
+                                  value: R.new_password,
+                                  onChange: (e) =>
+                                    A((s) => ({
+                                      ...s,
+                                      new_password: e.target.value,
+                                    })),
+                                  placeholder:
+                                    'Enter new password (min 6 characters)',
+                                }),
+                              ],
+                            }),
+                            (0, r.jsxs)('div', {
+                              className: 'space-y-2',
+                              children: [
+                                (0, r.jsx)(o.J, {
+                                  htmlFor: 'confirm_password',
+                                  children: 'Confirm New Password',
+                                }),
+                                (0, r.jsx)(d.p, {
+                                  id: 'confirm_password',
+                                  type: 'password',
+                                  value: R.confirm_password,
+                                  onChange: (e) =>
+                                    A((s) => ({
+                                      ...s,
+                                      confirm_password: e.target.value,
+                                    })),
+                                  placeholder: 'Confirm new password',
+                                }),
+                              ],
+                            }),
+                          ],
+                        }),
+                        (0, r.jsx)(c.wL, {
+                          children: (0, r.jsxs)(h.$, {
+                            onClick: J,
+                            disabled:
+                              P ||
+                              !R.current_password ||
+                              !R.new_password ||
+                              !R.confirm_password,
+                            children: [
+                              (0, r.jsx)(b.A, { className: 'mr-2 h-4 w-4' }),
+                              P ? 'Updating...' : 'Update Password',
+                            ],
+                          }),
+                        }),
+                      ],
+                    }),
+                  ],
+                }),
+              ],
+            });
+      }
+      var _ = a(4756),
+        S = a(7569),
+        k = a(953);
+      function R() {
+        return (0, r.jsxs)(k.SidebarProvider, {
+          children: [
+            (0, r.jsx)(S.AppSidebar, { variant: 'inset' }),
+            (0, r.jsxs)(k.SidebarInset, {
+              children: [
+                (0, r.jsx)(_.SiteHeader, {}),
+                (0, r.jsx)('div', {
+                  className: 'flex flex-1 flex-col',
+                  children: (0, r.jsxs)('div', {
+                    className:
+                      '@container/main flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8',
+                    children: [
+                      (0, r.jsx)('div', {
+                        className: 'flex items-center',
+                        children: (0, r.jsx)('h1', {
+                          className: 'text-2xl font-bold tracking-tight',
+                          children: 'Settings',
+                        }),
+                      }),
+                      (0, r.jsxs)(t.tU, {
+                        defaultValue: 'admin',
+                        className: 'w-full',
+                        children: [
+                          (0, r.jsx)(t.j7, {
+                            className: 'mb-4',
+                            children: (0, r.jsx)(t.Xi, {
+                              value: 'admin',
+                              children: 'Admin Settings',
+                            }),
+                          }),
+                          (0, r.jsx)(t.av, {
+                            value: 'server',
+                            children: (0, r.jsx)(j, {}),
+                          }),
+                          (0, r.jsx)(t.av, {
+                            value: 'admin',
+                            children: (0, r.jsx)(C, {}),
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
+                }),
+              ],
+            }),
+            (0, r.jsx)(l.l$, {}),
+          ],
+        });
+      }
+    },
+  },
+  (e) => {
+    var s = (s) => e((e.s = s));
+    (e.O(0, [363, 222, 230, 978, 651, 236, 255, 945, 497, 358], () => s(2739)),
+      (_N_E = e.O()));
+  },
+]);
