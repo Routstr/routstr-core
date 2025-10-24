@@ -193,7 +193,11 @@ UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui" / "out"
 if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     logger.info(f"Serving static UI from {UI_DIST_PATH}")
 
-    app.mount("/_next", StaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True), name="next-static")
+    app.mount(
+        "/_next",
+        StaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True),
+        name="next-static",
+    )
 
     @app.get("/", include_in_schema=False)
     async def serve_root_ui() -> FileResponse:
@@ -245,9 +249,13 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def serve_icon() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "icon.ico")
 
-    app.mount("/static", StaticFiles(directory=UI_DIST_PATH, check_dir=True), name="ui-static")
+    app.mount(
+        "/static", StaticFiles(directory=UI_DIST_PATH, check_dir=True), name="ui-static"
+    )
 else:
-    logger.warning(f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving")
+    logger.warning(
+        f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
+    )
 
 app.include_router(models_router)
 app.include_router(admin_router)

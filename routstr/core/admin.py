@@ -182,7 +182,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     for field in sensitive_fields:
         if field in settings_data:
             del settings_data[field]
-    
+
     async with create_session() as session:
         new_settings = await SettingsService.update(settings_data, session)
     data = new_settings.dict()
