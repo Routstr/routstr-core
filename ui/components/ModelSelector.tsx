@@ -45,21 +45,16 @@ import {
   Check,
   Cpu,
   Zap,
-  Plus,
   Edit3,
   Users,
   MoreVertical,
   Key,
   Globe,
-  Download,
   RefreshCw,
   Trash2,
   AlertTriangle,
   CheckSquare,
   Square,
-  Settings,
-  Link,
-  RotateCcw,
   Ban,
   CheckCircle,
 } from 'lucide-react';
@@ -204,11 +199,9 @@ export function ModelSelector({
               }
             );
             totalDisabled++;
-          } catch (fetchError: any) {
-            if (
-              fetchError.message?.includes('404') ||
-              fetchError.status === 404
-            ) {
+          } catch (fetchError: unknown) {
+            const error = fetchError as { message?: string; status?: number };
+            if (error.message?.includes('404') || error.status === 404) {
               const newOverride = {
                 id: model.full_name,
                 name: model.name,
@@ -326,20 +319,6 @@ export function ModelSelector({
       toast.error(
         `Failed to permanently delete provider models: ${error.message}`
       );
-    },
-  });
-
-  // Individual soft delete mutation
-  const softDeleteMutation = useMutation({
-    mutationFn: (modelId: string) => AdminService.softDeleteModel(modelId),
-    onSuccess: () => {
-      toast.success('Model soft deleted successfully');
-      queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
-      queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
-      queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
-    },
-    onError: (error) => {
-      toast.error(`Failed to soft delete model: ${error.message}`);
     },
   });
 
@@ -576,24 +555,6 @@ export function ModelSelector({
     setIsCollectDialogOpen(false);
   };
 
-  // Handle refresh - fetch all models from all providers using group credentials
-  const handleRefresh = async () => {
-    try {
-      const response = await AdminService.refreshAllModels();
-
-      toast.info(response.message);
-      await refetchModels();
-      queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
-      queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
-      queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
-    } catch (error: unknown) {
-      console.error('Error refreshing all models:', error);
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error';
-      toast.error(`Failed to refresh models: ${errorMessage}`);
-    }
-  };
-
   // Handle provider-specific refresh using group credentials
   const handleProviderRefresh = async (provider: string) => {
     const groupData = groupDataMap.get(provider);
@@ -692,10 +653,6 @@ export function ModelSelector({
     bulkSoftDeleteMutation.mutate(Array.from(selectedModels));
   };
 
-  const handleBulkApplyGroupSettings = () => {
-    setBulkApplyGroupSettingsDialogOpen(true);
-  };
-
   const confirmBulkApplyGroupSettings = () => {
     bulkApplyGroupSettingsMutation.mutate(Array.from(selectedModels));
     setBulkApplyGroupSettingsDialogOpen(false);
@@ -771,8 +728,9 @@ export function ModelSelector({
           enabled: false,
         });
         toast.success('Model disabled successfully');
-      } catch (fetchError: any) {
-        if (fetchError.message?.includes('404') || fetchError.status === 404) {
+      } catch (fetchError: unknown) {
+        const error = fetchError as { message?: string; status?: number };
+        if (error.message?.includes('404') || error.status === 404) {
           const newOverride = {
             id: model.full_name,
             name: model.name,

@@ -84,9 +84,6 @@ export function EditGroupForm({
   };
 
   // Count models that have individual API keys
-  const modelsWithIndividualKeys = models.filter(
-    (model) => model.api_key
-  ).length;
   const modelsWithoutKeys = models.filter((model) => !model.api_key).length;
 
   // Count models that would be affected by URL changes

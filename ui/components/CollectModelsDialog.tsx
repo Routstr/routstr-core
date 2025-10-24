@@ -130,7 +130,7 @@ export function CollectModelsDialog({
         if (!model) continue;
 
         try {
-          await AdminService.createAdminModel({
+          await AdminService.createModel({
             ...model,
             upstream_provider_id: selectedProvider,
             enabled: true,

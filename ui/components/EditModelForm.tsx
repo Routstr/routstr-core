@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -55,6 +55,33 @@ interface EditModelFormProps {
   isOpen: boolean;
 }
 
+interface AdminModelData {
+  id: string;
+  name: string;
+  description?: string;
+  created: number;
+  context_length: number;
+  architecture: {
+    modality: string;
+    input_modalities: string[];
+    output_modalities: string[];
+    tokenizer: string;
+    instruct_type: string | null;
+  };
+  pricing: {
+    prompt: number;
+    completion: number;
+    request: number;
+    image: number;
+    web_search: number;
+    internal_reasoning: number;
+  };
+  per_request_limits: null | undefined;
+  top_provider: null | undefined;
+  upstream_provider_id: number;
+  enabled: boolean;
+}
+
 export function EditModelForm({
   model,
   providerId,
@@ -63,7 +90,9 @@ export function EditModelForm({
   isOpen,
 }: EditModelFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [adminModelData, setAdminModelData] = useState<any>(null);
+  const [adminModelData, setAdminModelData] = useState<AdminModelData | null>(
+    null
+  );
   const [isNewOverride, setIsNewOverride] = useState(false);
 
   const form = useForm<EditModelFormData>({
@@ -78,19 +107,7 @@ export function EditModelForm({
     },
   });
 
-  useEffect(() => {
-    if (isOpen && providerId) {
-      loadAdminModel();
-    } else if (isOpen && !providerId) {
-      console.error('EditModelForm opened without providerId', {
-        model,
-        providerId,
-      });
-      toast.error('Missing provider information for this model');
-    }
-  }, [isOpen, model.id, providerId]);
-
-  const loadAdminModel = async () => {
+  const loadAdminModel = useCallback(async () => {
     if (!providerId) {
       console.error('loadAdminModel called without providerId');
       return;
@@ -107,7 +124,7 @@ export function EditModelForm({
         model.full_name
       );
 
-      setAdminModelData(adminModel);
+      setAdminModelData(adminModel as AdminModelData);
       setIsNewOverride(false);
 
       form.reset({
@@ -118,7 +135,7 @@ export function EditModelForm({
         completion: roundToFiveDecimals(adminModel.pricing.completion),
         enabled: adminModel.enabled !== false,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.log('Model not in database, will create new override:', error);
       setIsNewOverride(true);
       setAdminModelData({
@@ -157,7 +174,19 @@ export function EditModelForm({
         enabled: model.isEnabled !== false,
       });
     }
-  };
+  }, [providerId, model, form]);
+
+  useEffect(() => {
+    if (isOpen && providerId) {
+      loadAdminModel();
+    } else if (isOpen && !providerId) {
+      console.error('EditModelForm opened without providerId', {
+        model,
+        providerId,
+      });
+      toast.error('Missing provider information for this model');
+    }
+  }, [isOpen, providerId, model, loadAdminModel]);
 
   const onSubmit = async (data: EditModelFormData) => {
     if (!providerId) {
