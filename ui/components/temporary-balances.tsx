@@ -38,7 +38,7 @@ export function TemporaryBalances({
   });
 
   const formatBalance = (balance: number) => {
-    return `${balance.toLocaleString()} mSats`;
+    return `${balance.toLocaleString()} msat`;
   };
 
   const filteredData = data

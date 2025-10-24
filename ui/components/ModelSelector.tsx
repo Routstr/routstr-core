@@ -826,6 +826,21 @@ export function ModelSelector({
   return (
     <div className='grid gap-6'>
       <div className='flex flex-wrap items-center gap-2'>
+        <Button onClick={selectAllModels}>
+          <CheckSquare className='mr-2 h-4 w-4' />
+          Select All Models
+        </Button>
+        <Button onClick={deselectAllModels}>
+          <Square className='mr-2 h-4 w-4' />
+          Deselect All
+        </Button>
+        <Button
+          onClick={handleDeleteAll}
+          className='text-destructive focus:text-destructive'
+        >
+          <AlertTriangle className='mr-2 h-4 w-4' />
+          Delete All Models Permanently
+        </Button>
         {/* Model Management Actions
         <Button onClick={() => setIsAddFormOpen(true)} className='gap-2'>
           <Plus className='h-4 w-4' />
@@ -839,68 +854,6 @@ export function ModelSelector({
           Collect Models
         </Button>
         */}
-
-        {showProviderActions && (
-          <>
-            <div className='bg-border h-6 w-px' />
-
-            <Button
-              onClick={() => {
-                const modelsToSelect =
-                  propFilteredModels && propFilteredModels.length > 0
-                    ? propFilteredModels
-                    : filteredModels.length > 0
-                      ? filteredModels
-                      : providerFilteredModels;
-                const allModelIds = modelsToSelect.map((m) => m.id);
-                const newSelected = new Set(selectedModels);
-                allModelIds.forEach((id) => newSelected.add(id));
-                setSelectedModels(newSelected);
-              }}
-              variant='outline'
-              size='sm'
-              className='gap-2'
-            >
-              <CheckSquare className='h-4 w-4' />
-              Select All (
-              {propFilteredModels && propFilteredModels.length > 0
-                ? propFilteredModels.length
-                : filteredModels.length > 0
-                  ? filteredModels.length
-                  : providerFilteredModels.length}
-              )
-            </Button>
-
-            {selectedModels.size > 0 && (
-              <Button
-                onClick={() => {
-                  if (filterProvider) {
-                    // If in provider view, deselect only models from this provider
-                    const modelsToFilter =
-                      propFilteredModels && propFilteredModels.length > 0
-                        ? propFilteredModels
-                        : filteredModels.length > 0
-                          ? filteredModels
-                          : providerFilteredModels;
-                    const groupModelIds = modelsToFilter.map((m) => m.id);
-                    const newSelected = new Set(selectedModels);
-                    groupModelIds.forEach((id) => newSelected.delete(id));
-                    setSelectedModels(newSelected);
-                  } else {
-                    // If in all view, deselect all
-                    setSelectedModels(new Set());
-                  }
-                }}
-                variant='outline'
-                size='sm'
-                className='gap-2'
-              >
-                <Square className='h-4 w-4' />
-                Deselect All
-              </Button>
-            )}
-          </>
-        )}
 
         {/* Bulk selection actions */}
         {selectedModels.size > 0 && (
@@ -960,39 +913,6 @@ export function ModelSelector({
               <Ban className='h-4 w-4' />
               Disable Selected
             </Button>
-          </>
-        )}
-
-        {/* Global actions */}
-        {!showProviderActions && (
-          <>
-            <div className='bg-border h-6 w-px' />
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant='outline' size='sm' className='gap-2'>
-                  <MoreVertical className='h-4 w-4' />
-                  More Actions
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align='end'>
-                <DropdownMenuItem onClick={selectAllModels}>
-                  <CheckSquare className='mr-2 h-4 w-4' />
-                  Select All Models
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={deselectAllModels}>
-                  <Square className='mr-2 h-4 w-4' />
-                  Deselect All
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={handleDeleteAll}
-                  className='text-destructive focus:text-destructive'
-                >
-                  <AlertTriangle className='mr-2 h-4 w-4' />
-                  Delete All Models Permanently
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
           </>
         )}
       </div>
