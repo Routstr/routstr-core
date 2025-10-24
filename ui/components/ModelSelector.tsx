@@ -121,10 +121,39 @@ export function ModelSelector({
 
   // Bulk deletion mutations
   const bulkDeleteMutation = useMutation({
-    mutationFn: (modelIds: string[]) => AdminService.deleteModels(modelIds),
+    mutationFn: async (modelIds: string[]) => {
+      const selectedModelsList = models.filter((m) => modelIds.includes(m.id));
+      const modelsByProvider = selectedModelsList.reduce<
+        Record<string, Model[]>
+      >((acc, model) => {
+        const providerId = model.provider_id || 'unknown';
+        if (!acc[providerId]) {
+          acc[providerId] = [];
+        }
+        acc[providerId].push(model);
+        return acc;
+      }, {});
+
+      let totalDeleted = 0;
+      for (const [providerId, providerModels] of Object.entries(
+        modelsByProvider
+      )) {
+        if (providerId === 'unknown') {
+          continue;
+        }
+        const modelFullNames = providerModels.map((m) => m.full_name);
+        const result = await AdminService.deleteModels(
+          modelFullNames,
+          providerId
+        );
+        totalDeleted += result.deleted_count;
+      }
+
+      return { deleted_count: totalDeleted, message: 'Models deleted' };
+    },
     onSuccess: (data) => {
       toast.success(
-        `Successfully permanently deleted ${data.deleted_count} models`
+        `Successfully deleted ${data.deleted_count} model overrides`
       );
       setSelectedModels(new Set());
       queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
@@ -132,22 +161,101 @@ export function ModelSelector({
       queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
     },
     onError: (error) => {
-      toast.error(`Failed to permanently delete models: ${error.message}`);
+      toast.error(`Failed to delete model overrides: ${error.message}`);
     },
   });
 
-  // Bulk soft deletion mutations
+  // Bulk soft deletion mutations (disable models)
   const bulkSoftDeleteMutation = useMutation({
-    mutationFn: (modelIds: string[]) => AdminService.softDeleteModels(modelIds),
+    mutationFn: async (modelIds: string[]) => {
+      const selectedModelsList = models.filter((m) => modelIds.includes(m.id));
+      const modelsByProvider = selectedModelsList.reduce<
+        Record<string, Model[]>
+      >((acc, model) => {
+        const providerId = model.provider_id || 'unknown';
+        if (!acc[providerId]) {
+          acc[providerId] = [];
+        }
+        acc[providerId].push(model);
+        return acc;
+      }, {});
+
+      let totalDisabled = 0;
+      for (const [providerId, providerModels] of Object.entries(
+        modelsByProvider
+      )) {
+        if (providerId === 'unknown') {
+          continue;
+        }
+
+        for (const model of providerModels) {
+          const providerIdNum = parseInt(providerId);
+          try {
+            const existingModel = await AdminService.getProviderModel(
+              providerIdNum,
+              model.full_name
+            );
+            await AdminService.updateProviderModel(
+              providerIdNum,
+              model.full_name,
+              {
+                ...existingModel,
+                enabled: false,
+              }
+            );
+            totalDisabled++;
+          } catch (fetchError: any) {
+            if (
+              fetchError.message?.includes('404') ||
+              fetchError.status === 404
+            ) {
+              const newOverride = {
+                id: model.full_name,
+                name: model.name,
+                description: model.description || '',
+                created: Math.floor(Date.now() / 1000),
+                context_length: model.contextLength || 4096,
+                architecture: {
+                  modality: model.modelType || 'text',
+                  input_modalities: [model.modelType || 'text'],
+                  output_modalities: [model.modelType || 'text'],
+                  tokenizer: '',
+                  instruct_type: null,
+                },
+                pricing: {
+                  prompt: model.input_cost,
+                  completion: model.output_cost,
+                  request: 0,
+                  image: 0,
+                  web_search: 0,
+                  internal_reasoning: 0,
+                },
+                per_request_limits: null,
+                top_provider: null,
+                upstream_provider_id: providerIdNum,
+                enabled: false,
+              };
+              await AdminService.createProviderModel(
+                providerIdNum,
+                newOverride
+              );
+              totalDisabled++;
+            }
+          }
+        }
+      }
+
+      return { deleted_count: totalDisabled, message: 'Models disabled' };
+    },
     onSuccess: (data) => {
-      toast.success(`Successfully soft deleted ${data.deleted_count} models`);
+      toast.success(`Successfully disabled ${data.deleted_count} models`);
       setSelectedModels(new Set());
       queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
       queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
       queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
     },
     onError: (error) => {
-      toast.error(`Failed to soft delete models: ${error.message}`);
+      toast.error(`Failed to disable models: ${error.message}`);
     },
   });
 
@@ -235,32 +343,98 @@ export function ModelSelector({
     },
   });
 
-  // Restore model mutation
+  // Restore model mutation (enable model)
   const restoreMutation = useMutation({
-    mutationFn: (modelId: string) => AdminService.restoreModels([modelId]),
+    mutationFn: async (modelId: string) => {
+      const model = models.find((m) => m.id === modelId);
+      if (!model) {
+        throw new Error('Model not found');
+      }
+
+      if (!model.provider_id) {
+        throw new Error('Provider ID not available for this model');
+      }
+
+      const providerId = parseInt(model.provider_id);
+      const existingModel = await AdminService.getProviderModel(
+        providerId,
+        model.full_name
+      );
+
+      await AdminService.updateProviderModel(providerId, model.full_name, {
+        ...existingModel,
+        enabled: true,
+      });
+
+      return { restored_count: 1 };
+    },
     onSuccess: () => {
-      toast.success('Model restored successfully');
+      toast.success('Model enabled successfully');
       queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
       queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
       queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
     },
     onError: (error) => {
-      toast.error(`Failed to restore model: ${error.message}`);
+      toast.error(`Failed to enable model: ${error.message}`);
     },
   });
 
-  // Bulk restore mutation
+  // Bulk restore mutation (enable models)
   const bulkRestoreMutation = useMutation({
-    mutationFn: (modelIds: string[]) => AdminService.restoreModels(modelIds),
+    mutationFn: async (modelIds: string[]) => {
+      const selectedModelsList = models.filter((m) => modelIds.includes(m.id));
+      const modelsByProvider = selectedModelsList.reduce<
+        Record<string, Model[]>
+      >((acc, model) => {
+        const providerId = model.provider_id || 'unknown';
+        if (!acc[providerId]) {
+          acc[providerId] = [];
+        }
+        acc[providerId].push(model);
+        return acc;
+      }, {});
+
+      let totalEnabled = 0;
+      for (const [providerId, providerModels] of Object.entries(
+        modelsByProvider
+      )) {
+        if (providerId === 'unknown') {
+          continue;
+        }
+
+        for (const model of providerModels) {
+          const providerIdNum = parseInt(providerId);
+          try {
+            const existingModel = await AdminService.getProviderModel(
+              providerIdNum,
+              model.full_name
+            );
+            await AdminService.updateProviderModel(
+              providerIdNum,
+              model.full_name,
+              {
+                ...existingModel,
+                enabled: true,
+              }
+            );
+            totalEnabled++;
+          } catch (error) {
+            console.error(`Failed to enable model ${model.full_name}:`, error);
+          }
+        }
+      }
+
+      return { restored_count: totalEnabled, message: 'Models enabled' };
+    },
     onSuccess: (data) => {
-      toast.success(`Successfully restored ${data.restored_count} models`);
+      toast.success(`Successfully enabled ${data.restored_count} models`);
       setSelectedModels(new Set());
       queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
       queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
       queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
     },
     onError: (error) => {
-      toast.error(`Failed to restore models: ${error.message}`);
+      toast.error(`Failed to enable models: ${error.message}`);
     },
   });
 
@@ -545,22 +719,102 @@ export function ModelSelector({
 
   // Individual model deletion handler
   const handleDeleteModel = async (modelId: string) => {
+    const model = models.find((m) => m.id === modelId);
+    if (!model) {
+      toast.error('Model not found');
+      return;
+    }
+
+    if (!model.provider_id) {
+      toast.error('Provider ID not available for this model');
+      return;
+    }
+
     try {
-      await AdminService.deleteModel(modelId);
-      toast.success('Model permanently deleted');
+      const providerId = parseInt(model.provider_id);
+      await AdminService.deleteProviderModel(providerId, model.full_name);
+      toast.success('Model override deleted successfully');
       queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
       queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
       queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
     } catch (error: unknown) {
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';
-      toast.error(`Failed to permanently delete model: ${errorMessage}`);
+      toast.error(`Failed to delete model override: ${errorMessage}`);
     }
   };
 
-  // Individual model soft deletion handler
-  const handleSoftDeleteModel = (modelId: string) => {
-    softDeleteMutation.mutate(modelId);
+  // Individual model soft deletion handler (disable model)
+  const handleSoftDeleteModel = async (modelId: string) => {
+    const model = models.find((m) => m.id === modelId);
+    if (!model) {
+      toast.error('Model not found');
+      return;
+    }
+
+    if (!model.provider_id) {
+      toast.error('Provider ID not available for this model');
+      return;
+    }
+
+    try {
+      const providerId = parseInt(model.provider_id);
+
+      try {
+        const existingModel = await AdminService.getProviderModel(
+          providerId,
+          model.full_name
+        );
+
+        await AdminService.updateProviderModel(providerId, model.full_name, {
+          ...existingModel,
+          enabled: false,
+        });
+        toast.success('Model disabled successfully');
+      } catch (fetchError: any) {
+        if (fetchError.message?.includes('404') || fetchError.status === 404) {
+          const newOverride = {
+            id: model.full_name,
+            name: model.name,
+            description: model.description || '',
+            created: Math.floor(Date.now() / 1000),
+            context_length: model.contextLength || 4096,
+            architecture: {
+              modality: model.modelType || 'text',
+              input_modalities: [model.modelType || 'text'],
+              output_modalities: [model.modelType || 'text'],
+              tokenizer: '',
+              instruct_type: null,
+            },
+            pricing: {
+              prompt: model.input_cost,
+              completion: model.output_cost,
+              request: 0,
+              image: 0,
+              web_search: 0,
+              internal_reasoning: 0,
+            },
+            per_request_limits: null,
+            top_provider: null,
+            upstream_provider_id: providerId,
+            enabled: false,
+          };
+
+          await AdminService.createProviderModel(providerId, newOverride);
+          toast.success('Model disabled successfully');
+        } else {
+          throw fetchError;
+        }
+      }
+
+      queryClient.invalidateQueries({ queryKey: ['models-with-providers'] });
+      queryClient.invalidateQueries({ queryKey: ['all-provider-models'] });
+      queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      toast.error(`Failed to disable model: ${errorMessage}`);
+    }
   };
 
   if (isLoadingModels) {
@@ -704,8 +958,8 @@ export function ModelSelector({
                     className='gap-2 border-green-300 text-green-600 hover:border-green-400 hover:text-green-700'
                     disabled={bulkRestoreMutation.isPending}
                   >
-                    <RotateCcw className='h-4 w-4' />
-                    Restore Selected ({selectedSoftDeletedModels.length})
+                    <CheckCircle className='h-4 w-4' />
+                    Enable Selected ({selectedSoftDeletedModels.length})
                   </Button>
                 )
               );
@@ -719,7 +973,7 @@ export function ModelSelector({
               disabled={bulkDeleteMutation.isPending}
             >
               <Trash2 className='h-4 w-4' />
-              Delete Selected Permanently
+              Delete Selected Overrides
             </Button>
             <Button
               onClick={handleBulkSoftDelete}
@@ -728,8 +982,8 @@ export function ModelSelector({
               className='gap-2 border-orange-300 text-orange-600 hover:border-orange-400 hover:text-orange-700'
               disabled={bulkSoftDeleteMutation.isPending}
             >
-              <Trash2 className='h-4 w-4' />
-              Soft Delete Selected
+              <Ban className='h-4 w-4' />
+              Disable Selected
             </Button>
           </>
         )}
