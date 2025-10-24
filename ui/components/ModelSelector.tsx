@@ -840,7 +840,7 @@ export function ModelSelector({
     <div className='grid gap-6'>
       {/* Action buttons */}
       <div className='flex flex-wrap items-center gap-2'>
-        {/* Model Management Actions */}
+        {/* Model Management Actions
         <Button onClick={() => setIsAddFormOpen(true)} className='gap-2'>
           <Plus className='h-4 w-4' />
           Add Model
@@ -852,25 +852,8 @@ export function ModelSelector({
         >
           Collect Models
         </Button>
+        */}
 
-        {/* Refresh Actions */}
-        {showProviderActions && filterProvider ? (
-          <Button
-            onClick={() => handleProviderRefresh(filterProvider)}
-            variant='outline'
-            className='gap-2'
-          >
-            <RefreshCw className='h-4 w-4' />
-            Refresh {filterProvider}
-          </Button>
-        ) : (
-          <Button onClick={handleRefresh} variant='outline' className='gap-2'>
-            <RefreshCw className='h-4 w-4' />
-            Refresh All
-          </Button>
-        )}
-
-        {/* Selection Actions */}
         {showProviderActions && (
           <>
             <div className='bg-border h-6 w-px' />
@@ -923,24 +906,6 @@ export function ModelSelector({
               {selectedModels.size} selected
             </span>
 
-            {/* Group-specific bulk actions */}
-            {showProviderActions &&
-              groupData &&
-              (groupData.group_url || groupData.group_api_key) &&
-              selectedModels.size < filteredModels.length && (
-                <Button
-                  onClick={handleBulkApplyGroupSettings}
-                  variant='outline'
-                  size='sm'
-                  className='gap-2 border-blue-300 text-blue-600 hover:border-blue-400 hover:text-blue-700'
-                  disabled={bulkApplyGroupSettingsMutation.isPending}
-                >
-                  <Link className='h-4 w-4' />
-                  Apply Group Settings
-                </Button>
-              )}
-
-            {/* Bulk restore for soft-deleted models */}
             {(() => {
               const selectedSoftDeletedModels = filteredModels.filter(
                 (m) => selectedModels.has(m.id) && m.soft_deleted
