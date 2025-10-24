@@ -125,10 +125,16 @@ export class AdminService {
     if (!pricing) return pricing;
     const result = { ...pricing };
     if (typeof result.prompt === 'number') {
-      result.prompt = result.prompt * 1000;
+      result.prompt = result.prompt * 1000000;
     }
     if (typeof result.completion === 'number') {
-      result.completion = result.completion * 1000;
+      result.completion = result.completion * 1000000;
+    }
+    if (typeof result.request === 'number') {
+      result.request = result.request * 1000000;
+    }
+    if (typeof result.image === 'number') {
+      result.image = result.image * 1000000;
     }
     return result;
   }
@@ -139,10 +145,16 @@ export class AdminService {
     if (!pricing) return pricing;
     const result = { ...pricing };
     if (typeof result.prompt === 'number') {
-      result.prompt = result.prompt;
+      result.prompt = result.prompt / 1000000;
     }
     if (typeof result.completion === 'number') {
-      result.completion = result.completion;
+      result.completion = result.completion / 1000000;
+    }
+    if (typeof result.request === 'number') {
+      result.request = result.request / 1000000;
+    }
+    if (typeof result.image === 'number') {
+      result.image = result.image / 1000000;
     }
     return result;
   }
@@ -259,17 +271,7 @@ export class AdminService {
     const data = await apiClient.get<ProviderModels>(
       `/admin/api/upstream-providers/${providerId}/models`
     );
-    return {
-      ...data,
-      db_models: data.db_models.map((m) => ({
-        ...m,
-        pricing: this.convertPricingToPerMillionTokens(m.pricing),
-      })),
-      remote_models: data.remote_models.map((m) => ({
-        ...m,
-        pricing: this.convertPricingToPerMillionTokens(m.pricing),
-      })),
-    };
+    return data;
   }
 
   static async createProviderModel(
@@ -280,6 +282,10 @@ export class AdminService {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
+    console.log('Creating provider model - pricing conversion:', {
+      original: data.pricing,
+      converted: payload.pricing,
+    });
     const model = await apiClient.post<AdminModel>(
       `/admin/api/upstream-providers/${providerId}/models`,
       payload
@@ -326,6 +332,10 @@ export class AdminService {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
+    console.log('Updating provider model - pricing conversion:', {
+      original: data.pricing,
+      converted: payload.pricing,
+    });
     const model = await apiClient.patch<AdminModel>(
       `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`,
       payload
@@ -377,8 +387,15 @@ export class AdminService {
 
         providerModels.db_models.forEach((dbModel) => {
           seenModelIds.add(dbModel.id);
+          const modelWithProvider = {
+            ...dbModel,
+            upstream_provider_id: provider.id,
+          };
           allModels.push({
-            ...this.transformAdminModelToModel(dbModel, provider.provider_type),
+            ...this.transformAdminModelToModel(
+              modelWithProvider,
+              provider.provider_type
+            ),
             has_own_api_key: false,
             api_key_type: 'group',
           });
@@ -386,9 +403,13 @@ export class AdminService {
 
         providerModels.remote_models.forEach((remoteModel) => {
           if (!seenModelIds.has(remoteModel.id)) {
+            const modelWithProvider = {
+              ...remoteModel,
+              upstream_provider_id: provider.id,
+            };
             allModels.push({
               ...this.transformAdminModelToModel(
-                remoteModel,
+                modelWithProvider,
                 provider.provider_type
               ),
               has_own_api_key: false,

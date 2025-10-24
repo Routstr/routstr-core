@@ -33,7 +33,8 @@ export function AdminSettings() {
       const data = await AdminService.getSettings();
       setSettings(JSON.stringify(data, null, 2));
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load settings';
+      const message =
+        err instanceof Error ? err.message : 'Failed to load settings';
       setError(message);
       toast.error(message);
     } finally {
@@ -50,7 +51,8 @@ export function AdminSettings() {
       try {
         payload = JSON.parse(settings);
       } catch (e) {
-        const message = 'Invalid JSON: ' + (e instanceof Error ? e.message : String(e));
+        const message =
+          'Invalid JSON: ' + (e instanceof Error ? e.message : String(e));
         setError(message);
         toast.error(message);
         return;
@@ -66,7 +68,8 @@ export function AdminSettings() {
       setSettings(JSON.stringify(updatedData, null, 2));
       toast.success('Settings saved successfully');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to save settings';
+      const message =
+        err instanceof Error ? err.message : 'Failed to save settings';
       setError(message);
       toast.error(message);
     } finally {
@@ -77,21 +80,20 @@ export function AdminSettings() {
   return (
     <>
       <div className='mb-6'>
-        <h2 className='text-xl font-semibold tracking-tight'>
-          Admin Settings
-        </h2>
+        <h2 className='text-xl font-semibold tracking-tight'>Admin Settings</h2>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Server Configuration (JSON)</CardTitle>
           <CardDescription>
-            Edit server settings in JSON format. Values shown as &quot;[REDACTED]&quot; will remain unchanged if left as-is.
+            Edit server settings in JSON format. Values shown as
+            &quot;[REDACTED]&quot; will remain unchanged if left as-is.
           </CardDescription>
         </CardHeader>
         <CardContent className='space-y-4'>
           {loading ? (
-            <div className='flex items-center justify-center py-8 text-muted-foreground'>
+            <div className='text-muted-foreground flex items-center justify-center py-8'>
               Loading settings...
             </div>
           ) : (
@@ -105,7 +107,7 @@ export function AdminSettings() {
               <textarea
                 value={settings}
                 onChange={(e) => setSettings(e.target.value)}
-                className='w-full min-h-[400px] font-mono text-sm bg-muted p-4 rounded-md border focus:outline-none focus:ring-2 focus:ring-ring'
+                className='bg-muted focus:ring-ring min-h-[400px] w-full rounded-md border p-4 font-mono text-sm focus:ring-2 focus:outline-none'
                 placeholder='{}'
               />
             </>
@@ -119,10 +121,7 @@ export function AdminSettings() {
           >
             Reload
           </Button>
-          <Button
-            onClick={handleSave}
-            disabled={loading || saving}
-          >
+          <Button onClick={handleSave} disabled={loading || saving}>
             <Save className='mr-2 h-4 w-4' />
             {saving ? 'Saving...' : 'Save Settings'}
           </Button>
@@ -131,4 +130,3 @@ export function AdminSettings() {
     </>
   );
 }
-

@@ -3,11 +3,9 @@
 import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import {
-  ManualModelSchema,
-  type ManualModel,
-  type Model,
-} from '@/lib/api/schemas/models';
+import { z } from 'zod';
+import { type Model } from '@/lib/api/schemas/models';
+import { AdminService } from '@/lib/api/services/admin';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -29,63 +27,208 @@ import {
 } from '@/components/ui/form';
 import { Edit3, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { Switch } from '@/components/ui/switch';
+
+const EditModelFormSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  description: z.string().optional(),
+  context_length: z.coerce.number().min(0),
+  prompt: z.coerce.number().min(0),
+  completion: z.coerce.number().min(0),
+  request: z.coerce.number().min(0).optional(),
+  image: z.coerce.number().min(0).optional(),
+  enabled: z.boolean(),
+});
+
+type EditModelFormData = z.infer<typeof EditModelFormSchema>;
 
 interface EditModelFormProps {
   model: Model;
-  onModelUpdate: (modelId: string, updatedModel: ManualModel) => void;
+  providerId?: number;
+  onModelUpdate?: () => void;
   onCancel?: () => void;
   isOpen: boolean;
 }
 
 export function EditModelForm({
   model,
+  providerId,
   onModelUpdate,
   onCancel,
   isOpen,
 }: EditModelFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [adminModelData, setAdminModelData] = useState<any>(null);
+  const [isNewOverride, setIsNewOverride] = useState(false);
 
-  const form = useForm<ManualModel>({
-    resolver: zodResolver(ManualModelSchema) as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  const form = useForm<EditModelFormData>({
+    resolver: zodResolver(EditModelFormSchema),
     defaultValues: {
       name: model.name,
-      full_name: model.full_name,
-      input_cost: model.input_cost,
-      output_cost: model.output_cost,
-      provider: model.provider,
-      modelType: model.modelType as ManualModel['modelType'],
       description: model.description || '',
-      contextLength: model.contextLength || 0,
+      context_length: model.contextLength || 4096,
+      prompt: model.input_cost,
+      completion: model.output_cost,
+      request: 0,
+      image: 0,
+      enabled: model.isEnabled !== false,
     },
   });
 
-  // Reset form when model changes
   useEffect(() => {
-    form.reset({
-      name: model.name,
-      full_name: model.full_name,
-      input_cost: model.input_cost,
-      output_cost: model.output_cost,
-      provider: model.provider,
-      modelType: model.modelType as ManualModel['modelType'],
-      description: model.description || '',
-      contextLength: model.contextLength || 0,
-    });
-  }, [model, form]);
+    if (isOpen && providerId) {
+      loadAdminModel();
+    } else if (isOpen && !providerId) {
+      console.error('EditModelForm opened without providerId', {
+        model,
+        providerId,
+      });
+      toast.error('Missing provider information for this model');
+    }
+  }, [isOpen, model.id, providerId]);
 
-  const onSubmit = async (data: ManualModel) => {
+  const loadAdminModel = async () => {
+    if (!providerId) {
+      console.error('loadAdminModel called without providerId');
+      return;
+    }
+
+    try {
+      console.log('Loading admin model:', {
+        providerId,
+        modelId: model.full_name,
+      });
+
+      const adminModel = await AdminService.getProviderModel(
+        providerId,
+        model.full_name
+      );
+
+      setAdminModelData(adminModel);
+      setIsNewOverride(false);
+
+      form.reset({
+        name: adminModel.name,
+        description: adminModel.description || '',
+        context_length: adminModel.context_length,
+        prompt: adminModel.pricing.prompt || 0,
+        completion: adminModel.pricing.completion || 0,
+        request: adminModel.pricing.request || 0,
+        image: adminModel.pricing.image || 0,
+        enabled: adminModel.enabled !== false,
+      });
+    } catch (error: any) {
+      console.log('Model not in database, will create new override:', error);
+      setIsNewOverride(true);
+      setAdminModelData({
+        id: model.full_name,
+        name: model.name,
+        description: model.description || '',
+        created: Math.floor(Date.now() / 1000),
+        context_length: model.contextLength || 4096,
+        architecture: {
+          modality: model.modelType || 'text',
+          input_modalities: [model.modelType || 'text'],
+          output_modalities: [model.modelType || 'text'],
+          tokenizer: '',
+          instruct_type: null,
+        },
+        pricing: {
+          prompt: model.input_cost,
+          completion: model.output_cost,
+          request: 0,
+          image: 0,
+          web_search: 0,
+          internal_reasoning: 0,
+        },
+        per_request_limits: null,
+        top_provider: null,
+        upstream_provider_id: providerId,
+        enabled: model.isEnabled !== false,
+      });
+
+      form.reset({
+        name: model.name,
+        description: model.description || '',
+        context_length: model.contextLength || 4096,
+        prompt: model.input_cost,
+        completion: model.output_cost,
+        request: 0,
+        image: 0,
+        enabled: model.isEnabled !== false,
+      });
+    }
+  };
+
+  const onSubmit = async (data: EditModelFormData) => {
+    if (!providerId) {
+      console.error('onSubmit called without providerId', {
+        model,
+        providerId,
+      });
+      toast.error('Missing provider ID - cannot update model');
+      return;
+    }
+
+    if (!adminModelData) {
+      console.error('onSubmit called without adminModelData', {
+        model,
+        providerId,
+        adminModelData,
+      });
+      toast.error('Model data not loaded - please try reopening the form');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      // Ensure we're sending the correct API key value
-      const updatedData = {
-        ...data,
+      const payload = {
+        id: adminModelData.id,
+        name: data.name,
+        description: data.description || '',
+        created: adminModelData.created || Math.floor(Date.now() / 1000),
+        context_length: data.context_length,
+        architecture: adminModelData.architecture || {
+          modality: 'text',
+          input_modalities: ['text'],
+          output_modalities: ['text'],
+          tokenizer: '',
+          instruct_type: null,
+        },
+        pricing: {
+          prompt: data.prompt,
+          completion: data.completion,
+          request: data.request || 0,
+          image: data.image || 0,
+          web_search: 0,
+          internal_reasoning: 0,
+        },
+        per_request_limits: adminModelData.per_request_limits,
+        top_provider: adminModelData.top_provider,
+        upstream_provider_id: providerId,
+        enabled: data.enabled,
       };
-      await onModelUpdate(model.id, updatedData);
-      toast.success('Model updated successfully!');
+
+      if (isNewOverride) {
+        console.log('Creating new model override');
+        await AdminService.createProviderModel(providerId, payload);
+        toast.success('Model override created successfully!');
+      } else {
+        console.log('Updating existing model override');
+        await AdminService.updateProviderModel(
+          providerId,
+          adminModelData.id,
+          payload
+        );
+        toast.success('Model updated successfully!');
+      }
+
+      onModelUpdate?.();
       onCancel?.();
     } catch (error) {
-      toast.error('Failed to update model. Please try again.');
-      console.error('Error updating model:', error);
+      const action = isNewOverride ? 'create' : 'update';
+      toast.error(`Failed to ${action} model. Please try again.`);
+      console.error(`Error ${action}ing model:`, error);
     } finally {
       setIsSubmitting(false);
     }
@@ -103,33 +246,18 @@ export function EditModelForm({
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'>
             <Edit3 className='h-5 w-5' />
-            Edit Model
+            {isNewOverride ? 'Create Model Override' : 'Edit Model Override'}
           </DialogTitle>
           <DialogDescription>
-            Update the details for &quot;{model.name}&quot;
+            {isNewOverride
+              ? `Create an override for &quot;${model.name}&quot;`
+              : `Update the model override for &quot;${model.name}&quot;`}
           </DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className='space-y-4'>
             <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
-              <FormField
-                control={form.control}
-                name='full_name'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Original Model Name</FormLabel>
-                    <FormControl>
-                      <Input {...field} className='bg-muted w-full' disabled />
-                    </FormControl>
-                    <FormDescription>
-                      Original name from the provider (cannot be changed)
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
               <FormField
                 control={form.control}
                 name='name'
@@ -153,19 +281,21 @@ export function EditModelForm({
 
               <FormField
                 control={form.control}
-                name='provider'
+                name='context_length'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Provider *</FormLabel>
+                    <FormLabel>Context Length *</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder='e.g., OpenAI, Anthropic'
+                        type='number'
+                        min='0'
+                        placeholder='4096'
                         {...field}
                         className='w-full'
                       />
                     </FormControl>
                     <FormDescription>
-                      AI model provider or company
+                      Maximum context window size
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -173,10 +303,32 @@ export function EditModelForm({
               />
             </div>
 
+            <FormField
+              control={form.control}
+              name='description'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Description</FormLabel>
+                  <FormControl>
+                    <Textarea
+                      placeholder='Brief description of the model...'
+                      {...field}
+                      rows={3}
+                      className='w-full'
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    Optional description or notes about the model
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
             <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
               <FormField
                 control={form.control}
-                name='input_cost'
+                name='prompt'
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Input Cost (per 1M tokens) *</FormLabel>
@@ -208,7 +360,7 @@ export function EditModelForm({
 
               <FormField
                 control={form.control}
-                name='output_cost'
+                name='completion'
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Output Cost (per 1M tokens) *</FormLabel>
@@ -239,24 +391,87 @@ export function EditModelForm({
               />
             </div>
 
+            <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
+              <FormField
+                control={form.control}
+                name='request'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Request Cost (per request)</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        step='0.001'
+                        min='0'
+                        placeholder='0.00'
+                        {...field}
+                        value={
+                          field.value ? parseFloat(field.value.toFixed(3)) : ''
+                        }
+                        onChange={(e) => {
+                          const value = parseFloat(e.target.value) || 0;
+                          const rounded = Math.round(value * 1000) / 1000;
+                          field.onChange(rounded);
+                        }}
+                        className='w-full'
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      Fixed cost per request in USD
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='image'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Image Cost (per image)</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        step='0.001'
+                        min='0'
+                        placeholder='0.00'
+                        {...field}
+                        value={
+                          field.value ? parseFloat(field.value.toFixed(3)) : ''
+                        }
+                        onChange={(e) => {
+                          const value = parseFloat(e.target.value) || 0;
+                          const rounded = Math.round(value * 1000) / 1000;
+                          field.onChange(rounded);
+                        }}
+                        className='w-full'
+                      />
+                    </FormControl>
+                    <FormDescription>Cost per image in USD</FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
             <FormField
               control={form.control}
-              name='description'
+              name='enabled'
               render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Description</FormLabel>
+                <FormItem className='flex flex-row items-center justify-between rounded-lg border p-4'>
+                  <div className='space-y-0.5'>
+                    <FormLabel className='text-base'>Model Enabled</FormLabel>
+                    <FormDescription>
+                      Enable or disable this model override
+                    </FormDescription>
+                  </div>
                   <FormControl>
-                    <Textarea
-                      placeholder='Brief description of the model...'
-                      {...field}
-                      rows={3}
-                      className='w-full'
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
                     />
                   </FormControl>
-                  <FormDescription>
-                    Optional description or notes about the model
-                  </FormDescription>
-                  <FormMessage />
                 </FormItem>
               )}
             />
@@ -274,8 +489,10 @@ export function EditModelForm({
                 {isSubmitting ? (
                   <>
                     <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                    Updating...
+                    {isNewOverride ? 'Creating...' : 'Updating...'}
                   </>
+                ) : isNewOverride ? (
+                  'Create Override'
                 ) : (
                   'Update Model'
                 )}

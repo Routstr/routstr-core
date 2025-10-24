@@ -368,22 +368,7 @@ export function ModelSelector({
   };
 
   // Handle model update
-  const handleModelUpdate = async (
-    modelId: string,
-    updatedModel: ManualModel
-  ) => {
-    const existingModel = models.find((m) => m.id === modelId);
-    if (!existingModel) {
-      throw new Error('Model not found');
-    }
-
-    const updateData = {
-      ...updatedModel,
-      provider_id: existingModel.provider_id,
-      isEnabled: !existingModel.soft_deleted,
-    };
-
-    await AdminService.updateModel(modelId, updateData);
+  const handleModelUpdate = async () => {
     await refetchModels();
     setEditingModel(null);
   };
@@ -1114,6 +1099,11 @@ export function ModelSelector({
       {editingModel && (
         <EditModelForm
           model={editingModel}
+          providerId={
+            editingModel.provider_id
+              ? parseInt(editingModel.provider_id)
+              : undefined
+          }
           onModelUpdate={handleModelUpdate}
           onCancel={() => setEditingModel(null)}
           isOpen={!!editingModel}
