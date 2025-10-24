@@ -28,7 +28,7 @@ async def test_root_endpoint_structure_and_performance(
     responses = []
     for i in range(10):
         start = validator.start_timing("root_endpoint")
-        response = await integration_client.get("/")
+        response = await integration_client.get("/v1/info")
         duration = validator.end_timing("root_endpoint", start)
         responses.append(response)
 
@@ -100,7 +100,7 @@ async def test_root_endpoint_environment_variables(
 ) -> None:
     """Test that root endpoint reflects environment variable configuration"""
 
-    response = await integration_client.get("/")
+    response = await integration_client.get("/v1/info")
     assert response.status_code == 200
 
     data = response.json()
@@ -351,7 +351,7 @@ async def test_all_info_endpoints_no_database_changes(
     initial_state = await db_snapshot.capture()
 
     # Make requests to all info endpoints
-    endpoints = ["/", "/v1/models", "/admin/"]
+    endpoints = ["/v1/info", "/v1/models", "/admin/"]
 
     for endpoint in endpoints:
         response = await integration_client.get(endpoint)
@@ -387,7 +387,9 @@ async def test_concurrent_info_endpoint_requests(
     requests = []
     for endpoint in ["/", "/v1/models", "/admin/"]:
         for _ in range(5):  # 5 requests per endpoint
-            requests.append({"method": "GET", "url": endpoint})
+            # Use /v1/info instead of / for JSON API
+            url = "/v1/info" if endpoint == "/" else endpoint
+            requests.append({"method": "GET", "url": url})
 
     # Execute concurrently
     tester = ConcurrencyTester()
@@ -417,7 +419,7 @@ async def test_info_endpoints_response_consistency(
     # Test root endpoint consistency
     responses = []
     for _ in range(5):
-        response = await integration_client.get("/")
+        response = await integration_client.get("/v1/info")
         assert response.status_code == 200
         responses.append(response.json())
 

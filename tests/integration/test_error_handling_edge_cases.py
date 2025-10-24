@@ -48,7 +48,7 @@ class TestNetworkFailureScenarios:
     ) -> None:
         """Test proxy behavior when upstream LLM service is down"""
         # Mock at the routstr level to simulate upstream being down
-        with patch("routstr.upstream.httpx.AsyncClient") as mock_client_class:
+        with patch("httpx.AsyncClient") as mock_client_class:
             # Create a mock client instance
             mock_client = AsyncMock()
             mock_client_class.return_value = mock_client
