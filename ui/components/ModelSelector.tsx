@@ -13,7 +13,6 @@ import { AddModelForm } from '@/components/AddModelForm';
 import { EditModelForm } from '@/components/EditModelForm';
 import { EditGroupForm } from '@/components/EditGroupForm';
 import { CollectModelsDialog } from '@/components/CollectModelsDialog';
-import { ModelSearchFilter } from '@/components/ModelSearchFilter';
 import { formatCost } from '@/lib/services/costValidation';
 import { Button } from '@/components/ui/button';
 import {
@@ -71,7 +70,6 @@ interface ModelSelectorProps {
 export function ModelSelector({
   filterProvider,
   groupData,
-  showProviderActions = false,
   filteredModels: propFilteredModels,
 }: ModelSelectorProps) {
   const [selectedModelId, setSelectedModelId] = useState<string>('');
@@ -95,7 +93,7 @@ export function ModelSelector({
   ] = useState(false);
 
   // Search and filter state
-  const [filteredModels, setFilteredModels] = useState<Model[]>([]);
+  const [filteredModels] = useState<Model[]>([]);
 
   const queryClient = useQueryClient();
 
