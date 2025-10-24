@@ -35,8 +35,6 @@ const EditModelFormSchema = z.object({
   context_length: z.coerce.number().min(0),
   prompt: z.coerce.number().min(0),
   completion: z.coerce.number().min(0),
-  request: z.coerce.number().min(0).optional(),
-  image: z.coerce.number().min(0).optional(),
   enabled: z.boolean(),
 });
 
@@ -69,8 +67,6 @@ export function EditModelForm({
       context_length: model.contextLength || 4096,
       prompt: model.input_cost,
       completion: model.output_cost,
-      request: 0,
-      image: 0,
       enabled: model.isEnabled !== false,
     },
   });
@@ -113,8 +109,6 @@ export function EditModelForm({
         context_length: adminModel.context_length,
         prompt: adminModel.pricing.prompt || 0,
         completion: adminModel.pricing.completion || 0,
-        request: adminModel.pricing.request || 0,
-        image: adminModel.pricing.image || 0,
         enabled: adminModel.enabled !== false,
       });
     } catch (error: any) {
@@ -153,8 +147,6 @@ export function EditModelForm({
         context_length: model.contextLength || 4096,
         prompt: model.input_cost,
         completion: model.output_cost,
-        request: 0,
-        image: 0,
         enabled: model.isEnabled !== false,
       });
     }
@@ -198,8 +190,8 @@ export function EditModelForm({
         pricing: {
           prompt: data.prompt,
           completion: data.completion,
-          request: data.request || 0,
-          image: data.image || 0,
+          request: 0,
+          image: 0,
           web_search: 0,
           internal_reasoning: 0,
         },
@@ -335,23 +327,44 @@ export function EditModelForm({
                     <FormControl>
                       <Input
                         type='number'
-                        step='0.001'
+                        step='0.00001'
                         min='0'
-                        placeholder='5.00'
-                        {...field}
+                        placeholder='5.00000'
                         value={
-                          field.value ? parseFloat(field.value.toFixed(3)) : ''
+                          typeof field.value === 'number'
+                            ? field.value.toFixed(5)
+                            : ''
                         }
                         onChange={(e) => {
-                          const value = parseFloat(e.target.value) || 0;
-                          const rounded = Math.round(value * 1000) / 1000;
-                          field.onChange(rounded);
+                          const value = e.target.value;
+                          if (value === '') {
+                            field.onChange(0);
+                            return;
+                          }
+                          const numValue = parseFloat(value);
+                          if (!isNaN(numValue)) {
+                            field.onChange(numValue);
+                          } else if (
+                            value.endsWith('.') ||
+                            value.match(/^\d+\.0*$/)
+                          ) {
+                            field.onChange(parseFloat(value) || 0);
+                          }
+                        }}
+                        onBlur={(e) => {
+                          const value = parseFloat(e.target.value);
+                          if (!isNaN(value)) {
+                            const rounded = Math.round(value * 100000) / 100000;
+                            field.onChange(rounded);
+                          } else {
+                            field.onChange(0);
+                          }
                         }}
                         className='w-full'
                       />
                     </FormControl>
                     <FormDescription>
-                      Cost in USD per 1,000,000 input tokens (max 3 decimals)
+                      Cost in USD per 1,000,000 input tokens (max 5 decimals)
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -367,88 +380,45 @@ export function EditModelForm({
                     <FormControl>
                       <Input
                         type='number'
-                        step='0.001'
+                        step='0.00001'
                         min='0'
-                        placeholder='15.00'
-                        {...field}
+                        placeholder='15.00000'
                         value={
-                          field.value ? parseFloat(field.value.toFixed(3)) : ''
+                          typeof field.value === 'number'
+                            ? field.value.toFixed(5)
+                            : ''
                         }
                         onChange={(e) => {
-                          const value = parseFloat(e.target.value) || 0;
-                          const rounded = Math.round(value * 1000) / 1000;
-                          field.onChange(rounded);
+                          const value = e.target.value;
+                          if (value === '') {
+                            field.onChange(0);
+                            return;
+                          }
+                          const numValue = parseFloat(value);
+                          if (!isNaN(numValue)) {
+                            field.onChange(numValue);
+                          } else if (
+                            value.endsWith('.') ||
+                            value.match(/^\d+\.0*$/)
+                          ) {
+                            field.onChange(parseFloat(value) || 0);
+                          }
+                        }}
+                        onBlur={(e) => {
+                          const value = parseFloat(e.target.value);
+                          if (!isNaN(value)) {
+                            const rounded = Math.round(value * 100000) / 100000;
+                            field.onChange(rounded);
+                          } else {
+                            field.onChange(0);
+                          }
                         }}
                         className='w-full'
                       />
                     </FormControl>
                     <FormDescription>
-                      Cost in USD per 1,000,000 output tokens (max 3 decimals)
+                      Cost in USD per 1,000,000 output tokens (max 5 decimals)
                     </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-
-            <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
-              <FormField
-                control={form.control}
-                name='request'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Request Cost (per request)</FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        step='0.001'
-                        min='0'
-                        placeholder='0.00'
-                        {...field}
-                        value={
-                          field.value ? parseFloat(field.value.toFixed(3)) : ''
-                        }
-                        onChange={(e) => {
-                          const value = parseFloat(e.target.value) || 0;
-                          const rounded = Math.round(value * 1000) / 1000;
-                          field.onChange(rounded);
-                        }}
-                        className='w-full'
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      Fixed cost per request in USD
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={form.control}
-                name='image'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Image Cost (per image)</FormLabel>
-                    <FormControl>
-                      <Input
-                        type='number'
-                        step='0.001'
-                        min='0'
-                        placeholder='0.00'
-                        {...field}
-                        value={
-                          field.value ? parseFloat(field.value.toFixed(3)) : ''
-                        }
-                        onChange={(e) => {
-                          const value = parseFloat(e.target.value) || 0;
-                          const rounded = Math.round(value * 1000) / 1000;
-                          field.onChange(rounded);
-                        }}
-                        className='w-full'
-                      />
-                    </FormControl>
-                    <FormDescription>Cost per image in USD</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
