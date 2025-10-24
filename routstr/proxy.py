@@ -242,7 +242,7 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        return await upstream.handle_x_cashu(request, x_cashu, path, max_cost_for_model)
+        return await upstream.handle_x_cashu(request, x_cashu, path, max_cost_for_model, model_obj)
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)

@@ -1343,6 +1343,7 @@ class UpstreamProvider:
         amount: int,
         unit: str,
         max_cost_for_model: int,
+        model_obj: Model,
     ) -> Response | StreamingResponse:
         """Forward request paid with X-Cashu token to upstream service.
 
@@ -1353,6 +1354,7 @@ class UpstreamProvider:
             amount: Payment amount from X-Cashu token
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            model_obj: Model object for the request
 
         Returns:
             Response or StreamingResponse with refund if applicable
@@ -1363,7 +1365,7 @@ class UpstreamProvider:
         url = f"{self.base_url}/{path}"
 
         request_body = await request.body()
-        transformed_body = self.prepare_request_body(request_body)
+        transformed_body = self.prepare_request_body(request_body, model_obj)
 
         logger.debug(
             "Forwarding request to upstream",
@@ -1494,7 +1496,7 @@ class UpstreamProvider:
                 )
 
     async def handle_x_cashu(
-        self, request: Request, x_cashu_token: str, path: str, max_cost_for_model: int
+        self, request: Request, x_cashu_token: str, path: str, max_cost_for_model: int, model_obj: Model
     ) -> Response | StreamingResponse:
         """Handle request with X-Cashu token payment, redeeming token and forwarding request.
 
@@ -1503,6 +1505,7 @@ class UpstreamProvider:
             x_cashu_token: X-Cashu token from request header
             path: Request path
             max_cost_for_model: Maximum cost for the model
+            model_obj: Model object for the request
 
         Returns:
             Response or StreamingResponse from upstream with refund if applicable
@@ -1535,6 +1538,7 @@ class UpstreamProvider:
                 amount,
                 unit,
                 max_cost_for_model,
+                model_obj,
             )
         except Exception as e:
             error_message = str(e)
