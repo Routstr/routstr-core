@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from .upstream import UpstreamProvider
+
 if TYPE_CHECKING:
     from ..payment.models import Model
 
@@ -12,15 +14,8 @@ from ..core.logging import get_logger
 logger = get_logger(__name__)
 
 
-class OllamaUpstreamProvider:
+class OllamaUpstreamProvider(UpstreamProvider):
     """Upstream provider specifically configured for Ollama API."""
-
-    base_url: str
-    api_key: str
-    upstream_name: str = "ollama"
-    provider_fee: float = 1.01
-    _models_cache: list[Model] = []
-    _models_by_id: dict[str, Model] = {}
 
     def __init__(
         self,
@@ -36,11 +31,11 @@ class OllamaUpstreamProvider:
             provider_fee: Provider fee multiplier (default 1.01 for 1% fee)
         """
         self.upstream_name = "ollama"
-        self.base_url = base_url
-        self.api_key = api_key
-        self.provider_fee = provider_fee
-        self._models_cache = []
-        self._models_by_id = {}
+        super().__init__(
+            base_url=base_url,
+            api_key=api_key,
+            provider_fee=provider_fee,
+        )
 
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'ollama/' prefix for Ollama API compatibility."""
