@@ -36,7 +36,7 @@ const data = {
     },
     {
       title: 'Models',
-      url: '/models',
+      url: '/model',
       icon: DatabaseIcon,
     },
     {

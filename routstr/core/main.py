@@ -204,38 +204,31 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
         return FileResponse(UI_DIST_PATH / "index.html")
 
     @app.get("/dashboard", include_in_schema=False)
-    @app.get("/dashboard/{path:path}", include_in_schema=False)
-    async def serve_dashboard_ui(path: str = "") -> FileResponse:
+    async def serve_dashboard_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
 
     @app.get("/login", include_in_schema=False)
-    @app.get("/login/{path:path}", include_in_schema=False)
-    async def serve_login_ui(path: str = "") -> FileResponse:
+    async def serve_login_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "login" / "index.html")
 
-    @app.get("/models", include_in_schema=False)
-    @app.get("/models/{path:path}", include_in_schema=False)
-    async def serve_models_ui(path: str = "") -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "models" / "index.html")
+    @app.get("/model", include_in_schema=False)
+    async def serve_models_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "model" / "index.html")
 
     @app.get("/providers", include_in_schema=False)
-    @app.get("/providers/{path:path}", include_in_schema=False)
-    async def serve_providers_ui(path: str = "") -> FileResponse:
+    async def serve_providers_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "providers" / "index.html")
 
     @app.get("/settings", include_in_schema=False)
-    @app.get("/settings/{path:path}", include_in_schema=False)
-    async def serve_settings_ui(path: str = "") -> FileResponse:
+    async def serve_settings_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "settings" / "index.html")
 
     @app.get("/transactions", include_in_schema=False)
-    @app.get("/transactions/{path:path}", include_in_schema=False)
-    async def serve_transactions_ui(path: str = "") -> FileResponse:
+    async def serve_transactions_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
 
     @app.get("/unauthorized", include_in_schema=False)
-    @app.get("/unauthorized/{path:path}", include_in_schema=False)
-    async def serve_unauthorized_ui(path: str = "") -> FileResponse:
+    async def serve_unauthorized_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
 
     @app.get("/favicon.ico", include_in_schema=False)
