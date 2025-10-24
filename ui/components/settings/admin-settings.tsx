@@ -24,12 +24,17 @@ interface SettingsData {
   description?: string;
   npub?: string;
   nsec?: string;
-  admin_password?: string;
   upstream_api_key?: string;
   http_url?: string;
   onion_url?: string;
   cashu_mints?: string[];
   [key: string]: unknown;
+}
+
+interface PasswordData {
+  current_password: string;
+  new_password: string;
+  confirm_password: string;
 }
 
 export function AdminSettings() {
@@ -39,6 +44,13 @@ export function AdminSettings() {
   const [error, setError] = useState<string>('');
   const [showSecrets, setShowSecrets] = useState(false);
   const [newMint, setNewMint] = useState('');
+  const [passwordData, setPasswordData] = useState<PasswordData>({
+    current_password: '',
+    new_password: '',
+    confirm_password: '',
+  });
+  const [passwordError, setPasswordError] = useState<string>('');
+  const [passwordSaving, setPasswordSaving] = useState(false);
 
   useEffect(() => {
     loadSettings();
@@ -75,6 +87,45 @@ export function AdminSettings() {
       toast.error(message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handlePasswordUpdate = async () => {
+    try {
+      setPasswordSaving(true);
+      setPasswordError('');
+
+      if (passwordData.new_password !== passwordData.confirm_password) {
+        setPasswordError('New passwords do not match');
+        return;
+      }
+
+      if (passwordData.new_password.length < 6) {
+        setPasswordError('New password must be at least 6 characters');
+        return;
+      }
+
+      const { apiClient } = await import('@/lib/api/client');
+
+      await apiClient.patch('/admin/api/password', {
+        current_password: passwordData.current_password,
+        new_password: passwordData.new_password,
+      });
+
+      setPasswordData({
+        current_password: '',
+        new_password: '',
+        confirm_password: '',
+      });
+
+      toast.success('Password updated successfully');
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to update password';
+      setPasswordError(message);
+      toast.error(message);
+    } finally {
+      setPasswordSaving(false);
     }
   };
 
@@ -247,18 +298,12 @@ export function AdminSettings() {
           </CardHeader>
           <CardContent className='space-y-4'>
             {renderSecretField(
-              'admin_password',
-              'Admin Password',
-              'Enter admin password'
-            )}
-            {renderSecretField(
               'upstream_api_key',
               'Upstream API Key',
               'Enter API key'
             )}
           </CardContent>
         </Card>
-
         {/* Cashu Mints */}
         <Card>
           <CardHeader>
@@ -307,24 +352,104 @@ export function AdminSettings() {
             )}
           </CardContent>
         </Card>
-      </div>
 
-      <Card className='mt-6'>
-        <CardFooter className='flex justify-between'>
-          <Button
-            variant='outline'
-            onClick={loadSettings}
-            disabled={loading || saving}
-          >
-            <RefreshCw className='mr-2 h-4 w-4' />
-            Reload
-          </Button>
-          <Button onClick={handleSave} disabled={loading || saving}>
-            <Save className='mr-2 h-4 w-4' />
-            {saving ? 'Saving...' : 'Save Settings'}
-          </Button>
-        </CardFooter>
-      </Card>
+        <Card className='mt-6'>
+          <CardFooter className='flex justify-between'>
+            <Button
+              variant='outline'
+              onClick={loadSettings}
+              disabled={loading || saving}
+            >
+              <RefreshCw className='mr-2 h-4 w-4' />
+              Reload
+            </Button>
+            <Button onClick={handleSave} disabled={loading || saving}>
+              <Save className='mr-2 h-4 w-4' />
+              {saving ? 'Saving...' : 'Save Settings'}
+            </Button>
+          </CardFooter>
+        </Card>
+
+        {/* Password Change */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Change Admin Password</CardTitle>
+            <CardDescription>
+              Update your admin password for enhanced security
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='space-y-4'>
+            {passwordError && (
+              <Alert variant='destructive'>
+                <AlertCircle className='h-4 w-4' />
+                <AlertDescription>{passwordError}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className='space-y-2'>
+              <Label htmlFor='current_password'>Current Password</Label>
+              <Input
+                id='current_password'
+                type='password'
+                value={passwordData.current_password}
+                onChange={(e) =>
+                  setPasswordData((prev) => ({
+                    ...prev,
+                    current_password: e.target.value,
+                  }))
+                }
+                placeholder='Enter current password'
+              />
+            </div>
+
+            <div className='space-y-2'>
+              <Label htmlFor='new_password'>New Password</Label>
+              <Input
+                id='new_password'
+                type='password'
+                value={passwordData.new_password}
+                onChange={(e) =>
+                  setPasswordData((prev) => ({
+                    ...prev,
+                    new_password: e.target.value,
+                  }))
+                }
+                placeholder='Enter new password (min 6 characters)'
+              />
+            </div>
+
+            <div className='space-y-2'>
+              <Label htmlFor='confirm_password'>Confirm New Password</Label>
+              <Input
+                id='confirm_password'
+                type='password'
+                value={passwordData.confirm_password}
+                onChange={(e) =>
+                  setPasswordData((prev) => ({
+                    ...prev,
+                    confirm_password: e.target.value,
+                  }))
+                }
+                placeholder='Confirm new password'
+              />
+            </div>
+          </CardContent>
+          <CardFooter>
+            <Button
+              onClick={handlePasswordUpdate}
+              disabled={
+                passwordSaving ||
+                !passwordData.current_password ||
+                !passwordData.new_password ||
+                !passwordData.confirm_password
+              }
+            >
+              <Save className='mr-2 h-4 w-4' />
+              {passwordSaving ? 'Updating...' : 'Update Password'}
+            </Button>
+          </CardFooter>
+        </Card>
+      </div>
     </>
   );
 }

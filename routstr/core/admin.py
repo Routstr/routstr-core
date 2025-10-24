@@ -169,10 +169,22 @@ class SettingsUpdate(BaseModel):
     __root__: dict[str, object]
 
 
+class PasswordUpdate(BaseModel):
+    current_password: str
+    new_password: str
+
+
 @admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
 async def update_settings(request: Request, update: SettingsUpdate) -> dict:
+    # Remove sensitive fields from general settings update
+    settings_data = update.__root__.copy()
+    sensitive_fields = ["admin_password", "upstream_api_key", "nsec"]
+    for field in sensitive_fields:
+        if field in settings_data:
+            del settings_data[field]
+    
     async with create_session() as session:
-        new_settings = await SettingsService.update(update.__root__, session)
+        new_settings = await SettingsService.update(settings_data, session)
     data = new_settings.dict()
     if "upstream_api_key" in data:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
@@ -181,6 +193,35 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     if "nsec" in data:
         data["nsec"] = "[REDACTED]" if data["nsec"] else ""
     return data
+
+
+@admin_router.patch("/api/password", dependencies=[Depends(require_admin_api)])
+async def update_password(request: Request, password_update: PasswordUpdate) -> dict:
+    # Verify current password
+    try:
+        current_settings = SettingsService.get()
+        current_password = current_settings.admin_password
+    except Exception:
+        current_password = os.getenv("ADMIN_PASSWORD", "")
+
+    if not current_password:
+        raise HTTPException(status_code=500, detail="Admin password not configured")
+
+    if password_update.current_password != current_password:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    # Validate new password
+    new_password = password_update.new_password.strip()
+    if len(new_password) < 6:
+        raise HTTPException(
+            status_code=400, detail="New password must be at least 6 characters"
+        )
+
+    # Update password
+    async with create_session() as session:
+        await SettingsService.update({"admin_password": new_password}, session)
+
+    return {"ok": True, "message": "Password updated successfully"}
 
 
 class SetupRequest(BaseModel):
