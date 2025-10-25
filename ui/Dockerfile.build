@@ -32,7 +32,7 @@ RUN npm run build && \
 
 # Copy built files to the output directory
 RUN mkdir -p /output && \
-    cp -r /app/out/* /output/
+    cp -r /app/out/. /output/
 
 # Use the builder stage as the final stage
 FROM node:23-alpine
