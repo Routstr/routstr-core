@@ -1,0 +1,35 @@
+FROM node:23-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json* pnpm-lock.yaml* ./
+RUN npm ci
+
+# Build the UI
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Accept build arguments for environment variables
+ARG NEXT_PUBLIC_API_URL
+
+# Create .env.local for Next.js with build arguments
+RUN echo "NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}" > .env.local && \
+    echo "Using NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}"
+
+# Set production environment
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Build the application
+RUN npm run build && \
+    echo "UI build completed at $(date)"
+
+# Output stage - just copy the built files
+FROM scratch AS output
+COPY --from=builder /app/out /ui_out

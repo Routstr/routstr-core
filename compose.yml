@@ -1,10 +1,38 @@
 services:
+  ui-builder:
+    env_file:
+      - .env
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.build
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
+        NEXT_PUBLIC_ADMIN_API_KEY: ${NEXT_PUBLIC_ADMIN_API_KEY:-}
+    volumes:
+      - ./ui_out:/output
+    profiles:
+      - ui-build
+
+  ui:
+    image: alpine:latest
+    volumes:
+      - ./ui_out:/output:ro
+    command:
+      [
+        "sh",
+        "-c",
+        'echo ''UI service - build with "docker compose --profile ui-build up ui-builder"'' && tail -f /dev/null',
+      ]
+
   routstr:
     build: .
+    depends_on:
+      - ui
     volumes:
       - .:/app
       - ./logs:/app/logs
       - tor-data:/var/lib/tor:ro
+      - ./ui_out:/app/ui_out:ro
     env_file:
       - .env
     environment:
