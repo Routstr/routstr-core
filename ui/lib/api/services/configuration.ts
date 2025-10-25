@@ -59,7 +59,22 @@ export class ConfigurationService {
    * Get the local base URL (never use external configuration)
    */
   static getLocalBaseUrl(): string {
-    return process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+    console.log(apiUrl);
+    if (apiUrl) {
+      return apiUrl;
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      return '';
+    }
+
+    return 'http://127.0.0.1:8000';
+  }
+
+  static isProduction(): boolean {
+    return process.env.NODE_ENV === 'production';
   }
 
   /**
