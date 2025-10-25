@@ -30,6 +30,21 @@ export function DetailedWalletBalance({
     refetchInterval: refreshInterval,
   });
 
+  const convertToMsat = (amount: number, unit: string): number => {
+    if (unit === 'sat') {
+      return amount * 1000; // Convert sat to msat
+    }
+    return amount; // Already in msat
+  };
+
+  const formatMsatBalance = (msatAmount: number): string => {
+    if (msatAmount >= 1000) {
+      // Display as sats if >= 1000 msat
+      return `${(msatAmount / 1000).toLocaleString()} sats`;
+    }
+    return `${msatAmount.toLocaleString()} msat`;
+  };
+
   const calculateTotals = (balances: BalanceDetail[]) => {
     let totalWallet = 0;
     let totalUser = 0;
@@ -37,9 +52,16 @@ export function DetailedWalletBalance({
 
     balances.forEach((detail) => {
       if (!detail.error) {
-        totalWallet += detail.wallet_balance || 0;
-        totalUser += detail.user_balance || 0;
-        totalOwner += detail.owner_balance || 0;
+        const walletMsat = convertToMsat(
+          detail.wallet_balance || 0,
+          detail.unit
+        );
+        const userMsat = convertToMsat(detail.user_balance || 0, detail.unit);
+        const ownerMsat = convertToMsat(detail.owner_balance || 0, detail.unit);
+
+        totalWallet += walletMsat;
+        totalUser += userMsat;
+        totalOwner += ownerMsat;
       }
     });
 
@@ -105,7 +127,7 @@ export function DetailedWalletBalance({
                     Your Balance (Total)
                   </span>
                   <span className='text-2xl font-bold text-green-600'>
-                    {totals.totalOwner.toLocaleString()} sats
+                    {formatMsatBalance(totals.totalOwner)}
                   </span>
                 </div>
                 <div className='flex items-center justify-between'>
@@ -113,7 +135,7 @@ export function DetailedWalletBalance({
                     Total Wallet
                   </span>
                   <span className='text-lg font-semibold'>
-                    {totals.totalWallet.toLocaleString()} sats
+                    {formatMsatBalance(totals.totalWallet)}
                   </span>
                 </div>
                 <div className='flex items-center justify-between'>
@@ -121,7 +143,7 @@ export function DetailedWalletBalance({
                     User Balance
                   </span>
                   <span className='text-lg font-semibold'>
-                    {totals.totalUser.toLocaleString()} sats
+                    {formatMsatBalance(totals.totalUser)}
                   </span>
                 </div>
               </div>
@@ -165,12 +187,12 @@ export function DetailedWalletBalance({
                           <div className='text-right font-mono'>
                             {detail.error
                               ? 'error'
-                              : detail.wallet_balance.toLocaleString()}
+                              : `${detail.wallet_balance.toLocaleString()} ${detail.unit}`}
                           </div>
                           <div className='text-right font-mono'>
                             {detail.error
                               ? '-'
-                              : detail.user_balance.toLocaleString()}
+                              : `${detail.user_balance.toLocaleString()} ${detail.unit}`}
                           </div>
                           <div
                             className={cn(
@@ -182,7 +204,7 @@ export function DetailedWalletBalance({
                           >
                             {detail.error
                               ? '-'
-                              : detail.owner_balance.toLocaleString()}
+                              : `${detail.owner_balance.toLocaleString()} ${detail.unit}`}
                           </div>
                         </div>
 
@@ -207,7 +229,7 @@ export function DetailedWalletBalance({
                               <div className='truncate font-mono text-sm'>
                                 {detail.error
                                   ? 'error'
-                                  : detail.wallet_balance.toLocaleString()}
+                                  : `${detail.wallet_balance.toLocaleString()} ${detail.unit}`}
                               </div>
                             </div>
                             <div className='space-y-1'>
@@ -217,7 +239,7 @@ export function DetailedWalletBalance({
                               <div className='truncate font-mono text-sm'>
                                 {detail.error
                                   ? '-'
-                                  : detail.user_balance.toLocaleString()}
+                                  : `${detail.user_balance.toLocaleString()} ${detail.unit}`}
                               </div>
                             </div>
                             <div className='space-y-1'>
@@ -234,7 +256,7 @@ export function DetailedWalletBalance({
                               >
                                 {detail.error
                                   ? '-'
-                                  : detail.owner_balance.toLocaleString()}
+                                  : `${detail.owner_balance.toLocaleString()} ${detail.unit}`}
                               </div>
                             </div>
                           </div>
