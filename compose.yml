@@ -11,7 +11,7 @@ services:
     volumes:
       - ./ui_out:/output
     command:
-      ["sh", "-c", "echo 'UI built and ready' && tail -f /dev/null"]
+      ["sh", "-c", "mkdir -p /output && cp -r /app/built/. /output/ && echo 'UI build copied to mounted volume' && ls -la /output/ && echo 'UI built and ready' && tail -f /dev/null"]
 
   routstr:
     build: .

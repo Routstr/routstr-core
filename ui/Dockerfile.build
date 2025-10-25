@@ -30,12 +30,8 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build && \
     echo "UI build completed at $(date)"
 
-# Copy built files to the output directory
-RUN mkdir -p /output && \
-    cp -r /app/out/. /output/
-
 # Use the builder stage as the final stage
 FROM node:23-alpine
 WORKDIR /app
-COPY --from=builder /output /output
-CMD ["sh", "-c", "echo 'UI built and ready' && tail -f /dev/null"]
+COPY --from=builder /app/out /app/built
+CMD ["sh", "-c", "mkdir -p /output && cp -r /app/built/. /output/ && echo 'UI build copied to mounted volume' && ls -la /output/ && echo 'UI built and ready' && tail -f /dev/null"]
