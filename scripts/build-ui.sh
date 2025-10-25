@@ -49,7 +49,8 @@ else
     npm run build
 fi
 
-mv out ../ui_out
+mkdir ../ui_out
+mv out/* ../ui_out
 
 # Clean up the temporary .env.local file
 if [ -f "$UI_ENV_FILE" ]; then

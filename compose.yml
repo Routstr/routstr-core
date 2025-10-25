@@ -1,5 +1,5 @@
 services:
-  ui-builder:
+  ui:
     env_file:
       - .env
     build:
@@ -10,19 +10,8 @@ services:
         NEXT_PUBLIC_ADMIN_API_KEY: ${NEXT_PUBLIC_ADMIN_API_KEY:-}
     volumes:
       - ./ui_out:/output
-    profiles:
-      - ui-build
-
-  ui:
-    image: alpine:latest
-    volumes:
-      - ./ui_out:/output:ro
     command:
-      [
-        "sh",
-        "-c",
-        'echo ''UI service - build with "docker compose --profile ui-build up ui-builder"'' && tail -f /dev/null',
-      ]
+      ["sh", "-c", "echo 'UI built and ready' && tail -f /dev/null"]
 
   routstr:
     build: .
