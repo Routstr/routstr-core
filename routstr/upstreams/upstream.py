@@ -140,7 +140,9 @@ class UpstreamProvider:
         """
         return model_id
 
-    def prepare_request_body(self, body: bytes | None, model_obj: Model) -> bytes | None:
+    def prepare_request_body(
+        self, body: bytes | None, model_obj: Model
+    ) -> bytes | None:
         """Transform request body for provider-specific requirements.
 
         Automatically transforms model names in the request body.
@@ -1019,6 +1021,7 @@ class UpstreamProvider:
         amount: int,
         unit: str,
         max_cost_for_model: int,
+        mint: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1099,7 +1102,7 @@ class UpstreamProvider:
                             },
                         )
 
-                        refund_token = await self.send_refund(refund_amount, unit)
+                        refund_token = await self.send_refund(refund_amount, unit, mint)
                         response_headers["X-Cashu"] = refund_token
 
                         logger.info(
@@ -1151,6 +1154,7 @@ class UpstreamProvider:
         amount: int,
         unit: str,
         max_cost_for_model: int,
+        mint: str | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1221,7 +1225,7 @@ class UpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit)
+                refund_token = await self.send_refund(refund_amount, unit, mint)
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -1255,7 +1259,7 @@ class UpstreamProvider:
             )
 
             emergency_refund = amount
-            refund_token = await send_token(emergency_refund, unit=unit)
+            refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
 
             logger.warning(
@@ -1275,7 +1279,12 @@ class UpstreamProvider:
             )
 
     async def handle_x_cashu_chat_completion(
-        self, response: httpx.Response, amount: int, unit: str, max_cost_for_model: int
+        self,
+        response: httpx.Response,
+        amount: int,
+        unit: str,
+        max_cost_for_model: int,
+        mint: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -1312,11 +1321,11 @@ class UpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model
+                    content_str, response, amount, unit, max_cost_for_model, mint
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model
+                    content_str, response, amount, unit, max_cost_for_model, mint
                 )
 
         except Exception as e:
@@ -1344,6 +1353,7 @@ class UpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         model_obj: Model,
+        mint: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward request paid with X-Cashu token to upstream service.
 
@@ -1414,7 +1424,7 @@ class UpstreamProvider:
                         },
                     )
 
-                    refund_token = await self.send_refund(amount - 60, unit)
+                    refund_token = await self.send_refund(amount - 60, unit, mint)
 
                     logger.info(
                         "Refund processed for failed upstream request",
@@ -1452,7 +1462,7 @@ class UpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model
+                        response, amount, unit, max_cost_for_model, mint
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -1496,7 +1506,12 @@ class UpstreamProvider:
                 )
 
     async def handle_x_cashu(
-        self, request: Request, x_cashu_token: str, path: str, max_cost_for_model: int, model_obj: Model
+        self,
+        request: Request,
+        x_cashu_token: str,
+        path: str,
+        max_cost_for_model: int,
+        model_obj: Model,
     ) -> Response | StreamingResponse:
         """Handle request with X-Cashu token payment, redeeming token and forwarding request.
 
@@ -1539,6 +1554,7 @@ class UpstreamProvider:
                 unit,
                 max_cost_for_model,
                 model_obj,
+                mint,
             )
         except Exception as e:
             error_message = str(e)

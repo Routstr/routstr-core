@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -31,7 +32,10 @@ from .settings import settings as global_settings
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.2.0-dev"
+if os.getenv("VERSION_SUFFIX") is not None:
+    __version__ = f"0.2.0-{os.getenv('VERSION_SUFFIX')}"
+else:
+    __version__ = "0.2.0-dev"
 
 
 @asynccontextmanager
