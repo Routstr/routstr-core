@@ -114,6 +114,29 @@ async def refresh_model_maps() -> None:
         """Get base model ID by removing provider prefix."""
         return model_id.split("/", 1)[1] if "/" in model_id else model_id
 
+    def _alias_priority(alias: str, model: Model) -> int:
+        """Rank how strong the mapping of alias->model is.
+
+        Highest priority when alias exactly equals the model ID without provider prefix.
+        Next when alias equals canonical slug without prefix. Otherwise lowest.
+        """
+        model_base = get_base_model_id(model.id)
+        if model_base == alias:
+            return 3
+        if model.canonical_slug:
+            canonical_base = get_base_model_id(model.canonical_slug)
+            if canonical_base == alias:
+                return 2
+        return 1
+
+    def _maybe_set_alias(alias: str, model: Model, provider: UpstreamProvider) -> None:
+        existing = model_instances.get(alias)
+        if not existing or _alias_priority(alias, model) > _alias_priority(
+            alias, existing
+        ):
+            model_instances[alias] = model
+            provider_map[alias] = provider
+
     if openrouter:
         for model in openrouter.get_cached_models():
             if model.enabled:
@@ -131,8 +154,7 @@ async def refresh_model_maps() -> None:
                 for alias in resolve_model_alias(
                     model_to_use.id, model_to_use.canonical_slug
                 ):
-                    model_instances[alias] = model_to_use
-                    provider_map[alias] = openrouter
+                    _maybe_set_alias(alias, model_to_use, openrouter)
 
     for upstream in other_upstreams:
         upstream_prefix = getattr(upstream, "upstream_name", None)
@@ -159,8 +181,7 @@ async def refresh_model_maps() -> None:
                         aliases.append(prefixed_id)
 
                 for alias in aliases:
-                    model_instances[alias] = model_to_use
-                    provider_map[alias] = upstream
+                    _maybe_set_alias(alias, model_to_use, upstream)
 
     _model_instances = model_instances
     _provider_map = provider_map
@@ -223,6 +244,8 @@ async def proxy(
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
+    print(model_id)
+    print(model_obj)
 
     upstream = get_provider_for_model(model_id)
     if not upstream:
@@ -233,6 +256,8 @@ async def proxy(
             request=request,
         )
 
+    print(upstream.upstream_name)
+
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
     )
@@ -242,7 +267,9 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        return await upstream.handle_x_cashu(request, x_cashu, path, max_cost_for_model, model_obj)
+        return await upstream.handle_x_cashu(
+            request, x_cashu, path, max_cost_for_model, model_obj
+        )
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
@@ -277,7 +304,7 @@ async def proxy(
         key,
         max_cost_for_model,
         session,
-        model_obj
+        model_obj,
     )
 
     if response.status_code != 200:
