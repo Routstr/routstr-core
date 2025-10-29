@@ -271,22 +271,13 @@ async def test_models_endpoint_accept_headers(integration_client: AsyncClient) -
 async def test_admin_endpoint_unauthenticated(
     integration_client: AsyncClient, db_snapshot: Any
 ) -> None:
-    """Test GET /admin/ endpoint without authentication shows setup form"""
+    """Test GET /admin/ endpoint redirects to /"""
     await db_snapshot.capture()
 
     response = await integration_client.get("/admin/")
 
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-
-    html_content = response.text
-    assert "<!DOCTYPE html>" in html_content
-    assert "<html>" in html_content
-    assert "<form" in html_content
-    assert 'type="password"' in html_content
-    assert "password" in html_content.lower()
-    assert "<script>" in html_content or "<script " in html_content
-    assert "Initial Admin Setup" in html_content or "setup" in html_content.lower()
+    assert response.status_code == 307
+    assert response.headers.get("location") == "/"
 
     diff = await db_snapshot.diff()
     assert len(diff["api_keys"]["added"]) == 0
@@ -294,50 +285,6 @@ async def test_admin_endpoint_unauthenticated(
     assert len(diff["api_keys"]["modified"]) == 0
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_admin_endpoint_html_structure(integration_client: AsyncClient) -> None:
-    """Test admin endpoint returns valid HTML structure"""
-
-    response = await integration_client.get("/admin/")
-    assert response.status_code == 200
-
-    html_content = response.text
-
-    # Validate HTML structure
-    assert html_content.startswith("<!DOCTYPE html>")
-    assert "<html>" in html_content and "</html>" in html_content
-    assert "<head>" in html_content and "</head>" in html_content
-    assert "<body>" in html_content and "</body>" in html_content
-
-    # Should have CSS styling
-    assert "<style>" in html_content or "<link" in html_content
-
-    # Should have admin-related content
-    assert any(word in html_content.lower() for word in ["admin", "password", "login"])
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_admin_endpoint_accept_headers(integration_client: AsyncClient) -> None:
-    """Test admin endpoint always returns HTML regardless of Accept headers"""
-
-    # Test with JSON accept header
-    response = await integration_client.get(
-        "/admin/", headers={"Accept": "application/json"}
-    )
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-
-    # Test with wildcard
-    response = await integration_client.get("/admin/", headers={"Accept": "*/*"})
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-
-    # Test with no accept header
-    response = await integration_client.get("/admin/")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
 
 
 @pytest.mark.integration
@@ -351,7 +298,7 @@ async def test_all_info_endpoints_no_database_changes(
     initial_state = await db_snapshot.capture()
 
     # Make requests to all info endpoints
-    endpoints = ["/v1/info", "/v1/models", "/admin/"]
+    endpoints = ["/v1/info", "/v1/models"]
 
     for endpoint in endpoints:
         response = await integration_client.get(endpoint)
@@ -385,7 +332,7 @@ async def test_concurrent_info_endpoint_requests(
 
     # Create concurrent requests to all endpoints
     requests = []
-    for endpoint in ["/", "/v1/models", "/admin/"]:
+    for endpoint in ["/", "/v1/models"]:
         for _ in range(5):  # 5 requests per endpoint
             # Use /v1/info instead of / for JSON API
             url = "/v1/info" if endpoint == "/" else endpoint
@@ -398,15 +345,10 @@ async def test_concurrent_info_endpoint_requests(
     )
 
     # All should succeed
-    assert len(responses) == 15  # 3 endpoints × 5 requests each
+    assert len(responses) == 10  # 2 endpoints × 5 requests each
     for response in responses:
         assert response.status_code == 200
-
-        # Verify content type based on endpoint
-        if "/admin/" in str(response.url):
-            assert "text/html" in response.headers["content-type"]
-        else:
-            assert "application/json" in response.headers["content-type"]
+        assert "application/json" in response.headers["content-type"]
 
 
 @pytest.mark.integration
