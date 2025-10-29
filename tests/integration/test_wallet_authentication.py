@@ -94,9 +94,9 @@ async def test_api_key_generation_invalid_token(
         response = await integration_client.get("/v1/wallet/info")
 
         # Should fail with 401
-        assert response.status_code == 401, (
-            f"Token {invalid_token[:20]}... should be invalid"
-        )
+        assert (
+            response.status_code == 401
+        ), f"Token {invalid_token[:20]}... should be invalid"
 
         # Validate error response
         validator = ResponseValidator()
@@ -198,9 +198,9 @@ async def test_authorization_header_validation(
         # Make request to protected endpoint
         response = await integration_client.get("/v1/wallet/")
 
-        assert response.status_code == expected_status, (
-            f"{description}: Expected {expected_status}, got {response.status_code}"
-        )
+        assert (
+            response.status_code == expected_status
+        ), f"{description}: Expected {expected_status}, got {response.status_code}"
 
         if expected_status == 401:
             assert "detail" in response.json()

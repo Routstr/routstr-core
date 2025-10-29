@@ -42,12 +42,12 @@ async def test_reserved_balance_never_negative(integration_client: AsyncClient) 
     async with create_session() as session:
         key = await session.get(ApiKey, "test_reserved_balance_key")
         assert key is not None
-        assert key.reserved_balance >= 0, (
-            f"Reserved balance went negative: {key.reserved_balance}"
-        )
-        assert key.balance == 1000, (
-            "Balance should remain unchanged after failed request"
-        )
+        assert (
+            key.reserved_balance >= 0
+        ), f"Reserved balance went negative: {key.reserved_balance}"
+        assert (
+            key.balance == 1000
+        ), "Balance should remain unchanged after failed request"
 
     # Test 2: Simulate concurrent failed requests
     # This tests the race condition protection
@@ -71,9 +71,9 @@ async def test_reserved_balance_never_negative(integration_client: AsyncClient) 
     async with create_session() as session:
         key = await session.get(ApiKey, "test_reserved_balance_key")
         assert key is not None
-        assert key.reserved_balance >= 0, (
-            f"Reserved balance went negative after concurrent requests: {key.reserved_balance}"
-        )
+        assert (
+            key.reserved_balance >= 0
+        ), f"Reserved balance went negative after concurrent requests: {key.reserved_balance}"
         print(f"Final state - Balance: {key.balance}, Reserved: {key.reserved_balance}")
 
 
@@ -113,20 +113,20 @@ async def test_reserved_balance_with_successful_requests(
     async with create_session() as session:
         key = await session.get(ApiKey, unique_key)
         assert key is not None
-        assert key.reserved_balance >= 0, (
-            f"Reserved balance went negative: {key.reserved_balance}"
-        )
+        assert (
+            key.reserved_balance >= 0
+        ), f"Reserved balance went negative: {key.reserved_balance}"
         # Check if the request was processed (might fail due to model pricing in test env)
         # The important part is that reserved_balance doesn't go negative
         if key.total_spent > 0:
-            assert key.balance < 100000, (
-                "Balance should decrease after successful request"
-            )
+            assert (
+                key.balance < 100000
+            ), "Balance should decrease after successful request"
         else:
             # Request failed, but reserved balance should still be non-negative
-            assert key.balance == 100000, (
-                "Balance should remain unchanged if request failed"
-            )
+            assert (
+                key.balance == 100000
+            ), "Balance should remain unchanged if request failed"
         print(
             f"After successful request - Balance: {key.balance}, Reserved: {key.reserved_balance}, Spent: {key.total_spent}"
         )
@@ -157,9 +157,9 @@ async def test_insufficient_reserved_balance_for_revert(
     await integration_session.refresh(test_key)
 
     # Current implementation allows negative reserved balance
-    assert test_key.reserved_balance == -100, (
-        f"Expected reserved_balance to be -100, got: {test_key.reserved_balance}"
-    )
-    assert test_key.total_requests == -1, (
-        f"Expected total_requests to be -1, got: {test_key.total_requests}"
-    )
+    assert (
+        test_key.reserved_balance == -100
+    ), f"Expected reserved_balance to be -100, got: {test_key.reserved_balance}"
+    assert (
+        test_key.total_requests == -1
+    ), f"Expected total_requests to be -1, got: {test_key.total_requests}"

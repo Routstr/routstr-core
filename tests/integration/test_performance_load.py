@@ -131,9 +131,9 @@ class TestPerformanceBaseline:
 
             # Verify 95th percentile < 500ms
             p95 = sorted(response_times)[int(len(response_times) * 0.95)]
-            assert p95 < 500, (
-                f"{method} {path} p95 response time {p95}ms exceeds 500ms limit"
-            )
+            assert (
+                p95 < 500
+            ), f"{method} {path} p95 response time {p95}ms exceeds 500ms limit"
 
             print(f"\n{method} {path}:")
             print(f"  Mean: {statistics.mean(response_times):.2f}ms")
@@ -175,9 +175,9 @@ class TestPerformanceBaseline:
             query_times.append(duration)
 
         # All queries should complete < 100ms
-        assert max(query_times) < 100, (
-            f"Max query time {max(query_times)}ms exceeds 100ms limit"
-        )
+        assert (
+            max(query_times) < 100
+        ), f"Max query time {max(query_times)}ms exceeds 100ms limit"
         print("\nDatabase query performance:")
         print(f"  Mean: {statistics.mean(query_times):.2f}ms")
         print(f"  Max: {max(query_times):.2f}ms")
@@ -272,9 +272,9 @@ class TestLoadScenarios:
 
         # Performance requirements
         assert summary["error_rate"] < 0.05, "Error rate exceeds 5%"
-        assert summary["response_times"]["p95"] < 2.0, (
-            "P95 response time exceeds 2 seconds"
-        )
+        assert (
+            summary["response_times"]["p95"] < 2.0
+        ), "P95 response time exceeds 2 seconds"
 
     @pytest.mark.asyncio
     async def test_sustained_load_1000_rpm(
@@ -354,13 +354,13 @@ class TestLoadScenarios:
         )
 
         # Verify performance
-        assert actual_rps >= target_rps * 0.95, (
-            f"Could not sustain target rate (achieved {actual_rps:.2f} req/s)"
-        )
+        assert (
+            actual_rps >= target_rps * 0.95
+        ), f"Could not sustain target rate (achieved {actual_rps:.2f} req/s)"
         assert summary["error_rate"] < 0.01, "Error rate exceeds 1%"
-        assert summary["response_times"]["p95"] < 1.0, (
-            "P95 response time exceeds 1 second"
-        )
+        assert (
+            summary["response_times"]["p95"] < 1.0
+        ), "P95 response time exceeds 1 second"
 
 
 @pytest.mark.integration
@@ -418,12 +418,12 @@ class TestMemoryLeaks:
 
         # Check for significant memory leaks
         # Allow some growth but not more than 20% or 50MB total
-        assert memory_growth < 50, (
-            f"Memory grew by {memory_growth} MB, indicating a potential leak"
-        )
-        assert memory_samples[-1] < memory_samples[0] * 1.2, (
-            "Memory grew by more than 20%"
-        )
+        assert (
+            memory_growth < 50
+        ), f"Memory grew by {memory_growth} MB, indicating a potential leak"
+        assert (
+            memory_samples[-1] < memory_samples[0] * 1.2
+        ), "Memory grew by more than 20%"
 
 
 @pytest.mark.integration
@@ -471,9 +471,9 @@ class TestPerformanceRegression:
             print(f"  Current: {mean_time * 1000:.1f}ms")
             print(f"  Difference: {((mean_time / baseline - 1) * 100):.1f}%")
 
-            assert mean_time <= max_allowed, (
-                f"{endpoint} performance degraded by more than 20% (baseline: {baseline}s, current: {mean_time}s)"
-            )
+            assert (
+                mean_time <= max_allowed
+            ), f"{endpoint} performance degraded by more than 20% (baseline: {baseline}s, current: {mean_time}s)"
 
         # Get overall validation results
         results = {}
@@ -482,9 +482,9 @@ class TestPerformanceRegression:
                 endpoint, max_duration=baselines[endpoint] * 1.2, percentile=0.95
             )
             results[endpoint] = result
-            assert result["valid"], (
-                f"Performance validation failed for {endpoint}: {result}"
-            )
+            assert result[
+                "valid"
+            ], f"Performance validation failed for {endpoint}: {result}"
 
 
 # Performance test utilities

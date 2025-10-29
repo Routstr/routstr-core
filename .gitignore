@@ -12,6 +12,8 @@ dist/
 # Development 
 .notes
 .*keys.db
+*.db-shm
+*.db-wal
 .*wallet.sqlite3
 *models.json
 .cashu

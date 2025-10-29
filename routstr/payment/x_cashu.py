@@ -46,7 +46,7 @@ async def x_cashu_handler(
         )
 
         return await forward_to_upstream(
-            request, path, headers, amount, unit, max_cost_for_model
+            request, path, headers, amount, unit, max_cost_for_model, mint
         )
     except Exception as e:
         error_message = str(e)
@@ -105,6 +105,7 @@ async def forward_to_upstream(
     amount: int,
     unit: str,
     max_cost_for_model: int,
+    mint: str,
 ) -> Response | StreamingResponse:
     """Forward request to upstream and handle the response."""
     if path.startswith("v1/"):
@@ -159,7 +160,7 @@ async def forward_to_upstream(
                     },
                 )
 
-                refund_token = await send_refund(amount - 60, unit)
+                refund_token = await send_refund(amount - 60, unit, mint)
 
                 logger.info(
                     "Refund processed for failed upstream request",
@@ -197,7 +198,7 @@ async def forward_to_upstream(
                 )
 
                 result = await handle_x_cashu_chat_completion(
-                    response, amount, unit, max_cost_for_model
+                    response, amount, unit, max_cost_for_model, mint
                 )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
@@ -242,7 +243,7 @@ async def forward_to_upstream(
 
 
 async def handle_x_cashu_chat_completion(
-    response: httpx.Response, amount: int, unit: str, max_cost_for_model: int
+    response: httpx.Response, amount: int, unit: str, max_cost_for_model: int, mint: str
 ) -> StreamingResponse | Response:
     """Handle both streaming and non-streaming chat completion responses with token-based pricing."""
     logger.debug(
@@ -267,11 +268,11 @@ async def handle_x_cashu_chat_completion(
 
         if is_streaming:
             return await handle_streaming_response(
-                content_str, response, amount, unit, max_cost_for_model
+                content_str, response, amount, unit, max_cost_for_model, mint
             )
         else:
             return await handle_non_streaming_response(
-                content_str, response, amount, unit, max_cost_for_model
+                content_str, response, amount, unit, max_cost_for_model, mint
             )
 
     except Exception as e:
@@ -298,6 +299,7 @@ async def handle_streaming_response(
     amount: int,
     unit: str,
     max_cost_for_model: int,
+    mint: str,
 ) -> StreamingResponse:
     """Handle Server-Sent Events (SSE) streaming response."""
     logger.debug(
@@ -372,7 +374,7 @@ async def handle_streaming_response(
                         },
                     )
 
-                    refund_token = await send_refund(refund_amount, unit)
+                    refund_token = await send_refund(refund_amount, unit, mint)
                     response_headers["X-Cashu"] = refund_token
 
                     logger.info(
@@ -424,6 +426,7 @@ async def handle_non_streaming_response(
     amount: int,
     unit: str,
     max_cost_for_model: int,
+    mint: str,
 ) -> Response:
     """Handle regular JSON response."""
     logger.debug(
@@ -484,7 +487,7 @@ async def handle_non_streaming_response(
         )
 
         if refund_amount > 0:
-            refund_token = await send_refund(refund_amount, unit)
+            refund_token = await send_refund(refund_amount, unit, mint)
             response_headers["X-Cashu"] = refund_token
 
             logger.info(

@@ -30,6 +30,104 @@ logger = get_logger(__name__)
 proxy_router = APIRouter()
 
 
+def _extract_upstream_error_message(body_bytes: bytes) -> tuple[str, str | None]:
+    """Extract a human-friendly message and optional upstream error code from a response body."""
+    message: str = "Upstream request failed"
+    upstream_code: str | None = None
+    if not body_bytes:
+        return message, upstream_code
+    try:
+        data = json.loads(body_bytes)
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                raw_msg = err.get("message") or err.get("detail") or err.get("error")
+                if isinstance(raw_msg, (str, int, float)):
+                    message = str(raw_msg)
+                upstream_code_raw = err.get("code") or err.get("type")
+                if isinstance(upstream_code_raw, (str, int, float)):
+                    upstream_code = str(upstream_code_raw)
+            elif "message" in data and isinstance(data["message"], (str, int, float)):
+                message = str(data["message"])  # type: ignore[arg-type]
+            elif "detail" in data and isinstance(data["detail"], (str, int, float)):
+                message = str(data["detail"])  # type: ignore[arg-type]
+    except Exception:
+        preview = body_bytes.decode("utf-8", errors="ignore").strip()
+        if preview:
+            message = preview[:500]
+    return message, upstream_code
+
+
+async def map_upstream_error_response(
+    request: Request,
+    path: str,
+    upstream_response: httpx.Response,
+) -> Response:
+    """Map upstream non-200 responses to standardized error responses.
+
+    - Known cases are mapped to friendly messages and appropriate status codes
+    - Unknown errors are converted to a generic 502
+    """
+    status_code = upstream_response.status_code
+    headers = dict(upstream_response.headers)
+    content_type = headers.get("content-type", "")
+    try:
+        body_bytes = await upstream_response.aread()
+    except Exception:
+        body_bytes = b""
+
+    message, upstream_code = _extract_upstream_error_message(body_bytes)
+    lowered_message = message.lower()
+    lowered_code = (upstream_code or "").lower()
+
+    error_type = "upstream_error"
+    mapped_status = 502
+
+    # Specific mappings
+    if status_code in (400, 422):
+        error_type = "invalid_request_error"
+        mapped_status = 400
+    elif status_code in (401, 403):
+        error_type = "upstream_auth_error"
+        mapped_status = 502
+    elif status_code == 404:
+        # Many providers return 404 for unknown models or routes
+        if path.endswith("chat/completions"):
+            error_type = "invalid_model"
+            mapped_status = 400
+            if not message or message == "Upstream request failed":
+                message = "Requested model is not available upstream"
+        elif "model" in lowered_message or "model" in lowered_code:
+            error_type = "invalid_model"
+            mapped_status = 400
+            if not message or message == "Upstream request failed":
+                message = "Requested model is not available upstream"
+        else:
+            error_type = "upstream_error"
+            mapped_status = 502
+    elif status_code == 429:
+        error_type = "rate_limit_exceeded"
+        mapped_status = 429
+    elif status_code >= 500:
+        error_type = "upstream_error"
+        mapped_status = 502
+
+    # Include upstream content type hint in logs for diagnostics
+    logger.debug(
+        "Mapped upstream error",
+        extra={
+            "path": path,
+            "upstream_status": status_code,
+            "mapped_status": mapped_status,
+            "error_type": error_type,
+            "upstream_content_type": content_type,
+            "message_preview": message[:200],
+        },
+    )
+
+    return create_error_response(error_type, message, mapped_status, request=request)
+
+
 async def handle_streaming_chat_completion(
     response: httpx.Response, key: ApiKey, max_cost_for_model: int
 ) -> StreamingResponse:
@@ -362,6 +460,17 @@ async def forward_to_upstream(
             },
         )
 
+        # Map and return errors immediately to provide clear messages
+        if response.status_code != 200:
+            try:
+                mapped_error = await map_upstream_error_response(
+                    request, path, response
+                )
+            finally:
+                await response.aclose()
+                await client.aclose()
+            return mapped_error
+
         # For chat completions, we need to handle token-based pricing
         if path.endswith("chat/completions"):
             # Check if client requested streaming
@@ -527,6 +636,12 @@ async def proxy(
     if request_body:
         try:
             request_body_dict = json.loads(request_body)
+
+            if "max_tokens" in request_body_dict:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "max_tokens must be an integer (without quotes)"},
+                )
             logger.debug(
                 "Request body parsed",
                 extra={
@@ -655,18 +770,10 @@ async def proxy(
                 "upstream_headers": response.headers
                 if hasattr(response, "headers")
                 else None,
-                "upstream_response": response.body
-                if hasattr(response, "body")
-                else None,
             },
         )
-        request_id = (
-            request.state.request_id if hasattr(request.state, "request_id") else None
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Upstream request failed, please contact support with request id: {request_id}",
-        )
+        # Return the mapped error response generated earlier rather than masking with 502
+        return response
 
     return response
 
@@ -786,6 +893,12 @@ async def forward_get_to_upstream(
                 "GET request forwarded successfully",
                 extra={"path": path, "status_code": response.status_code},
             )
+            if response.status_code != 200:
+                try:
+                    mapped = await map_upstream_error_response(request, path, response)
+                finally:
+                    await response.aclose()
+                return mapped
 
             return StreamingResponse(
                 response.aiter_bytes(),

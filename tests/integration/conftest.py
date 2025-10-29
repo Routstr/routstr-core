@@ -63,6 +63,7 @@ else:
 
 # Set test environment variables before importing the app
 os.environ.update(test_env)
+os.environ.pop("ADMIN_PASSWORD", None)
 
 from routstr.core.db import ApiKey, get_session  # noqa: E402
 from routstr.core.main import app, lifespan  # noqa: E402
