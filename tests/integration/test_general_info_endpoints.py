@@ -285,8 +285,6 @@ async def test_admin_endpoint_unauthenticated(
     assert len(diff["api_keys"]["modified"]) == 0
 
 
-
-
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_all_info_endpoints_no_database_changes(
