@@ -285,6 +285,17 @@ else:
         f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
     )
 
+    @app.get("/", include_in_schema=False)
+    async def root_fallback() -> dict:
+        return {
+            "name": global_settings.name,
+            "description": global_settings.description,
+            "version": __version__,
+            "status": "running",
+            "ui": "not available",
+        }
+
+
 app.include_router(models_router)
 app.include_router(admin_router)
 app.include_router(balance_router)
