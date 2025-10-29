@@ -104,6 +104,12 @@ async def refresh_model_maps() -> None:
             if row.upstream_provider_id is not None
         }
 
+        # Get all disabled model IDs from database to filter them out
+        disabled_result = await session.exec(
+            select(ModelRow.id).where(~ModelRow.enabled)
+        )
+        disabled_model_ids = {row for row in disabled_result.all()}
+
     for upstream in _upstreams:
         if upstream.base_url == "https://openrouter.ai/api/v1":
             openrouter = upstream
@@ -139,7 +145,7 @@ async def refresh_model_maps() -> None:
 
     if openrouter:
         for model in openrouter.get_cached_models():
-            if model.enabled:
+            if model.enabled and model.id not in disabled_model_ids:
                 if model.id in overrides_by_id:
                     override_row, provider_fee = overrides_by_id[model.id]
                     model_to_use = _row_to_model(
@@ -159,7 +165,7 @@ async def refresh_model_maps() -> None:
     for upstream in other_upstreams:
         upstream_prefix = getattr(upstream, "upstream_name", None)
         for model in upstream.get_cached_models():
-            if model.enabled:
+            if model.enabled and model.id not in disabled_model_ids:
                 if model.id in overrides_by_id:
                     override_row, provider_fee = overrides_by_id[model.id]
                     model_to_use = _row_to_model(
