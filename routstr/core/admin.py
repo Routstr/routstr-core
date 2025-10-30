@@ -1,5 +1,4 @@
 import json
-import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -216,12 +215,7 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
 
 @admin_router.patch("/api/password", dependencies=[Depends(require_admin_api)])
 async def update_password(request: Request, password_update: PasswordUpdate) -> dict:
-    # Verify current password
-    try:
-        current_settings = SettingsService.get()
-        current_password = current_settings.admin_password
-    except Exception:
-        current_password = os.getenv("ADMIN_PASSWORD", "")
+    current_password = settings.admin_password
 
     if not current_password:
         raise HTTPException(status_code=500, detail="Admin password not configured")
@@ -249,11 +243,7 @@ class SetupRequest(BaseModel):
 
 @admin_router.post("/api/setup")
 async def initial_setup(request: Request, payload: SetupRequest) -> dict[str, object]:
-    try:
-        current = SettingsService.get()
-    except Exception:
-        current = settings
-    if getattr(current, "admin_password", ""):
+    if settings.admin_password:
         raise HTTPException(status_code=409, detail="Admin password already set")
     pw = (payload.password or "").strip()
     if len(pw) < 8:
@@ -273,11 +263,7 @@ class AdminLoginRequest(BaseModel):
 async def admin_login(
     request: Request, payload: AdminLoginRequest
 ) -> dict[str, object]:
-    try:
-        current = SettingsService.get()
-        admin_pw = current.admin_password
-    except Exception:
-        admin_pw = os.getenv("ADMIN_PASSWORD", "")
+    admin_pw = settings.admin_password
 
     if not admin_pw:
         raise HTTPException(status_code=500, detail="Admin password not configured")
@@ -437,11 +423,7 @@ def info(content: str) -> str:
 
 
 def admin_auth() -> str:
-    try:
-        settings = SettingsService.get()
-        admin_pw = settings.admin_password
-    except Exception:
-        admin_pw = os.getenv("ADMIN_PASSWORD", "")
+    admin_pw = settings.admin_password
     if admin_pw == "":
         return setup_form()
     else:
