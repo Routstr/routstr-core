@@ -15,6 +15,8 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
  * Configuration service to manage external server settings
  */
 export class ConfigurationService {
+  private static readonly manualBaseUrlStorageKey = 'admin_manual_base_url';
+
   /**
    * Get the current server configuration from localStorage
    */
@@ -59,11 +61,22 @@ export class ConfigurationService {
    * Get the local base URL (never use external configuration)
    */
   static getLocalBaseUrl(): string {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const envBaseUrl = process.env.NEXT_PUBLIC_API_URL;
 
-    console.log(apiUrl);
-    if (apiUrl) {
-      return apiUrl;
+    console.log(envBaseUrl);
+    if (envBaseUrl && envBaseUrl.trim()) {
+      return envBaseUrl;
+    }
+
+    if (typeof window !== 'undefined') {
+      const manualBaseUrl = this.getManualBaseUrl();
+      if (manualBaseUrl) {
+        return manualBaseUrl;
+      }
+
+      if (window.location.origin) {
+        return window.location.origin;
+      }
     }
 
     if (process.env.NODE_ENV === 'production') {
@@ -71,6 +84,32 @@ export class ConfigurationService {
     }
 
     return 'http://127.0.0.1:8000';
+  }
+
+  static isEnvBaseUrlConfigured(): boolean {
+    const envBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? '';
+    return envBaseUrl.trim().length > 0;
+  }
+
+  static getManualBaseUrl(): string {
+    if (typeof window === 'undefined') {
+      return '';
+    }
+
+    return localStorage.getItem(this.manualBaseUrlStorageKey) ?? '';
+  }
+
+  static setManualBaseUrl(baseUrl: string): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const normalizedBaseUrl = baseUrl.trim();
+    if (normalizedBaseUrl) {
+      localStorage.setItem(this.manualBaseUrlStorageKey, normalizedBaseUrl);
+    } else {
+      localStorage.removeItem(this.manualBaseUrlStorageKey);
+    }
   }
 
   static isProduction(): boolean {

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import type { ChangeEvent, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,10 +16,12 @@ import { adminLogin } from '@/lib/api/services/auth';
 import { ConfigurationService } from '@/lib/api/services/configuration';
 import { toast } from 'sonner';
 
-export default function AdminLoginPage() {
+export default function AdminLoginPage(): JSX.Element {
   const router = useRouter();
-  const [password, setPassword] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const allowCustomBaseUrl = !ConfigurationService.isEnvBaseUrlConfigured();
+  const [password, setPassword] = useState<string>('');
+  const [baseUrl, setBaseUrl] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
   useEffect(() => {
     if (ConfigurationService.isTokenValid()) {
@@ -26,8 +29,35 @@ export default function AdminLoginPage() {
     }
   }, [router]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    if (!allowCustomBaseUrl) {
+      return;
+    }
+
+    const storedBaseUrl = ConfigurationService.getManualBaseUrl();
+    if (storedBaseUrl) {
+      setBaseUrl(storedBaseUrl);
+      return;
+    }
+
+    if (typeof window !== 'undefined') {
+      setBaseUrl(window.location.origin ?? '');
+    }
+  }, [allowCustomBaseUrl]);
+
+  const handleSubmit = async (
+    event: FormEvent<HTMLFormElement>
+  ): Promise<void> => {
+    event.preventDefault();
+
+    if (allowCustomBaseUrl) {
+      const normalizedBaseUrl = baseUrl.trim();
+      if (!normalizedBaseUrl) {
+        toast.error('Please enter the API URL');
+        return;
+      }
+      ConfigurationService.setManualBaseUrl(normalizedBaseUrl);
+    }
 
     if (!password) {
       toast.error('Please enter your password');
@@ -60,12 +90,28 @@ export default function AdminLoginPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className='space-y-4'>
+            {allowCustomBaseUrl && (
+              <div className='space-y-2'>
+                <Input
+                  type='text'
+                  placeholder='API URL (https://api.example.com)'
+                  value={baseUrl}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setBaseUrl(event.target.value)
+                  }
+                  disabled={isLoading}
+                  required
+                />
+              </div>
+            )}
             <div className='space-y-2'>
               <Input
                 type='password'
                 placeholder='Admin Password'
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  setPassword(event.target.value)
+                }
                 disabled={isLoading}
                 autoFocus
                 required
