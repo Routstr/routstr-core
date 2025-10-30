@@ -7,6 +7,8 @@ import { SuppressHydrationWarning } from '@/components/suppress-hydration-warnin
 const geistSans = Geist({
   variable: '--font-geist-sans',
   subsets: ['latin'],
+  preload: false,
+  display: 'swap',
 });
 
 const geistMono = Geist_Mono({
