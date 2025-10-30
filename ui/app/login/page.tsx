@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
+import type { ChangeEvent, FormEvent, ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,7 +16,7 @@ import { adminLogin } from '@/lib/api/services/auth';
 import { ConfigurationService } from '@/lib/api/services/configuration';
 import { toast } from 'sonner';
 
-export default function AdminLoginPage(): JSX.Element {
+export default function AdminLoginPage(): ReactElement {
   const router = useRouter();
   const allowCustomBaseUrl = !ConfigurationService.isEnvBaseUrlConfigured();
   const [password, setPassword] = useState<string>('');
