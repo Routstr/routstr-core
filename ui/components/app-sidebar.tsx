@@ -86,12 +86,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <div className='flex items-center gap-2'>
                 <Image
                   src='/icon.ico'
-                  alt='Routstr'
+                  alt='Routstr Node'
                   width={24}
                   height={24}
                   className='rounded'
                 />
-                <span className='text-base font-semibold'>Routstr</span>
+                <span className='text-base font-semibold'>Routstr Node</span>
               </div>
             </SidebarMenuButton>
           </SidebarMenuItem>

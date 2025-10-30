@@ -30,9 +30,9 @@ export function SiteHeader() {
           <SidebarTrigger className='-ml-1' />
           <Separator
             orientation='vertical'
-            className='mx-2 data-[orientation=vertical]:h-4'
+            className='mx-2 data-[orientation=vertical]:h-4 lg:hidden'
           />
-          <h1 className='text-base font-medium'>Routstr</h1>
+          <h1 className='text-base font-medium lg:hidden'>Routstr Node</h1>
         </div>
         <div className='flex items-center gap-2'>
           <ThemeToggle />
