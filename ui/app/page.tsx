@@ -22,10 +22,10 @@ export default function Page() {
 
           <div className='grid gap-6'>
             <div className='col-span-full'>
-              <DetailedWalletBalance refreshInterval={5000} />
+              <DetailedWalletBalance refreshInterval={30000} />
             </div>
             <div className='col-span-full'>
-              <TemporaryBalances refreshInterval={10000} />
+              <TemporaryBalances refreshInterval={60000} />
             </div>
           </div>
         </div>
