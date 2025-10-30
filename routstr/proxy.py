@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlmodel import select
+from sqlmodel import col, select
 
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
@@ -106,7 +106,7 @@ async def refresh_model_maps() -> None:
 
         # Get all disabled model IDs from database to filter them out
         disabled_result = await session.exec(
-            select(ModelRow.id).where(~ModelRow.enabled)
+            select(ModelRow.id).where(not col(ModelRow.enabled))
         )
         disabled_model_ids = {row for row in disabled_result.all()}
 
