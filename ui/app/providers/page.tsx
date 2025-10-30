@@ -26,8 +26,6 @@ import {
   Pencil,
   Trash2,
   Server,
-  Eye,
-  EyeOff,
   Database,
   ChevronDown,
   ChevronUp,
@@ -62,7 +60,6 @@ export default function ProvidersPage() {
     useState<UpstreamProvider | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
-  const [showApiKey, setShowApiKey] = useState<number | null>(null);
   const [expandedProviders, setExpandedProviders] = useState<Set<number>>(
     new Set()
   );
@@ -424,12 +421,6 @@ export default function ProvidersPage() {
                     <CardContent>
                       <div className='space-y-4'>
                         <div className='space-y-2'>
-                          <div className='flex items-center justify-between text-sm'>
-                            <span className='text-muted-foreground'>
-                              Provider ID:
-                            </span>
-                            <span className='font-mono'>{provider.id}</span>
-                          </div>
                           {provider.api_version && (
                             <div className='flex items-center justify-between text-sm'>
                               <span className='text-muted-foreground'>
@@ -440,35 +431,6 @@ export default function ProvidersPage() {
                               </span>
                             </div>
                           )}
-                          <div className='flex items-center justify-between text-sm'>
-                            <span className='text-muted-foreground'>
-                              API Key:
-                            </span>
-                            <div className='flex items-center gap-2'>
-                              <span className='font-mono'>
-                                {showApiKey === provider.id
-                                  ? provider.api_key || '[REDACTED]'
-                                  : '••••••••'}
-                              </span>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                onClick={() =>
-                                  setShowApiKey(
-                                    showApiKey === provider.id
-                                      ? null
-                                      : provider.id
-                                  )
-                                }
-                              >
-                                {showApiKey === provider.id ? (
-                                  <EyeOff className='h-4 w-4' />
-                                ) : (
-                                  <Eye className='h-4 w-4' />
-                                )}
-                              </Button>
-                            </div>
-                          </div>
                         </div>
 
                         {expandedProviders.has(provider.id) && (
