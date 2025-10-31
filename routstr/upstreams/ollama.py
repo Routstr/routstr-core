@@ -41,6 +41,39 @@ class OllamaUpstreamProvider(UpstreamProvider):
         """Strip 'ollama/' prefix for Ollama API compatibility."""
         return model_id.removeprefix("ollama/")
 
+    async def forward_request(
+        self,
+        request,
+        path: str,
+        headers: dict,
+        request_body: bytes,
+        key,
+        max_cost_for_model: int,
+        session,
+        model_obj,
+    ):
+        """Override to use OpenAI-compatible endpoint for proxy requests."""
+        if path.startswith("v1/"):
+            path = path.replace("v1/", "")
+
+        original_base_url = self.base_url
+        self.base_url = f"{self.base_url}/v1"
+
+        try:
+            result = await super().forward_request(
+                request,
+                path,
+                headers,
+                request_body,
+                key,
+                max_cost_for_model,
+                session,
+                model_obj,
+            )
+            return result
+        finally:
+            self.base_url = original_base_url
+
     async def fetch_models(self) -> list[Model]:
         """Fetch models from Ollama API using /api/tags endpoint."""
         from ..payment.models import Architecture, Model, Pricing, TopProvider
