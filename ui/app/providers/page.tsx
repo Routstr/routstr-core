@@ -529,7 +529,7 @@ export default function ProvidersPage() {
                                   >
                                     {providerModels.db_models.length > 0 && (
                                       <div className='text-muted-foreground mb-3 text-sm'>
-                                        Custom models override or extend the provider's catalog.
+                                        Custom models override or extend the provider&apos;s catalog.
                                       </div>
                                     )}
                                     {providerModels.db_models.length === 0 ? (
@@ -580,7 +580,7 @@ export default function ProvidersPage() {
                                   >
                                     {providerModels.remote_models.length > 0 && (
                                       <div className='text-muted-foreground mb-3 text-sm'>
-                                        Models automatically discovered from the provider's catalog.
+                                        Models automatically discovered from the provider&apos;s catalog.
                                       </div>
                                     )}
                                     <div className='space-y-2'>
