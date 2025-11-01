@@ -3,10 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import httpx
+from fastapi import Request
+from fastapi.responses import Response, StreamingResponse
 
 from .upstream import UpstreamProvider
 
 if TYPE_CHECKING:
+    from ..core.db import ApiKey, AsyncSession
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -43,15 +46,15 @@ class OllamaUpstreamProvider(UpstreamProvider):
 
     async def forward_request(
         self,
-        request,
+        request: Request,
         path: str,
         headers: dict,
-        request_body: bytes,
-        key,
+        request_body: bytes | None,
+        key: ApiKey,
         max_cost_for_model: int,
-        session,
-        model_obj,
-    ):
+        session: AsyncSession,
+        model_obj: Model,
+    ) -> Response | StreamingResponse:
         """Override to use OpenAI-compatible endpoint for proxy requests."""
         if path.startswith("v1/"):
             path = path.replace("v1/", "")

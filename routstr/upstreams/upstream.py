@@ -4,13 +4,9 @@ import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Mapping
+from typing import Mapping
 
 import httpx
-
-if TYPE_CHECKING:
-    from ..payment.cost_caculation import CostData, MaxCostData
-
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
