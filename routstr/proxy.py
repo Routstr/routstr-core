@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import col, select
 
+from .algorithm import create_model_mappings
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
 from .core.db import (
@@ -21,8 +22,8 @@ from .payment.helpers import (
     create_error_response,
     get_max_cost_for_model,
 )
-from .payment.models import Model, _row_to_model
-from .upstream import UpstreamProvider, init_upstreams, resolve_model_alias
+from .payment.models import Model
+from .upstream import UpstreamProvider, init_upstreams
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
@@ -77,15 +78,10 @@ def get_unique_models() -> list[Model]:
 
 
 async def refresh_model_maps() -> None:
-    """Refresh global model and provider maps in-place."""
+    """Refresh global model and provider maps using the cost-based algorithm."""
     global _model_instances, _provider_map, _unique_models
 
-    model_instances: dict[str, Model] = {}
-    provider_map: dict[str, UpstreamProvider] = {}
-    unique_models: dict[str, Model] = {}
-    openrouter: UpstreamProvider | None = None
-    other_upstreams: list[UpstreamProvider] = []
-
+    # Gather database overrides and disabled models
     async with create_session() as session:
         result = await session.exec(select(ModelRow).where(ModelRow.enabled))
         override_rows = result.all()
@@ -110,95 +106,11 @@ async def refresh_model_maps() -> None:
         )
         disabled_model_ids = {row for row in disabled_result.all()}
 
-    for upstream in _upstreams:
-        if upstream.base_url == "https://openrouter.ai/api/v1":
-            openrouter = upstream
-        else:
-            other_upstreams.append(upstream)
-
-    def get_base_model_id(model_id: str) -> str:
-        """Get base model ID by removing provider prefix."""
-        return model_id.split("/", 1)[1] if "/" in model_id else model_id
-
-    def _alias_priority(alias: str, model: Model) -> int:
-        """Rank how strong the mapping of alias->model is.
-
-        Highest priority when alias exactly equals the model ID without provider prefix.
-        Next when alias equals canonical slug without prefix. Otherwise lowest.
-        """
-        model_base = get_base_model_id(model.id)
-        if model_base == alias:
-            return 3
-        if model.canonical_slug:
-            canonical_base = get_base_model_id(model.canonical_slug)
-            if canonical_base == alias:
-                return 2
-        return 1
-
-    def _maybe_set_alias(alias: str, model: Model, provider: UpstreamProvider) -> None:
-        existing = model_instances.get(alias)
-        if not existing or _alias_priority(alias, model) > _alias_priority(
-            alias, existing
-        ):
-            model_instances[alias] = model
-            provider_map[alias] = provider
-
-    if openrouter:
-        for model in openrouter.get_cached_models():
-            if model.enabled and model.id not in disabled_model_ids:
-                if model.id in overrides_by_id:
-                    override_row, provider_fee = overrides_by_id[model.id]
-                    model_to_use = _row_to_model(
-                        override_row, apply_provider_fee=True, provider_fee=provider_fee
-                    )
-                else:
-                    model_to_use = model
-                base_id = get_base_model_id(model_to_use.id)
-                if base_id not in unique_models:
-                    unique_model = model_to_use.copy(update={"id": base_id})
-                    unique_models[base_id] = unique_model
-                for alias in resolve_model_alias(
-                    model_to_use.id, model_to_use.canonical_slug
-                ):
-                    _maybe_set_alias(alias, model_to_use, openrouter)
-
-    for upstream in other_upstreams:
-        upstream_prefix = getattr(upstream, "upstream_name", None)
-        for model in upstream.get_cached_models():
-            if model.enabled and model.id not in disabled_model_ids:
-                if model.id in overrides_by_id:
-                    override_row, provider_fee = overrides_by_id[model.id]
-                    model_to_use = _row_to_model(
-                        override_row, apply_provider_fee=True, provider_fee=provider_fee
-                    )
-                else:
-                    model_to_use = model
-                base_id = get_base_model_id(model_to_use.id)
-                unique_model = model_to_use.copy(update={"id": base_id})
-                unique_models[base_id] = unique_model
-
-                aliases = resolve_model_alias(
-                    model_to_use.id, model_to_use.canonical_slug
-                )
-
-                if upstream_prefix and "/" not in model_to_use.id:
-                    prefixed_id = f"{upstream_prefix}/{model_to_use.id}"
-                    if prefixed_id not in aliases:
-                        aliases.append(prefixed_id)
-
-                for alias in aliases:
-                    _maybe_set_alias(alias, model_to_use, upstream)
-
-    _model_instances = model_instances
-    _provider_map = provider_map
-    _unique_models = unique_models
-
-    logger.debug(
-        "Refreshed model maps",
-        extra={
-            "unique_model_count": len(_unique_models),
-            "total_alias_count": len(_model_instances),
-        },
+    # Use the algorithm to create optimal mappings
+    _model_instances, _provider_map, _unique_models = create_model_mappings(
+        upstreams=_upstreams,
+        overrides_by_id=overrides_by_id,
+        disabled_model_ids=disabled_model_ids,
     )
 
 
