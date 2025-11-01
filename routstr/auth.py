@@ -3,6 +3,7 @@ import math
 from typing import Optional
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, update
 
 from .core import get_logger
@@ -177,7 +178,25 @@ async def validate_bearer_key(
                 refund_mint_url=refund_mint_url,
             )
             session.add(new_key)
-            await session.flush()
+
+            try:
+                await session.flush()
+            except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    "Concurrent key creation detected, fetching existing key",
+                    extra={"key_hash": hashed_key[:8] + "..."},
+                )
+                existing_key = await session.get(ApiKey, hashed_key)
+                if not existing_key:
+                    raise Exception("Failed to fetch existing key after IntegrityError")
+
+                if key_expiry_time is not None:
+                    existing_key.key_expiry_time = key_expiry_time
+                if refund_address is not None:
+                    existing_key.refund_address = refund_address
+
+                return existing_key
 
             logger.debug(
                 "New key created, starting token redemption",

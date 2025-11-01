@@ -105,6 +105,8 @@ async def balances_for_mint_and_unit(
 async def init_db() -> None:
     """Initializes the database and creates tables if they don't exist."""
     async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.run_sync(SQLModel.metadata.create_all)
 
 

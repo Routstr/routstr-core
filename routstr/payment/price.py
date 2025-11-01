@@ -100,7 +100,14 @@ async def _fetch_btc_usd_price() -> float:
 async def _update_prices() -> None:
     """Update global BTC and SATS price variables."""
     global BTC_USD_PRICE, SATS_USD_PRICE
-    btc_price = await _fetch_btc_usd_price()
+    try:
+        btc_price = await _fetch_btc_usd_price()
+    except Exception as e:
+        logger.warning(
+            "Skipping price update; unable to fetch BTC price",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+        return
     BTC_USD_PRICE = btc_price
     SATS_USD_PRICE = btc_price / 100_000_000
     logger.info(

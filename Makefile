@@ -16,7 +16,7 @@ else
     ALEMBIC := alembic
 endif
 
-.PHONY: help setup test test-unit test-integration test-integration-docker test-all test-fast test-performance clean docker-up docker-down lint format type-check dev-setup check-deps db-upgrade db-downgrade db-current db-history db-migrate db-revision db-heads db-clean
+.PHONY: help setup test test-unit test-integration test-integration-docker test-all test-fast test-performance clean docker-up docker-down lint format type-check dev-setup check-deps db-upgrade db-downgrade db-current db-history db-migrate db-revision db-heads db-clean ui-build ui-build-docker ui-dev
 
 # Default target
 help:
@@ -38,6 +38,12 @@ help:
 	@echo "  make check-deps         - Check system dependencies"
 	@echo "  make setup              - First-time project setup"
 	@echo ""
+	@echo "UI targets:"
+	@echo "  make ui-build           - Build UI for production (static export)"
+	@echo "  make ui-build-docker    - Build UI using Docker (no Node.js needed)"
+	@echo "  make ui-dev             - Start UI development server"
+	@echo ""
+	@echo "Docker UI build requires only Docker, no local Node.js installation needed."
 	@echo "Database migration shortcuts:"
 	@echo "  make create-migration   - Auto-generate new migration"
 	@echo "  make db-upgrade         - Apply all pending migrations"
@@ -261,3 +267,19 @@ docs-deploy:
 docs-install:
 	@echo "📚 Installing documentation dependencies..."
 	pip install -r docs/requirements.txt
+
+# UI build
+ui-build:
+	@echo "🎨 Building UI for static deployment..."
+	./scripts/build-ui.sh
+
+ui-build-docker:
+	@echo "🐳 Building UI using Docker (no Node.js installation required)..."
+	@echo "Building UI with environment variables from .env..."
+	docker build -f ui/Dockerfile.build -t routstr-ui-build --build-arg NEXT_PUBLIC_API_URL=$(NEXT_PUBLIC_API_URL) --build-arg NEXT_PUBLIC_ADMIN_API_KEY=$(NEXT_PUBLIC_ADMIN_API_KEY) .
+	docker run --rm -v $(PWD)/ui_out:/output routstr-ui-build cp -r /ui_out /output/
+	@echo "✅ UI build complete! Static files available in ui_out/"
+
+ui-dev:
+	@echo "🎨 Starting UI development server..."
+	cd ui && (command -v pnpm >/dev/null 2>&1 && pnpm run dev || npm run dev)
