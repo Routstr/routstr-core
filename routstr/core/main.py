@@ -35,7 +35,7 @@ logger = get_logger(__name__)
 if os.getenv("VERSION_SUFFIX") is not None:
     __version__ = f"0.2.0-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.2.0-dev"
+    __version__ = "0.2.0"
 
 
 @asynccontextmanager
