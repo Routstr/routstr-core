@@ -347,7 +347,7 @@ GET /health
 Response:
 {
   "status": "healthy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "timestamp": "2024-01-01T00:00:00Z",
   "checks": {
     "database": "ok",
