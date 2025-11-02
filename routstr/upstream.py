@@ -19,6 +19,7 @@ from .upstreams import (
     OpenRouterUpstreamProvider,
     UpstreamProvider,
 )
+from .upstreams.generic import GenericUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -452,6 +453,13 @@ def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider
         elif provider_row.provider_type == "ollama":
             return OllamaUpstreamProvider(
                 provider_row.base_url, provider_row.api_key, provider_row.provider_fee
+            )
+        elif provider_row.provider_type == "generic":
+            return GenericUpstreamProvider(
+                provider_row.base_url,
+                provider_row.api_key,
+                provider_row.provider_fee,
+                provider_row.provider_type,
             )
         elif provider_row.provider_type == "custom":
             return UpstreamProvider(

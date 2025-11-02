@@ -162,8 +162,6 @@ async def proxy(
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
-    print(model_id)
-    print(model_obj)
 
     upstream = get_provider_for_model(model_id)
     if not upstream:
@@ -173,8 +171,6 @@ async def proxy(
             400,
             request=request,
         )
-
-    print(upstream.upstream_name)
 
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
