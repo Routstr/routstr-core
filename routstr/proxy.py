@@ -83,7 +83,7 @@ async def refresh_model_maps() -> None:
 
     # Gather database overrides and disabled models
     async with create_session() as session:
-        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
+        result = await session.exec(select(ModelRow).where(ModelRow.enabled == True))
         override_rows = result.all()
 
         provider_result = await session.exec(select(UpstreamProviderRow))
@@ -100,13 +100,11 @@ async def refresh_model_maps() -> None:
             if row.upstream_provider_id is not None
         }
 
-        # Get all disabled model IDs from database to filter them out
         disabled_result = await session.exec(
-            select(ModelRow.id).where(not col(ModelRow.enabled))
+            select(ModelRow.id).where(ModelRow.enabled == False)
         )
         disabled_model_ids = {row for row in disabled_result.all()}
 
-    # Use the algorithm to create optimal mappings
     _model_instances, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,
         overrides_by_id=overrides_by_id,

@@ -2516,11 +2516,23 @@ async def update_provider_model(
         row.top_provider = (
             json.dumps(payload.top_provider) if payload.top_provider else None
         )
+        was_disabled = not row.enabled
         row.enabled = payload.enabled
 
         session.add(row)
         await session.commit()
         await session.refresh(row)
+
+    if was_disabled and payload.enabled:
+        from ..payment.models import _cleanup_enabled_models_once
+
+        try:
+            await _cleanup_enabled_models_once()
+        except Exception as e:
+            logger.warning(
+                f"Failed to run model cleanup after enabling: {e}",
+                extra={"model_id": model_id, "error": str(e)},
+            )
 
     await refresh_model_maps()
     return _row_to_model(
@@ -2784,19 +2796,24 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
             session=session, upstream_id=provider_id, include_disabled=True
         )
 
-        remote_models = []
+        upstream_models = []
         upstream_instance = _instantiate_provider(provider)
         if upstream_instance:
             try:
                 raw_models = await upstream_instance.fetch_models()
-                remote_models = [
-                    upstream_instance._apply_provider_fee_to_model(m).dict()
+                upstream_models = [
+                    upstream_instance._apply_provider_fee_to_model(m)
                     for m in raw_models
                 ]
             except Exception as e:
                 logger.error(
                     f"Failed to fetch models from {provider.provider_type}: {e}"
                 )
+
+        db_model_ids = {model.id for model in db_models}
+        filtered_remote_models = [
+            m for m in upstream_models if m.name not in db_model_ids
+        ]
 
         return {
             "provider": {
@@ -2805,7 +2822,7 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
                 "base_url": provider.base_url,
             },
             "db_models": [m.dict() for m in db_models],
-            "remote_models": remote_models,
+            "remote_models": [m.dict() for m in filtered_remote_models],
         }
 
 
