@@ -333,10 +333,15 @@ def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
             request_body_dict = json.loads(request_body)
 
             if "max_tokens" in request_body_dict:
-                raise HTTPException(
-                    status_code=400,
-                    detail={"error": "max_tokens must be an integer (without quotes)"},
-                )
+                max_tokens_value = request_body_dict["max_tokens"]
+
+                if isinstance(max_tokens_value, int):
+                    pass
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": "max_tokens must be an integer"},
+                    )
 
             logger.debug(
                 "Request body parsed",
