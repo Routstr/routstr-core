@@ -37,9 +37,7 @@ def require_admin_api(request: Request) -> None:
         if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
             return
 
-    admin_cookie = request.cookies.get("admin_password")
-    if not admin_cookie or admin_cookie != settings.admin_password:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    raise HTTPException(status_code=403, detail="Unauthorized")
 
 
 def is_admin_authenticated(request: Request) -> bool:
@@ -50,8 +48,7 @@ def is_admin_authenticated(request: Request) -> bool:
         if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
             return True
 
-    admin_cookie = request.cookies.get("admin_password")
-    return bool(admin_cookie and admin_cookie == settings.admin_password)
+    return False
 
 
 @admin_router.get(
