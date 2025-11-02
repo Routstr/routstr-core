@@ -11,7 +11,10 @@ import {
   DollarSign,
   Activity,
 } from 'lucide-react';
-import { AdminService, TemporaryBalance } from '@/lib/api/services/admin';
+import {
+  AdminService,
+  TemporaryBalance,
+} from '@/lib/api/services/admin';
 import {
   Card,
   CardContent,
@@ -21,11 +24,17 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import type { DisplayUnit } from '@/lib/types/units';
+import { formatFromMsat } from '@/lib/currency';
 
 export function TemporaryBalances({
   refreshInterval = 10000,
+  displayUnit,
+  usdPerSat,
 }: {
   refreshInterval?: number;
+  displayUnit: DisplayUnit;
+  usdPerSat: number | null;
 }) {
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -37,9 +46,8 @@ export function TemporaryBalances({
     refetchInterval: refreshInterval,
   });
 
-  const formatBalance = (balance: number) => {
-    return `${balance.toLocaleString()} msat`;
-  };
+  const formatBalance = (msat: number) =>
+    formatFromMsat(msat, displayUnit, usdPerSat);
 
   const filteredData = data
     ? data.filter(
@@ -235,16 +243,16 @@ export function TemporaryBalances({
                             <div className='text-muted-foreground text-xs font-medium'>
                               Balance
                             </div>
-                            <div className='truncate font-mono text-sm'>
-                              {formatBalance(balance.balance)}
+                          <div className='truncate font-mono text-sm'>
+                            {formatBalance(balance.balance)}
                             </div>
                           </div>
                           <div className='space-y-1'>
                             <div className='text-muted-foreground text-xs font-medium'>
                               Spent
                             </div>
-                            <div className='truncate font-mono text-sm'>
-                              {formatBalance(balance.total_spent)}
+                          <div className='truncate font-mono text-sm'>
+                            {formatBalance(balance.total_spent)}
                             </div>
                           </div>
                         </div>

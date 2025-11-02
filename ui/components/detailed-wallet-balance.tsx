@@ -14,11 +14,17 @@ import {
 import { Button } from '@/components/ui/button';
 import { WithdrawModal } from '@/components/withdraw-modal';
 import { cn } from '@/lib/utils';
+import type { DisplayUnit } from '@/lib/types/units';
+import { convertToMsat, formatFromMsat } from '@/lib/currency';
 
 export function DetailedWalletBalance({
   refreshInterval = 10000,
+  displayUnit,
+  usdPerSat,
 }: {
   refreshInterval?: number;
+  displayUnit: DisplayUnit;
+  usdPerSat: number | null;
 }) {
   const [withdrawModalOpen, setWithdrawModalOpen] = useState(false);
 
@@ -30,20 +36,8 @@ export function DetailedWalletBalance({
     refetchInterval: refreshInterval,
   });
 
-  const convertToMsat = (amount: number, unit: string): number => {
-    if (unit === 'sat') {
-      return amount * 1000; // Convert sat to msat
-    }
-    return amount; // Already in msat
-  };
-
-  const formatMsatBalance = (msatAmount: number): string => {
-    if (msatAmount >= 1000) {
-      // Display as sats if >= 1000 msat
-      return `${(msatAmount / 1000).toLocaleString()} sats`;
-    }
-    return `${msatAmount.toLocaleString()} msat`;
-  };
+  const formatAmount = (msatAmount: number): string =>
+    formatFromMsat(msatAmount, displayUnit, usdPerSat);
 
   const calculateTotals = (balances: BalanceDetail[]) => {
     let totalWallet = 0;
@@ -127,7 +121,7 @@ export function DetailedWalletBalance({
                     Your Balance (Total)
                   </span>
                   <span className='text-2xl font-bold text-green-600'>
-                    {formatMsatBalance(totals.totalOwner)}
+                    {formatAmount(totals.totalOwner)}
                   </span>
                 </div>
                 <div className='flex items-center justify-between'>
@@ -135,7 +129,7 @@ export function DetailedWalletBalance({
                     Total Wallet
                   </span>
                   <span className='text-lg font-semibold'>
-                    {formatMsatBalance(totals.totalWallet)}
+                    {formatAmount(totals.totalWallet)}
                   </span>
                 </div>
                 <div className='flex items-center justify-between'>
@@ -143,7 +137,7 @@ export function DetailedWalletBalance({
                     User Balance
                   </span>
                   <span className='text-lg font-semibold'>
-                    {formatMsatBalance(totals.totalUser)}
+                    {formatAmount(totals.totalUser)}
                   </span>
                 </div>
               </div>
@@ -168,101 +162,106 @@ export function DetailedWalletBalance({
                         (detail.wallet_balance && detail.wallet_balance > 0) ||
                         detail.error
                     )
-                    .map((detail, index) => (
-                      <div
-                        key={index}
-                        className={cn(
-                          'border-t p-3 text-sm',
-                          detail.error && 'bg-destructive/10 text-destructive'
-                        )}
-                      >
-                        {/* Desktop Layout */}
-                        <div className='hidden grid-cols-4 gap-2 md:grid'>
-                          <div className='text-xs break-all'>
-                            {detail.mint_url
-                              .replace('https://', '')
-                              .replace('http://', '')}{' '}
-                            • {detail.unit.toUpperCase()}
-                          </div>
-                          <div className='text-right font-mono'>
-                            {detail.error
-                              ? 'error'
-                              : `${detail.wallet_balance.toLocaleString()} ${detail.unit}`}
-                          </div>
-                          <div className='text-right font-mono'>
-                            {detail.error
-                              ? '-'
-                              : `${detail.user_balance.toLocaleString()} ${detail.unit}`}
-                          </div>
-                          <div
-                            className={cn(
-                              'text-right font-mono',
-                              !detail.error &&
-                                detail.owner_balance > 0 &&
-                                'font-semibold text-green-600'
-                            )}
-                          >
-                            {detail.error
-                              ? '-'
-                              : `${detail.owner_balance.toLocaleString()} ${detail.unit}`}
-                          </div>
-                        </div>
+                    .map((detail, index) => {
+                      const walletMsat = convertToMsat(
+                        detail.wallet_balance || 0,
+                        detail.unit
+                      );
+                      const userMsat = convertToMsat(
+                        detail.user_balance || 0,
+                        detail.unit
+                      );
+                      const ownerMsat = convertToMsat(
+                        detail.owner_balance || 0,
+                        detail.unit
+                      );
 
-                        {/* Mobile Layout */}
-                        <div className='space-y-3 md:hidden'>
-                          <div className='space-y-1'>
-                            <span className='text-muted-foreground text-xs font-medium'>
-                              Mint / Unit
-                            </span>
-                            <div className='font-mono text-xs break-all'>
+                      return (
+                        <div
+                          key={index}
+                          className={cn(
+                            'border-t p-3 text-sm',
+                            detail.error && 'bg-destructive/10 text-destructive'
+                          )}
+                        >
+                          {/* Desktop Layout */}
+                          <div className='hidden grid-cols-4 gap-2 md:grid'>
+                            <div className='text-xs break-all'>
                               {detail.mint_url
                                 .replace('https://', '')
                                 .replace('http://', '')}{' '}
                               • {detail.unit.toUpperCase()}
                             </div>
+                            <div className='text-right font-mono'>
+                              {detail.error
+                                ? 'error'
+                                : formatAmount(walletMsat)}
+                            </div>
+                            <div className='text-right font-mono'>
+                              {detail.error ? '-' : formatAmount(userMsat)}
+                            </div>
+                            <div
+                              className={cn(
+                                'text-right font-mono',
+                                !detail.error && ownerMsat > 0 &&
+                                  'font-semibold text-green-600'
+                              )}
+                            >
+                              {detail.error ? '-' : formatAmount(ownerMsat)}
+                            </div>
                           </div>
-                          <div className='grid grid-cols-3 gap-2'>
+
+                          {/* Mobile Layout */}
+                          <div className='space-y-3 md:hidden'>
                             <div className='space-y-1'>
-                              <div className='text-muted-foreground text-xs font-medium'>
-                                Wallet
-                              </div>
-                              <div className='truncate font-mono text-sm'>
-                                {detail.error
-                                  ? 'error'
-                                  : `${detail.wallet_balance.toLocaleString()} ${detail.unit}`}
+                              <span className='text-muted-foreground text-xs font-medium'>
+                                Mint / Unit
+                              </span>
+                              <div className='font-mono text-xs break-all'>
+                                {detail.mint_url
+                                  .replace('https://', '')
+                                  .replace('http://', '')}{' '}
+                                • {detail.unit.toUpperCase()}
                               </div>
                             </div>
-                            <div className='space-y-1'>
-                              <div className='text-muted-foreground text-xs font-medium'>
-                                Users
+                            <div className='grid grid-cols-3 gap-2'>
+                              <div className='space-y-1'>
+                                <div className='text-muted-foreground text-xs font-medium'>
+                                  Wallet
+                                </div>
+                                <div className='truncate font-mono text-sm'>
+                                  {detail.error
+                                    ? 'error'
+                                    : formatAmount(walletMsat)}
+                                </div>
                               </div>
-                              <div className='truncate font-mono text-sm'>
-                                {detail.error
-                                  ? '-'
-                                  : `${detail.user_balance.toLocaleString()} ${detail.unit}`}
+                              <div className='space-y-1'>
+                                <div className='text-muted-foreground text-xs font-medium'>
+                                  Users
+                                </div>
+                                <div className='truncate font-mono text-sm'>
+                                  {detail.error ? '-' : formatAmount(userMsat)}
+                                </div>
                               </div>
-                            </div>
-                            <div className='space-y-1'>
-                              <div className='text-muted-foreground text-xs font-medium'>
-                                Owner
-                              </div>
-                              <div
-                                className={cn(
-                                  'truncate font-mono text-sm',
-                                  !detail.error &&
-                                    detail.owner_balance > 0 &&
-                                    'font-semibold text-green-600'
-                                )}
-                              >
-                                {detail.error
-                                  ? '-'
-                                  : `${detail.owner_balance.toLocaleString()} ${detail.unit}`}
+                              <div className='space-y-1'>
+                                <div className='text-muted-foreground text-xs font-medium'>
+                                  Owner
+                                </div>
+                                <div
+                                  className={cn(
+                                    'truncate font-mono text-sm',
+                                    !detail.error && ownerMsat > 0 &&
+                                      'font-semibold text-green-600'
+                                  )}
+                                >
+                                  {detail.error ? '-' : formatAmount(ownerMsat)}
+                                </div>
                               </div>
                             </div>
                           </div>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                 ) : (
                   <div className='text-muted-foreground p-4 text-center text-sm'>
                     No balances to display
