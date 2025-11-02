@@ -14,6 +14,7 @@ from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
 from ..payment.models import (
+    cleanup_enabled_models_periodically,
     models_router,
     update_sats_pricing,
 )
@@ -48,6 +49,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     nip91_task = None
     providers_task = None
     models_refresh_task = None
+    models_cleanup_task = None
     model_maps_refresh_task = None
 
     try:
@@ -87,6 +89,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task = asyncio.create_task(
                 refresh_upstreams_models_periodically(get_upstreams())
             )
+        models_cleanup_task = asyncio.create_task(cleanup_enabled_models_periodically())
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
         nip91_task = asyncio.create_task(announce_provider())
@@ -115,6 +118,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             providers_task.cancel()
         if models_refresh_task is not None:
             models_refresh_task.cancel()
+        if models_cleanup_task is not None:
+            models_cleanup_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
 
@@ -132,6 +137,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:
                 tasks_to_wait.append(models_refresh_task)
+            if models_cleanup_task is not None:
+                tasks_to_wait.append(models_cleanup_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
 

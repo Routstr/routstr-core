@@ -497,7 +497,7 @@ export class AdminService {
       internal_reasoning: 0,
     };
 
-    const modelId = (data.id as string) || (data.full_name as string);
+    const modelId = data.id as string;
 
     const payload = {
       model_id: modelId,

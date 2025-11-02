@@ -139,7 +139,7 @@ export function ModelSelector({
         if (providerId === 'unknown') {
           continue;
         }
-        const modelFullNames = providerModels.map((m) => m.full_name);
+        const modelFullNames = providerModels.map((m) => m.id);
         const result = await AdminService.deleteModels(
           modelFullNames,
           providerId
@@ -191,22 +191,18 @@ export function ModelSelector({
           try {
             const existingModel = await AdminService.getProviderModel(
               providerIdNum,
-              model.full_name
+              model.id
             );
-            await AdminService.updateProviderModel(
-              providerIdNum,
-              model.full_name,
-              {
-                ...existingModel,
-                enabled: false,
-              }
-            );
+            await AdminService.updateProviderModel(providerIdNum, model.id, {
+              ...existingModel,
+              enabled: false,
+            });
             totalDisabled++;
           } catch (fetchError: unknown) {
             const error = fetchError as { message?: string; status?: number };
             if (error.message?.includes('404') || error.status === 404) {
               const newOverride = {
-                id: model.full_name,
+                id: model.id,
                 name: model.name,
                 description: model.description || '',
                 created: Math.floor(Date.now() / 1000),
@@ -340,10 +336,10 @@ export function ModelSelector({
       const providerId = parseInt(model.provider_id);
       const existingModel = await AdminService.getProviderModel(
         providerId,
-        model.full_name
+        model.id
       );
 
-      await AdminService.updateProviderModel(providerId, model.full_name, {
+      await AdminService.updateProviderModel(providerId, model.id, {
         ...existingModel,
         enabled: true,
       });
@@ -389,7 +385,7 @@ export function ModelSelector({
           try {
             const existingModel = await AdminService.getProviderModel(
               providerIdNum,
-              model.full_name
+              model.id
             );
             await AdminService.updateProviderModel(
               providerIdNum,
@@ -747,7 +743,7 @@ export function ModelSelector({
       try {
         const existingModel = await AdminService.getProviderModel(
           providerId,
-          model.full_name
+          model.id
         );
 
         await AdminService.updateProviderModel(providerId, model.full_name, {
@@ -759,7 +755,7 @@ export function ModelSelector({
         const error = fetchError as { message?: string; status?: number };
         if (error.message?.includes('404') || error.status === 404) {
           const newOverride = {
-            id: model.full_name,
+            id: model.id,
             name: model.name,
             description: model.description || '',
             created: Math.floor(Date.now() / 1000),

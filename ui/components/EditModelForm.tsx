@@ -121,7 +121,7 @@ export function EditModelForm({
 
       const adminModel = await AdminService.getProviderModel(
         providerId,
-        model.full_name
+        model.id
       );
 
       setAdminModelData(adminModel as AdminModelData);
