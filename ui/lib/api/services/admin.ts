@@ -1,6 +1,13 @@
 import { apiClient } from '../client';
 import { z } from 'zod';
 
+export const ProviderTypeSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  default_base_url: z.string(),
+  fixed_base_url: z.boolean(),
+});
+
 export const UpstreamProviderSchema = z.object({
   id: z.number(),
   provider_type: z.string(),
@@ -70,6 +77,7 @@ export const ProviderModelsSchema = z.object({
   remote_models: z.array(AdminModelSchema),
 });
 
+export type ProviderType = z.infer<typeof ProviderTypeSchema>;
 export type UpstreamProvider = z.infer<typeof UpstreamProviderSchema>;
 export type CreateUpstreamProvider = z.infer<
   typeof CreateUpstreamProviderSchema
@@ -226,6 +234,10 @@ export class AdminService {
         : null,
       enabled: model.isEnabled,
     };
+  }
+
+  static async getProviderTypes(): Promise<ProviderType[]> {
+    return await apiClient.get<ProviderType[]>('/admin/api/provider-types');
   }
 
   static async getUpstreamProviders(): Promise<UpstreamProvider[]> {

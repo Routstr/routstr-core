@@ -67,10 +67,16 @@ export default function ProvidersPage() {
 
   const [formData, setFormData] = useState<CreateUpstreamProvider>({
     provider_type: 'openrouter',
-    base_url: '',
+    base_url: 'https://openrouter.ai/api/v1',
     api_key: '',
     api_version: null,
     enabled: true,
+  });
+
+  const { data: providerTypes = [] } = useQuery({
+    queryKey: ['provider-types'],
+    queryFn: () => AdminService.getProviderTypes(),
+    refetchOnWindowFocus: false,
   });
 
   const {
@@ -135,7 +141,7 @@ export default function ProvidersPage() {
   const resetForm = () => {
     setFormData({
       provider_type: 'openrouter',
-      base_url: '',
+      base_url: 'https://openrouter.ai/api/v1',
       api_key: '',
       api_version: null,
       enabled: true,
@@ -179,15 +185,13 @@ export default function ProvidersPage() {
   };
 
   const getDefaultBaseUrl = (type: string) => {
-    const defaults: Record<string, string> = {
-      openrouter: 'https://openrouter.ai/api/v1',
-      openai: 'https://api.openai.com/v1',
-      anthropic: 'https://api.anthropic.com/v1',
-      azure: '',
-      ollama: 'http://localhost:11434',
-      generic: '',
-    };
-    return defaults[type] || '';
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.default_base_url || '';
+  };
+
+  const hasFixedBaseUrl = (type: string) => {
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.fixed_base_url || false;
   };
 
   const toggleProviderExpansion = (providerId: number) => {
@@ -255,12 +259,11 @@ export default function ProvidersPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value='openrouter'>OpenRouter</SelectItem>
-                          <SelectItem value='openai'>OpenAI</SelectItem>
-                          <SelectItem value='anthropic'>Anthropic</SelectItem>
-                          <SelectItem value='azure'>Azure OpenAI</SelectItem>
-                          <SelectItem value='ollama'>Ollama</SelectItem>
-                          <SelectItem value='generic'>Generic</SelectItem>
+                          {providerTypes.map((type) => (
+                            <SelectItem key={type.id} value={type.id}>
+                              {type.name}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
@@ -273,6 +276,8 @@ export default function ProvidersPage() {
                           setFormData({ ...formData, base_url: e.target.value })
                         }
                         placeholder='https://api.example.com/v1'
+                        disabled={hasFixedBaseUrl(formData.provider_type)}
+                        className={hasFixedBaseUrl(formData.provider_type) ? 'cursor-not-allowed opacity-60' : ''}
                       />
                     </div>
                     <div className='grid gap-2'>
@@ -639,6 +644,7 @@ export default function ProvidersPage() {
                     setFormData({
                       ...formData,
                       provider_type: value,
+                      base_url: getDefaultBaseUrl(value),
                     });
                   }}
                 >
@@ -646,12 +652,11 @@ export default function ProvidersPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value='openrouter'>OpenRouter</SelectItem>
-                    <SelectItem value='openai'>OpenAI</SelectItem>
-                    <SelectItem value='anthropic'>Anthropic</SelectItem>
-                    <SelectItem value='azure'>Azure OpenAI</SelectItem>
-                    <SelectItem value='ollama'>Ollama</SelectItem>
-                    <SelectItem value='generic'>Generic</SelectItem>
+                    {providerTypes.map((type) => (
+                      <SelectItem key={type.id} value={type.id}>
+                        {type.name}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -664,6 +669,8 @@ export default function ProvidersPage() {
                     setFormData({ ...formData, base_url: e.target.value })
                   }
                   placeholder='https://api.example.com/v1'
+                  disabled={hasFixedBaseUrl(formData.provider_type)}
+                  className={hasFixedBaseUrl(formData.provider_type) ? 'cursor-not-allowed opacity-60' : ''}
                 />
               </div>
               <div className='grid gap-2'>

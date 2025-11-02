@@ -2727,6 +2727,50 @@ async def delete_upstream_provider(provider_id: int) -> dict[str, object]:
     return {"ok": True, "deleted_id": provider_id}
 
 
+@admin_router.get("/api/provider-types", dependencies=[Depends(require_admin_api)])
+async def get_provider_types() -> list[dict[str, object]]:
+    """Get metadata about available provider types including default URLs and whether they're fixed."""
+    provider_types = [
+        {
+            "id": "openrouter",
+            "name": "OpenRouter",
+            "default_base_url": "https://openrouter.ai/api/v1",
+            "fixed_base_url": True,
+        },
+        {
+            "id": "openai",
+            "name": "OpenAI",
+            "default_base_url": "https://api.openai.com/v1",
+            "fixed_base_url": True,
+        },
+        {
+            "id": "anthropic",
+            "name": "Anthropic",
+            "default_base_url": "https://api.anthropic.com/v1",
+            "fixed_base_url": True,
+        },
+        {
+            "id": "azure",
+            "name": "Azure OpenAI",
+            "default_base_url": "",
+            "fixed_base_url": False,
+        },
+        {
+            "id": "ollama",
+            "name": "Ollama",
+            "default_base_url": "http://localhost:11434",
+            "fixed_base_url": False,
+        },
+        {
+            "id": "generic",
+            "name": "Generic",
+            "default_base_url": "",
+            "fixed_base_url": False,
+        },
+    ]
+    return provider_types
+
+
 @admin_router.get(
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
