@@ -133,9 +133,9 @@ async def test_topup_with_invalid_token(
         )
 
         # Should fail with 400
-        assert (
-            response.status_code == 400
-        ), f"Token {invalid_token[:20]}... should be invalid"
+        assert response.status_code == 400, (
+            f"Token {invalid_token[:20]}... should be invalid"
+        )
 
         # Validate error response
         validator = ResponseValidator()

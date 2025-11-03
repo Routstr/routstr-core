@@ -549,9 +549,9 @@ class TestPerformance:
                 max_time = max(times)
 
                 # Average should be well under 100ms
-                assert (
-                    avg_time < 100
-                ), f"{op_type} average time {avg_time}ms exceeds 100ms"
+                assert avg_time < 100, (
+                    f"{op_type} average time {avg_time}ms exceeds 100ms"
+                )
 
                 # No single operation should exceed 200ms
                 assert max_time < 200, f"{op_type} max time {max_time}ms exceeds 200ms"

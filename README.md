@@ -143,9 +143,41 @@ make db-migrate
 make db-upgrade
 ```
 
+## Admin UI
+
+Routstr includes a modern Next.js admin dashboard that's served directly from the Python backend as static files - no separate Node.js server required.
+
+### Building the UI
+
+```bash
+make ui-build
+```
+
+This compiles the Next.js application into static HTML, CSS, and JavaScript files in `ui/out/`.
+
+### Accessing the Dashboard
+
+Once built, the UI is automatically served by the FastAPI backend:
+
+- **Dashboard**: `http://localhost:8000/`
+- **Login**: `http://localhost:8000/login`
+- **Models Management**: `http://localhost:8000/model
+- **Providers Management**: `http://localhost:8000/providers`
+- **Settings**: `http://localhost:8000/settings`
+
+The dashboard provides:
+
+- Real-time wallet balance monitoring
+- Model pricing configuration
+- Upstream provider management
+- Transaction history
+- System settings
+
+**Authentication**: Use the `ADMIN_PASSWORD` environment variable to access the dashboard.
+
 ## Withdrawing Balance
 
-Go to `https://<your.routstr.proxy>/admin/` (NOTE: be sure to add the '/' at the end), enter the `ADMIN_PASSWORD` you set above and withdraw your balance as a Cashu token.
+Go to the admin dashboard at `http://localhost:8000/` and login with your `ADMIN_PASSWORD` to withdraw your balance as a Cashu token.
 
 ## Example Client
 

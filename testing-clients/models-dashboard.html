@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Routstr Models Dashboard</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+        <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .subtitle {
+            color: rgba(255,255,255,0.9);
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 1rem;
+        }
+
+        .status {
+            background: rgba(255,255,255,0.95);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .add-model-btn {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .add-model-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+        }
+
+        .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            max-width: 700px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            color: #333;
+            font-size: 1.5rem;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 2rem;
+            color: #999;
+            cursor: pointer;
+            line-height: 1;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: all 0.2s;
+        }
+
+        .close-btn:hover {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .model-search {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 1rem;
+            margin-bottom: 20px;
+            transition: border-color 0.2s;
+        }
+
+        .model-search:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .model-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .model-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .model-item:hover {
+            border-color: #667eea;
+            background: #f9fafb;
+        }
+
+        .model-item.selected {
+            border-color: #667eea;
+            background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%);
+        }
+
+        .model-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+            cursor: pointer;
+            accent-color: #667eea;
+        }
+
+        .model-item-info {
+            flex: 1;
+        }
+
+        .model-item-id {
+            font-weight: 600;
+            color: #333;
+            font-size: 0.9rem;
+            margin-bottom: 2px;
+        }
+
+        .model-item-name {
+            color: #666;
+            font-size: 0.85rem;
+        }
+
+        .modal-actions {
+            margin-top: 20px;
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            padding-top: 15px;
+            border-top: 2px solid #f0f0f0;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #d1d5db;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: white;
+        }
+
+        .empty-state h2 {
+            font-size: 1.5rem;
+            margin-bottom: 10px;
+        }
+
+        .empty-state p {
+            font-size: 1rem;
+            opacity: 0.9;
+        }
+
+        .models-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .model-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .model-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }
+
+        .model-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 10px;
+        }
+
+        .model-info {
+            flex: 1;
+        }
+
+        .model-id {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 4px;
+        }
+
+        .model-name {
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .model-context {
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        .pricing-current {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 0.75rem;
+            text-align: right;
+            min-width: 140px;
+        }
+
+        .pricing-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 3px;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 200px;
+            margin-top: 15px;
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin: 20px 0;
+        }
+
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 1.2rem;
+            padding: 40px;
+        }
+
+        @media (max-width: 768px) {
+            .models-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            h1 {
+                font-size: 1.8rem;
+            }
+        }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Routstr Models Dashboard</h1>
+            <p class="subtitle">Live pricing updates every second</p>
+            <div class="status">
+                <div class="status-item">
+                    <span class="status-indicator"></span>
+                    <span>
+                        Connected to
+                        <strong>localhost:8000</strong>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span id="lastUpdate">Last update: --:--:--</span>
+                </div>
+                <div class="status-item">
+                    <span id="modelCount">Loading models...</span>
+                </div>
+                <button class="add-model-btn" id="addModelBtn">
+                    <span>➕</span>
+                    <span>Select Models</span>
+                </button>
+            </div>
+            <div id="error" class="error" style="display: none;"></div>
+            <div id="loading" class="loading">Loading models...</div>
+            <div id="emptyState" class="empty-state" style="display: none;">
+                <h2>No models selected</h2>
+                <p>Click "Select Models" button above to choose which models to monitor</p>
+            </div>
+            <div id="modelsGrid" class="models-grid"></div>
+        </div>
+        <div id="modelModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Select Models to Monitor</h2>
+                    <button class="close-btn" id="closeModal">&times;</button>
+                </div>
+                <input
+                    type="text"
+                    id="modelSearch"
+                    class="model-search"
+                    placeholder="Search models by ID or name..."
+                >
+                <div class="model-list" id="modelList"></div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" id="cancelBtn">Cancel</button>
+                    <button class="btn btn-secondary" id="clearAllBtn">Clear All</button>
+                    <button class="btn btn-secondary" id="selectAllBtn">Select All</button>
+                    <button class="btn btn-primary" id="saveBtn">Save Selection</button>
+                </div>
+            </div>
+        </div>
+        <script>
+        const API_URL = 'http://localhost:8000/v1/models';
+        const UPDATE_INTERVAL = 1000;
+        const MAX_DATA_POINTS = 20;
+        const STORAGE_KEY = 'routstr_selected_models';
+
+        const charts = {};
+        const chartData = {};
+        let allModels = [];
+        let selectedModels = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'));
+        let tempSelectedModels = new Set();
+
+        async function fetchModels() {
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const data = await response.json();
+                return data.data || [];
+            } catch (error) {
+                console.error('Error fetching models:', error);
+                showError(`Failed to fetch models: ${error.message}`);
+                return null;
+            }
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        function hideError() {
+            document.getElementById('error').style.display = 'none';
+        }
+
+        function updateStatus(modelCount) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            document.getElementById('lastUpdate').textContent = `Last update: ${timeStr}`;
+            document.getElementById('modelCount').textContent = `${modelCount} models`;
+        }
+
+        function formatNumber(num, decimals = 6) {
+            if (num === 0) return '0';
+            if (num < 0.000001) return num.toExponential(2);
+            return num.toFixed(decimals);
+        }
+
+        function initializeChartData(modelId) {
+            if (!chartData[modelId]) {
+                chartData[modelId] = {
+                    labels: [],
+                    usdPrompt: [],
+                    usdCompletion: [],
+                    satsPrompt: [],
+                    satsCompletion: []
+                };
+            }
+        }
+
+        function updateChartData(modelId, model) {
+            initializeChartData(modelId);
+            
+            const data = chartData[modelId];
+            const now = new Date();
+            const timeLabel = now.toLocaleTimeString();
+
+            data.labels.push(timeLabel);
+            data.usdPrompt.push(model.pricing?.prompt || 0);
+            data.usdCompletion.push(model.pricing?.completion || 0);
+            data.satsPrompt.push(model.sats_pricing?.prompt || 0);
+            data.satsCompletion.push(model.sats_pricing?.completion || 0);
+
+            if (data.labels.length > MAX_DATA_POINTS) {
+                data.labels.shift();
+                data.usdPrompt.shift();
+                data.usdCompletion.shift();
+                data.satsPrompt.shift();
+                data.satsCompletion.shift();
+            }
+
+            if (charts[modelId]) {
+                updateChart(modelId);
+            }
+        }
+
+        function createChart(canvasId, modelId) {
+            const ctx = document.getElementById(canvasId);
+            if (!ctx) return;
+
+            initializeChartData(modelId);
+            const data = chartData[modelId];
+
+            charts[modelId] = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        {
+                            label: 'USD Prompt',
+                            data: data.usdPrompt,
+                            borderColor: '#667eea',
+                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.4,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'USD Completion',
+                            data: data.usdCompletion,
+                            borderColor: '#764ba2',
+                            backgroundColor: 'rgba(118, 75, 162, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.4,
+                            yAxisID: 'y'
+                        },
+                        {
+                            label: 'Sats Prompt',
+                            data: data.satsPrompt,
+                            borderColor: '#f59e0b',
+                            backgroundColor: 'rgba(245, 158, 11, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.4,
+                            yAxisID: 'y1'
+                        },
+                        {
+                            label: 'Sats Completion',
+                            data: data.satsCompletion,
+                            borderColor: '#ef4444',
+                            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                            borderWidth: 2,
+                            tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'bottom',
+                            labels: {
+                                boxWidth: 12,
+                                font: { size: 10 }
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            padding: 10,
+                            bodyFont: { size: 11 }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            ticks: {
+                                maxRotation: 45,
+                                minRotation: 45,
+                                font: { size: 9 }
+                            }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'USD',
+                                font: { size: 10 }
+                            },
+                            ticks: {
+                                font: { size: 9 }
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Sats',
+                                font: { size: 10 }
+                            },
+                            ticks: {
+                                font: { size: 9 }
+                            },
+                            grid: {
+                                drawOnChartArea: false
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateChart(modelId) {
+            const chart = charts[modelId];
+            const data = chartData[modelId];
+            
+            if (!chart || !data) return;
+
+            chart.data.labels = data.labels;
+            chart.data.datasets[0].data = data.usdPrompt;
+            chart.data.datasets[1].data = data.usdCompletion;
+            chart.data.datasets[2].data = data.satsPrompt;
+            chart.data.datasets[3].data = data.satsCompletion;
+            chart.update('none');
+        }
+
+        function createModelCard(model) {
+            const cardDiv = document.createElement('div');
+            cardDiv.className = 'model-card';
+            cardDiv.id = `model-${model.id.replace(/[^a-z0-9]/gi, '-')}`;
+
+            const canvasId = `chart-${model.id.replace(/[^a-z0-9]/gi, '-')}`;
+
+            const usdPrompt = model.pricing?.prompt || 0;
+            const usdCompletion = model.pricing?.completion || 0;
+            const satsPrompt = model.sats_pricing?.prompt || 0;
+            const satsCompletion = model.sats_pricing?.completion || 0;
+
+            cardDiv.innerHTML = `
+                <div class="model-header">
+                    <div class="model-info">
+                        <div class="model-id">${model.id}</div>
+                        <div class="model-name">${model.name || model.id}</div>
+                        <div class="model-context">Context: ${(model.context_length || 0).toLocaleString()} tokens</div>
+                    </div>
+                    <div class="pricing-current">
+                        <div class="pricing-row">
+                            <span>USD Prompt:</span>
+                            <strong>${formatNumber(usdPrompt)}</strong>
+                        </div>
+                        <div class="pricing-row">
+                            <span>USD Compl:</span>
+                            <strong>${formatNumber(usdCompletion)}</strong>
+                        </div>
+                        <div class="pricing-row" style="margin-top: 5px; padding-top: 5px; border-top: 1px solid rgba(255,255,255,0.3);">
+                            <span>Sats Prompt:</span>
+                            <strong>${formatNumber(satsPrompt, 2)}</strong>
+                        </div>
+                        <div class="pricing-row">
+                            <span>Sats Compl:</span>
+                            <strong>${formatNumber(satsCompletion, 2)}</strong>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="${canvasId}"></canvas>
+                </div>
+            `;
+
+            return cardDiv;
+        }
+
+        function openModal() {
+            tempSelectedModels = new Set(selectedModels);
+            renderModalList(allModels);
+            document.getElementById('modelModal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modelModal').classList.remove('active');
+            document.getElementById('modelSearch').value = '';
+        }
+
+        function saveSelection() {
+            selectedModels = new Set(tempSelectedModels);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify([...selectedModels]));
+            closeModal();
+            renderDashboard();
+        }
+
+        function renderModalList(models) {
+            const modalList = document.getElementById('modelList');
+            modalList.innerHTML = '';
+
+            const searchTerm = document.getElementById('modelSearch').value.toLowerCase();
+            const filteredModels = models.filter(model => 
+                model.id.toLowerCase().includes(searchTerm) || 
+                (model.name && model.name.toLowerCase().includes(searchTerm))
+            );
+
+            filteredModels.forEach(model => {
+                const isSelected = tempSelectedModels.has(model.id);
+                const itemDiv = document.createElement('div');
+                itemDiv.className = `model-item ${isSelected ? 'selected' : ''}`;
+                itemDiv.innerHTML = `
+                    <input type="checkbox" ${isSelected ? 'checked' : ''} id="check-${model.id.replace(/[^a-z0-9]/gi, '-')}">
+                    <div class="model-item-info">
+                        <div class="model-item-id">${model.id}</div>
+                        <div class="model-item-name">${model.name || 'No name'}</div>
+                    </div>
+                `;
+                
+                itemDiv.addEventListener('click', (e) => {
+                    const checkbox = itemDiv.querySelector('input[type="checkbox"]');
+                    if (e.target !== checkbox) {
+                        checkbox.checked = !checkbox.checked;
+                    }
+                    
+                    if (checkbox.checked) {
+                        tempSelectedModels.add(model.id);
+                        itemDiv.classList.add('selected');
+                    } else {
+                        tempSelectedModels.delete(model.id);
+                        itemDiv.classList.remove('selected');
+                    }
+                });
+                
+                modalList.appendChild(itemDiv);
+            });
+
+            if (filteredModels.length === 0) {
+                modalList.innerHTML = '<div style="padding: 40px; text-align: center; color: #999;">No models found</div>';
+            }
+        }
+
+        function renderDashboard() {
+            const grid = document.getElementById('modelsGrid');
+            const emptyState = document.getElementById('emptyState');
+            
+            if (selectedModels.size === 0) {
+                grid.style.display = 'none';
+                emptyState.style.display = 'block';
+                return;
+            }
+            
+            grid.style.display = 'grid';
+            emptyState.style.display = 'none';
+            
+            const existingCards = Array.from(grid.children);
+            existingCards.forEach(card => {
+                const modelId = card.id.replace('model-', '').replace(/-/g, '/');
+                const actualModelId = allModels.find(m => 
+                    m.id.replace(/[^a-z0-9]/gi, '-') === card.id.replace('model-', '')
+                )?.id;
+                
+                if (actualModelId && !selectedModels.has(actualModelId)) {
+                    if (charts[actualModelId]) {
+                        charts[actualModelId].destroy();
+                        delete charts[actualModelId];
+                    }
+                    card.remove();
+                }
+            });
+        }
+
+        async function updateModels() {
+            const models = await fetchModels();
+            
+            if (!models) {
+                return;
+            }
+
+            allModels = models;
+            hideError();
+            document.getElementById('loading').style.display = 'none';
+            updateStatus(models.length);
+
+            const grid = document.getElementById('modelsGrid');
+            const emptyState = document.getElementById('emptyState');
+
+            if (selectedModels.size === 0) {
+                grid.style.display = 'none';
+                emptyState.style.display = 'block';
+                return;
+            }
+
+            grid.style.display = 'grid';
+            emptyState.style.display = 'none';
+
+            const selectedModelObjects = models.filter(model => selectedModels.has(model.id));
+
+            selectedModelObjects.forEach(model => {
+                const modelId = model.id;
+                const cardId = `model-${modelId.replace(/[^a-z0-9]/gi, '-')}`;
+                const canvasId = `chart-${modelId.replace(/[^a-z0-9]/gi, '-')}`;
+                
+                updateChartData(modelId, model);
+
+                if (!document.getElementById(cardId)) {
+                    const card = createModelCard(model);
+                    grid.appendChild(card);
+                    
+                    setTimeout(() => {
+                        createChart(canvasId, modelId);
+                    }, 100);
+                } else {
+                    const pricingDiv = document.querySelector(`#${cardId} .pricing-current`);
+                    if (pricingDiv) {
+                        const usdPrompt = model.pricing?.prompt || 0;
+                        const usdCompletion = model.pricing?.completion || 0;
+                        const satsPrompt = model.sats_pricing?.prompt || 0;
+                        const satsCompletion = model.sats_pricing?.completion || 0;
+
+                        pricingDiv.innerHTML = `
+                            <div class="pricing-row">
+                                <span>USD Prompt:</span>
+                                <strong>${formatNumber(usdPrompt)}</strong>
+                            </div>
+                            <div class="pricing-row">
+                                <span>USD Compl:</span>
+                                <strong>${formatNumber(usdCompletion)}</strong>
+                            </div>
+                            <div class="pricing-row" style="margin-top: 5px; padding-top: 5px; border-top: 1px solid rgba(255,255,255,0.3);">
+                                <span>Sats Prompt:</span>
+                                <strong>${formatNumber(satsPrompt, 2)}</strong>
+                            </div>
+                            <div class="pricing-row">
+                                <span>Sats Compl:</span>
+                                <strong>${formatNumber(satsCompletion, 2)}</strong>
+                            </div>
+                        `;
+                    }
+                }
+            });
+        }
+
+        document.getElementById('addModelBtn').addEventListener('click', openModal);
+        document.getElementById('closeModal').addEventListener('click', closeModal);
+        document.getElementById('cancelBtn').addEventListener('click', closeModal);
+        document.getElementById('saveBtn').addEventListener('click', saveSelection);
+        
+        document.getElementById('selectAllBtn').addEventListener('click', () => {
+            allModels.forEach(model => tempSelectedModels.add(model.id));
+            renderModalList(allModels);
+        });
+        
+        document.getElementById('clearAllBtn').addEventListener('click', () => {
+            tempSelectedModels.clear();q
+            renderModalList(allModels);
+        });
+        
+        document.getElementById('modelSearch').addEventListener('input', () => {
+            renderModalList(allModels);
+        });
+        
+        document.getElementById('modelModal').addEventListener('click', (e) => {
+            if (e.target.id === 'modelModal') {
+                closeModal();
+            }
+        });
+
+        updateModels();
+        setInterval(updateModels, UPDATE_INTERVAL);
+        </script>
+    </body>
+</html>

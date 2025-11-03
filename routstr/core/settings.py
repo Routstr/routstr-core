@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     cashu_mints: list[str] = Field(default_factory=list, env="CASHU_MINTS")
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
+    primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
 
     # Pricing
     # Default behavior: derive pricing from MODELS

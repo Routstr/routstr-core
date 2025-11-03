@@ -1,12 +1,9 @@
-import json
 import math
 
 from pydantic.v1 import BaseModel
-from sqlmodel import select
-from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from ..core.db import ModelRow
+from ..core.db import AsyncSession
 from ..core.settings import settings
 
 logger = get_logger(__name__)
@@ -29,7 +26,7 @@ class CostDataError(BaseModel):
 
 
 async def calculate_cost(
-    response_data: dict, max_cost: int, session: AsyncSession | None = None
+    response_data: dict, max_cost: int, session: AsyncSession
 ) -> CostData | MaxCostData | CostDataError:
     """
     Calculate the cost of an API request based on token usage.
@@ -74,18 +71,22 @@ async def calculate_cost(
         float(settings.fixed_per_1k_output_tokens) * 1000.0
     )
 
-    if not settings.fixed_pricing and session is not None:
+    if not settings.fixed_pricing:
         response_model = response_data.get("model", "")
         logger.debug(
             "Using model-based pricing",
             extra={"model": response_model},
         )
 
-        result = await session.exec(select(ModelRow.id))  # type: ignore
-        available_ids = [
-            row[0] if isinstance(row, tuple) else row for row in result.all()
-        ]
-        if response_model not in available_ids:
+        from ..proxy import get_upstreams
+        from ..upstream import get_model_with_override
+
+        upstreams = get_upstreams()
+        model_obj = await get_model_with_override(
+            response_model, upstreams, session=session
+        )
+
+        if not model_obj:
             logger.error(
                 "Invalid model in response",
                 extra={"response_model": response_model},
@@ -95,8 +96,7 @@ async def calculate_cost(
                 code="model_not_found",
             )
 
-        row = await session.get(ModelRow, response_model)
-        if row is None or not row.sats_pricing:
+        if not model_obj.sats_pricing:
             logger.error(
                 "Model pricing not defined",
                 extra={"model": response_model, "model_id": response_model},
@@ -106,9 +106,8 @@ async def calculate_cost(
             )
 
         try:
-            sats_pricing = json.loads(row.sats_pricing)
-            mspp = float(sats_pricing.get("prompt", 0))
-            mspc = float(sats_pricing.get("completion", 0))
+            mspp = float(model_obj.sats_pricing.prompt)
+            mspc = float(model_obj.sats_pricing.completion)
         except Exception:
             return CostDataError(message="Invalid pricing data", code="pricing_invalid")
 

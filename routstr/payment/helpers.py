@@ -1,17 +1,14 @@
 import json
 import math
-from typing import Mapping
+from typing import Any
 
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
-from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from ..core.db import ModelRow
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
-from .models import Pricing
 
 logger = get_logger(__name__)
 
@@ -85,19 +82,19 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
 
 
 async def get_max_cost_for_model(
-    model: str, session: AsyncSession | None = None
+    model: str,
+    session: AsyncSession,
+    model_obj: Any | None = None,
 ) -> int:
-    """Get the maximum cost for a specific model."""
+    """Get the maximum cost for a specific model from providers with overrides."""
     logger.debug(
         "Getting max cost for model",
         extra={
             "model": model,
             "fixed_pricing": settings.fixed_pricing,
-            "has_models": True,
         },
     )
 
-    # Fixed pricing: always use fixed_cost_per_request
     if settings.fixed_pricing:
         default_cost_msats = settings.fixed_cost_per_request * 1000
         logger.debug(
@@ -106,43 +103,42 @@ async def get_max_cost_for_model(
         )
         return max(settings.min_request_msat, default_cost_msats)
 
-    if session is None:
-        # Without a DB session, we can't resolve model pricing; fall back to fixed cost
-        fallback_msats = settings.fixed_cost_per_request * 1000
-        logger.warning(
-            "No DB session provided for model pricing; using fixed cost",
-            extra={"requested_model": model, "using_default_cost": fallback_msats},
-        )
-        return max(settings.min_request_msat, fallback_msats)
+    if not model_obj:
+        from ..proxy import get_upstreams
+        from ..upstream import get_model_with_override
 
-    result = await session.exec(select(ModelRow.id))  # type: ignore
-    available_ids = [row[0] if isinstance(row, tuple) else row for row in result.all()]
-    if model not in available_ids:
-        # If no models or unknown model, fall back to fixed cost if provided, else minimal default
+        upstreams = get_upstreams()
+        model_obj = await get_model_with_override(model, upstreams, session)
+
+    if not model_obj:
         fallback_msats = settings.fixed_cost_per_request * 1000
         logger.warning(
-            "Model not found in available models",
+            "Model not found in providers or overrides",
             extra={
                 "requested_model": model,
-                "available_models": available_ids,
                 "using_default_cost": fallback_msats,
             },
         )
         return max(settings.min_request_msat, fallback_msats)
 
-    row = await session.get(ModelRow, model)
-    if row and row.sats_pricing:
+    if model_obj.sats_pricing:
         try:
-            sats = Pricing(**json.loads(row.sats_pricing))  # type: ignore
-            max_cost = sats.max_cost * 1000 * (1 - settings.tolerance_percentage / 100)
+            max_cost = (
+                model_obj.sats_pricing.max_cost
+                * 1000
+                * (1 - settings.tolerance_percentage / 100)
+            )
             logger.debug(
                 "Found model-specific max cost",
                 extra={"model": model, "max_cost_msats": max_cost},
             )
             calculated_msats = int(max_cost)
             return max(settings.min_request_msat, calculated_msats)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                "Error calculating max cost from model pricing",
+                extra={"model": model, "error": str(e)},
+            )
 
     logger.warning(
         "Model pricing not found, using fixed cost",
@@ -155,14 +151,17 @@ async def get_max_cost_for_model(
 
 
 async def calculate_discounted_max_cost(
-    max_cost_for_model: int, body: dict, session: AsyncSession | None = None
+    max_cost_for_model: int,
+    body: dict,
+    model_obj: Any | None = None,
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available."""
-    if settings.fixed_pricing or session is None:
+    if settings.fixed_pricing:
         return max_cost_for_model
 
     model = body.get("model", "unknown")
-    model_pricing = await get_model_cost_info(model, session=session)
+
+    model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
         return max_cost_for_model
 
@@ -218,22 +217,6 @@ def estimate_tokens(messages: list) -> int:
     return len(str(messages)) // 3
 
 
-async def get_model_cost_info(
-    model_id: str, session: AsyncSession | None = None
-) -> Pricing | None:
-    if not model_id or model_id == "unknown":
-        return None
-    if session is None:
-        return None
-    row = await session.get(ModelRow, model_id)
-    if row and row.sats_pricing:
-        try:
-            return Pricing(**json.loads(row.sats_pricing))  # type: ignore
-        except Exception:
-            return None
-    return None
-
-
 def create_error_response(
     error_type: str,
     message: str,
@@ -257,61 +240,3 @@ def create_error_response(
         media_type="application/json",
         headers={"X-Cashu": token} if token else {},
     )
-
-
-def prepare_upstream_headers(request_headers: dict) -> dict:
-    """Prepare headers for upstream request, removing sensitive/problematic ones."""
-    upstream_api_key = settings.upstream_api_key
-    logger.debug(
-        "Preparing upstream headers",
-        extra={
-            "original_headers_count": len(request_headers),
-            "has_upstream_api_key": bool(upstream_api_key),
-        },
-    )
-
-    headers = dict(request_headers)
-
-    # Remove headers that shouldn't be forwarded
-    removed_headers = []
-    for header in [
-        "host",
-        "content-length",
-        "refund-lnurl",
-        "key-expiry-time",
-        "x-cashu",
-    ]:
-        if headers.pop(header, None) is not None:
-            removed_headers.append(header)
-
-    # Handle authorization
-    if upstream_api_key:
-        headers["Authorization"] = f"Bearer {upstream_api_key}"
-        if headers.pop("authorization", None) is not None:
-            removed_headers.append("authorization (replaced with upstream key)")
-    else:
-        for auth_header in ["Authorization", "authorization"]:
-            if headers.pop(auth_header, None) is not None:
-                removed_headers.append(auth_header)
-
-    logger.debug(
-        "Headers prepared for upstream",
-        extra={
-            "final_headers_count": len(headers),
-            "removed_headers": removed_headers,
-            "added_upstream_auth": bool(upstream_api_key),
-        },
-    )
-
-    return headers
-
-
-def prepare_upstream_params(
-    path: str, query_params: Mapping[str, str] | None
-) -> dict[str, str]:
-    """Prepare query params for upstream request, optionally adding api-version for chat/completions."""
-    params: dict[str, str] = dict(query_params or {})
-    chat_api_version = settings.chat_completions_api_version
-    if path.endswith("chat/completions") and chat_api_version:
-        params["api-version"] = chat_api_version
-    return params
