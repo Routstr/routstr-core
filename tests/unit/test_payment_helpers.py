@@ -1,4 +1,5 @@
 import os
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 # Set required env vars before importing
@@ -34,7 +35,7 @@ async def test_get_max_cost_for_model_known() -> None:
     row.upstream_provider_id = 1
 
     # Mock the exec results to return model row when querying for override
-    def mock_exec(query):
+    def mock_exec(query: Any) -> Any:
         result = Mock()
         result.first = Mock(return_value=row)
         result.all = Mock(return_value=[row])
@@ -72,7 +73,7 @@ async def test_get_max_cost_for_model_unknown() -> None:
     mock_session = AsyncMock()
 
     # Mock the exec results to return no model override
-    async def async_mock_exec(query):
+    async def async_mock_exec(query: Any) -> Any:
         result = Mock()
         result.first = Mock(return_value=None)
         result.all = Mock(return_value=[])
@@ -92,10 +93,11 @@ async def test_get_max_cost_for_model_unknown() -> None:
 
 
 async def test_get_max_cost_for_model_disabled() -> None:
+    mock_session = AsyncMock()
     with patch.object(settings, "fixed_pricing", True):
         with patch.object(settings, "fixed_cost_per_request", 200):
             with patch.object(settings, "tolerance_percentage", 0):
-                cost = await get_max_cost_for_model("any-model", session=None)
+                cost = await get_max_cost_for_model("any-model", session=mock_session)
                 assert cost == 200000
 
 

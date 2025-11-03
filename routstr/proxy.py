@@ -3,8 +3,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlmodel import select
+from sqlmodel import col, select
 
+from .algorithm import create_model_mappings
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
 from .core.db import (
@@ -21,8 +22,8 @@ from .payment.helpers import (
     create_error_response,
     get_max_cost_for_model,
 )
-from .payment.models import Model, _row_to_model
-from .upstream import UpstreamProvider, init_upstreams, resolve_model_alias
+from .payment.models import Model
+from .upstream import UpstreamProvider, init_upstreams
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
@@ -77,17 +78,14 @@ def get_unique_models() -> list[Model]:
 
 
 async def refresh_model_maps() -> None:
-    """Refresh global model and provider maps in-place."""
+    """Refresh global model and provider maps using the cost-based algorithm."""
     global _model_instances, _provider_map, _unique_models
 
-    model_instances: dict[str, Model] = {}
-    provider_map: dict[str, UpstreamProvider] = {}
-    unique_models: dict[str, Model] = {}
-    openrouter: UpstreamProvider | None = None
-    other_upstreams: list[UpstreamProvider] = []
-
+    # Gather database overrides and disabled models
     async with create_session() as session:
-        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
+        result = await session.exec(
+            select(ModelRow).where(col(ModelRow.enabled).is_(True))
+        )
         override_rows = result.all()
 
         provider_result = await session.exec(select(UpstreamProviderRow))
@@ -104,74 +102,15 @@ async def refresh_model_maps() -> None:
             if row.upstream_provider_id is not None
         }
 
-    for upstream in _upstreams:
-        if upstream.base_url == "https://openrouter.ai/api/v1":
-            openrouter = upstream
-        else:
-            other_upstreams.append(upstream)
+        disabled_result = await session.exec(
+            select(ModelRow.id).where(col(ModelRow.enabled).is_(False))
+        )
+        disabled_model_ids = {row for row in disabled_result.all()}
 
-    def get_base_model_id(model_id: str) -> str:
-        """Get base model ID by removing provider prefix."""
-        return model_id.split("/", 1)[1] if "/" in model_id else model_id
-
-    if openrouter:
-        for model in openrouter.get_cached_models():
-            if model.enabled:
-                if model.id in overrides_by_id:
-                    override_row, provider_fee = overrides_by_id[model.id]
-                    model_to_use = _row_to_model(
-                        override_row, apply_provider_fee=True, provider_fee=provider_fee
-                    )
-                else:
-                    model_to_use = model
-                base_id = get_base_model_id(model_to_use.id)
-                if base_id not in unique_models:
-                    unique_model = model_to_use.copy(update={"id": base_id})
-                    unique_models[base_id] = unique_model
-                for alias in resolve_model_alias(
-                    model_to_use.id, model_to_use.canonical_slug
-                ):
-                    model_instances[alias] = model_to_use
-                    provider_map[alias] = openrouter
-
-    for upstream in other_upstreams:
-        upstream_prefix = getattr(upstream, "upstream_name", None)
-        for model in upstream.get_cached_models():
-            if model.enabled:
-                if model.id in overrides_by_id:
-                    override_row, provider_fee = overrides_by_id[model.id]
-                    model_to_use = _row_to_model(
-                        override_row, apply_provider_fee=True, provider_fee=provider_fee
-                    )
-                else:
-                    model_to_use = model
-                base_id = get_base_model_id(model_to_use.id)
-                unique_model = model_to_use.copy(update={"id": base_id})
-                unique_models[base_id] = unique_model
-
-                aliases = resolve_model_alias(
-                    model_to_use.id, model_to_use.canonical_slug
-                )
-
-                if upstream_prefix and "/" not in model_to_use.id:
-                    prefixed_id = f"{upstream_prefix}/{model_to_use.id}"
-                    if prefixed_id not in aliases:
-                        aliases.append(prefixed_id)
-
-                for alias in aliases:
-                    model_instances[alias] = model_to_use
-                    provider_map[alias] = upstream
-
-    _model_instances = model_instances
-    _provider_map = provider_map
-    _unique_models = unique_models
-
-    logger.debug(
-        "Refreshed model maps",
-        extra={
-            "unique_model_count": len(_unique_models),
-            "total_alias_count": len(_model_instances),
-        },
+    _model_instances, _provider_map, _unique_models = create_model_mappings(
+        upstreams=_upstreams,
+        overrides_by_id=overrides_by_id,
+        disabled_model_ids=disabled_model_ids,
     )
 
 
@@ -242,7 +181,9 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        return await upstream.handle_x_cashu(request, x_cashu, path, max_cost_for_model)
+        return await upstream.handle_x_cashu(
+            request, x_cashu, path, max_cost_for_model, model_obj
+        )
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
@@ -277,6 +218,7 @@ async def proxy(
         key,
         max_cost_for_model,
         session,
+        model_obj,
     )
 
     if response.status_code != 200:
@@ -385,6 +327,18 @@ def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
     if request_body:
         try:
             request_body_dict = json.loads(request_body)
+
+            if "max_tokens" in request_body_dict:
+                max_tokens_value = request_body_dict["max_tokens"]
+
+                if isinstance(max_tokens_value, int):
+                    pass
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": "max_tokens must be an integer"},
+                    )
+
             logger.debug(
                 "Request body parsed",
                 extra={

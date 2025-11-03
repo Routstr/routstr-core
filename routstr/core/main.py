@@ -1,16 +1,20 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
 from ..payment.models import (
+    cleanup_enabled_models_periodically,
     models_router,
     update_sats_pricing,
 )
@@ -29,7 +33,10 @@ from .settings import settings as global_settings
 setup_logging()
 logger = get_logger(__name__)
 
-__version__ = "0.2.0-dev"
+if os.getenv("VERSION_SUFFIX") is not None:
+    __version__ = f"0.2.0-{os.getenv('VERSION_SUFFIX')}"
+else:
+    __version__ = "0.2.0"
 
 
 @asynccontextmanager
@@ -42,6 +49,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     nip91_task = None
     providers_task = None
     models_refresh_task = None
+    models_cleanup_task = None
     model_maps_refresh_task = None
 
     try:
@@ -81,6 +89,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task = asyncio.create_task(
                 refresh_upstreams_models_periodically(get_upstreams())
             )
+        models_cleanup_task = asyncio.create_task(cleanup_enabled_models_periodically())
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
         nip91_task = asyncio.create_task(announce_provider())
@@ -109,6 +118,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             providers_task.cancel()
         if models_refresh_task is not None:
             models_refresh_task.cancel()
+        if models_cleanup_task is not None:
+            models_cleanup_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
 
@@ -126,6 +137,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:
                 tasks_to_wait.append(models_refresh_task)
+            if models_cleanup_task is not None:
+                tasks_to_wait.append(models_cleanup_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
 
@@ -159,7 +172,6 @@ app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore
 app.add_exception_handler(Exception, general_exception_handler)
 
 
-@app.get("/", include_in_schema=False)
 @app.get("/v1/info")
 async def info() -> dict:
     return {
@@ -174,14 +186,121 @@ async def info() -> dict:
     }
 
 
-@app.get("/admin")
-async def admin_redirect() -> RedirectResponse:
-    return RedirectResponse("/admin/")
-
-
 @app.get("/v1/providers")
 async def providers() -> RedirectResponse:
     return RedirectResponse("/v1/providers/")
+
+
+UI_DIST_PATH = Path(__file__).parent.parent.parent / "ui_out"
+
+if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
+    logger.info(f"Serving static UI from {UI_DIST_PATH}")
+
+    app.mount(
+        "/_next",
+        StaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True),
+        name="next-static",
+    )
+
+    @app.get("/", include_in_schema=False)
+    async def serve_root_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "index.html")
+
+    # Add explicit route for /index.txt to redirect to /
+    @app.get("/index.txt", include_in_schema=False)
+    async def redirect_index_txt() -> RedirectResponse:
+        return RedirectResponse("/")
+
+    @app.get("/admin")
+    async def admin_redirect() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "index.html")
+
+    @app.get("/dashboard", include_in_schema=False)
+    async def serve_dashboard_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "index.html")
+
+    @app.get("/login", include_in_schema=False)
+    async def serve_login_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "login" / "index.html")
+
+    # Add explicit route for /login/index.txt to redirect to /login
+    @app.get("/login/index.txt", include_in_schema=False)
+    async def redirect_login_index_txt() -> RedirectResponse:
+        return RedirectResponse("/login")
+
+    @app.get("/model", include_in_schema=False)
+    async def serve_models_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "model" / "index.html")
+
+    # Add explicit route for /model/index.txt to redirect to /model
+    @app.get("/model/index.txt", include_in_schema=False)
+    async def redirect_model_index_txt() -> RedirectResponse:
+        return RedirectResponse("/model")
+
+    @app.get("/providers", include_in_schema=False)
+    async def serve_providers_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "providers" / "index.html")
+
+    # Add explicit route for /providers/index.txt to redirect to /providers
+    @app.get("/providers/index.txt", include_in_schema=False)
+    async def redirect_providers_index_txt() -> RedirectResponse:
+        return RedirectResponse("/providers")
+
+    @app.get("/settings", include_in_schema=False)
+    async def serve_settings_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "settings" / "index.html")
+
+    # Add explicit route for /settings/index.txt to redirect to /settings
+    @app.get("/settings/index.txt", include_in_schema=False)
+    async def redirect_settings_index_txt() -> RedirectResponse:
+        return RedirectResponse("/settings")
+
+    @app.get("/transactions", include_in_schema=False)
+    async def serve_transactions_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
+
+    # Add explicit route for /transactions/index.txt to redirect to /transactions
+    @app.get("/transactions/index.txt", include_in_schema=False)
+    async def redirect_transactions_index_txt() -> RedirectResponse:
+        return RedirectResponse("/transactions")
+
+    @app.get("/unauthorized", include_in_schema=False)
+    async def serve_unauthorized_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
+
+    # Add explicit route for /unauthorized/index.txt to redirect to /unauthorized
+    @app.get("/unauthorized/index.txt", include_in_schema=False)
+    async def redirect_unauthorized_index_txt() -> RedirectResponse:
+        return RedirectResponse("/unauthorized")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def serve_favicon() -> FileResponse:
+        icon_path = UI_DIST_PATH / "icon.ico"
+        if icon_path.exists():
+            return FileResponse(icon_path)
+        return FileResponse(UI_DIST_PATH / "favicon.ico")
+
+    @app.get("/icon.ico", include_in_schema=False)
+    async def serve_icon() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "icon.ico")
+
+    app.mount(
+        "/static", StaticFiles(directory=UI_DIST_PATH, check_dir=True), name="ui-static"
+    )
+else:
+    logger.warning(
+        f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
+    )
+
+    @app.get("/", include_in_schema=False)
+    async def root_fallback() -> dict:
+        return {
+            "name": global_settings.name,
+            "description": global_settings.description,
+            "version": __version__,
+            "status": "running",
+            "ui": "not available",
+        }
 
 
 app.include_router(models_router)

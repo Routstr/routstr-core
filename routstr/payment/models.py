@@ -526,6 +526,116 @@ async def update_sats_pricing() -> None:
             logger.error(f"Error updating sats pricing: {e}")
 
 
+async def cleanup_enabled_models_periodically() -> None:
+    """Background task to clean up enabled models that match upstream pricing.
+
+    When model is enabled (enabled=True), remove it from DB if it matches upstream pricing.
+    Keep it in DB only if pricing differs from upstream or if it's disabled.
+    """
+    interval = getattr(
+        settings, "models_cleanup_interval_seconds", 300
+    )  # 5 minutes default
+    if not interval or interval <= 0:
+        return
+
+    while True:
+        try:
+            await _cleanup_enabled_models_once()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(
+                "Error during enabled models cleanup",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
+
+        try:
+            jitter = max(0.0, float(interval) * 0.1)
+            await asyncio.sleep(interval + random.uniform(0, jitter))
+        except asyncio.CancelledError:
+            break
+
+
+async def _cleanup_enabled_models_once() -> None:
+    """Clean up enabled models that match upstream pricing."""
+    from ..proxy import get_upstreams
+
+    async with create_session() as session:
+        # Get all enabled models from DB
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.enabled,  # Only enabled models
+            )
+        )
+        db_models = result.all()
+
+        if not db_models:
+            return
+
+        upstreams = get_upstreams()
+        models_to_remove = []
+
+        for db_model in db_models:
+            # Find corresponding upstream model
+            print(db_model.id)
+            upstream_model = None
+            for upstream in upstreams:
+                upstream_model = upstream.get_cached_model_by_id(db_model.id)
+                if upstream_model:
+                    break
+
+            if not upstream_model:
+                continue
+
+            # Compare pricing to see if they match
+            db_pricing = json.loads(db_model.pricing)
+            upstream_pricing = upstream_model.pricing.dict()
+
+            # Check if pricing matches (with small tolerance for float comparison)
+            pricing_matches = _pricing_matches(db_pricing, upstream_pricing)
+
+            if pricing_matches:
+                models_to_remove.append(db_model)
+                logger.info(
+                    f"Removing enabled model {db_model.id} - matches upstream pricing",
+                    extra={"model_id": db_model.id},
+                )
+
+        # Remove models that match upstream pricing
+        for model in models_to_remove:
+            await session.delete(model)
+
+        if models_to_remove:
+            await session.commit()
+            logger.info(
+                f"Cleaned up {len(models_to_remove)} enabled models that match upstream pricing"
+            )
+
+
+def _pricing_matches(
+    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.1
+) -> bool:
+    """Check if pricing dictionaries match within tolerance."""
+    keys_to_compare = [
+        "prompt",
+        "completion",
+        "request",
+        "image",
+        "web_search",
+        "internal_reasoning",
+    ]
+
+    for key in keys_to_compare:
+        db_val = float(db_pricing.get(key, 0.0)) * 1000000
+        upstream_val = float(upstream_pricing.get(key, 0.0)) * 1000000
+        print(db_val - upstream_val)
+
+        if abs(db_val - upstream_val) > tolerance:
+            return False
+
+    return True
+
+
 async def refresh_models_periodically() -> None:
     """Background task: periodically fetch OpenRouter models and insert new ones.
 
