@@ -83,7 +83,9 @@ async def refresh_model_maps() -> None:
 
     # Gather database overrides and disabled models
     async with create_session() as session:
-        result = await session.exec(select(ModelRow).where(ModelRow.enabled == True))
+        result = await session.exec(
+            select(ModelRow).where(col(ModelRow.enabled).is_(True))
+        )
         override_rows = result.all()
 
         provider_result = await session.exec(select(UpstreamProviderRow))
@@ -101,7 +103,7 @@ async def refresh_model_maps() -> None:
         }
 
         disabled_result = await session.exec(
-            select(ModelRow.id).where(ModelRow.enabled == False)
+            select(ModelRow.id).where(col(ModelRow.enabled).is_(False))
         )
         disabled_model_ids = {row for row in disabled_result.all()}
 
