@@ -121,7 +121,7 @@ class OllamaUpstreamProvider(UpstreamProvider):
                     models_list.append(
                         Model(
                             id=model_name,
-                            name=model_name.replace(':', ' '),
+                            name=model_name.replace(":", " "),
                             created=0,
                             description=description,
                             context_length=context_length,
