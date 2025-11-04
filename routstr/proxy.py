@@ -101,7 +101,7 @@ async def refresh_model_maps() -> None:
         }
 
         disabled_result = await session.exec(
-            select(ModelRow.id).where(~ModelRow.enabled)
+            select(ModelRow.id).where(ModelRow.enabled == False)
         )
         disabled_model_ids = {row for row in disabled_result.all()}
 
