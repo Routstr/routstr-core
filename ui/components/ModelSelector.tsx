@@ -387,14 +387,10 @@ export function ModelSelector({
               providerIdNum,
               model.id
             );
-            await AdminService.updateProviderModel(
-              providerIdNum,
-              model.full_name,
-              {
-                ...existingModel,
-                enabled: true,
-              }
-            );
+            await AdminService.updateProviderModel(providerIdNum, model.id, {
+              ...existingModel,
+              enabled: true,
+            });
             totalEnabled++;
           } catch (error) {
             console.error(`Failed to enable model ${model.full_name}:`, error);
