@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from sqlmodel import  select
+from sqlmodel import select
 
 from .algorithm import create_model_mappings
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
@@ -83,7 +83,7 @@ async def refresh_model_maps() -> None:
 
     # Gather database overrides and disabled models
     async with create_session() as session:
-        result = await session.exec(select(ModelRow).where(ModelRow.enabled == True))
+        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
         override_rows = result.all()
 
         provider_result = await session.exec(select(UpstreamProviderRow))
@@ -104,7 +104,6 @@ async def refresh_model_maps() -> None:
             select(ModelRow.id).where(~ModelRow.enabled)
         )
         disabled_model_ids = {row for row in disabled_result.all()}
-        print(disabled_model_ids)
 
     _model_instances, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,
