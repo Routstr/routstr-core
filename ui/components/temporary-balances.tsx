@@ -11,10 +11,7 @@ import {
   DollarSign,
   Activity,
 } from 'lucide-react';
-import {
-  AdminService,
-  TemporaryBalance,
-} from '@/lib/api/services/admin';
+import { AdminService, TemporaryBalance } from '@/lib/api/services/admin';
 import {
   Card,
   CardContent,
@@ -243,16 +240,16 @@ export function TemporaryBalances({
                             <div className='text-muted-foreground text-xs font-medium'>
                               Balance
                             </div>
-                          <div className='truncate font-mono text-sm'>
-                            {formatBalance(balance.balance)}
+                            <div className='truncate font-mono text-sm'>
+                              {formatBalance(balance.balance)}
                             </div>
                           </div>
                           <div className='space-y-1'>
                             <div className='text-muted-foreground text-xs font-medium'>
                               Spent
                             </div>
-                          <div className='truncate font-mono text-sm'>
-                            {formatBalance(balance.total_spent)}
+                            <div className='truncate font-mono text-sm'>
+                              {formatBalance(balance.total_spent)}
                             </div>
                           </div>
                         </div>

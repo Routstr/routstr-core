@@ -65,12 +65,14 @@ interface ModelSelectorProps {
   groupData?: ModelGroup;
   showProviderActions?: boolean;
   filteredModels?: Model[];
+  showDeleteAllButton?: boolean;
 }
 
 export function ModelSelector({
   filterProvider,
   groupData,
   filteredModels: propFilteredModels,
+  showDeleteAllButton = false,
 }: ModelSelectorProps) {
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [, setHoveredModelId] = useState<string | null>(null);
@@ -824,13 +826,15 @@ export function ModelSelector({
           <Square className='mr-2 h-4 w-4' />
           Deselect All
         </Button>
-        <Button
-          onClick={handleDeleteAll}
-          className='text-destructive focus:text-destructive'
-        >
-          <AlertTriangle className='mr-2 h-4 w-4' />
-          Delete All Models Permanently
-        </Button>
+        {showDeleteAllButton && (
+          <Button
+            onClick={handleDeleteAll}
+            className='text-destructive focus:text-destructive'
+          >
+            <AlertTriangle className='mr-2 h-4 w-4' />
+            Delete All Overrides Permanently
+          </Button>
+        )}
         {/* Model Management Actions
         <Button onClick={() => setIsAddFormOpen(true)} className='gap-2'>
           <Plus className='h-4 w-4' />

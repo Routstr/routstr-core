@@ -156,7 +156,10 @@ export default function ModelsPage() {
                             models={models}
                             onFilteredModelsChange={setFilteredModels}
                           />
-                          <ModelSelector filteredModels={filteredModels} />
+                          <ModelSelector
+                            filteredModels={filteredModels}
+                            showDeleteAllButton={true}
+                          />
                         </div>
                       </TabsContent>
 
@@ -199,6 +202,7 @@ export default function ModelsPage() {
                                   filterProvider={provider}
                                   groupData={groupData}
                                   showProviderActions={true}
+                                  showDeleteAllButton={false}
                                 />
                               </div>
                             </TabsContent>

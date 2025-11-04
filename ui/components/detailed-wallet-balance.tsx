@@ -203,7 +203,8 @@ export function DetailedWalletBalance({
                             <div
                               className={cn(
                                 'text-right font-mono',
-                                !detail.error && ownerMsat > 0 &&
+                                !detail.error &&
+                                  ownerMsat > 0 &&
                                   'font-semibold text-green-600'
                               )}
                             >
@@ -250,7 +251,8 @@ export function DetailedWalletBalance({
                                 <div
                                   className={cn(
                                     'truncate font-mono text-sm',
-                                    !detail.error && ownerMsat > 0 &&
+                                    !detail.error &&
+                                      ownerMsat > 0 &&
                                       'font-semibold text-green-600'
                                   )}
                                 >
