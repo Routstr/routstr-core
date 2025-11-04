@@ -16,6 +16,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { useMemo, useState } from 'react';
 import type { Model } from '@/lib/api/schemas/models';
+import { groupAndSortModelsByProvider } from '@/lib/utils/modelSort';
 
 export default function ModelsPage() {
   const [filteredModels, setFilteredModels] = useState<Model[]>([]);
@@ -34,15 +35,7 @@ export default function ModelsPage() {
 
   const groupedModels = useMemo(() => {
     if (!models) return {};
-
-    return models.reduce<Record<string, typeof models>>((acc, model) => {
-      const provider = model.provider;
-      if (!acc[provider]) {
-        acc[provider] = [];
-      }
-      acc[provider].push(model);
-      return acc;
-    }, {});
+    return groupAndSortModelsByProvider(models);
   }, [models]);
 
   const groupDataMap = useMemo(() => {
@@ -52,7 +45,9 @@ export default function ModelsPage() {
   const providerInfo = useMemo(() => {
     return Object.entries(groupedModels).map(([provider, providerModels]) => {
       const groupData = groupDataMap.get(provider);
-      const activeModels = providerModels.filter((m) => !m.soft_deleted).length;
+      const activeModels = providerModels.filter(
+        (m) => m.isEnabled && !m.soft_deleted
+      ).length;
       const totalModels = providerModels.length;
 
       return {
@@ -186,7 +181,7 @@ export default function ModelsPage() {
                                               (m) => m.soft_deleted
                                             ).length
                                           }{' '}
-                                          soft deleted
+                                          disabled
                                         </span>
                                       )}
                                       {groupData?.group_url && (
