@@ -612,7 +612,7 @@ async def _cleanup_enabled_models_once() -> None:
 
 
 def _pricing_matches(
-    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.1
+    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.0
 ) -> bool:
     """Check if pricing dictionaries match within tolerance."""
     keys_to_compare = [
@@ -625,8 +625,8 @@ def _pricing_matches(
     ]
 
     for key in keys_to_compare:
-        db_val = float(db_pricing.get(key, 0.0)) * 1000000
-        upstream_val = float(upstream_pricing.get(key, 0.0)) * 1000000
+        db_val = int(float(db_pricing.get(key, 0.0)) * 1000000)
+        upstream_val = int(float(upstream_pricing.get(key, 0.0)) * 1000000)
 
         if abs(db_val - upstream_val) > tolerance:
             return False
