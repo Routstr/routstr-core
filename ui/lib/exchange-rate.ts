@@ -51,4 +51,3 @@ export async function fetchBtcUsdPrice(): Promise<number | null> {
 export function btcToSatsRate(btcUsdPrice: number): number {
   return btcUsdPrice / 100_000_000;
 }
-

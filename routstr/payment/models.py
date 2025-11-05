@@ -577,7 +577,6 @@ async def _cleanup_enabled_models_once() -> None:
 
         for db_model in db_models:
             # Find corresponding upstream model
-            print(db_model.id)
             upstream_model = None
             for upstream in upstreams:
                 upstream_model = upstream.get_cached_model_by_id(db_model.id)
@@ -613,7 +612,7 @@ async def _cleanup_enabled_models_once() -> None:
 
 
 def _pricing_matches(
-    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.1
+    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.0
 ) -> bool:
     """Check if pricing dictionaries match within tolerance."""
     keys_to_compare = [
@@ -626,9 +625,8 @@ def _pricing_matches(
     ]
 
     for key in keys_to_compare:
-        db_val = float(db_pricing.get(key, 0.0)) * 1000000
-        upstream_val = float(upstream_pricing.get(key, 0.0)) * 1000000
-        print(db_val - upstream_val)
+        db_val = int(float(db_pricing.get(key, 0.0)) * 1000000)
+        upstream_val = int(float(upstream_pricing.get(key, 0.0)) * 1000000)
 
         if abs(db_val - upstream_val) > tolerance:
             return False

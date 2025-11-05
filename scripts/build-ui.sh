@@ -49,6 +49,7 @@ else
     npm run build
 fi
 
+rm -rf ../ui_out
 mkdir -p ../ui_out
 mv out/* ../ui_out
 

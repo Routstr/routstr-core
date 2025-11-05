@@ -14,4 +14,3 @@ export function getDisplayUnitLabel(unit: DisplayUnit): string {
       return unit;
   }
 }
-

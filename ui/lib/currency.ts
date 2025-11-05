@@ -43,4 +43,3 @@ export function formatFromMsat(
   });
   return formatter.format(usd);
 }
-

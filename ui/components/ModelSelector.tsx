@@ -59,18 +59,24 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import {
+  sortModels,
+  groupAndSortModelsByProvider,
+} from '@/lib/utils/modelSort';
 
 interface ModelSelectorProps {
   filterProvider?: string;
   groupData?: ModelGroup;
   showProviderActions?: boolean;
   filteredModels?: Model[];
+  showDeleteAllButton?: boolean;
 }
 
 export function ModelSelector({
   filterProvider,
   groupData,
   filteredModels: propFilteredModels,
+  showDeleteAllButton = false,
 }: ModelSelectorProps) {
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [, setHoveredModelId] = useState<string | null>(null);
@@ -387,14 +393,10 @@ export function ModelSelector({
               providerIdNum,
               model.id
             );
-            await AdminService.updateProviderModel(
-              providerIdNum,
-              model.full_name,
-              {
-                ...existingModel,
-                enabled: true,
-              }
-            );
+            await AdminService.updateProviderModel(providerIdNum, model.id, {
+              ...existingModel,
+              enabled: true,
+            });
             totalEnabled++;
           } catch (error) {
             console.error(`Failed to enable model ${model.full_name}:`, error);
@@ -426,20 +428,13 @@ export function ModelSelector({
           : providerFilteredModels;
 
     if (filterProvider) {
-      // If filtering by provider, return single group
-      return { [filterProvider]: modelsToGroup };
+      const sortedModels = sortModels(modelsToGroup);
+      return { [filterProvider]: sortedModels };
     }
 
     if (!modelsToGroup) return {};
 
-    return modelsToGroup.reduce<Record<string, Model[]>>((acc, model) => {
-      const provider = model.provider;
-      if (!acc[provider]) {
-        acc[provider] = [];
-      }
-      acc[provider].push(model);
-      return acc;
-    }, {});
+    return groupAndSortModelsByProvider(modelsToGroup);
   }, [
     providerFilteredModels,
     filteredModels,
@@ -828,13 +823,15 @@ export function ModelSelector({
           <Square className='mr-2 h-4 w-4' />
           Deselect All
         </Button>
-        <Button
-          onClick={handleDeleteAll}
-          className='text-destructive focus:text-destructive'
-        >
-          <AlertTriangle className='mr-2 h-4 w-4' />
-          Delete All Models Permanently
-        </Button>
+        {showDeleteAllButton && (
+          <Button
+            onClick={handleDeleteAll}
+            className='text-destructive focus:text-destructive'
+          >
+            <AlertTriangle className='mr-2 h-4 w-4' />
+            Delete All Overrides Permanently
+          </Button>
+        )}
         {/* Model Management Actions
         <Button onClick={() => setIsAddFormOpen(true)} className='gap-2'>
           <Plus className='h-4 w-4' />
@@ -1077,9 +1074,9 @@ export function ModelSelector({
                                 variant='ghost'
                                 size='sm'
                                 onClick={(e) => e.stopPropagation()}
-                                className='h-8 w-8 p-0'
+                                className='hover:bg-muted/50 dark:hover:bg-muted/80 h-8 w-8 p-0'
                               >
-                                <MoreVertical className='h-4 w-4' />
+                                <MoreVertical className='text-muted-foreground hover:text-foreground h-4 w-4' />
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align='end'>
@@ -1181,7 +1178,7 @@ export function ModelSelector({
                         {model.soft_deleted && (
                           <span className='inline-flex items-center rounded-full border border-red-300 bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-800'>
                             <Trash2 className='mr-1 h-3 w-3' />
-                            Deleted
+                            Disabled
                           </span>
                         )}
                       </div>
