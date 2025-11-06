@@ -6,7 +6,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
-from .upstream import UpstreamProvider
+from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
     from ..core.db import ApiKey, AsyncSession
@@ -17,7 +17,7 @@ from ..core.logging import get_logger
 logger = get_logger(__name__)
 
 
-class OllamaUpstreamProvider(UpstreamProvider):
+class OllamaUpstreamProvider(BaseUpstreamProvider):
     """Upstream provider specifically configured for Ollama API."""
 
     def __init__(

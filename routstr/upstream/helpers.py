@@ -5,21 +5,21 @@ import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .core.settings import Settings
+    from ..core.settings import Settings
 
 
-from .core import get_logger
-from .core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
-from .payment.models import Model
-from .upstreams import (
+from ..core import get_logger
+from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
+from ..payment.models import Model
+from . import (
     AnthropicUpstreamProvider,
     AzureUpstreamProvider,
+    BaseUpstreamProvider,
+    GenericUpstreamProvider,
     OllamaUpstreamProvider,
     OpenAIUpstreamProvider,
     OpenRouterUpstreamProvider,
-    UpstreamProvider,
 )
-from .upstreams.generic import GenericUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -70,7 +70,7 @@ def resolve_model_alias(model_id: str, canonical_slug: str | None = None) -> lis
 
 
 async def get_all_models_with_overrides(
-    upstreams: list[UpstreamProvider],
+    upstreams: list[BaseUpstreamProvider],
 ) -> list[Model]:
     """Get all models from all providers with database overrides applied.
 
@@ -85,7 +85,7 @@ async def get_all_models_with_overrides(
     """
     from sqlmodel import select
 
-    from .payment.models import _row_to_model
+    from ..payment.models import _row_to_model
 
     async with create_session() as session:
         result = await session.exec(select(ModelRow).where(ModelRow.enabled))
@@ -122,7 +122,7 @@ async def get_all_models_with_overrides(
 
 async def get_model_with_override(
     model_id: str,
-    upstreams: list[UpstreamProvider],
+    upstreams: list[BaseUpstreamProvider],
     session: AsyncSession,
 ) -> Model | None:
     """Get a specific model from providers with database override applied.
@@ -138,7 +138,7 @@ async def get_model_with_override(
     """
     from sqlmodel import select
 
-    from .payment.models import _row_to_model
+    from ..payment.models import _row_to_model
 
     aliases = resolve_model_alias(model_id)
 
@@ -170,7 +170,7 @@ async def get_model_with_override(
 
 
 async def refresh_upstreams_models_periodically(
-    upstreams: list[UpstreamProvider],
+    upstreams: list[BaseUpstreamProvider],
 ) -> None:
     """Background task to periodically refresh models cache for all providers.
 
@@ -180,7 +180,7 @@ async def refresh_upstreams_models_periodically(
     import asyncio
     import random
 
-    from .core.settings import settings
+    from ..core.settings import settings
 
     interval = getattr(settings, "models_refresh_interval_seconds", 0)
     if not interval or interval <= 0:
@@ -212,7 +212,7 @@ async def refresh_upstreams_models_periodically(
             break
 
 
-async def init_upstreams() -> list[UpstreamProvider]:
+async def init_upstreams() -> list[BaseUpstreamProvider]:
     """Initialize upstream providers from database.
 
     Seeds database with providers from settings if empty, then loads and instantiates
@@ -220,7 +220,7 @@ async def init_upstreams() -> list[UpstreamProvider]:
     """
     from sqlmodel import select
 
-    from .core.settings import settings
+    from ..core.settings import settings
 
     async with create_session() as session:
         result = await session.exec(select(UpstreamProviderRow))
@@ -235,7 +235,7 @@ async def init_upstreams() -> list[UpstreamProvider]:
             result = await session.exec(select(UpstreamProviderRow))
             existing_providers = result.all()
 
-        upstreams: list[UpstreamProvider] = []
+        upstreams: list[BaseUpstreamProvider] = []
         for provider_row in existing_providers:
             if not provider_row.enabled:
                 logger.debug(f"Skipping disabled provider: {provider_row.base_url}")
@@ -266,7 +266,7 @@ async def _seed_providers_from_settings(
     """
     from sqlmodel import select
 
-    from .core.settings import settings
+    from ..core.settings import settings
 
     providers_to_add: list[UpstreamProviderRow] = []
     seeded_base_urls: set[str] = set()
@@ -415,7 +415,9 @@ async def _seed_providers_from_settings(
         )
 
 
-def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider | None:
+def _instantiate_provider(
+    provider_row: UpstreamProviderRow,
+) -> BaseUpstreamProvider | None:
     """Instantiate an UpstreamProvider from a database row.
 
     Args:
@@ -462,7 +464,7 @@ def _instantiate_provider(provider_row: UpstreamProviderRow) -> UpstreamProvider
                 provider_row.provider_type,
             )
         elif provider_row.provider_type == "custom":
-            return UpstreamProvider(
+            return BaseUpstreamProvider(
                 provider_row.base_url, provider_row.api_key, provider_row.provider_fee
             )
         else:
