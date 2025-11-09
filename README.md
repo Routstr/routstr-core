@@ -99,6 +99,7 @@ The most common settings are shown below. See `.env.example` for the full list.
 - `NPUB` – Nostr public key of the proxy
 - `HTTP_URL` – Public-facing URL of the proxy
 - `ONION_URL` – Tor hidden service URL of the proxy
+- `NEXT_PUBLIC_API_URL` - UI Configuration for Next.js frontend (proxy URL, default: 'http://127.0.0.1:8000' )
 
 ## Database Migrations
 
