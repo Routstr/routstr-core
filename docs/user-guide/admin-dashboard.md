@@ -1,329 +1,222 @@
 # Admin Dashboard
 
-The Routstr admin dashboard provides a web interface for managing your node, viewing balances, and handling withdrawals.
+The Routstr admin dashboard is a modern web interface for managing your node, monitoring wallet balances, configuring AI models and providers, and handling Bitcoin Lightning payments through Cashu eCash.
 
 ## Accessing the Dashboard
 
-### URL Format
-
-The admin dashboard is available at:
-
-```
-https://api.routstr.com/admin/
-```
-
-> **Important**: Always include the trailing slash (`/`) in the URL.
-
 ### Authentication
 
-The dashboard is protected by a password set in the `ADMIN_PASSWORD` environment variable.
+The dashboard is protected by password authentication:
 
-1. Navigate to `/admin/`
+1. Navigate to `/admin/` in your browser
 2. Enter the admin password
-3. Click "Login"
+3. Optional: Configure custom base URL if not pre-configured
+4. Click "Login"
 
-The password is stored as a secure cookie for the session.
+The interface supports both environment-configured URLs and manual URL entry for deployment flexibility.
 
 ## Dashboard Overview
 
-### Main Interface
+The main dashboard consists of four primary sections accessible through a collapsible sidebar:
 
-The dashboard displays:
+- **Dashboard** - Wallet balance monitoring and fund management
+- **Models** - AI model management and testing
+- **Providers** - Upstream provider configuration
+- **Settings** - Node configuration and admin preferences
 
-- **Node Information**
-  - Node name and description
-  - Version number
-  - Public URLs (HTTP and Onion)
-  - Supported Cashu mints
+### Navigation
 
-- **Statistics**
-  - Total API keys
-  - Active keys
-  - Total balance across all keys
-  - Recent activity
+## Dashboard Page
 
-- **API Key List**
-  - All keys with balances
-  - Usage statistics
-  - Management options
+### Wallet Balance Management
 
-## Features
+#### Balance Display Options
 
-### Viewing API Keys
+Switch between display units using the toggle buttons:
 
-The main table shows all API keys with:
+- **msat** - Millisatoshis (highest precision)
+- **sat** - Satoshis (standard Bitcoin unit)
+- **usd** - US Dollar equivalent (when exchange rate available)
 
-| Column | Description |
-|--------|-------------|
-| API Key | Masked key (first/last 4 chars) |
-| Balance | Current balance in sats |
-| Created | Creation timestamp |
-| Last Used | Most recent API call |
-| Total Spent | Lifetime usage |
-| Status | Active/Expired/Disabled |
+#### Balance Overview
 
-### Searching and Filtering
+The dashboard displays three key metrics:
 
-- **Search**: Find keys by partial match
-- **Sort**: Click column headers to sort
-- **Filter**: Show only active/expired keys
-- **Export**: Download data as CSV
+- **Your Balance (Total)** - Available funds for node operator
+- **Total Wallet** - Combined balance across all Cashu mints
+- **User Balance** - Funds held for API key holders
 
-### Key Details
+#### Detailed Balance Breakdown
 
-Click on any key to view:
+View balances by mint with the following information:
 
-- Full API key (masked by default)
-- Complete transaction history
-- Usage graphs
-- Metadata (name, expiry, refund address)
+| Column      | Description                           |
+| ----------- | ------------------------------------- |
+| Mint / Unit | Cashu mint URL and currency unit      |
+| Wallet      | Total funds in this mint              |
+| Users       | Funds belonging to API key holders    |
+| Owner       | Your available funds (Wallet - Users) |
 
-## Balance Management
+### Temporary Balances
 
-### Viewing Balances
+Monitor API key activity with:
 
-Balances are displayed in multiple units:
+- **Summary Cards** - Total balance, total spent, total requests
+- **Search Functionality** - Filter by key hash or refund address
+- **Detailed Table** - Individual key balances with expiry times
+- **Auto-refresh** - Updates every 60 seconds
 
-- **Sats**: Standard satoshi units
-- **mSats**: Millisatoshis (internal precision)
-- **BTC**: Bitcoin decimal format
-- **USD**: Approximate USD value
+### Fund Management
 
-### Balance History
+#### Withdrawing Funds
 
-View balance changes over time:
+To withdraw your available balance:
 
-```
-Time         | Type      | Amount  | Balance | Description
--------------|-----------|---------|---------|-------------
-12:34:56     | Deposit   | +10,000 | 10,000  | Token redemption
-12:35:12     | Usage     | -154    | 9,846   | gpt-3.5-turbo call
-12:36:45     | Usage     | -210    | 9,636   | gpt-4 call
-```
+1. Click the **Withdraw** button
+2. Select which mint to withdraw from
+3. Specify the amount (or withdraw full balance)
+4. Click **Generate Token**
+5. Copy the generated eCash token
+6. Import the token into your Cashu wallet
 
-## Withdrawals
+#### Real-time Updates
 
-### Manual Withdrawal
+- Balances refresh automatically every 30 seconds
+- Manual refresh option available
+- Live Bitcoin/USD exchange rate integration
+- Error handling for mint connectivity issues
 
-To withdraw funds from an API key:
+## Models Management Page
 
-1. Click "Withdraw" next to the key
-2. Optionally specify amount (default: full balance)
-3. Select target Cashu mint
-4. Click "Generate Token"
-5. Copy the eCash token
-6. Redeem in your Cashu wallet
+### Model Organization
 
-### Bulk Operations
+Models are organized by provider groups with tabs:
 
-For multiple withdrawals:
+- **All Models** - Combined view of all available models
+- **Provider-specific tabs** - Individual providers (OpenRouter, Azure, etc.)
+- Badge indicators showing active/total model counts
 
-1. Select keys using checkboxes
-2. Click "Bulk Actions" → "Withdraw"
-3. Tokens are generated for each key
-4. Download all tokens as text file
+### Model Management Features
 
-### Automatic Withdrawals
+#### Individual Model Operations
 
-If configured with `RECEIVE_LN_ADDRESS`:
+For each model you can:
 
-- Balances above threshold auto-convert to Lightning
-- Sent to configured Lightning address
-- View payout history in dashboard
+- **Toggle Enable/Disable** - Control model availability
+- **View Details** - Context length, pricing, description
+- **Edit Configuration** - Model-specific settings
+- **Status Indicators** - Green badges for enabled, gray for disabled
 
-## Node Configuration
+#### Bulk Operations
 
-### Viewing Settings
+- **Select All/Deselect All** - Quick selection controls
+- **Bulk Enable/Disable** - Mass model management
+- **Bulk Delete** - Remove model overrides
+- **Provider-level Actions** - Apply settings to all models in a provider
 
-Current node configuration is displayed:
+#### Model Information Display
 
-- Upstream provider URL
-- Enabled features
-- Pricing model
-- Fee structure
+- **Model Types** - Text, embedding, image, audio, multimodal indicators
+- **Pricing Information** - Per-million-token costs for input/output
+- **Context Length** - Maximum tokens supported
+- **API Key Status** - Whether credentials are configured
+- **Free Model Indicators** - No-cost models clearly marked
 
-### Models and Pricing
+## Providers Management Page
 
-View supported models and their pricing:
+### Upstream Provider Configuration
 
-| Model | Input $/1K | Output $/1K | Sats/1K |
-|-------|------------|-------------|---------|
-| gpt-3.5-turbo | $0.0015 | $0.002 | 3/4 |
-| gpt-4 | $0.03 | $0.06 | 60/120 |
-| dall-e-3 | - | - | 1000/image |
+Manage AI provider connections and credentials:
 
-### Updating Configuration
+#### Provider Types Supported
 
-> **Note**: Configuration changes require node restart.
+- **OpenRouter** - Multi-model aggregator
+- **Azure OpenAI** - Microsoft's OpenAI service
+- **OpenAI** - Direct OpenAI integration
+- **Custom Providers** - Any OpenAI-compatible API
 
-To update settings:
+#### Adding New Providers
 
-1. Modify environment variables
-2. Restart the node
-3. Verify changes in dashboard
+1. Click **Add Provider**
+2. Select **Provider Type** from dropdown
+3. Enter **Base URL** (auto-populated for known providers)
+4. Add **API Key** for authentication
+5. Set **API Version** (required for Azure)
+6. Toggle **Enabled** status
+7. Click **Create**
 
-## Analytics
+#### Provider Management
 
-### Usage Statistics
+**Provider Cards Display:**
 
-View comprehensive usage data:
+- Provider type and status (Enabled/Disabled)
+- Base URL configuration
+- Action buttons (Models, Edit, Delete)
 
-- **Requests per Day**: Line graph
-- **Token Usage**: Stacked bar chart
-- **Model Distribution**: Pie chart
-- **Cost Analysis**: Breakdown by model
+**Available Actions:**
 
-### Performance Metrics
+- **Edit** - Modify provider configuration
+- **Delete** - Remove provider (with confirmation)
+- **View Models** - Expand model discovery interface
+- **Enable/Disable** - Toggle provider availability
 
-Monitor node performance:
+#### Model Discovery
 
-- Average response time
-- Request success rate
-- Upstream API latency
-- Cache hit ratio
+Each provider shows two types of models:
 
-### Export Data
+**Provided Models Tab:**
 
-Export analytics data:
+- Auto-discovered from provider's catalog
+- Read-only model information
+- Real-time availability updates
 
-1. Select date range
-2. Choose metrics
-3. Click "Export"
-4. Download as CSV/JSON
+**Custom Models Tab:**
 
-## Security Features
+- Manually configured model overrides
+- Extend or override provider catalog
+- Individual enable/disable controls
 
-### Access Control
+## Settings Page
 
-- Password protection
-- Session timeout (configurable)
-- IP allowlisting (optional)
-- Audit logging
+### Node Configuration
 
-### Security Log
+Configure core node settings and preferences:
 
-View security events:
+#### Basic Information
 
-```
-2024-01-15 12:34:56 | Login Success | IP: 192.168.1.1
-2024-01-15 12:35:12 | Withdrawal | Key: sk-****abcd | Amount: 5000
-2024-01-15 12:40:00 | Session Timeout | IP: 192.168.1.1
-```
+- **Node Name** - Identifier for your node
+- **Node Description** - Descriptive text for your service
+- **HTTP URL** - Public HTTP endpoint
+- **Onion URL** - Tor hidden service address
 
-### Best Practices
+#### Nostr Integration
 
-1. **Strong Password**: Use a long, random password
-2. **HTTPS Only**: Always access via HTTPS
-3. **Regular Monitoring**: Check logs frequently
-4. **Limited Access**: Restrict dashboard access
+- **Public Key (npub)** - Your Nostr public identity
+- **Private Key (nsec)** - Nostr private key with show/hide toggle
+- **Nostr Relays** - Configure relays for provider announcements
 
-## Troubleshooting
+#### Security Settings
 
-### Cannot Access Dashboard
+- **Upstream API Key** - Primary API key for upstream providers
+- **Admin Password** - Change dashboard access password
+- **API Key Visibility** - Control credential display in interface
 
-**Issue**: 404 Not Found
+#### Cashu Mint Management
 
-- Ensure trailing slash: `/admin/`
-- Check if admin routes are enabled
+- **Add Mint URLs** - Configure multiple Cashu mint endpoints
+- **Remove Mints** - Delete unused mint configurations
+- **Mint Validation** - Verify mint endpoint connectivity
 
-**Issue**: Unauthorized
+#### Settings Features
 
-- Verify `ADMIN_PASSWORD` is set
-- Clear browser cookies
-- Try incognito/private mode
-
-### Display Issues
-
-**Issue**: Broken Layout
-
-- Clear browser cache
-- Disable ad blockers
-- Try different browser
-
-**Issue**: Missing Data
-
-- Check database connectivity
-- Verify node is running
-- Review error logs
-
-### Withdrawal Problems
-
-**Issue**: Token Generation Fails
-
-- Check mint connectivity
-- Verify sufficient balance
-- Try different mint
-
-**Issue**: Invalid Token
-
-- Ensure complete token copy
-- Check token hasn't expired
-- Verify mint compatibility
-
-## Advanced Features
-
-### Custom Branding
-
-Customize dashboard appearance:
-
-```bash
-# Environment variables
-ADMIN_LOGO_URL=https://example.com/logo.png
-ADMIN_THEME_COLOR=#FF6B00
-ADMIN_CUSTOM_CSS=/path/to/custom.css
-```
-
-### API Access
-
-Access admin functions programmatically:
-
-```bash
-# Get node stats
-curl -X GET https://your-node.com/admin/api/stats \
-  -H "X-Admin-Password: your-password"
-
-# Export key data
-curl -X GET https://your-node.com/admin/api/keys \
-  -H "X-Admin-Password: your-password" \
-  -H "Accept: application/json"
-```
-
-### Webhooks
-
-Configure notifications:
-
-```bash
-ADMIN_WEBHOOK_URL=https://example.com/webhook
-ADMIN_WEBHOOK_EVENTS=withdrawal,low_balance,error
-```
-
-## Dashboard Shortcuts
-
-### Keyboard Navigation
-
-- `Ctrl+K`: Quick search
-- `Ctrl+R`: Refresh data
-- `Ctrl+E`: Export current view
-- `Escape`: Close modals
-
-### Quick Actions
-
-- Double-click to copy API key
-- Right-click for context menu
-- Drag to reorder columns
-- Shift-click to select multiple
-
-## Mobile Access
-
-The dashboard is mobile-responsive:
-
-- Touch-optimized controls
-- Swipe navigation
-- Compact view mode
-- Offline capability
+- **Real-time Save** - Changes apply immediately
+- **Validation** - Form validation with error feedback
+- **Secure Fields** - Password masking with reveal toggles
+- **Reload Functionality** - Refresh configuration from server
 
 ## Next Steps
 
-- [Models & Pricing](models-pricing.md) - Configure pricing
-- [API Reference](../api/overview.md) - Admin API endpoints
-- [Advanced Configuration](../advanced/custom-pricing.md) - Advanced settings
+- [Payment Flow](payment-flow.md) - Understanding Bitcoin payment processing
+- [Using the API](using-api.md) - Making API requests to your node
+- [Models & Pricing](models-pricing.md) - Configuring model pricing and fees
+- [API Reference](../api/overview.md) - Complete API documentation
