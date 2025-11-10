@@ -288,22 +288,6 @@ export function AdminSettings() {
           </CardContent>
         </Card>
 
-        {/* Security Settings */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Security Settings</CardTitle>
-            <CardDescription>
-              Configure authentication and API access
-            </CardDescription>
-          </CardHeader>
-          <CardContent className='space-y-4'>
-            {renderSecretField(
-              'upstream_api_key',
-              'Upstream API Key',
-              'Enter API key'
-            )}
-          </CardContent>
-        </Card>
         {/* Cashu Mints */}
         <Card>
           <CardHeader>

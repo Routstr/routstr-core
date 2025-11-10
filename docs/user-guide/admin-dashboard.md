@@ -195,12 +195,6 @@ Configure core node settings and preferences:
 - **Private Key (nsec)** - Nostr private key with show/hide toggle
 - **Nostr Relays** - Configure relays for provider announcements
 
-#### Security Settings
-
-- **Upstream API Key** - Primary API key for upstream providers
-- **Admin Password** - Change dashboard access password
-- **API Key Visibility** - Control credential display in interface
-
 #### Cashu Mint Management
 
 - **Add Mint URLs** - Configure multiple Cashu mint endpoints
