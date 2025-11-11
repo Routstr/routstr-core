@@ -11,15 +11,13 @@ if TYPE_CHECKING:
 from ..core import get_logger
 from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
 from ..payment.models import Model
-from . import (
-    AnthropicUpstreamProvider,
-    AzureUpstreamProvider,
-    BaseUpstreamProvider,
-    GenericUpstreamProvider,
-    OllamaUpstreamProvider,
-    OpenAIUpstreamProvider,
-    OpenRouterUpstreamProvider,
-)
+from .anthropic import AnthropicUpstreamProvider
+from .azure import AzureUpstreamProvider
+from .base import BaseUpstreamProvider
+from .generic import GenericUpstreamProvider
+from .ollama import OllamaUpstreamProvider
+from .openai import OpenAIUpstreamProvider
+from .openrouter import OpenRouterUpstreamProvider
 
 logger = get_logger(__name__)
 

@@ -6,7 +6,6 @@ from .helpers import (
     _instantiate_provider,
     _seed_providers_from_settings,
     get_all_models_with_overrides,
-    get_model_with_override,
     init_upstreams,
     refresh_upstreams_models_periodically,
     resolve_model_alias,
