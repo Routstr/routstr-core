@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 class XAIUpstreamProvider(BaseUpstreamProvider):
     """Upstream provider specifically configured for XAI API."""
 
-    provider_type = "xai"
+    provider_type = "x-ai"
     default_base_url = "https://api.x.ai/v1"
     platform_url = "https://console.x.ai/"
 
@@ -38,9 +38,9 @@ class XAIUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'xai/' prefix for XAI API compatibility."""
-        return model_id.removeprefix("xai/")
+        return model_id.removeprefix("x-ai/")
 
     async def fetch_models(self) -> list[Model]:
         """Fetch XAI models from OpenRouter API filtered by xai source."""
-        models_data = await async_fetch_openrouter_models(source_filter="xai")
+        models_data = await async_fetch_openrouter_models(source_filter="x-ai")
         return [Model(**model) for model in models_data]  # type: ignore

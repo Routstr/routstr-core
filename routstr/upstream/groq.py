@@ -39,8 +39,3 @@ class GroqUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'groq/' prefix for Groq API compatibility."""
         return model_id.removeprefix("groq/")
-
-    async def fetch_models(self) -> list[Model]:
-        """Fetch Groq models from OpenRouter API filtered by groq source."""
-        models_data = await async_fetch_openrouter_models(source_filter="groq")
-        return [Model(**model) for model in models_data]  # type: ignore

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import traceback
@@ -1698,7 +1699,95 @@ class BaseUpstreamProvider:
             List of Model objects with pricing
         """
         logger.debug(f"Fetching models for {self.provider_type or self.base_url}")
-        return []
+
+        try:
+            or_models, provider_models_response = await asyncio.gather(
+                self._fetch_openrouter_models(),
+                self._fetch_provider_models(),
+            )
+
+            provider_model_ids = self._parse_model_ids(provider_models_response)
+
+            found_models = []
+            not_found_models = []
+
+            for model_id in provider_model_ids:
+                or_model = self._match_model(model_id, or_models)
+                if or_model:
+                    try:
+                        model = Model(**or_model)  # type: ignore
+                        found_models.append(model)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to parse model {model_id}",
+                            extra={"error": str(e), "error_type": type(e).__name__},
+                        )
+                else:
+                    not_found_models.append(model_id)
+
+            logger.info(
+                "Fetched models for provider",
+                extra={
+                    "provider": self.provider_type or self.base_url,
+                    "found_count": len(found_models),
+                    "not_found_count": len(not_found_models),
+                },
+            )
+
+            if not_found_models:
+                logger.debug(
+                    "Models not found in OpenRouter",
+                    extra={"not_found_models": not_found_models},
+                )
+
+            return found_models
+
+        except Exception as e:
+            logger.error(
+                f"Error fetching models for {self.provider_type or self.base_url}",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
+            return []
+
+    async def _fetch_openrouter_models(self) -> list[dict]:
+        """Fetch models from OpenRouter API."""
+        url = "https://openrouter.ai/api/v1/models"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            models = response.json()
+            return [
+                model
+                for model in models.get("data", [])
+                if ":free" not in model.get("id", "").lower()
+            ]
+
+    async def _fetch_provider_models(self) -> dict:
+        """Fetch models from provider's API."""
+        url = f"{self.base_url.rstrip('/')}/models"
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+    def _parse_model_ids(self, response: dict) -> list[str]:
+        """Parse model IDs from provider response."""
+        return [model.get("id") for model in response.get("data", []) if "id" in model]
+
+    def _match_model(self, model_id: str, or_models: list[dict]) -> dict | None:
+        """Match provider model ID with OpenRouter model."""
+        return next(
+            (
+                model
+                for model in or_models
+                if (model.get("id") == model_id)
+                or (model.get("id", "").split("/")[-1] == model_id)
+                or (model.get("canonical_slug") == model_id)
+                or (model.get("canonical_slug", "").split("/")[-1] == model_id)
+            ),
+            None,
+        )
 
     async def refresh_models_cache(self) -> None:
         """Refresh the in-memory models cache from upstream API."""
