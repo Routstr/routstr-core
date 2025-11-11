@@ -6,7 +6,7 @@ from .core.logging import get_logger
 
 if TYPE_CHECKING:
     from .payment.models import Model
-    from .upstream import UpstreamProvider
+    from .upstream import BaseUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -59,7 +59,7 @@ def calculate_model_cost_score(model: "Model") -> float:
     return total_cost
 
 
-def get_provider_penalty(provider: "UpstreamProvider") -> float:
+def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
     """Calculate a penalty multiplier for certain providers.
 
     This allows applying policy-based adjustments beyond pure cost.
@@ -86,9 +86,9 @@ def get_provider_penalty(provider: "UpstreamProvider") -> float:
 
 def should_prefer_model(
     candidate_model: "Model",
-    candidate_provider: "UpstreamProvider",
+    candidate_provider: "BaseUpstreamProvider",
     current_model: "Model",
-    current_provider: "UpstreamProvider",
+    current_provider: "BaseUpstreamProvider",
     alias: str,
 ) -> bool:
     """Determine if candidate model should replace current model for an alias.
@@ -166,10 +166,10 @@ def should_prefer_model(
 
 
 def create_model_mappings(
-    upstreams: list["UpstreamProvider"],
+    upstreams: list["BaseUpstreamProvider"],
     overrides_by_id: dict[str, tuple],
     disabled_model_ids: set[str],
-) -> tuple[dict[str, "Model"], dict[str, "UpstreamProvider"], dict[str, "Model"]]:
+) -> tuple[dict[str, "Model"], dict[str, "BaseUpstreamProvider"], dict[str, "Model"]]:
     """Create optimal model mappings based on cost and provider preferences.
 
     This is the main entry point for the algorithm. It processes all upstream providers
@@ -196,12 +196,12 @@ def create_model_mappings(
     from .upstream import resolve_model_alias
 
     model_instances: dict[str, "Model"] = {}
-    provider_map: dict[str, "UpstreamProvider"] = {}
+    provider_map: dict[str, "BaseUpstreamProvider"] = {}
     unique_models: dict[str, "Model"] = {}
 
     # Separate OpenRouter from other providers
-    openrouter: "UpstreamProvider" | None = None
-    other_upstreams: list["UpstreamProvider"] = []
+    openrouter: "BaseUpstreamProvider" | None = None
+    other_upstreams: list["BaseUpstreamProvider"] = []
 
     for upstream in upstreams:
         base_url = getattr(upstream, "base_url", "")
@@ -215,7 +215,7 @@ def create_model_mappings(
         return model_id.split("/", 1)[1] if "/" in model_id else model_id
 
     def _maybe_set_alias(
-        alias: str, model: "Model", provider: "UpstreamProvider"
+        alias: str, model: "Model", provider: "BaseUpstreamProvider"
     ) -> None:
         """Set alias to model/provider if not set or if new model is preferred."""
         existing_model = model_instances.get(alias)
@@ -233,7 +233,7 @@ def create_model_mappings(
                 provider_map[alias] = provider
 
     def process_provider_models(
-        upstream: "UpstreamProvider", is_openrouter: bool = False
+        upstream: "BaseUpstreamProvider", is_openrouter: bool = False
     ) -> None:
         """Process all models from a given provider."""
         upstream_prefix = getattr(upstream, "upstream_name", None)
@@ -258,7 +258,11 @@ def create_model_mappings(
                 unique_models[base_id] = unique_model
 
             # Get all aliases for this model
-            aliases = resolve_model_alias(model_to_use.id, model_to_use.canonical_slug)
+            aliases = resolve_model_alias(
+                model_to_use.id,
+                model_to_use.canonical_slug,
+                alias_ids=model_to_use.alias_ids,
+            )
 
             # Add prefixed alias if applicable
             if upstream_prefix and "/" not in model_to_use.id:

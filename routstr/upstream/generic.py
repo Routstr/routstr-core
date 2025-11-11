@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from .upstream import UpstreamProvider
+from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
     from ..payment.models import Model
@@ -14,7 +14,7 @@ from ..core.logging import get_logger
 logger = get_logger(__name__)
 
 
-class GenericUpstreamProvider(UpstreamProvider):
+class GenericUpstreamProvider(BaseUpstreamProvider):
     """Generic upstream provider that can fetch models from any OpenAI-compatible API."""
 
     def __init__(
