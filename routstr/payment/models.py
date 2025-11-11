@@ -60,6 +60,7 @@ class Model(BaseModel):
     enabled: bool = True
     upstream_provider_id: int | None = None
     canonical_slug: str | None = None
+    alias_ids: list[str] | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -409,6 +410,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
         )
     except Exception as e:
         logger.error(

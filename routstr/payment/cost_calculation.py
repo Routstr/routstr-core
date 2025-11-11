@@ -25,7 +25,7 @@ class CostDataError(BaseModel):
     code: str
 
 
-async def calculate_cost(
+async def calculate_cost(  # todo: can be sync
     response_data: dict, max_cost: int, session: AsyncSession
 ) -> CostData | MaxCostData | CostDataError:
     """
@@ -78,13 +78,9 @@ async def calculate_cost(
             extra={"model": response_model},
         )
 
-        from ..proxy import get_upstreams
-        from ..upstream import get_model_with_override
+        from ..proxy import get_model_instance
 
-        upstreams = get_upstreams()
-        model_obj = await get_model_with_override(
-            response_model, upstreams, session=session
-        )
+        model_obj = get_model_instance(response_model)
 
         if not model_obj:
             logger.error(

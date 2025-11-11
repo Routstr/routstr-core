@@ -23,14 +23,14 @@ from .payment.helpers import (
     get_max_cost_for_model,
 )
 from .payment.models import Model
-from .upstream import UpstreamProvider, init_upstreams
+from .upstream import BaseUpstreamProvider, init_upstreams
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
 
-_upstreams: list[UpstreamProvider] = []
+_upstreams: list[BaseUpstreamProvider] = []
 _model_instances: dict[str, Model] = {}  # All aliases -> Model
-_provider_map: dict[str, UpstreamProvider] = {}  # All aliases -> Provider
+_provider_map: dict[str, BaseUpstreamProvider] = {}  # All aliases -> Provider
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
@@ -53,7 +53,7 @@ async def reinitialize_upstreams() -> None:
     await refresh_model_maps()
 
 
-def get_upstreams() -> list[UpstreamProvider]:
+def get_upstreams() -> list[BaseUpstreamProvider]:
     """Get the initialized upstream providers.
 
     Returns:
@@ -67,7 +67,7 @@ def get_model_instance(model_id: str) -> Model | None:
     return _model_instances.get(model_id)
 
 
-def get_provider_for_model(model_id: str) -> UpstreamProvider | None:
+def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
     """Get UpstreamProvider for model ID from global cache."""
     return _provider_map.get(model_id)
 

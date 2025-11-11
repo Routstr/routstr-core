@@ -25,7 +25,6 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
-    async_fetch_openrouter_models,
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
@@ -33,7 +32,7 @@ from ..wallet import recieve_token, send_token
 logger = get_logger(__name__)
 
 
-class UpstreamProvider:
+class BaseUpstreamProvider:
     """Provider for forwarding requests to an upstream AI service API."""
 
     base_url: str
@@ -1626,6 +1625,7 @@ class UpstreamProvider:
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
         )
 
         (
@@ -1648,6 +1648,7 @@ class UpstreamProvider:
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
         )
 
     async def fetch_models(self) -> list[Model]:
@@ -1702,111 +1703,3 @@ class UpstreamProvider:
             Model object or None if not found
         """
         return self._models_by_id.get(model_id)
-
-
-class OpenAIUpstreamProvider(UpstreamProvider):
-    """Upstream provider specifically configured for OpenAI API."""
-
-    def __init__(self, api_key: str, provider_fee: float = 1.01):
-        self.upstream_name = "openai"
-        super().__init__(
-            base_url="https://api.openai.com/v1",
-            api_key=api_key,
-            provider_fee=provider_fee,
-        )
-
-    def transform_model_name(self, model_id: str) -> str:
-        """Strip 'openai/' prefix for OpenAI API compatibility."""
-        return model_id.removeprefix("openai/")
-
-    async def fetch_models(self) -> list[Model]:
-        """Fetch OpenAI models from OpenRouter API filtered by openai source."""
-        models_data = await async_fetch_openrouter_models(source_filter="openai")
-        return [Model(**model) for model in models_data]  # type: ignore
-
-
-class AnthropicUpstreamProvider(UpstreamProvider):
-    """Upstream provider specifically configured for Anthropic API."""
-
-    def __init__(self, api_key: str, provider_fee: float = 1.01):
-        self.upstream_name = "anthropic"
-        super().__init__(
-            base_url="https://api.anthropic.com/v1",
-            api_key=api_key,
-            provider_fee=provider_fee,
-        )
-
-    def transform_model_name(self, model_id: str) -> str:
-        """Strip 'anthropic/' prefix for Anthropic API compatibility."""
-        return model_id.removeprefix("anthropic/")
-
-    async def fetch_models(self) -> list[Model]:
-        """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
-        models_data = await async_fetch_openrouter_models(source_filter="anthropic")
-        return [Model(**model) for model in models_data]  # type: ignore
-
-
-class AzureUpstreamProvider(UpstreamProvider):
-    """Upstream provider specifically configured for Azure OpenAI Service."""
-
-    def __init__(
-        self,
-        base_url: str,
-        api_key: str,
-        api_version: str,
-        provider_fee: float = 1.01,
-    ):
-        """Initialize Azure provider with API key and version.
-
-        Args:
-            base_url: Azure OpenAI endpoint base URL
-            api_key: Azure OpenAI API key for authentication
-            api_version: Azure OpenAI API version (e.g., "2024-02-15-preview")
-            provider_fee: Provider fee multiplier (default 1.01 for 1% fee)
-        """
-        super().__init__(
-            base_url=base_url,
-            api_key=api_key,
-            provider_fee=provider_fee,
-        )
-        self.api_version = api_version
-
-    def prepare_params(
-        self, path: str, query_params: Mapping[str, str] | None
-    ) -> Mapping[str, str]:
-        """Prepare query parameters for Azure OpenAI, adding API version.
-
-        Args:
-            path: Request path
-            query_params: Original query parameters from the client
-
-        Returns:
-            Query parameters dict with Azure API version added for chat completions
-        """
-        params = dict(query_params or {})
-        if path.endswith("chat/completions"):
-            params["api-version"] = self.api_version
-        return params
-
-
-class OpenRouterUpstreamProvider(UpstreamProvider):
-    """Upstream provider specifically configured for OpenRouter API."""
-
-    def __init__(self, api_key: str, provider_fee: float = 1.06):
-        """Initialize OpenRouter provider with API key.
-
-        Args:
-            api_key: OpenRouter API key for authentication
-            provider_fee: Provider fee multiplier (default 1.06 for 6% fee)
-        """
-        self.upstream_name = "openrouter"
-        super().__init__(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=api_key,
-            provider_fee=provider_fee,
-        )
-
-    async def fetch_models(self) -> list[Model]:
-        """Fetch all OpenRouter models."""
-        models_data = await async_fetch_openrouter_models()
-        return [Model(**model) for model in models_data]  # type: ignore
