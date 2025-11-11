@@ -102,8 +102,8 @@ importers:
         specifier: ^8.21.3
         version: 8.21.3(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
       axios:
-        specifier: ^1.8.4
-        version: 1.12.2
+        specifier: ^1.13.2
+        version: 1.13.2
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -1605,8 +1605,8 @@ packages:
     resolution: {integrity: sha512-ilYanEU8vxxBexpJd8cWM4ElSQq4QctCLKih0TSfjIfCQTeyH/6zVrmIJfLPrKTKJRbiG+cfnZbQIjAlJmF1jQ==}
     engines: {node: '>=4'}
 
-  axios@1.12.2:
-    resolution: {integrity: sha512-vMJzPewAlRyOgxV2dU0Cuz2O8zzzx9VYtbJOaBgXFeLc4IV/Eg50n4LowmehOOR61S8ZMpc2K5Sa7g6A4jfkUw==}
+  axios@1.13.2:
+    resolution: {integrity: sha512-VPk9ebNqPcy5lRGuSlKx752IlDatOjT9paPlm8A7yOuW2Fbvp4X3JznJtT4f0GzGLLiWE9W8onz51SqLYwzGaA==}
 
   axobject-query@4.1.0:
     resolution: {integrity: sha512-qIj0G9wZbMGNLjLmg1PT6v2mE9AH2zlnADJD/2tC6E00hgmhUOfEB6greHPAfLRSufHqROIUTkw6E+M3lH0PTQ==}
@@ -3326,7 +3326,7 @@ snapshots:
     dependencies:
       '@gandlaf21/bolt11-decode': 3.1.1
       '@noble/secp256k1': 1.7.2
-      axios: 1.12.2
+      axios: 1.13.2
       buffer: 6.0.3
     transitivePeerDependencies:
       - debug
@@ -4698,7 +4698,7 @@ snapshots:
 
   axe-core@4.11.0: {}
 
-  axios@1.12.2:
+  axios@1.13.2:
     dependencies:
       follow-redirects: 1.15.11
       form-data: 4.0.4
@@ -5750,7 +5750,7 @@ snapshots:
       '@aws-crypto/sha256-js': 4.0.0
       aes-js: 3.1.2
       assert: 2.1.0
-      axios: 1.12.2
+      axios: 1.13.2
       base64-js: 1.5.1
       bech32: 2.0.0
       bolt11: 1.4.1
