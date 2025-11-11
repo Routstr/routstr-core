@@ -7,6 +7,7 @@ import httpx
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
+    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -16,6 +17,10 @@ logger = get_logger(__name__)
 
 class GenericUpstreamProvider(BaseUpstreamProvider):
     """Generic upstream provider that can fetch models from any OpenAI-compatible API."""
+
+    provider_type = "generic"
+    default_base_url = "http://localhost:8888"
+    platform_url = None
 
     def __init__(
         self,
@@ -38,6 +43,26 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             api_key=api_key,
             provider_fee=provider_fee,
         )
+
+    @classmethod
+    def from_db_row(
+        cls, provider_row: "UpstreamProviderRow"
+    ) -> "GenericUpstreamProvider":
+        return cls(
+            base_url=provider_row.base_url,
+            api_key=provider_row.api_key,
+            provider_fee=provider_row.provider_fee,
+        )
+
+    @classmethod
+    def get_provider_metadata(cls) -> dict[str, object]:
+        return {
+            "id": cls.provider_type,
+            "name": "Generic",
+            "default_base_url": cls.default_base_url,
+            "fixed_base_url": False,
+            "platform_url": cls.platform_url,
+        }
 
     async def fetch_models(self) -> list[Model]:
         """Fetch models from upstream API using /models endpoint."""

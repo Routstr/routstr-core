@@ -78,7 +78,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         from ..payment.price import _update_prices
         from ..proxy import get_upstreams
-        from ..upstream import refresh_upstreams_models_periodically
+        from ..upstream.helpers import refresh_upstreams_models_periodically
 
         await _update_prices()
         await initialize_upstreams()

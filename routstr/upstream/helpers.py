@@ -11,13 +11,7 @@ if TYPE_CHECKING:
 from ..core import get_logger
 from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
 from ..payment.models import Model
-from .anthropic import AnthropicUpstreamProvider
-from .azure import AzureUpstreamProvider
 from .base import BaseUpstreamProvider
-from .generic import GenericUpstreamProvider
-from .ollama import OllamaUpstreamProvider
-from .openai import OpenAIUpstreamProvider
-from .openrouter import OpenRouterUpstreamProvider
 
 logger = get_logger(__name__)
 
@@ -148,7 +142,7 @@ async def refresh_upstreams_models_periodically(
                     await upstream.refresh_models_cache()
                 except Exception as e:
                     logger.error(
-                        f"Error refreshing models for {upstream.upstream_name or upstream.base_url}",
+                        f"Error refreshing models for {upstream.base_url}",
                         extra={"error": str(e), "error_type": type(e).__name__},
                     )
         except asyncio.CancelledError:
@@ -220,61 +214,47 @@ async def _seed_providers_from_settings(
     """
     from sqlmodel import select
 
-    from ..core.settings import settings
+    from . import upstream_provider_classes
 
     providers_to_add: list[UpstreamProviderRow] = []
     seeded_base_urls: set[str] = set()
 
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if openai_api_key:
-        base_url = "https://api.openai.com/v1"
-        result = await session.exec(
-            select(UpstreamProviderRow).where(UpstreamProviderRow.base_url == base_url)
-        )
-        if not result.first():
-            providers_to_add.append(
-                UpstreamProviderRow(
-                    provider_type="openai",
-                    base_url=base_url,
-                    api_key=openai_api_key,
-                    enabled=True,
-                )
-            )
-            seeded_base_urls.add(base_url)
+    provider_classes_by_type = {
+        cls.provider_type: cls
+        for cls in upstream_provider_classes  # type: ignore[attr-defined]
+    }
 
-    anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_api_key:
-        base_url = "https://api.anthropic.com/v1"
-        result = await session.exec(
-            select(UpstreamProviderRow).where(UpstreamProviderRow.base_url == base_url)
-        )
-        if not result.first():
-            providers_to_add.append(
-                UpstreamProviderRow(
-                    provider_type="anthropic",
-                    base_url=base_url,
-                    api_key=anthropic_api_key,
-                    enabled=True,
-                )
-            )
-            seeded_base_urls.add(base_url)
+    env_mappings: list[tuple[str, str, str | None, str | None]] = [
+        ("OPENAI_API_KEY", "openai", None, None),
+        ("ANTHROPIC_API_KEY", "anthropic", None, None),
+        ("OPENROUTER_API_KEY", "openrouter", None, None),
+        ("GROQ_API_KEY", "groq", None, None),
+        ("PERPLEXITY_API_KEY", "perplexity", None, None),
+        ("FIREWORKS_API_KEY", "fireworks", None, None),
+        ("XAI_API_KEY", "xai", None, None),
+    ]
 
-    openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-    if openrouter_api_key:
-        base_url = "https://openrouter.ai/api/v1"
-        result = await session.exec(
-            select(UpstreamProviderRow).where(UpstreamProviderRow.base_url == base_url)
-        )
-        if not result.first():
-            providers_to_add.append(
-                UpstreamProviderRow(
-                    provider_type="openrouter",
-                    base_url=base_url,
-                    api_key=openrouter_api_key,
-                    enabled=True,
+    for env_key, provider_type, _, _ in env_mappings:
+        api_key = os.environ.get(env_key)
+        if api_key and provider_type in provider_classes_by_type:
+            provider_class = provider_classes_by_type[provider_type]
+            if provider_class.default_base_url:  # type: ignore[attr-defined]
+                base_url = provider_class.default_base_url  # type: ignore[attr-defined]
+                result = await session.exec(
+                    select(UpstreamProviderRow).where(
+                        UpstreamProviderRow.base_url == base_url
+                    )
                 )
-            )
-            seeded_base_urls.add(base_url)
+                if not result.first():
+                    providers_to_add.append(
+                        UpstreamProviderRow(
+                            provider_type=provider_type,
+                            base_url=base_url,
+                            api_key=api_key,
+                            enabled=True,
+                        )
+                    )
+                    seeded_base_urls.add(base_url)
 
     ollama_base_url = os.environ.get("OLLAMA_BASE_URL")
     if ollama_base_url:
@@ -323,48 +303,20 @@ async def _seed_providers_from_settings(
                 )
             )
             if not result.first():
-                if "api.openai.com" in base_url.lower():
-                    providers_to_add.append(
-                        UpstreamProviderRow(
-                            provider_type="openai",
-                            base_url=base_url,
-                            api_key=settings.upstream_api_key,
-                            enabled=True,
-                        )
+                providers_to_add.append(
+                    UpstreamProviderRow(
+                        provider_type="custom",
+                        base_url=base_url,
+                        api_key=settings.upstream_api_key,
+                        enabled=True,
                     )
-                elif "api.anthropic.com" in base_url.lower():
-                    providers_to_add.append(
-                        UpstreamProviderRow(
-                            provider_type="anthropic",
-                            base_url=base_url,
-                            api_key=settings.upstream_api_key,
-                            enabled=True,
-                        )
-                    )
-                elif "openrouter.ai/api/v1" in base_url.lower():
-                    providers_to_add.append(
-                        UpstreamProviderRow(
-                            provider_type="openrouter",
-                            base_url=base_url,
-                            api_key=settings.upstream_api_key,
-                            enabled=True,
-                        )
-                    )
-                else:
-                    providers_to_add.append(
-                        UpstreamProviderRow(
-                            provider_type="custom",
-                            base_url=base_url,
-                            api_key=settings.upstream_api_key,
-                            enabled=True,
-                        )
-                    )
+                )
                 seeded_base_urls.add(base_url)
 
     for provider in providers_to_add:
         session.add(provider)
         logger.info(
-            f"Seeding {provider.provider_type} provider",
+            f"Seeding {provider.provider_type} provider",  # type: ignore[str-format]
             extra={"base_url": provider.base_url},
         )
 
@@ -380,53 +332,35 @@ def _instantiate_provider(
     Returns:
         Instantiated provider or None if provider type is unknown
     """
+    from . import upstream_provider_classes
+
     try:
-        if provider_row.provider_type == "openai":
-            return OpenAIUpstreamProvider(
-                provider_row.api_key, provider_row.provider_fee
-            )
-        elif provider_row.provider_type == "anthropic":
-            return AnthropicUpstreamProvider(
-                provider_row.api_key, provider_row.provider_fee
-            )
-        elif provider_row.provider_type == "azure":
-            if not provider_row.api_version:
+        provider_classes_by_type = {
+            cls.provider_type: cls
+            for cls in upstream_provider_classes  # type: ignore[attr-defined]
+        }
+
+        provider_class = provider_classes_by_type.get(provider_row.provider_type)
+
+        if provider_class:
+            provider = provider_class.from_db_row(provider_row)  # type: ignore[attr-defined]
+            if provider is None:
                 logger.error(
-                    "Azure provider missing api_version",
+                    f"Failed to instantiate {provider_row.provider_type} provider",
                     extra={"base_url": provider_row.base_url},
                 )
-                return None
-            return AzureUpstreamProvider(
-                provider_row.base_url,
-                provider_row.api_key,
-                provider_row.api_version,
-                provider_row.provider_fee,
-            )
-        elif provider_row.provider_type == "openrouter":
-            return OpenRouterUpstreamProvider(
-                provider_row.api_key, provider_row.provider_fee
-            )
-        elif provider_row.provider_type == "ollama":
-            return OllamaUpstreamProvider(
-                provider_row.base_url, provider_row.api_key, provider_row.provider_fee
-            )
-        elif provider_row.provider_type == "generic":
-            return GenericUpstreamProvider(
-                provider_row.base_url,
-                provider_row.api_key,
-                provider_row.provider_fee,
-                provider_row.provider_type,
-            )
-        elif provider_row.provider_type == "custom":
+            return provider
+
+        if provider_row.provider_type == "custom":
             return BaseUpstreamProvider(
                 provider_row.base_url, provider_row.api_key, provider_row.provider_fee
             )
-        else:
-            logger.error(
-                f"Unknown provider type: {provider_row.provider_type}",
-                extra={"base_url": provider_row.base_url},
-            )
-            return None
+
+        logger.error(
+            f"Unknown provider type: {provider_row.provider_type}",
+            extra={"base_url": provider_row.base_url},
+        )
+        return None
     except Exception as e:
         logger.error(
             f"Failed to instantiate provider: {e}",
