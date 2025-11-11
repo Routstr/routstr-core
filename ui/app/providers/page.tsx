@@ -194,6 +194,11 @@ export default function ProvidersPage() {
     return providerType?.fixed_base_url || false;
   };
 
+  const getPlatformUrl = (type: string) => {
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.platform_url || null;
+  };
+
   const toggleProviderExpansion = (providerId: number) => {
     const newExpanded = new Set(expandedProviders);
     if (newExpanded.has(providerId)) {
@@ -285,7 +290,19 @@ export default function ProvidersPage() {
                       />
                     </div>
                     <div className='grid gap-2'>
-                      <Label htmlFor='api_key'>API Key</Label>
+                      <div className='flex items-center justify-between'>
+                        <Label htmlFor='api_key'>API Key</Label>
+                        {getPlatformUrl(formData.provider_type) && (
+                          <a
+                            href={getPlatformUrl(formData.provider_type)!}
+                            target='_blank'
+                            rel='noopener noreferrer'
+                            className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                          >
+                            Get Your API Key Here →
+                          </a>
+                        )}
+                      </div>
                       <Input
                         id='api_key'
                         type='password'
@@ -694,9 +711,21 @@ export default function ProvidersPage() {
                 />
               </div>
               <div className='grid gap-2'>
-                <Label htmlFor='edit_api_key'>
-                  API Key (leave blank to keep current)
-                </Label>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='edit_api_key'>
+                    API Key (leave blank to keep current)
+                  </Label>
+                  {getPlatformUrl(formData.provider_type) && (
+                    <a
+                      href={getPlatformUrl(formData.provider_type)!}
+                      target='_blank'
+                      rel='noopener noreferrer'
+                      className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                    >
+                      Get Your API Key Here →
+                    </a>
+                  )}
+                </div>
                 <Input
                   id='edit_api_key'
                   type='password'

@@ -22,7 +22,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
 
     provider_type = "ollama"
     default_base_url = "http://localhost:11434"
-    platform_url = "https://ollama.com/"
+    platform_url = None
 
     def __init__(
         self,
