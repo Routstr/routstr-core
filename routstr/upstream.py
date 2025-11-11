@@ -24,7 +24,9 @@ from .upstreams.generic import GenericUpstreamProvider
 logger = get_logger(__name__)
 
 
-def resolve_model_alias(model_id: str, canonical_slug: str | None = None) -> list[str]:
+def resolve_model_alias(
+    model_id: str, canonical_slug: str | None = None, alias_ids: list[str] | None = None
+) -> list[str]:
     """Resolve model ID to all possible aliases.
 
     Returns list of aliases including canonical slug and variations without provider prefix.
@@ -65,6 +67,9 @@ def resolve_model_alias(model_id: str, canonical_slug: str | None = None) -> lis
                 canonical_base = date_pattern.sub("", canonical_without_prefix)
                 if canonical_base not in aliases:
                     aliases.append(canonical_base)
+
+    if alias_ids:
+        aliases.extend(alias_ids)
 
     return aliases
 
@@ -118,55 +123,6 @@ async def get_all_models_with_overrides(
                 all_models[model.id] = model
 
     return list(all_models.values())
-
-
-async def get_model_with_override(
-    model_id: str,
-    upstreams: list[UpstreamProvider],
-    session: AsyncSession,
-) -> Model | None:
-    """Get a specific model from providers with database override applied.
-
-    Resolves model aliases automatically (e.g., both "gpt-5-mini" and "openai/gpt-5-mini").
-
-    Args:
-        model_id: Model identifier (with or without provider prefix)
-        upstreams: List of upstream provider instances
-
-    Returns:
-        Model object or None if not found
-    """
-    from sqlmodel import select
-
-    from .payment.models import _row_to_model
-
-    aliases = resolve_model_alias(model_id)
-
-    for alias in aliases:
-        result = await session.exec(
-            select(ModelRow).where(
-                ModelRow.id == alias,
-                ModelRow.upstream_provider_id.isnot(None),  # type: ignore
-                ModelRow.enabled,
-            )
-        )
-        override_row = result.first()
-        if override_row:
-            provider = await session.get(
-                UpstreamProviderRow, override_row.upstream_provider_id
-            )
-            provider_fee = provider.provider_fee if provider else 1.01
-            return _row_to_model(
-                override_row, apply_provider_fee=True, provider_fee=provider_fee
-            )
-
-    for alias in aliases:
-        for upstream in upstreams:
-            model = upstream.get_cached_model_by_id(alias)
-            if model and model.enabled:
-                return model
-
-    return None
 
 
 async def refresh_upstreams_models_periodically(

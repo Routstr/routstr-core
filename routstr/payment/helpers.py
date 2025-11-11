@@ -104,11 +104,9 @@ async def get_max_cost_for_model(
         return max(settings.min_request_msat, default_cost_msats)
 
     if not model_obj:
-        from ..proxy import get_upstreams
-        from ..upstream import get_model_with_override
+        from ..proxy import get_model_instance
 
-        upstreams = get_upstreams()
-        model_obj = await get_model_with_override(model, upstreams, session)
+        model_obj = get_model_instance(model)
 
     if not model_obj:
         fallback_msats = settings.fixed_cost_per_request * 1000

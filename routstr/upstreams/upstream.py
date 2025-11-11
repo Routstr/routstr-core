@@ -1626,6 +1626,7 @@ class UpstreamProvider:
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
         )
 
         (
@@ -1648,6 +1649,7 @@ class UpstreamProvider:
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
         )
 
     async def fetch_models(self) -> list[Model]:
@@ -1737,13 +1739,33 @@ class AnthropicUpstreamProvider(UpstreamProvider):
         )
 
     def transform_model_name(self, model_id: str) -> str:
-        """Strip 'anthropic/' prefix for Anthropic API compatibility."""
-        return model_id.removeprefix("anthropic/")
+        """Strip 'anthropic/' prefix for Anthropic API compatibility and transform model names."""
+        if model_id.startswith("anthropic/"):
+            model_id = model_id[len("anthropic/") :]
+        fixed_transforms = {
+            "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+            "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+            "claude-opus-4.1": "claude-opus-4-1-20250805",
+            "claude-opus-4": "claude-opus-4-20250514",
+            "claude-sonnet-4": "claude-sonnet-4-20250514",
+            "claude-3.5-haiku": "claude-3-5-haiku-20241022",
+            "claude-3-haiku": "claude-3-haiku-20240307",
+            "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+            "claude-opus-4-1": "claude-opus-4-1-20250805",
+            "claude-3-5-haiku": "claude-3-5-haiku-20241022",
+        }
+        if model_id in fixed_transforms:
+            model_id = fixed_transforms[model_id]
+        return model_id
 
     async def fetch_models(self) -> list[Model]:
         """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
         models_data = await async_fetch_openrouter_models(source_filter="anthropic")
-        return [Model(**model) for model in models_data]  # type: ignore
+        models = [Model(**model) for model in models_data]  # type: ignore
+        for model in models:
+            model.alias_ids = [self.transform_model_name(model.id)]
+        return models
 
 
 class AzureUpstreamProvider(UpstreamProvider):

@@ -258,7 +258,11 @@ def create_model_mappings(
                 unique_models[base_id] = unique_model
 
             # Get all aliases for this model
-            aliases = resolve_model_alias(model_to_use.id, model_to_use.canonical_slug)
+            aliases = resolve_model_alias(
+                model_to_use.id,
+                model_to_use.canonical_slug,
+                alias_ids=model_to_use.alias_ids,
+            )
 
             # Add prefixed alias if applicable
             if upstream_prefix and "/" not in model_to_use.id:
