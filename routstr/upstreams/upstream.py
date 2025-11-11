@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, create_session
-from ..payment.cost_caculation import (
+from ..payment.cost_calculation import (
     CostData,
     CostDataError,
     MaxCostData,
