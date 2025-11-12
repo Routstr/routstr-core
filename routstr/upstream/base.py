@@ -4,7 +4,7 @@ import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import Mapping
+from typing import Mapping, Optional
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
@@ -875,13 +875,14 @@ class BaseUpstreamProvider:
                 )
 
     async def get_x_cashu_cost(
-        self, response_data: dict, max_cost_for_model: int
+        self, response_data: dict, max_cost_for_model: int, request_data: Optional[dict] = None
     ) -> MaxCostData | CostData | None:
         """Calculate cost for X-Cashu payment based on response data.
 
         Args:
             response_data: Response data containing model and usage information
             max_cost_for_model: Maximum cost for the model
+            request_data: Original request data containing messages (for image token calculation)
 
         Returns:
             Cost data object (MaxCostData or CostData) or None if calculation fails
@@ -893,7 +894,7 @@ class BaseUpstreamProvider:
         )
 
         async with create_session() as session:
-            match await calculate_cost(response_data, max_cost_for_model, session):
+            match await calculate_cost(response_data, max_cost_for_model, session, request_data):
                 case MaxCostData() as cost:
                     logger.debug(
                         "Using max cost pricing",
@@ -1017,6 +1018,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        request_data: Optional[dict] = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1075,7 +1077,7 @@ class BaseUpstreamProvider:
             response_data = {"usage": usage_data, "model": model}
             try:
                 cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model
+                    response_data, max_cost_for_model, request_data
                 )
                 if cost_data:
                     if unit == "msat":
@@ -1150,6 +1152,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        request_data: Optional[dict] = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1170,7 +1173,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
-            cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+            cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model, request_data)
 
             if not cost_data:
                 logger.error(
@@ -1280,6 +1283,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        request_data: Optional[dict] = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -1316,11 +1320,11 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str, response, amount, unit, max_cost_for_model, mint, request_data
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str, response, amount, unit, max_cost_for_model, mint, request_data
                 )
 
         except Exception as e:
@@ -1371,6 +1375,17 @@ class BaseUpstreamProvider:
 
         request_body = await request.body()
         transformed_body = self.prepare_request_body(request_body, model_obj)
+
+        # Parse request data for image token calculation
+        request_data = None
+        try:
+            if request_body:
+                request_data = json.loads(request_body.decode('utf-8'))
+        except Exception as e:
+            logger.warning(
+                "Could not parse request body for image token calculation",
+                extra={"error": str(e)}
+            )
 
         logger.debug(
             "Forwarding request to upstream",
@@ -1457,7 +1472,7 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model, mint
+                        response, amount, unit, max_cost_for_model, mint, request_data
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
