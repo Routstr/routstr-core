@@ -39,9 +39,4 @@ class FireworksUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'fireworks/' prefix for Fireworks API compatibility."""
-        return model_id.removeprefix("fireworks/")
-
-    async def fetch_models(self) -> list[Model]:
-        """Fetch Fireworks models from OpenRouter API filtered by fireworks source."""
-        models_data = await async_fetch_openrouter_models(source_filter="fireworks")
-        return [Model(**model) for model in models_data]  # type: ignore
+        return model_id.split("/")[-1]
