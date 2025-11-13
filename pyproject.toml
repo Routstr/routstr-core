@@ -19,6 +19,7 @@ dependencies = [
     "websockets>=12.0",
     "nostr>=0.0.2",
     "mdurl==0.1.2",
+    "pillow>=10",
 ]
 
 [dependency-groups]
