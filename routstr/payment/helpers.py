@@ -191,10 +191,8 @@ async def calculate_discounted_max_cost(
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
         )
-        if estimated_prompt_delta_sats >= 0:
+        if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
-        else:
-            adjusted = adjusted + math.ceil(-estimated_prompt_delta_sats * 1000)
 
     max_tokens_raw = body.get("max_tokens", None)
     if max_tokens_raw is not None:
@@ -209,10 +207,8 @@ async def calculate_discounted_max_cost(
             estimated_completion_delta_sats = (
                 max_completion_allowed_sats - max_tokens_int * model_pricing.completion
             )
-            if estimated_completion_delta_sats >= 0:
+            if estimated_completion_delta_sats > 0:
                 adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
-            else:
-                adjusted = adjusted + math.ceil(-estimated_completion_delta_sats * 1000)
 
     logger.debug(
         "Discounted max cost computed",
@@ -228,7 +224,20 @@ async def calculate_discounted_max_cost(
 
 
 def estimate_tokens(messages: list) -> int:
-    return len(str(messages)) // 3
+    """Estimate tokens for text content, excluding image_url fields."""
+    total = 0
+    for msg in messages:
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                total += sum(
+                    len(item.get("text", ""))
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+    return total // 3
 
 
 def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
