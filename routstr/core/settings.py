@@ -114,7 +114,7 @@ def resolve_bootstrap() -> Settings:
                 )
             except Exception:
                 pass
-        # Map COST_PER_1K_* -> CUSTOM_PER_1K_*
+        # Map COST_PER_1K_* -> FIXED_PER_1K_*
         if (
             "COST_PER_1K_INPUT_TOKENS" in os.environ
             and "FIXED_PER_1K_INPUT_TOKENS" not in os.environ
