@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
@@ -13,6 +14,10 @@ from fastapi.responses import Response, StreamingResponse
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, create_session
+
+if TYPE_CHECKING:
+    from ..core.db import UpstreamProviderRow
+
 from ..payment.cost_caculation import (
     CostData,
     CostDataError,
@@ -35,9 +40,12 @@ logger = get_logger(__name__)
 class BaseUpstreamProvider:
     """Provider for forwarding requests to an upstream AI service API."""
 
+    provider_type: str = "base"
+    default_base_url: str | None = None
+    platform_url: str | None = None
+
     base_url: str
     api_key: str
-    upstream_name: str | None = None
     provider_fee: float = 1.05
     _models_cache: list[Model] = []
     _models_by_id: dict[str, Model] = {}
@@ -55,6 +63,39 @@ class BaseUpstreamProvider:
         self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
+
+    @classmethod
+    def from_db_row(
+        cls, provider_row: "UpstreamProviderRow"
+    ) -> "BaseUpstreamProvider | None":
+        """Factory method to instantiate provider from database row.
+
+        Args:
+            provider_row: Database row containing provider configuration
+
+        Returns:
+            Instantiated provider or None if instantiation fails
+        """
+        return cls(
+            base_url=provider_row.base_url,
+            api_key=provider_row.api_key,
+            provider_fee=provider_row.provider_fee,
+        )
+
+    @classmethod
+    def get_provider_metadata(cls) -> dict[str, object]:
+        """Get metadata about this provider type for API responses.
+
+        Returns:
+            Dict with provider type metadata including id, name, default_base_url, fixed_base_url, platform_url
+        """
+        return {
+            "id": cls.provider_type,
+            "name": cls.provider_type.title(),
+            "default_base_url": cls.default_base_url or "",
+            "fixed_base_url": bool(cls.default_base_url),
+            "platform_url": cls.platform_url,
+        }
 
     def prepare_headers(self, request_headers: dict) -> dict:
         """Prepare headers for upstream request by removing proxy-specific headers and adding authentication.
@@ -162,7 +203,7 @@ class BaseUpstreamProvider:
                     extra={
                         "original": original_model,
                         "transformed": transformed_model,
-                        "provider": self.upstream_name or self.base_url,
+                        "provider": self.provider_type or self.base_url,
                     },
                 )
                 return json.dumps(data).encode()
@@ -171,7 +212,7 @@ class BaseUpstreamProvider:
                 "Could not transform request body",
                 extra={
                     "error": str(e),
-                    "provider": self.upstream_name or self.base_url,
+                    "provider": self.provider_type or self.base_url,
                 },
             )
 
@@ -1657,8 +1698,96 @@ class BaseUpstreamProvider:
         Returns:
             List of Model objects with pricing
         """
-        logger.debug(f"Fetching models for {self.upstream_name or self.base_url}")
-        return []
+        logger.debug(f"Fetching models for {self.provider_type or self.base_url}")
+
+        try:
+            or_models, provider_models_response = await asyncio.gather(
+                self._fetch_openrouter_models(),
+                self._fetch_provider_models(),
+            )
+
+            provider_model_ids = self._parse_model_ids(provider_models_response)
+
+            found_models = []
+            not_found_models = []
+
+            for model_id in provider_model_ids:
+                or_model = self._match_model(model_id, or_models)
+                if or_model:
+                    try:
+                        model = Model(**or_model)  # type: ignore
+                        found_models.append(model)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to parse model {model_id}",
+                            extra={"error": str(e), "error_type": type(e).__name__},
+                        )
+                else:
+                    not_found_models.append(model_id)
+
+            logger.info(
+                "Fetched models for provider",
+                extra={
+                    "provider": self.provider_type or self.base_url,
+                    "found_count": len(found_models),
+                    "not_found_count": len(not_found_models),
+                },
+            )
+
+            if not_found_models:
+                logger.debug(
+                    "Models not found in OpenRouter",
+                    extra={"not_found_models": not_found_models},
+                )
+
+            return found_models
+
+        except Exception as e:
+            logger.error(
+                f"Error fetching models for {self.provider_type or self.base_url}",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
+            return []
+
+    async def _fetch_openrouter_models(self) -> list[dict]:
+        """Fetch models from OpenRouter API."""
+        url = "https://openrouter.ai/api/v1/models"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            models = response.json()
+            return [
+                model
+                for model in models.get("data", [])
+                if ":free" not in model.get("id", "").lower()
+            ]
+
+    async def _fetch_provider_models(self) -> dict:
+        """Fetch models from provider's API."""
+        url = f"{self.base_url.rstrip('/')}/models"
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+
+    def _parse_model_ids(self, response: dict) -> list[str]:
+        """Parse model IDs from provider response."""
+        return [model.get("id") for model in response.get("data", []) if "id" in model]
+
+    def _match_model(self, model_id: str, or_models: list[dict]) -> dict | None:
+        """Match provider model ID with OpenRouter model."""
+        return next(
+            (
+                model
+                for model in or_models
+                if (model.get("id") == model_id)
+                or (model.get("id", "").split("/")[-1] == model_id)
+                or (model.get("canonical_slug") == model_id)
+                or (model.get("canonical_slug", "").split("/")[-1] == model_id)
+            ),
+            None,
+        )
 
     async def refresh_models_cache(self) -> None:
         """Refresh the in-memory models cache from upstream API."""
@@ -1676,12 +1805,12 @@ class BaseUpstreamProvider:
 
             self._models_by_id = {m.id: m for m in self._models_cache}
             logger.info(
-                f"Refreshed models cache for {self.upstream_name or self.base_url}",
+                f"Refreshed models cache for {self.provider_type or self.base_url}",
                 extra={"model_count": len(models)},
             )
         except Exception as e:
             logger.error(
-                f"Failed to refresh models cache for {self.upstream_name or self.base_url}",
+                f"Failed to refresh models cache for {self.provider_type or self.base_url}",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
 

@@ -6,6 +6,7 @@ export const ProviderTypeSchema = z.object({
   name: z.string(),
   default_base_url: z.string(),
   fixed_base_url: z.boolean(),
+  platform_url: z.string().nullable(),
 });
 
 export const UpstreamProviderSchema = z.object({

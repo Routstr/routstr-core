@@ -512,7 +512,7 @@ async def integration_app(
         from routstr.core.settings import settings as _settings
 
         # Passthrough discounted max cost to avoid dependence on MODELS in tests
-        def _passthrough_discount(
+        async def _passthrough_discount(
             max_cost_for_model: int,
             body: dict,
             model_obj: Any = None,

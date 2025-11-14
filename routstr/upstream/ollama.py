@@ -9,7 +9,7 @@ from fastapi.responses import Response, StreamingResponse
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
-    from ..core.db import ApiKey, AsyncSession
+    from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -19,6 +19,10 @@ logger = get_logger(__name__)
 
 class OllamaUpstreamProvider(BaseUpstreamProvider):
     """Upstream provider specifically configured for Ollama API."""
+
+    provider_type = "ollama"
+    default_base_url = "http://localhost:11434"
+    platform_url = None
 
     def __init__(
         self,
@@ -33,12 +37,31 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             api_key: Optional API key (Ollama typically doesn't require one)
             provider_fee: Provider fee multiplier (default 1.01 for 1% fee)
         """
-        self.upstream_name = "ollama"
         super().__init__(
             base_url=base_url,
             api_key=api_key,
             provider_fee=provider_fee,
         )
+
+    @classmethod
+    def from_db_row(
+        cls, provider_row: "UpstreamProviderRow"
+    ) -> "OllamaUpstreamProvider":
+        return cls(
+            base_url=provider_row.base_url,
+            api_key=provider_row.api_key,
+            provider_fee=provider_row.provider_fee,
+        )
+
+    @classmethod
+    def get_provider_metadata(cls) -> dict[str, object]:
+        return {
+            "id": cls.provider_type,
+            "name": "Ollama",
+            "default_base_url": cls.default_base_url,
+            "fixed_base_url": False,
+            "platform_url": cls.platform_url,
+        }
 
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'ollama/' prefix for Ollama API compatibility."""
@@ -192,12 +215,12 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
 
             self._models_by_id = {m.id: m for m in self._models_cache}
             logger.info(
-                f"Refreshed models cache for {self.upstream_name or self.base_url}",
+                f"Refreshed models cache for {self.base_url}",
                 extra={"model_count": len(models)},
             )
         except Exception as e:
             logger.error(
-                f"Failed to refresh models cache for {self.upstream_name or self.base_url}",
+                f"Failed to refresh models cache for {self.base_url}",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
 

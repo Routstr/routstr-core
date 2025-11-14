@@ -23,7 +23,8 @@ from .payment.helpers import (
     get_max_cost_for_model,
 )
 from .payment.models import Model
-from .upstream import BaseUpstreamProvider, init_upstreams
+from .upstream import BaseUpstreamProvider
+from .upstream.helpers import init_upstreams
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()

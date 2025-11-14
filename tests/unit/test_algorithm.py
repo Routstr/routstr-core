@@ -49,7 +49,7 @@ def create_test_model(
 def create_test_provider(name: str, base_url: str = "http://test.com") -> Mock:
     """Helper to create a test provider mock."""
     provider = Mock()
-    provider.upstream_name = name
+    provider.provider_type = name
     provider.base_url = base_url
     return provider
 

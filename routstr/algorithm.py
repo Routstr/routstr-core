@@ -193,7 +193,7 @@ def create_model_mappings(
         Tuple of (model_instances, provider_map, unique_models)
     """
     from .payment.models import _row_to_model
-    from .upstream import resolve_model_alias
+    from .upstream.helpers import resolve_model_alias
 
     model_instances: dict[str, "Model"] = {}
     provider_map: dict[str, "BaseUpstreamProvider"] = {}

@@ -34,9 +34,9 @@ setup_logging()
 logger = get_logger(__name__)
 
 if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.2.0-{os.getenv('VERSION_SUFFIX')}"
+    __version__ = f"0.2.0b-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.2.0"
+    __version__ = "0.2.0b"
 
 
 @asynccontextmanager
@@ -78,7 +78,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         from ..payment.price import _update_prices
         from ..proxy import get_upstreams
-        from ..upstream import refresh_upstreams_models_periodically
+        from ..upstream.helpers import refresh_upstreams_models_periodically
 
         await _update_prices()
         await initialize_upstreams()
