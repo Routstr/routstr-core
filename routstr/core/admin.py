@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
@@ -20,6 +20,7 @@ from ..wallet import (
 from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
 from .logging import get_logger
 from .settings import SettingsService, settings
+from .usage_metrics import UsageMetricsService, list_metric_definitions
 
 logger = get_logger(__name__)
 
@@ -166,6 +167,38 @@ async def get_temporary_balances_api(request: Request) -> list[dict[str, object]
 async def get_balances_api(request: Request) -> list[dict[str, object]]:
     balance_details, _tw, _tu, _ow = await fetch_all_balances()
     return [dict(d) for d in balance_details]
+
+
+@admin_router.get(
+    "/api/usage-metrics/definitions", dependencies=[Depends(require_admin_api)]
+)
+async def get_usage_metric_definitions() -> list[dict[str, str]]:
+    return list_metric_definitions()
+
+
+@admin_router.get("/api/usage-metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics(
+    metrics: str | None = Query(
+        default=None,
+        description="Comma-separated list of usage metric identifiers to include",
+    ),
+    bucket_minutes: int = Query(default=15, ge=1, le=24 * 60),
+    hours: int = Query(default=24, ge=1, le=24 * 7),
+) -> dict[str, object]:
+    metric_list = (
+        [item.strip() for item in metrics.split(",") if item.strip()]
+        if metrics
+        else []
+    )
+    try:
+        result = await UsageMetricsService.collect(
+            metrics=metric_list,
+            bucket_minutes=bucket_minutes,
+            hours=hours,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.to_dict()
 
 
 @admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
