@@ -17,7 +17,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { FileText, RefreshCw } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
-import { LogEntry, LogsResponse, DatesResponse } from './types';
+import { LogEntry, LogsResponse } from './types';
 import { LogFilters } from './log-filters';
 import { LogEntryCard } from './log-entry-card';
 import { LogDetailsDialog } from './log-details-dialog';
@@ -30,12 +30,6 @@ export default function LogsPage() {
   const [limit, setLimit] = useState<number>(100);
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState<boolean>(false);
-
-  const { data: datesData } = useQuery({
-    queryKey: ['log-dates'],
-    queryFn: () => apiClient.get<DatesResponse>('/admin/api/logs/dates'),
-    refetchInterval: 300000,
-  });
 
   const {
     data: logsData,
@@ -107,7 +101,6 @@ export default function LogsPage() {
             requestId={requestId}
             searchText={searchText}
             limit={limit}
-            availableDates={datesData?.dates || []}
             onDateChange={setSelectedDate}
             onLevelChange={setSelectedLevel}
             onRequestIdChange={setRequestId}
@@ -151,9 +144,9 @@ export default function LogsPage() {
                 <>
                   <ScrollArea className='h-[500px] w-full sm:h-[600px]'>
                     <div className='space-y-2 pr-3'>
-                      {logsData.logs.map((entry) => (
+                      {logsData.logs.map((entry, index) => (
                         <LogEntryCard
-                          key={`${entry.request_id}-${entry.asctime}-${entry.lineno}`}
+                          key={`${entry.request_id}-${entry.asctime}-${entry.lineno}-${index}`}
                           entry={entry}
                           onClick={handleLogClick}
                         />

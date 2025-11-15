@@ -53,7 +53,6 @@ export function LogEntryCard({ entry, onClick }: LogEntryCardProps) {
 
   return (
     <div
-      key={`${entry.request_id}-${entry.asctime}-${entry.lineno}`}
       className='bg-card hover:bg-accent/50 group mb-4 cursor-pointer overflow-hidden rounded-lg border p-3 transition-colors duration-200 sm:p-4'
       onClick={() => onClick(entry)}
     >
