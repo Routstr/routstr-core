@@ -10,6 +10,10 @@ class ApiClient {
     return ConfigurationService.getAuthHeaders();
   }
 
+  setAuthToken(token: string, expiresIn: number = 3600): void {
+    ConfigurationService.setToken(token, expiresIn);
+  }
+
   private handleAuthError(error: unknown): void {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;

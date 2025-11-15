@@ -8,17 +8,27 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { DetailedWalletBalance } from '@/components/detailed-wallet-balance';
 import { TemporaryBalances } from '@/components/temporary-balances';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { OnboardingWizard } from '@/components/onboarding-wizard';
 import type { DisplayUnit } from '@/lib/types/units';
 import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
+import { checkOnboardingStatus } from '@/lib/onboarding';
 
 export default function Page() {
   const [displayUnit, setDisplayUnit] = useState<DisplayUnit>('sat');
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   const { data: btcUsdPrice } = useQuery({
     queryKey: ['btc-usd-price'],
     queryFn: fetchBtcUsdPrice,
     refetchInterval: 120_000,
     staleTime: 60_000,
+  });
+
+  const { data: onboardingStatus } = useQuery({
+    queryKey: ['onboarding-status'],
+    queryFn: checkOnboardingStatus,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
   const usdPerSat = btcUsdPrice ? btcToSatsRate(btcUsdPrice) : null;
@@ -29,60 +39,75 @@ export default function Page() {
     }
   }, [displayUnit, usdPerSat]);
 
-  return (
-    <SidebarProvider>
-      <AppSidebar variant='inset' />
-      <SidebarInset className='p-0'>
-        <SiteHeader />
-        <div className='container max-w-6xl px-4 py-8 md:px-6 lg:px-8'>
-          <div className='mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
-            <div>
-              <h1 className='text-3xl font-bold tracking-tight'>
-                Admin Dashboard
-              </h1>
-              <p className='text-muted-foreground mt-2'>
-                Monitor and manage wallet balances
-              </p>
-            </div>
-            <div className='flex items-center'>
-              <ToggleGroup
-                type='single'
-                value={displayUnit}
-                onValueChange={(value) => {
-                  if (value) {
-                    setDisplayUnit(value as DisplayUnit);
-                  }
-                }}
-                variant='outline'
-                size='sm'
-              >
-                <ToggleGroupItem value='msat'>mSAT</ToggleGroupItem>
-                <ToggleGroupItem value='sat'>sat</ToggleGroupItem>
-                <ToggleGroupItem value='usd' disabled={!usdPerSat}>
-                  USD
-                </ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-          </div>
+  useEffect(() => {
+    if (onboardingStatus?.needsOnboarding) {
+      setShowOnboarding(true);
+    }
+  }, [onboardingStatus]);
 
-          <div className='grid gap-6'>
-            <div className='col-span-full'>
-              <DetailedWalletBalance
-                refreshInterval={30000}
-                displayUnit={displayUnit}
-                usdPerSat={usdPerSat}
-              />
+  return (
+    <>
+      <OnboardingWizard
+        open={showOnboarding}
+        onComplete={() => {
+          setShowOnboarding(false);
+          window.location.reload();
+        }}
+      />
+      <SidebarProvider>
+        <AppSidebar variant='inset' />
+        <SidebarInset className='p-0'>
+          <SiteHeader />
+          <div className='container max-w-6xl px-4 py-8 md:px-6 lg:px-8'>
+            <div className='mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
+              <div>
+                <h1 className='text-3xl font-bold tracking-tight'>
+                  Admin Dashboard
+                </h1>
+                <p className='text-muted-foreground mt-2'>
+                  Monitor and manage wallet balances
+                </p>
+              </div>
+              <div className='flex items-center'>
+                <ToggleGroup
+                  type='single'
+                  value={displayUnit}
+                  onValueChange={(value) => {
+                    if (value) {
+                      setDisplayUnit(value as DisplayUnit);
+                    }
+                  }}
+                  variant='outline'
+                  size='sm'
+                >
+                  <ToggleGroupItem value='msat'>mSAT</ToggleGroupItem>
+                  <ToggleGroupItem value='sat'>sat</ToggleGroupItem>
+                  <ToggleGroupItem value='usd' disabled={!usdPerSat}>
+                    USD
+                  </ToggleGroupItem>
+                </ToggleGroup>
+              </div>
             </div>
-            <div className='col-span-full'>
-              <TemporaryBalances
-                refreshInterval={60000}
-                displayUnit={displayUnit}
-                usdPerSat={usdPerSat}
-              />
+
+            <div className='grid gap-6'>
+              <div className='col-span-full'>
+                <DetailedWalletBalance
+                  refreshInterval={30000}
+                  displayUnit={displayUnit}
+                  usdPerSat={usdPerSat}
+                />
+              </div>
+              <div className='col-span-full'>
+                <TemporaryBalances
+                  refreshInterval={60000}
+                  displayUnit={displayUnit}
+                  usdPerSat={usdPerSat}
+                />
+              </div>
             </div>
           </div>
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+        </SidebarInset>
+      </SidebarProvider>
+    </>
   );
 }
