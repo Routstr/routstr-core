@@ -10,6 +10,12 @@ import { TemporaryBalances } from '@/components/temporary-balances';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import type { DisplayUnit } from '@/lib/types/units';
 import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
+import { AdminService } from '@/lib/api/services/admin';
+import { InitialSetupOnboarding } from '@/components/initial-setup-onboarding';
+
+type AdminSettingsResponse = Record<string, unknown> & {
+  admin_password?: string | null;
+};
 
 export default function Page() {
   const [displayUnit, setDisplayUnit] = useState<DisplayUnit>('sat');
@@ -20,6 +26,38 @@ export default function Page() {
     refetchInterval: 120_000,
     staleTime: 60_000,
   });
+
+  const {
+    data: settingsData,
+    isLoading: settingsLoading,
+    isError: settingsError,
+  } = useQuery<AdminSettingsResponse>({
+    queryKey: ['admin-settings'],
+    queryFn: async () => (await AdminService.getSettings()) as AdminSettingsResponse,
+    staleTime: 60_000,
+  });
+
+  const {
+    data: upstreamProviders,
+    isLoading: providersLoading,
+    isError: providersError,
+  } = useQuery({
+    queryKey: ['upstream-providers'],
+    queryFn: AdminService.getUpstreamProviders,
+    staleTime: 60_000,
+  });
+
+  const adminPasswordValue =
+    typeof settingsData?.admin_password === 'string' ? settingsData.admin_password : '';
+  const hasAdminPassword = adminPasswordValue.trim().length > 0;
+  const hasUpstreamProviders = (upstreamProviders?.length ?? 0) > 0;
+  const shouldShowOnboarding =
+    !settingsLoading &&
+    !providersLoading &&
+    !settingsError &&
+    !providersError &&
+    !hasAdminPassword &&
+    !hasUpstreamProviders;
 
   const usdPerSat = btcUsdPrice ? btcToSatsRate(btcUsdPrice) : null;
 
@@ -37,12 +75,8 @@ export default function Page() {
         <div className='container max-w-6xl px-4 py-8 md:px-6 lg:px-8'>
           <div className='mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
             <div>
-              <h1 className='text-3xl font-bold tracking-tight'>
-                Admin Dashboard
-              </h1>
-              <p className='text-muted-foreground mt-2'>
-                Monitor and manage wallet balances
-              </p>
+              <h1 className='text-3xl font-bold tracking-tight'>Admin Dashboard</h1>
+              <p className='text-muted-foreground mt-2'>Monitor and manage wallet balances</p>
             </div>
             <div className='flex items-center'>
               <ToggleGroup
@@ -64,6 +98,15 @@ export default function Page() {
               </ToggleGroup>
             </div>
           </div>
+
+          {shouldShowOnboarding && (
+            <div className='mb-8'>
+              <InitialSetupOnboarding
+                hasAdminPassword={hasAdminPassword}
+                hasUpstreamProviders={hasUpstreamProviders}
+              />
+            </div>
+          )}
 
           <div className='grid gap-6'>
             <div className='col-span-full'>
