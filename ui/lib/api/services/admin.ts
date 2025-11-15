@@ -802,6 +802,30 @@ export class AdminService {
       '/admin/api/temporary-balances'
     );
   }
+
+  static async getUsageMetrics(
+    interval: number = 15,
+    hours: number = 24
+  ): Promise<UsageMetrics> {
+    return await apiClient.get<UsageMetrics>(
+      `/admin/api/usage/metrics?interval=${interval}&hours=${hours}`
+    );
+  }
+
+  static async getUsageSummary(hours: number = 24): Promise<UsageSummary> {
+    return await apiClient.get<UsageSummary>(
+      `/admin/api/usage/summary?hours=${hours}`
+    );
+  }
+
+  static async getErrorDetails(
+    hours: number = 24,
+    limit: number = 100
+  ): Promise<ErrorDetails> {
+    return await apiClient.get<ErrorDetails>(
+      `/admin/api/usage/error-details?hours=${hours}&limit=${limit}`
+    );
+  }
 }
 
 export const TemporaryBalanceSchema = z.object({
@@ -814,3 +838,50 @@ export const TemporaryBalanceSchema = z.object({
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
+
+export interface UsageMetricData {
+  timestamp: string;
+  total_requests: number;
+  successful_chat_completions: number;
+  failed_requests: number;
+  errors: number;
+  warnings: number;
+  payment_processed: number;
+  upstream_errors: number;
+}
+
+export interface UsageMetrics {
+  metrics: UsageMetricData[];
+  interval_minutes: number;
+  hours_back: number;
+  total_buckets: number;
+}
+
+export interface UsageSummary {
+  total_entries: number;
+  total_requests: number;
+  successful_chat_completions: number;
+  failed_requests: number;
+  total_errors: number;
+  total_warnings: number;
+  payment_processed: number;
+  upstream_errors: number;
+  unique_models_count: number;
+  unique_models: string[];
+  error_types: Record<string, number>;
+  success_rate: number;
+}
+
+export interface ErrorDetail {
+  timestamp: string;
+  message: string;
+  error_type: string;
+  pathname: string;
+  lineno: number;
+  request_id: string;
+}
+
+export interface ErrorDetails {
+  errors: ErrorDetail[];
+  total_count: number;
+}
