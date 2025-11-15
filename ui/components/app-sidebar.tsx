@@ -3,6 +3,7 @@
 import * as React from 'react';
 import {
   DatabaseIcon,
+  FileTextIcon,
   LayoutDashboardIcon,
   ServerIcon,
   SettingsIcon,
@@ -43,6 +44,11 @@ const data = {
       title: 'Providers',
       url: '/providers',
       icon: ServerIcon,
+    },
+    {
+      title: 'Logs',
+      url: '/logs',
+      icon: FileTextIcon,
     },
     {
       title: 'Settings',

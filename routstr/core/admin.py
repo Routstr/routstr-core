@@ -10,6 +10,7 @@ from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
+from ..search import search_logs
 from ..wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -906,6 +907,72 @@ async def view_logs(request: Request, request_id: str) -> str:
     </html>
     """
     )
+
+
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """
+    Get filtered log entries.
+
+    Args:
+        date: Filter by specific date (YYYY-MM-DD)
+        level: Filter by log level
+        request_id: Filter by request ID
+        search: Search text in message and name fields (case-insensitive)
+        limit: Maximum number of entries to return
+
+    Returns:
+        Dict containing logs and filter metadata
+    """
+    logs_dir = Path("logs")
+
+    # Use the search module for log filtering
+    log_entries = search_logs(
+        logs_dir=logs_dir,
+        date=date,
+        level=level,
+        request_id=request_id,
+        search_text=search,
+        limit=limit,
+    )
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
+    }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, object]:
+    logs_dir = Path("logs")
+    dates = []
+
+    if logs_dir.exists():
+        log_files = sorted(
+            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
+        )
+
+        for log_file in log_files[:30]:
+            try:
+                filename = log_file.name
+                date_str = filename.replace("app_", "").replace(".log", "")
+                dates.append(date_str)
+            except Exception:
+                continue
+
+    return {"dates": dates}
 
 
 @admin_router.post("/withdraw", dependencies=[Depends(require_admin_api)])
@@ -2402,6 +2469,32 @@ def upstream_providers_page() -> str:
 </html>
     """
     )
+
+
+def logs_page() -> str:
+    return """
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Logs - Admin Dashboard</title>
+            <script>
+                window.location.href = '/logs';
+            </script>
+        </head>
+        <body>
+            <p>Redirecting to logs page...</p>
+        </body>
+    </html>
+    """
+
+
+@admin_router.get("/logs", response_class=HTMLResponse)
+async def admin_logs(request: Request) -> str:
+    if is_admin_authenticated(request):
+        return logs_page()
+    return admin_auth()
 
 
 @admin_router.get("/upstream-providers", response_class=HTMLResponse)
