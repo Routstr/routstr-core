@@ -15,8 +15,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Calendar, Filter } from 'lucide-react';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import { Calendar } from '@/components/ui/calendar';
+import { CalendarIcon, Filter, X } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { format } from 'date-fns';
+import { cn } from '@/lib/utils';
 
 interface LogFiltersProps {
   selectedDate: string;
@@ -24,7 +32,6 @@ interface LogFiltersProps {
   requestId: string;
   searchText: string;
   limit: number;
-  availableDates: string[];
   onDateChange: (date: string) => void;
   onLevelChange: (level: string) => void;
   onRequestIdChange: (requestId: string) => void;
@@ -42,7 +49,6 @@ export function LogFilters({
   requestId,
   searchText,
   limit,
-  availableDates,
   onDateChange,
   onLevelChange,
   onRequestIdChange,
@@ -56,6 +62,9 @@ export function LogFilters({
     isPreset ? '' : limit.toString()
   );
   const [isCustom, setIsCustom] = useState<boolean>(!isPreset);
+  const [date, setDate] = useState<Date | undefined>(
+    selectedDate && selectedDate !== 'all' ? new Date(selectedDate) : undefined
+  );
 
   useEffect(() => {
     const currentIsPreset = PRESET_LIMITS.includes(limit.toString());
@@ -64,6 +73,18 @@ export function LogFilters({
       setCustomLimit(limit.toString());
     }
   }, [limit]);
+
+  useEffect(() => {
+    if (selectedDate === 'all' || !selectedDate) {
+      setDate(undefined);
+    } else {
+      try {
+        setDate(new Date(selectedDate));
+      } catch {
+        setDate(undefined);
+      }
+    }
+  }, [selectedDate]);
 
   const handleLimitChange = (value: string) => {
     if (value === 'custom') {
@@ -100,6 +121,15 @@ export function LogFilters({
     }
   };
 
+  const handleDateSelect = (selectedDate: Date | undefined) => {
+    setDate(selectedDate);
+    if (selectedDate) {
+      onDateChange(format(selectedDate, 'yyyy-MM-dd'));
+    } else {
+      onDateChange('all');
+    }
+  };
+
   return (
     <Card className='mb-6'>
       <CardHeader>
@@ -115,20 +145,40 @@ export function LogFilters({
         <div className='grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3'>
           <div className='space-y-2'>
             <Label htmlFor='date'>Date</Label>
-            <Select value={selectedDate} onValueChange={onDateChange}>
-              <SelectTrigger>
-                <Calendar className='mr-2 h-4 w-4' />
-                <SelectValue placeholder='Select date' />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='all'>All dates</SelectItem>
-                {availableDates.map((date) => (
-                  <SelectItem key={date} value={date}>
-                    {date}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant='outline'
+                  className={cn(
+                    'w-full justify-start text-left font-normal',
+                    !date && 'text-muted-foreground'
+                  )}
+                >
+                  <CalendarIcon className='mr-2 h-4 w-4' />
+                  {date ? format(date, 'PPP') : <span>Pick a date</span>}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className='w-auto p-0' align='start'>
+                <Calendar
+                  mode='single'
+                  selected={date}
+                  onSelect={handleDateSelect}
+                  initialFocus
+                />
+              </PopoverContent>
+            </Popover>
+            {date && (
+              <Button
+                type='button'
+                variant='ghost'
+                size='sm'
+                onClick={() => handleDateSelect(undefined)}
+                className='w-full'
+              >
+                <X className='mr-2 h-4 w-4' />
+                Clear date
+              </Button>
+            )}
           </div>
 
           <div className='space-y-2'>
