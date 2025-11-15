@@ -8,7 +8,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Copy } from 'lucide-react';
+import { Copy, Check } from 'lucide-react';
+import { useState } from 'react';
 
 interface LogEntry {
   asctime: string;
@@ -51,10 +52,16 @@ export function LogDetailsDialog({
   isOpen,
   onClose,
 }: LogDetailsDialogProps) {
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+
   if (!log) return null;
 
-  const copyToClipboard = (text: string) => {
+  const copyToClipboard = (text: string, fieldName?: string) => {
     navigator.clipboard.writeText(text);
+    if (fieldName) {
+      setCopiedField(fieldName);
+      setTimeout(() => setCopiedField(null), 2000);
+    }
   };
 
   const allFields = Object.keys(log).filter((key) => key !== 'key');
@@ -74,22 +81,12 @@ export function LogDetailsDialog({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className='max-h-[90vh] w-[95vw] max-w-[95vw] overflow-hidden'>
         <DialogHeader>
-          <div className='flex items-center justify-between'>
-            <DialogTitle className='flex items-center gap-2'>
-              <Badge variant='outline' className={getLevelColor(log.levelname)}>
-                {log.levelname}
-              </Badge>
-              <span>Log Entry Details</span>
-            </DialogTitle>
-            <Button
-              variant='ghost'
-              size='sm'
-              onClick={() => copyToClipboard(JSON.stringify(log, null, 2))}
-              className='h-8 w-8 p-0'
-            >
-              <Copy className='h-4 w-4' />
-            </Button>
-          </div>
+          <DialogTitle className='flex items-center gap-2'>
+            <Badge variant='outline' className={getLevelColor(log.levelname)}>
+              {log.levelname}
+            </Badge>
+            <span>Log Entry Details</span>
+          </DialogTitle>
           <DialogDescription>
             {log.asctime} • {log.name} • {log.pathname}:{log.lineno}
           </DialogDescription>
@@ -99,8 +96,8 @@ export function LogDetailsDialog({
           <div className='space-y-6'>
             <div>
               <h4 className='mb-2 text-sm font-medium'>Message</h4>
-              <div className='bg-muted rounded-md p-3'>
-                <pre className='font-mono text-sm whitespace-pre-wrap'>
+              <div className='bg-muted max-h-48 overflow-auto rounded-md p-3'>
+                <pre className='font-mono text-sm whitespace-pre break-all'>
                   {log.message}
                 </pre>
               </div>
@@ -111,13 +108,35 @@ export function LogDetailsDialog({
               <div className='grid grid-cols-1 gap-3'>
                 {standardFields.map((field) => (
                   <div key={field} className='flex flex-col space-y-1'>
-                    <span className='text-muted-foreground text-xs font-medium uppercase'>
-                      {field}
-                    </span>
-                    <div className='bg-muted max-h-48 overflow-auto rounded p-2 font-mono text-sm'>
-                      <div className='inline-block min-w-full whitespace-nowrap'>
+                    <div className='flex items-center justify-between gap-2'>
+                      <span className='text-muted-foreground text-xs font-medium uppercase'>
+                        {field}
+                      </span>
+                      {field === 'request_id' && (
+                        <Button
+                          variant='outline'
+                          size='sm'
+                          onClick={() => copyToClipboard(String(log[field as keyof LogEntry] || ''), field)}
+                          className='h-6 flex-shrink-0 px-2'
+                        >
+                          {copiedField === field ? (
+                            <>
+                              <Check className='mr-1 h-3 w-3' />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className='mr-1 h-3 w-3' />
+                              Copy
+                            </>
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                    <div className='bg-muted max-h-32 overflow-auto rounded p-2'>
+                      <pre className='font-mono text-sm break-all whitespace-pre-wrap'>
                         {String(log[field as keyof LogEntry] || 'N/A')}
-                      </div>
+                      </pre>
                     </div>
                   </div>
                 ))}
@@ -130,18 +149,18 @@ export function LogDetailsDialog({
                 <div className='grid grid-cols-1 gap-3'>
                   {extraFields.map((field) => (
                     <div key={field} className='flex flex-col space-y-1'>
-                      <span className='text-muted-foreground text-xs font-medium uppercase'>
+                      <span className='text-muted-foreground truncate text-xs font-medium uppercase'>
                         {field}
                       </span>
-                      <div className='bg-muted max-h-48 overflow-auto rounded p-2 font-mono text-sm'>
+                      <div className='bg-muted max-h-48 overflow-auto rounded p-2'>
                         {typeof log[field] === 'object' ? (
-                          <pre className='inline-block min-w-full text-xs whitespace-pre'>
+                          <pre className='font-mono text-xs break-all whitespace-pre-wrap'>
                             {JSON.stringify(log[field], null, 2)}
                           </pre>
                         ) : (
-                          <div className='inline-block min-w-full whitespace-nowrap'>
+                          <pre className='font-mono text-sm break-all whitespace-pre-wrap'>
                             {String(log[field] || 'N/A')}
-                          </div>
+                          </pre>
                         )}
                       </div>
                     </div>
@@ -152,17 +171,8 @@ export function LogDetailsDialog({
 
             <div>
               <h4 className='mb-3 text-sm font-medium'>Raw JSON</h4>
-              <div className='relative'>
-                <Button
-                  variant='ghost'
-                  size='sm'
-                  onClick={() => copyToClipboard(JSON.stringify(log, null, 2))}
-                  className='absolute top-2 right-2 h-8 px-2'
-                >
-                  <Copy className='mr-1 h-3 w-3' />
-                  Copy
-                </Button>
-                <pre className='bg-muted inline-block max-h-64 min-w-full overflow-auto rounded-md p-4 text-xs whitespace-pre'>
+              <div className='bg-muted max-h-64 overflow-auto rounded-md p-4'>
+                <pre className='text-xs break-all whitespace-pre-wrap'>
                   {JSON.stringify(log, null, 2)}
                 </pre>
               </div>
