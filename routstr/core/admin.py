@@ -1,9 +1,10 @@
 import json
 import secrets
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
@@ -2958,3 +2959,321 @@ h1 { color: #333; }
 .no-logs { text-align: center; color: #666; padding: 40px; }
 .request-id-display { background-color: #e9ecef; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; }
 """
+
+
+def _parse_log_file(file_path: Path) -> list[dict]:
+    """Parse JSON log file and return list of log entries."""
+    entries: list[dict] = []
+    try:
+        with open(file_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    entries.append(entry)
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        logger.error(f"Error reading log file {file_path}: {e}")
+    return entries
+
+
+def _aggregate_metrics_by_time(
+    entries: list[dict], interval_minutes: int, hours_back: int = 24
+) -> dict[str, list[dict]]:
+    """Aggregate log metrics into time buckets."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours_back)
+    
+    time_buckets: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "total_requests": 0,
+            "successful_chat_completions": 0,
+            "failed_requests": 0,
+            "errors": 0,
+            "warnings": 0,
+            "payment_processed": 0,
+            "upstream_errors": 0,
+        }
+    )
+    
+    for entry in entries:
+        try:
+            timestamp_str = entry.get("asctime", "")
+            if not timestamp_str:
+                continue
+                
+            log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            log_time = log_time.replace(tzinfo=timezone.utc)
+            
+            if log_time < cutoff:
+                continue
+            
+            bucket_time = log_time.replace(
+                minute=(log_time.minute // interval_minutes) * interval_minutes,
+                second=0,
+                microsecond=0,
+            )
+            bucket_key = bucket_time.isoformat()
+            
+            message = entry.get("message", "").lower()
+            level = entry.get("levelname", "").upper()
+            
+            if level == "ERROR":
+                time_buckets[bucket_key]["errors"] += 1
+            elif level == "WARNING":
+                time_buckets[bucket_key]["warnings"] += 1
+            
+            if "received proxy request" in message:
+                time_buckets[bucket_key]["total_requests"] += 1
+            
+            if "token adjustment completed for non-streaming" in message:
+                time_buckets[bucket_key]["successful_chat_completions"] += 1
+            elif "token adjustment completed for streaming" in message:
+                time_buckets[bucket_key]["successful_chat_completions"] += 1
+            
+            if "upstream request failed" in message or "revert payment" in message:
+                time_buckets[bucket_key]["failed_requests"] += 1
+            
+            if "payment processed successfully" in message:
+                time_buckets[bucket_key]["payment_processed"] += 1
+                
+            if "upstream" in message and level == "ERROR":
+                time_buckets[bucket_key]["upstream_errors"] += 1
+                
+        except Exception:
+            continue
+    
+    result = []
+    for bucket_key in sorted(time_buckets.keys()):
+        result.append({"timestamp": bucket_key, **time_buckets[bucket_key]})
+    
+    return {
+        "metrics": result,
+        "interval_minutes": interval_minutes,
+        "hours_back": hours_back,
+        "total_buckets": len(result),
+    }
+
+
+def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
+    """Calculate summary statistics from log entries."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours_back)
+    
+    stats = {
+        "total_entries": 0,
+        "total_requests": 0,
+        "successful_chat_completions": 0,
+        "failed_requests": 0,
+        "total_errors": 0,
+        "total_warnings": 0,
+        "payment_processed": 0,
+        "upstream_errors": 0,
+        "unique_models": set(),
+        "error_types": defaultdict(int),
+    }
+    
+    for entry in entries:
+        try:
+            timestamp_str = entry.get("asctime", "")
+            if not timestamp_str:
+                continue
+                
+            log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            log_time = log_time.replace(tzinfo=timezone.utc)
+            
+            if log_time < cutoff:
+                continue
+            
+            stats["total_entries"] += 1
+            
+            message = entry.get("message", "").lower()
+            level = entry.get("levelname", "").upper()
+            
+            if level == "ERROR":
+                stats["total_errors"] += 1
+                if "error_type" in entry:
+                    error_type = str(entry["error_type"])
+                    stats["error_types"][error_type] += 1
+            elif level == "WARNING":
+                stats["total_warnings"] += 1
+            
+            if "received proxy request" in message:
+                stats["total_requests"] += 1
+            
+            if "token adjustment completed" in message:
+                stats["successful_chat_completions"] += 1
+                
+            if "upstream request failed" in message or "revert payment" in message:
+                stats["failed_requests"] += 1
+            
+            if "payment processed successfully" in message:
+                stats["payment_processed"] += 1
+                
+            if "upstream" in message and level == "ERROR":
+                stats["upstream_errors"] += 1
+            
+            if "model" in entry:
+                model = entry["model"]
+                if isinstance(model, str) and model != "unknown":
+                    stats["unique_models"].add(model)
+                    
+        except Exception:
+            continue
+    
+    return {
+        "total_entries": stats["total_entries"],
+        "total_requests": stats["total_requests"],
+        "successful_chat_completions": stats["successful_chat_completions"],
+        "failed_requests": stats["failed_requests"],
+        "total_errors": stats["total_errors"],
+        "total_warnings": stats["total_warnings"],
+        "payment_processed": stats["payment_processed"],
+        "upstream_errors": stats["upstream_errors"],
+        "unique_models_count": len(stats["unique_models"]),
+        "unique_models": sorted(list(stats["unique_models"])),
+        "error_types": dict(stats["error_types"]),
+        "success_rate": (
+            (stats["successful_chat_completions"] / stats["total_requests"] * 100)
+            if stats["total_requests"] > 0
+            else 0
+        ),
+    }
+
+
+@admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics(
+    request: Request,
+    interval: int = Query(default=15, ge=1, le=1440, description="Time interval in minutes"),
+    hours: int = Query(default=24, ge=1, le=168, description="Hours of history to analyze"),
+) -> dict:
+    """Get usage metrics aggregated by time interval."""
+    logs_dir = Path("logs")
+    all_entries: list[dict] = []
+    
+    if not logs_dir.exists():
+        return {
+            "metrics": [],
+            "interval_minutes": interval,
+            "hours_back": hours,
+            "total_buckets": 0,
+        }
+    
+    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
+    
+    for log_file in sorted(logs_dir.glob("app_*.log")):
+        try:
+            file_date_str = log_file.stem.split("_")[1]
+            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            
+            if file_date < cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0):
+                continue
+                
+            entries = _parse_log_file(log_file)
+            all_entries.extend(entries)
+        except Exception as e:
+            logger.error(f"Error processing log file {log_file}: {e}")
+            continue
+    
+    return _aggregate_metrics_by_time(all_entries, interval, hours)
+
+
+@admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
+async def get_usage_summary(
+    request: Request,
+    hours: int = Query(default=24, ge=1, le=168, description="Hours of history to analyze"),
+) -> dict:
+    """Get summary statistics for the specified time period."""
+    logs_dir = Path("logs")
+    all_entries: list[dict] = []
+    
+    if not logs_dir.exists():
+        return {
+            "total_entries": 0,
+            "total_requests": 0,
+            "successful_chat_completions": 0,
+            "failed_requests": 0,
+            "total_errors": 0,
+            "total_warnings": 0,
+            "payment_processed": 0,
+            "upstream_errors": 0,
+            "unique_models_count": 0,
+            "unique_models": [],
+            "error_types": {},
+            "success_rate": 0,
+        }
+    
+    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
+    
+    for log_file in sorted(logs_dir.glob("app_*.log")):
+        try:
+            file_date_str = log_file.stem.split("_")[1]
+            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            
+            if file_date < cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0):
+                continue
+                
+            entries = _parse_log_file(log_file)
+            all_entries.extend(entries)
+        except Exception as e:
+            logger.error(f"Error processing log file {log_file}: {e}")
+            continue
+    
+    return _get_summary_stats(all_entries, hours)
+
+
+@admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
+async def get_error_details(
+    request: Request,
+    hours: int = Query(default=24, ge=1, le=168, description="Hours of history to analyze"),
+    limit: int = Query(default=100, ge=1, le=1000, description="Maximum number of errors to return"),
+) -> dict:
+    """Get detailed error information."""
+    logs_dir = Path("logs")
+    errors: list[dict] = []
+    
+    if not logs_dir.exists():
+        return {"errors": [], "total_count": 0}
+    
+    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
+    
+    for log_file in sorted(logs_dir.glob("app_*.log"), reverse=True):
+        try:
+            file_date_str = log_file.stem.split("_")[1]
+            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            
+            if file_date < cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0):
+                continue
+                
+            entries = _parse_log_file(log_file)
+            
+            for entry in entries:
+                if entry.get("levelname", "").upper() == "ERROR":
+                    timestamp_str = entry.get("asctime", "")
+                    if timestamp_str:
+                        log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                        log_time = log_time.replace(tzinfo=timezone.utc)
+                        
+                        if log_time >= cutoff_date:
+                            errors.append({
+                                "timestamp": timestamp_str,
+                                "message": entry.get("message", ""),
+                                "error_type": entry.get("error_type", "unknown"),
+                                "pathname": entry.get("pathname", ""),
+                                "lineno": entry.get("lineno", 0),
+                                "request_id": entry.get("request_id", ""),
+                            })
+                
+                if len(errors) >= limit:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error processing log file {log_file}: {e}")
+            continue
+        
+        if len(errors) >= limit:
+            break
+    
+    errors.sort(key=lambda x: x["timestamp"], reverse=True)
+    
+    return {"errors": errors[:limit], "total_count": len(errors)}

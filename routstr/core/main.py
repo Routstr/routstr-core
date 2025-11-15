@@ -282,6 +282,15 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def redirect_unauthorized_index_txt() -> RedirectResponse:
         return RedirectResponse("/unauthorized")
 
+    @app.get("/usage", include_in_schema=False)
+    async def serve_usage_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "usage" / "index.html")
+
+    # Add explicit route for /usage/index.txt to redirect to /usage
+    @app.get("/usage/index.txt", include_in_schema=False)
+    async def redirect_usage_index_txt() -> RedirectResponse:
+        return RedirectResponse("/usage")
+
     @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon() -> FileResponse:
         icon_path = UI_DIST_PATH / "icon.ico"
