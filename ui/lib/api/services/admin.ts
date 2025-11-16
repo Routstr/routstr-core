@@ -859,6 +859,7 @@ export interface UsageMetricData {
   upstream_errors: number;
   revenue_msats: number;
   refunds_msats: number;
+  [key: string]: unknown;
 }
 
 export interface UsageMetrics {
