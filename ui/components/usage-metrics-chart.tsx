@@ -11,13 +11,12 @@ import {
   Legend,
   CartesianGrid,
 } from 'recharts';
-import { UsageMetricData } from '@/lib/api/services/admin';
 
 interface UsageMetricsChartProps {
-  data: UsageMetricData[];
+  data: Array<Record<string, unknown> & { timestamp: string }>;
   title: string;
   dataKeys: Array<{
-    key: keyof UsageMetricData;
+    key: string;
     name: string;
     color: string;
   }>;

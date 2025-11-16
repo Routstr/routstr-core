@@ -137,7 +137,7 @@ export default function UsagePage() {
               ) : metricsData && metricsData.metrics.length > 0 ? (
                 <>
                   <UsageMetricsChart
-                    data={metricsData.metrics}
+                    data={metricsData.metrics as Array<Record<string, unknown> & { timestamp: string }>}
                     title='Request Volume'
                     dataKeys={[
                       {
@@ -164,7 +164,7 @@ export default function UsagePage() {
                       refunds_sats: m.refunds_msats / 1000,
                       net_revenue_sats:
                         (m.revenue_msats - m.refunds_msats) / 1000,
-                    }))}
+                    })) as Array<Record<string, unknown> & { timestamp: string }>}
                     title='Revenue Over Time (sats)'
                     dataKeys={[
                       {
@@ -185,7 +185,7 @@ export default function UsagePage() {
                     ]}
                   />
                   <UsageMetricsChart
-                    data={metricsData.metrics}
+                    data={metricsData.metrics as Array<Record<string, unknown> & { timestamp: string }>}
                     title='Error Tracking'
                     dataKeys={[
                       {
@@ -206,7 +206,7 @@ export default function UsagePage() {
                     ]}
                   />
                   <UsageMetricsChart
-                    data={metricsData.metrics}
+                    data={metricsData.metrics as Array<Record<string, unknown> & { timestamp: string }>}
                     title='Payment Activity'
                     dataKeys={[
                       {
