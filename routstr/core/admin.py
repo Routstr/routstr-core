@@ -827,8 +827,8 @@ async def view_logs(request: Request, request_id: str) -> str:
             except Exception as e:
                 logger.error(f"Error reading log file {log_file}: {e}")
 
-    # Sort entries by timestamp if available
-    log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=False)
+    # Sort entries by timestamp if available (newest first)
+    log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=True)
 
     # Format log entries for display
     formatted_logs = []
