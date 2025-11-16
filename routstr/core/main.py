@@ -83,6 +83,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         await _update_prices()
         await initialize_upstreams()
 
+        from ..payment.registry import initialize_payment_methods
+
+        initialize_payment_methods()
+        logger.info("Payment methods initialized")
+
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
         if global_settings.models_refresh_interval_seconds > 0:

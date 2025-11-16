@@ -104,54 +104,44 @@ async def swap_to_primary_mint(
 
 
 async def credit_balance(
-    cashu_token: str, key: db.ApiKey, session: db.AsyncSession
+    payment_data: str,
+    key: db.ApiKey,
+    session: db.AsyncSession,
+    payment_method: str | None = None,
 ) -> int:
+    from .payment.registry import detect_payment_method, get_payment_method, initialize_payment_methods
+
+    initialize_payment_methods()
+
     logger.info(
-        "credit_balance: Starting token redemption",
-        extra={"token_preview": cashu_token[:50]},
+        "credit_balance: Starting payment processing",
+        extra={"payment_data_preview": payment_data[:50], "payment_method": payment_method},
     )
 
+    method = None
+    if payment_method:
+        method = get_payment_method(payment_method)
+        if not method:
+            raise ValueError(f"Unknown payment method: {payment_method}")
+    else:
+        method = detect_payment_method(payment_data)
+        if not method:
+            raise ValueError("Could not detect payment method from payment data")
+
     try:
-        amount, unit, mint_url = await recieve_token(cashu_token)
+        result = await method.process_payment(payment_data, key, session)
         logger.info(
-            "credit_balance: Token redeemed successfully",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+            "credit_balance: Payment processed successfully",
+            extra={
+                "amount_msats": result["amount_msats"],
+                "currency": result["currency"],
+                "payment_method": result["payment_method"],
+            },
         )
-
-        if unit == "sat":
-            amount = amount * 1000
-            logger.info(
-                "credit_balance: Converted to msat", extra={"amount_msat": amount}
-            )
-
-        logger.info(
-            "credit_balance: Updating balance",
-            extra={"old_balance": key.balance, "credit_amount": amount},
-        )
-
-        # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
-        stmt = (
-            update(db.ApiKey)
-            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-            .values(balance=(db.ApiKey.balance) + amount)
-        )
-        await session.exec(stmt)  # type: ignore[call-overload]
-        await session.commit()
-        await session.refresh(key)
-
-        logger.info(
-            "credit_balance: Balance updated successfully",
-            extra={"new_balance": key.balance},
-        )
-
-        logger.info(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
-        return amount
+        return result["amount_msats"]
     except Exception as e:
         logger.error(
-            "credit_balance: Error during token redemption",
+            "credit_balance: Error during payment processing",
             extra={"error": str(e), "error_type": type(e).__name__},
         )
         raise
