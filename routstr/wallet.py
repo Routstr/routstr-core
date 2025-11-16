@@ -5,8 +5,6 @@ from typing import TypedDict
 from cashu.core.base import Proof, Token
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
-from sqlmodel import col, update
-
 from .core import db, get_logger
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
@@ -101,60 +99,6 @@ async def swap_to_primary_mint(
     _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
 
     return int(minted_amount), settings.primary_mint_unit, settings.primary_mint
-
-
-async def credit_balance(
-    cashu_token: str, key: db.ApiKey, session: db.AsyncSession
-) -> int:
-    logger.info(
-        "credit_balance: Starting token redemption",
-        extra={"token_preview": cashu_token[:50]},
-    )
-
-    try:
-        amount, unit, mint_url = await recieve_token(cashu_token)
-        logger.info(
-            "credit_balance: Token redeemed successfully",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
-
-        if unit == "sat":
-            amount = amount * 1000
-            logger.info(
-                "credit_balance: Converted to msat", extra={"amount_msat": amount}
-            )
-
-        logger.info(
-            "credit_balance: Updating balance",
-            extra={"old_balance": key.balance, "credit_amount": amount},
-        )
-
-        # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
-        stmt = (
-            update(db.ApiKey)
-            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-            .values(balance=(db.ApiKey.balance) + amount)
-        )
-        await session.exec(stmt)  # type: ignore[call-overload]
-        await session.commit()
-        await session.refresh(key)
-
-        logger.info(
-            "credit_balance: Balance updated successfully",
-            extra={"new_balance": key.balance},
-        )
-
-        logger.info(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
-        return amount
-    except Exception as e:
-        logger.error(
-            "credit_balance: Error during token redemption",
-            extra={"error": str(e), "error_type": type(e).__name__},
-        )
-        raise
 
 
 _wallets: dict[str, Wallet] = {}

@@ -15,7 +15,11 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
-from .wallet import credit_balance, deserialize_token_from_string
+from .payment.temporary_balance import (
+    build_cashu_payment_payload,
+    credit_temporary_balance,
+)
+from .wallet import deserialize_token_from_string
 
 logger = get_logger(__name__)
 
@@ -208,7 +212,8 @@ async def validate_bearer_key(
                 extra={"token_preview": bearer_key[:50]},
             )
             try:
-                msats = await credit_balance(bearer_key, new_key, session)
+                payload = build_cashu_payment_payload(bearer_key)
+                msats = await credit_temporary_balance(payload, new_key, session)
                 logger.info(
                     "AUTH: credit_balance returned successfully", extra={"msats": msats}
                 )

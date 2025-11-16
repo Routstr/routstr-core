@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 from time import monotonic
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
@@ -10,7 +10,12 @@ from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
-from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
+from .payment.temporary_balance import (
+    TemporaryBalancePaymentPayload,
+    build_cashu_payment_payload,
+    credit_temporary_balance,
+)
+from .wallet import recieve_token, send_to_lnurl, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -74,7 +79,36 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
 
 
 class TopupRequest(BaseModel):
-    cashu_token: str
+    method: str | None = None
+    payload: dict[str, Any] | None = None
+    cashu_token: str | None = None
+
+
+def _build_topup_payload(
+    cashu_token: str | None, topup_request: TopupRequest | None
+) -> TemporaryBalancePaymentPayload:
+    if topup_request is None:
+        if cashu_token is None:
+            raise HTTPException(status_code=400, detail="A payment method is required.")
+        return build_cashu_payment_payload(cashu_token)
+
+    method = (topup_request.method or "").strip() or None
+    payload_data: dict[str, Any] = dict(topup_request.payload or {})
+
+    if topup_request.cashu_token:
+        payload_data.setdefault("token", topup_request.cashu_token)
+        method = method or "cashu"
+
+    if cashu_token and (method in (None, "cashu")) and "token" not in payload_data:
+        payload_data["token"] = cashu_token
+        method = method or "cashu"
+
+    if method is None:
+        raise HTTPException(
+            status_code=400, detail="A payment method identifier is required."
+        )
+
+    return TemporaryBalancePaymentPayload(method=method, data=payload_data)
 
 
 @router.post("/topup")
@@ -84,16 +118,14 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
-    if topup_request is not None:
-        cashu_token = topup_request.cashu_token
-    if cashu_token is None:
-        raise HTTPException(status_code=400, detail="A cashu_token is required.")
-
-    cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
-    if len(cashu_token) < 10 or "cashu" not in cashu_token:
-        raise HTTPException(status_code=400, detail="Invalid token format")
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        payment_payload = _build_topup_payload(cashu_token, topup_request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        amount_msats = await credit_temporary_balance(payment_payload, key, session)
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
@@ -102,6 +134,8 @@ async def topup_wallet_endpoint(
             raise HTTPException(status_code=400, detail="Invalid token format")
         else:
             raise HTTPException(status_code=400, detail="Failed to redeem token")
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}

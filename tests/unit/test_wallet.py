@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from routstr.core.db import ApiKey
-from routstr.wallet import credit_balance, get_balance, recieve_token, send_token
+from routstr.payment.temporary_balance import (
+    build_cashu_payment_payload,
+    credit_temporary_balance,
+)
+from routstr.wallet import get_balance, recieve_token, send_token
 
 
 @pytest.mark.asyncio
@@ -96,10 +100,11 @@ async def test_credit_balance() -> None:
 
     with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
         with patch(
-            "routstr.wallet.recieve_token",
+            "routstr.payment.temporary_balance.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),
         ):
-            amount = await credit_balance(token_str, mock_key, mock_session)
+            payload = build_cashu_payment_payload(token_str)
+            amount = await credit_temporary_balance(payload, mock_key, mock_session)
             assert amount == 1000000  # converted to msat
             assert mock_key.balance == 6000000  # Should be updated after refresh
             # Verify atomic operations were used

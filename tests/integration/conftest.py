@@ -280,10 +280,24 @@ class TestmintWallet:
         return 100000  # 100k sats
 
     async def credit_balance(
-        self, cashu_token: str, key: ApiKey, session: AsyncSession
+        self, payload: Any, key: ApiKey, session: AsyncSession
     ) -> int:
         """Credit balance to API key - test implementation"""
         try:
+            from routstr.payment.temporary_balance import (
+                TemporaryBalancePaymentPayload,
+            )
+
+            if isinstance(payload, TemporaryBalancePaymentPayload):
+                cashu_token = payload.data.get("token")
+            elif isinstance(payload, dict):
+                cashu_token = payload.get("token")
+            else:
+                cashu_token = payload
+
+            if not isinstance(cashu_token, str):
+                raise ValueError("token missing from payment payload")
+
             logger.info(
                 f"TestmintWallet.credit_balance called with token: {cashu_token[:20]}..."
             )
@@ -522,7 +536,10 @@ async def integration_app(
         with (
             patch("routstr.core.db.engine", integration_engine),
             patch.object(_settings, "cashu_mints", [mint_url]),
-            patch("routstr.wallet.credit_balance", testmint_wallet.credit_balance),
+            patch(
+                "routstr.payment.temporary_balance.credit_temporary_balance",
+                testmint_wallet.credit_balance,
+            ),
             patch("routstr.wallet.send_token", testmint_wallet.send_token),
             patch("routstr.wallet.send_to_lnurl", testmint_wallet.send_to_lnurl),
             patch("routstr.wallet.recieve_token", testmint_wallet.redeem_token),
