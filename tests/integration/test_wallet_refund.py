@@ -165,73 +165,13 @@ async def test_refund_amount_validation(
     assert key.refund_address is None
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="Lightning address refund functionality not implemented")
-async def test_refund_with_lightning_address(
-    integration_client: AsyncClient,
-    testmint_wallet: Any,
-    integration_session: Any,
-    db_snapshot: Any,
-) -> None:
-    """Test refund to Lightning address when refund_address is set"""
-
-    # Create API key normally first
-    token = await testmint_wallet.mint_tokens(500)
-    refund_address = "test@lightning.address"
-
-    # Use cashu token as Bearer auth to create API key
-    integration_client.headers["Authorization"] = f"Bearer {token}"
-    response = await integration_client.get("/v1/wallet/info")
-    assert response.status_code == 200
-    api_key = response.json()["api_key"]
-    balance = response.json()["balance"]
-
-    # Update the key to have a refund address
-    hashed_key = api_key[3:] if api_key.startswith("sk-") else api_key
-    from sqlmodel import update
-
-    await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
-        .values(refund_address=refund_address)
-    )
-    await integration_session.commit()
-
-    # Capture state
-    await db_snapshot.capture()
-
-    # Mock send_to_lnurl function directly
-    with patch("routstr.balance.send_to_lnurl") as mock_send_to_lnurl:
-        mock_send_to_lnurl.return_value = {
-            "amount_sent": balance,
-            "unit": "msat",
-            "lnurl": refund_address,
-            "status": "completed",
-        }
-
-        # Request refund
-        integration_client.headers["Authorization"] = f"Bearer {api_key}"
-        response = await integration_client.post("/v1/wallet/refund")
-
-        assert response.status_code == 200
-        data = response.json()
-
-        # Should return recipient and msats, but no token
-        assert data["recipient"] == refund_address
-        assert data["msats"] == balance
-        assert "token" not in data
-
-        # Verify send_to_lnurl was called with correct parameters
-        mock_send_to_lnurl.assert_called_once_with(
-            balance,  # amount in msats
-            "msat",  # unit
-            refund_address,  # lnurl
-        )
-
-    # Verify key was deleted by trying to use it
-    integration_client.headers["Authorization"] = f"Bearer {api_key}"
-    verify_response = await integration_client.get("/v1/wallet/info")
+# TODO: Implement Lightning address refund functionality
+# @pytest.mark.integration
+# @pytest.mark.asyncio
+# async def test_refund_with_lightning_address(...) -> None:
+#     """Test refund to Lightning address when refund_address is set"""
+#     # Lightning address refund functionality not yet implemented
+#     pass
     assert verify_response.status_code == 401
 
 

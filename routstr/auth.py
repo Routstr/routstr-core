@@ -390,6 +390,8 @@ async def revert_pay_for_request(
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.reserved_balance) >= cost_per_request)
+        .where(col(ApiKey.total_requests) >= 1)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
             total_requests=col(ApiKey.total_requests) - 1,
@@ -399,21 +401,23 @@ async def revert_pay_for_request(
     result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
     if result.rowcount == 0:
+        await session.refresh(key)
         logger.error(
-            "Failed to revert payment - insufficient reserved balance",
+            "Failed to revert payment - insufficient reserved balance or invalid total_requests",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
                 "cost_to_revert": cost_per_request,
                 "current_reserved_balance": key.reserved_balance,
+                "current_total_requests": key.total_requests,
             },
         )
         raise HTTPException(
-            status_code=402,
+            status_code=500,
             detail={
                 "error": {
-                    "message": f"failed to revert request payment: {cost_per_request} mSats required. {key.balance} available.",
-                    "type": "payment_error",
-                    "code": "payment_error",
+                    "message": f"Failed to revert request payment: insufficient reserved balance ({key.reserved_balance} msats) or invalid request count ({key.total_requests}).",
+                    "type": "revert_error",
+                    "code": "revert_error",
                 }
             },
         )

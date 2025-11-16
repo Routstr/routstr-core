@@ -137,6 +137,7 @@ async def test_insufficient_reserved_balance_for_revert(
     integration_session: AsyncSession,
 ) -> None:
     """Test revert_pay_for_request behavior with insufficient reserved balance."""
+    from fastapi import HTTPException
     from routstr.auth import revert_pay_for_request
 
     # Create key with zero reserved balance
@@ -145,21 +146,25 @@ async def test_insufficient_reserved_balance_for_revert(
         hashed_key=unique_key,
         balance=1000,
         reserved_balance=0,
+        total_requests=0,
     )
     integration_session.add(test_key)
     await integration_session.commit()
 
-    # Try to revert more than available
-    # Note: Current implementation allows reserved_balance to go negative
-    await revert_pay_for_request(test_key, integration_session, 100)
+    # Try to revert more than available - should now raise an exception
+    with pytest.raises(HTTPException) as exc_info:
+        await revert_pay_for_request(test_key, integration_session, 100)
+    
+    assert exc_info.value.status_code == 500
+    assert "revert_error" in str(exc_info.value.detail)
 
     # Refresh to get updated values
     await integration_session.refresh(test_key)
 
-    # Current implementation allows negative reserved balance
-    assert test_key.reserved_balance == -100, (
-        f"Expected reserved_balance to be -100, got: {test_key.reserved_balance}"
+    # Fixed implementation prevents negative reserved balance
+    assert test_key.reserved_balance == 0, (
+        f"Reserved balance should remain 0, got: {test_key.reserved_balance}"
     )
-    assert test_key.total_requests == -1, (
-        f"Expected total_requests to be -1, got: {test_key.total_requests}"
+    assert test_key.total_requests == 0, (
+        f"Total requests should remain 0, got: {test_key.total_requests}"
     )
