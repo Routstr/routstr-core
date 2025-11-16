@@ -826,6 +826,15 @@ export class AdminService {
       `/admin/api/usage/error-details?hours=${hours}&limit=${limit}`
     );
   }
+
+  static async getRevenueByModel(
+    hours: number = 24,
+    limit: number = 20
+  ): Promise<RevenueByModel> {
+    return await apiClient.get<RevenueByModel>(
+      `/admin/api/usage/revenue-by-model?hours=${hours}&limit=${limit}`
+    );
+  }
 }
 
 export const TemporaryBalanceSchema = z.object({
@@ -848,6 +857,8 @@ export interface UsageMetricData {
   warnings: number;
   payment_processed: number;
   upstream_errors: number;
+  revenue_msats: number;
+  refunds_msats: number;
 }
 
 export interface UsageMetrics {
@@ -870,6 +881,14 @@ export interface UsageSummary {
   unique_models: string[];
   error_types: Record<string, number>;
   success_rate: number;
+  revenue_msats: number;
+  refunds_msats: number;
+  revenue_sats: number;
+  refunds_sats: number;
+  net_revenue_msats: number;
+  net_revenue_sats: number;
+  avg_revenue_per_request_msats: number;
+  refund_rate: number;
 }
 
 export interface ErrorDetail {
@@ -884,4 +903,21 @@ export interface ErrorDetail {
 export interface ErrorDetails {
   errors: ErrorDetail[];
   total_count: number;
+}
+
+export interface ModelRevenueData {
+  model: string;
+  revenue_sats: number;
+  refunds_sats: number;
+  net_revenue_sats: number;
+  requests: number;
+  successful: number;
+  failed: number;
+  avg_revenue_per_request: number;
+}
+
+export interface RevenueByModel {
+  models: ModelRevenueData[];
+  total_revenue_sats: number;
+  total_models: number;
 }

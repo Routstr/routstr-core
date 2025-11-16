@@ -8,6 +8,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
 import { UsageMetricsChart } from '@/components/usage-metrics-chart';
 import { UsageSummaryCards } from '@/components/usage-summary-cards';
 import { ErrorDetailsTable } from '@/components/error-details-table';
+import { RevenueByModelTable } from '@/components/revenue-by-model-table';
 import { AdminService } from '@/lib/api/services/admin';
 import { Button } from '@/components/ui/button';
 import {
@@ -58,10 +59,22 @@ export default function UsagePage() {
     staleTime: 30_000,
   });
 
+  const {
+    data: revenueByModelData,
+    isLoading: revenueByModelLoading,
+    refetch: refetchRevenueByModel,
+  } = useQuery({
+    queryKey: ['revenue-by-model', timeRange],
+    queryFn: () => AdminService.getRevenueByModel(parseInt(timeRange), 20),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
   const handleRefresh = () => {
     refetchMetrics();
     refetchSummary();
     refetchErrors();
+    refetchRevenueByModel();
   };
 
   return (
@@ -145,6 +158,33 @@ export default function UsagePage() {
                     ]}
                   />
                   <UsageMetricsChart
+                    data={metricsData.metrics.map((m) => ({
+                      ...m,
+                      revenue_sats: m.revenue_msats / 1000,
+                      refunds_sats: m.refunds_msats / 1000,
+                      net_revenue_sats:
+                        (m.revenue_msats - m.refunds_msats) / 1000,
+                    }))}
+                    title='Revenue Over Time (sats)'
+                    dataKeys={[
+                      {
+                        key: 'revenue_sats',
+                        name: 'Revenue',
+                        color: '#10b981',
+                      },
+                      {
+                        key: 'refunds_sats',
+                        name: 'Refunds',
+                        color: '#ef4444',
+                      },
+                      {
+                        key: 'net_revenue_sats',
+                        name: 'Net Revenue',
+                        color: '#059669',
+                      },
+                    ]}
+                  />
+                  <UsageMetricsChart
                     data={metricsData.metrics}
                     title='Error Tracking'
                     dataKeys={[
@@ -192,6 +232,15 @@ export default function UsagePage() {
                 </Card>
               )}
             </div>
+
+            {revenueByModelLoading ? (
+              <div className='text-center py-8'>Loading revenue by model...</div>
+            ) : revenueByModelData && revenueByModelData.models.length > 0 ? (
+              <RevenueByModelTable 
+                models={revenueByModelData.models}
+                totalRevenue={revenueByModelData.total_revenue_sats}
+              />
+            ) : null}
 
             {errorLoading ? (
               <div className='text-center py-8'>Loading errors...</div>

@@ -10,6 +10,9 @@ import {
   Database,
   CreditCard,
   TrendingUp,
+  DollarSign,
+  TrendingDown,
+  Coins,
 } from 'lucide-react';
 
 interface UsageSummaryCardsProps {
@@ -31,16 +34,34 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
       color: 'text-green-500',
     },
     {
-      title: 'Failed Requests',
-      value: summary.failed_requests.toLocaleString(),
-      icon: XCircle,
+      title: 'Revenue (sats)',
+      value: summary.revenue_sats.toLocaleString(undefined, {
+        maximumFractionDigits: 2,
+      }),
+      icon: Coins,
+      color: 'text-green-600',
+    },
+    {
+      title: 'Net Revenue (sats)',
+      value: summary.net_revenue_sats.toLocaleString(undefined, {
+        maximumFractionDigits: 2,
+      }),
+      icon: DollarSign,
+      color: 'text-emerald-600',
+    },
+    {
+      title: 'Refunds (sats)',
+      value: summary.refunds_sats.toLocaleString(undefined, {
+        maximumFractionDigits: 2,
+      }),
+      icon: TrendingDown,
       color: 'text-red-500',
     },
     {
-      title: 'Errors',
-      value: summary.total_errors.toLocaleString(),
-      icon: AlertTriangle,
-      color: 'text-orange-500',
+      title: 'Avg Revenue/Request',
+      value: `${(summary.avg_revenue_per_request_msats / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 })} sats`,
+      icon: CreditCard,
+      color: 'text-cyan-500',
     },
     {
       title: 'Success Rate',
@@ -49,16 +70,28 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
       color: 'text-emerald-500',
     },
     {
+      title: 'Refund Rate',
+      value: `${summary.refund_rate.toFixed(1)}%`,
+      icon: XCircle,
+      color: 'text-orange-500',
+    },
+    {
+      title: 'Failed Requests',
+      value: summary.failed_requests.toLocaleString(),
+      icon: XCircle,
+      color: 'text-red-400',
+    },
+    {
+      title: 'Errors',
+      value: summary.total_errors.toLocaleString(),
+      icon: AlertTriangle,
+      color: 'text-orange-500',
+    },
+    {
       title: 'Unique Models',
       value: summary.unique_models_count.toLocaleString(),
       icon: Database,
       color: 'text-purple-500',
-    },
-    {
-      title: 'Payments Processed',
-      value: summary.payment_processed.toLocaleString(),
-      icon: CreditCard,
-      color: 'text-indigo-500',
     },
     {
       title: 'Upstream Errors',
