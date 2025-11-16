@@ -10,6 +10,7 @@ from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
+from .payment.method_implementations import get_payment_method
 from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
 
 router = APIRouter()
@@ -87,21 +88,25 @@ async def topup_wallet_endpoint(
     if topup_request is not None:
         cashu_token = topup_request.cashu_token
     if cashu_token is None:
-        raise HTTPException(status_code=400, detail="A cashu_token is required.")
+        raise HTTPException(status_code=400, detail="A payment token is required.")
 
-    cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
-    if len(cashu_token) < 10 or "cashu" not in cashu_token:
-        raise HTTPException(status_code=400, detail="Invalid token format")
+    payment_data = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
+    
+    payment_method = get_payment_method(payment_data)
+    if not payment_method:
+        raise HTTPException(status_code=400, detail="Invalid payment format")
+    
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        payment_result = await payment_method.credit_balance(payment_data, key, session)
+        amount_msats = payment_result["amount_msats"]
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Token already spent")
+            raise HTTPException(status_code=400, detail="Payment already processed")
         elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Invalid token format")
+            raise HTTPException(status_code=400, detail="Invalid payment format")
         else:
-            raise HTTPException(status_code=400, detail="Failed to redeem token")
+            raise HTTPException(status_code=400, detail="Failed to process payment")
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}
@@ -165,24 +170,48 @@ async def refund_wallet_endpoint(
     elif remaining_balance <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
 
+    # Determine payment method from stored metadata
+    # For backward compatibility, default to cashu if refund_mint_url is set
+    payment_method = None
+    if key.refund_mint_url:
+        # Assume cashu if mint_url is present
+        from .payment.method_implementations import CashuTokenPaymentMethod
+        payment_method = CashuTokenPaymentMethod()
+    else:
+        # Try to detect payment method from refund_address format
+        if key.refund_address:
+            if key.refund_address.startswith("ln"):
+                from .payment.method_implementations import BitcoinLightningPaymentMethod
+                payment_method = BitcoinLightningPaymentMethod()
+            else:
+                # Default to cashu for backward compatibility
+                from .payment.method_implementations import CashuTokenPaymentMethod
+                payment_method = CashuTokenPaymentMethod()
+        else:
+            # Default to cashu for backward compatibility
+            from .payment.method_implementations import CashuTokenPaymentMethod
+            payment_method = CashuTokenPaymentMethod()
+
     # Perform refund operation first, before modifying balance
     try:
-        if key.refund_address:
-            from .core.settings import settings as global_settings
+        refund_result = await payment_method.refund_balance(
+            key, remaining_balance_msats, session
+        )
+        
+        if not refund_result["success"]:
+            raise HTTPException(status_code=500, detail="Refund failed")
 
-            await send_to_lnurl(
-                remaining_balance,
-                key.refund_currency or "sat",
-                key.refund_mint_url or global_settings.primary_mint,
-                key.refund_address,
-            )
-            result = {"recipient": key.refund_address}
-        else:
-            refund_currency = key.refund_currency or "sat"
-            token = await send_token(
-                remaining_balance, refund_currency, key.refund_mint_url
-            )
-            result = {"token": token}
+        result: dict[str, str] = {}
+        if payment_method.method_type == "cashu":
+            if key.refund_address:
+                result["recipient"] = key.refund_address
+            else:
+                result["token"] = refund_result["refund_identifier"] or ""
+        elif payment_method.method_type == "lightning":
+            result["recipient"] = key.refund_address or ""
+            result["invoice"] = refund_result["refund_identifier"] or ""
+        elif payment_method.method_type == "usdt":
+            result["transaction_hash"] = refund_result["refund_identifier"] or ""
 
         if key.refund_currency == "sat":
             result["sats"] = str(remaining_balance_msats // 1000)

@@ -15,6 +15,7 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
+from .payment.method_implementations import get_payment_method
 from .wallet import credit_balance, deserialize_token_from_string
 
 logger = get_logger(__name__)
@@ -104,25 +105,26 @@ async def validate_bearer_key(
                 extra={"key_preview": bearer_key[:10] + "..."},
             )
 
-    if bearer_key.startswith("cashu"):
+    payment_method = get_payment_method(bearer_key)
+    if payment_method:
         logger.debug(
-            "Processing Cashu token",
+            f"Processing {payment_method.method_type} payment",
             extra={
-                "token_preview": bearer_key[:20] + "...",
-                "token_type": bearer_key[:6] if len(bearer_key) >= 6 else bearer_key,
+                "payment_preview": bearer_key[:20] + "...",
+                "method_type": payment_method.method_type,
             },
         )
 
         try:
             hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
-            token_obj = deserialize_token_from_string(bearer_key)
+            metadata = await payment_method.validate_payment_data(bearer_key, session)
             logger.debug(
-                "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
+                "Generated payment hash", extra={"hash_preview": hashed_key[:16] + "..."}
             )
 
             if existing_key := await session.get(ApiKey, hashed_key):
                 logger.info(
-                    "Existing Cashu token found",
+                    f"Existing {payment_method.method_type} payment found",
                     extra={
                         "key_hash": existing_key.hashed_key[:8] + "...",
                         "balance": existing_key.balance,
@@ -133,7 +135,7 @@ async def validate_bearer_key(
                 if key_expiry_time is not None:
                     existing_key.key_expiry_time = key_expiry_time
                     logger.debug(
-                        "Updated key expiry time for existing Cashu key",
+                        "Updated key expiry time for existing payment",
                         extra={
                             "key_hash": existing_key.hashed_key[:8] + "...",
                             "expiry_time": key_expiry_time,
@@ -143,7 +145,7 @@ async def validate_bearer_key(
                 if refund_address is not None:
                     existing_key.refund_address = refund_address
                     logger.debug(
-                        "Updated refund address for existing Cashu key",
+                        "Updated refund address for existing payment",
                         extra={
                             "key_hash": existing_key.hashed_key[:8] + "...",
                             "refund_address_preview": refund_address[:20] + "..."
@@ -155,19 +157,25 @@ async def validate_bearer_key(
                 return existing_key
 
             logger.info(
-                "Creating new Cashu token entry",
+                f"Creating new {payment_method.method_type} payment entry",
                 extra={
                     "hash_preview": hashed_key[:16] + "...",
                     "has_refund_address": bool(refund_address),
                     "has_expiry_time": bool(key_expiry_time),
+                    "method_type": payment_method.method_type,
                 },
             )
-            if token_obj.mint in settings.cashu_mints:
-                refund_currency = token_obj.unit
-                refund_mint_url = token_obj.mint
-            else:
-                refund_currency = "sat"
-                refund_mint_url = settings.primary_mint
+
+            refund_currency = metadata.get("currency") or "sat"
+            refund_mint_url = metadata.get("mint_url") or settings.primary_mint
+
+            if payment_method.method_type == "cashu":
+                if metadata.get("mint_url") in settings.cashu_mints:
+                    refund_currency = metadata.get("currency") or "sat"
+                    refund_mint_url = metadata.get("mint_url") or settings.primary_mint
+                else:
+                    refund_currency = "sat"
+                    refund_mint_url = settings.primary_mint
 
             new_key = ApiKey(
                 hashed_key=hashed_key,
@@ -199,22 +207,24 @@ async def validate_bearer_key(
                 return existing_key
 
             logger.debug(
-                "New key created, starting token redemption",
-                extra={"key_hash": hashed_key[:8] + "..."},
+                "New key created, starting payment processing",
+                extra={"key_hash": hashed_key[:8] + "...", "method_type": payment_method.method_type},
             )
 
             logger.info(
-                "AUTH: About to call credit_balance",
-                extra={"token_preview": bearer_key[:50]},
+                f"AUTH: About to call {payment_method.method_type} credit_balance",
+                extra={"payment_preview": bearer_key[:50]},
             )
             try:
-                msats = await credit_balance(bearer_key, new_key, session)
+                payment_result = await payment_method.credit_balance(bearer_key, new_key, session)
+                msats = payment_result["amount_msats"]
                 logger.info(
-                    "AUTH: credit_balance returned successfully", extra={"msats": msats}
+                    f"AUTH: {payment_method.method_type} credit_balance returned successfully",
+                    extra={"msats": msats},
                 )
             except Exception as credit_error:
                 logger.error(
-                    "AUTH: credit_balance failed",
+                    f"AUTH: {payment_method.method_type} credit_balance failed",
                     extra={
                         "error": str(credit_error),
                         "error_type": type(credit_error).__name__,
@@ -224,40 +234,42 @@ async def validate_bearer_key(
 
             if msats <= 0:
                 logger.error(
-                    "Token redemption returned zero or negative amount",
-                    extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
+                    "Payment processing returned zero or negative amount",
+                    extra={"msats": msats, "key_hash": hashed_key[:8] + "...", "method_type": payment_method.method_type},
                 )
-                raise Exception("Token redemption failed")
+                raise Exception("Payment processing failed")
 
             await session.refresh(new_key)
             await session.commit()
 
             logger.info(
-                "New Cashu token successfully redeemed and stored",
+                f"New {payment_method.method_type} payment successfully processed and stored",
                 extra={
                     "key_hash": hashed_key[:8] + "...",
                     "redeemed_msats": msats,
                     "final_balance": new_key.balance,
+                    "method_type": payment_method.method_type,
                 },
             )
 
             return new_key
         except Exception as e:
             logger.error(
-                "Cashu token redemption failed",
+                f"{payment_method.method_type} payment processing failed",
                 extra={
                     "error": str(e),
                     "error_type": type(e).__name__,
-                    "token_preview": bearer_key[:20] + "..."
+                    "payment_preview": bearer_key[:20] + "..."
                     if len(bearer_key) > 20
                     else bearer_key,
+                    "method_type": payment_method.method_type,
                 },
             )
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": {
-                        "message": f"Invalid or expired Cashu key: {str(e)}",
+                        "message": f"Invalid or expired {payment_method.method_type} payment: {str(e)}",
                         "type": "invalid_request_error",
                         "code": "invalid_api_key",
                     }
