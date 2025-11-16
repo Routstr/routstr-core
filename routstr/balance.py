@@ -10,6 +10,7 @@ from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
+from .payment.methods import get_payment_method, list_payment_methods
 from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
 
 router = APIRouter()
@@ -74,37 +75,87 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
 
 
 class TopupRequest(BaseModel):
-    cashu_token: str
+    payment_data: str
+    payment_method: str = "cashu"
+
+
+@router.get("/payment-methods")
+async def get_payment_methods() -> dict[str, list[dict[str, str]]]:
+    """List all available payment methods for topup."""
+    return {"methods": list_payment_methods()}
 
 
 @router.post("/topup")
 async def topup_wallet_endpoint(
+    payment_data: str | None = None,
+    payment_method: str | None = None,
     cashu_token: str | None = None,
     topup_request: TopupRequest | None = None,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
-) -> dict[str, int]:
-    if topup_request is not None:
-        cashu_token = topup_request.cashu_token
-    if cashu_token is None:
-        raise HTTPException(status_code=400, detail="A cashu_token is required.")
+) -> dict[str, int | str]:
+    # Backward compatibility: support old cashu_token parameter
+    if cashu_token is not None:
+        payment_data = cashu_token
+        payment_method = "cashu"
 
-    cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
-    if len(cashu_token) < 10 or "cashu" not in cashu_token:
-        raise HTTPException(status_code=400, detail="Invalid token format")
+    # Support new TopupRequest format
+    if topup_request is not None:
+        payment_data = topup_request.payment_data
+        payment_method = topup_request.payment_method
+
+    if payment_data is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Payment data is required. Use 'payment_data' parameter or 'cashu_token' for backward compatibility.",
+        )
+
+    if payment_method is None:
+        payment_method = "cashu"
+
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        method = get_payment_method(payment_method)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not await method.validate_payment_data(payment_data):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid payment data format for {method.display_name}",
+        )
+
+    try:
+        result = await method.process_payment(payment_data, key, session)
+        response: dict[str, int | str] = {
+            "msats": result["amount_msats"],
+            "payment_method": result["payment_method"],
+        }
+        if result["payment_id"]:
+            response["payment_id"] = result["payment_id"]
+        return response
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"{method.display_name} payment method is not yet fully implemented. {str(e)}",
+        )
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Token already spent")
+            raise HTTPException(status_code=400, detail="Payment already processed")
         elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Invalid token format")
+            raise HTTPException(status_code=400, detail=f"Invalid {method.display_name} format")
         else:
-            raise HTTPException(status_code=400, detail="Failed to redeem token")
-    except Exception:
+            raise HTTPException(status_code=400, detail=f"Payment processing failed: {error_msg}")
+    except Exception as e:
+        logger.error(
+            "Topup payment processing error",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "payment_method": payment_method,
+            },
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
-    return {"msats": amount_msats}
 
 
 _REFUND_CACHE_TTL_SECONDS: int = settings.refund_cache_ttl_seconds
