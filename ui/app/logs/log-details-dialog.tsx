@@ -170,7 +170,27 @@ export function LogDetailsDialog({
             )}
 
             <div>
-              <h4 className='mb-3 text-sm font-medium'>Raw JSON</h4>
+              <div className='mb-3 flex items-center justify-between'>
+                <h4 className='text-sm font-medium'>Raw JSON</h4>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() => copyToClipboard(JSON.stringify(log, null, 2), 'json')}
+                  className='h-6 px-2'
+                >
+                  {copiedField === 'json' ? (
+                    <>
+                      <Check className='mr-1 h-3 w-3' />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className='mr-1 h-3 w-3' />
+                      Copy
+                    </>
+                  )}
+                </Button>
+              </div>
               <div className='bg-muted max-h-64 overflow-auto rounded-md p-4'>
                 <pre className='text-xs break-all whitespace-pre-wrap'>
                   {JSON.stringify(log, null, 2)}
