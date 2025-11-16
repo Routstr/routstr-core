@@ -452,6 +452,9 @@ class BaseUpstreamProvider:
                                                     )
                                                 )
                                                 usage_finalized = True
+                                                # IMPORTANT: Do not modify this log message - used for usage statistics tracking
+                                                # This log is parsed to track revenue from successful requests
+                                                # The 'cost_data.actual_cost' field is used to calculate total revenue
                                                 logger.info(
                                                     "Token adjustment completed for streaming",
                                                     extra={
@@ -555,6 +558,9 @@ class BaseUpstreamProvider:
             )
             response_json["cost"] = cost_data
 
+            # IMPORTANT: Do not modify this log message - used for usage statistics tracking
+            # This log is parsed to track revenue from successful requests
+            # The 'cost_data.actual_cost' field is used to calculate total revenue
             logger.info(
                 "Token adjustment completed for non-streaming",
                 extra={

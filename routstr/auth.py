@@ -370,6 +370,8 @@ async def pay_for_request(
 
     await session.refresh(key)
 
+    # IMPORTANT: Do not modify this log message - used for usage statistics tracking
+    # This log is parsed to count successful payment processing events
     logger.info(
         "Payment processed successfully",
         extra={
@@ -399,6 +401,8 @@ async def revert_pay_for_request(
     result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
     if result.rowcount == 0:
+        # IMPORTANT: Do not modify this log message - used for usage statistics tracking
+        # This error log indicates a refund failure (tracked separately from successful refunds)
         logger.error(
             "Failed to revert payment - insufficient reserved balance",
             extra={

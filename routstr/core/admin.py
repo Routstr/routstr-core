@@ -2887,7 +2887,20 @@ def _parse_log_file(file_path: Path) -> list[dict]:
 def _aggregate_metrics_by_time(
     entries: list[dict], interval_minutes: int, hours_back: int = 24
 ) -> dict[str, list[dict]]:
-    """Aggregate log metrics into time buckets."""
+    """
+    Aggregate log metrics into time buckets.
+    
+    CRITICAL: This function parses specific log messages for usage tracking.
+    The following log messages must not be modified without updating this function:
+    - "received proxy request" -> counts total_requests
+    - "token adjustment completed" -> counts successful_chat_completions, extracts revenue_msats from cost_data.actual_cost
+    - "upstream request failed" OR "revert payment" -> counts failed_requests
+    - "payment processed successfully" -> counts payment_processed
+    - "revert payment" -> extracts refunds_msats from max_cost_for_model
+    - ERROR level with "upstream" -> counts upstream_errors
+    
+    See routstr/core/logging.py for full documentation of critical log messages.
+    """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=hours_back)
     
@@ -2977,7 +2990,13 @@ def _aggregate_metrics_by_time(
 
 
 def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
-    """Calculate summary statistics from log entries."""
+    """
+    Calculate summary statistics from log entries.
+    
+    CRITICAL: This function parses specific log messages for usage tracking.
+    See routstr/core/logging.py for documentation of critical log messages.
+    Changes to log messages in proxy.py, auth.py, or upstream/base.py may break this function.
+    """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=hours_back)
     
@@ -3245,7 +3264,13 @@ async def get_revenue_by_model(
     hours: int = Query(default=24, ge=1, le=168, description="Hours of history to analyze"),
     limit: int = Query(default=20, ge=1, le=100, description="Maximum number of models to return"),
 ) -> dict:
-    """Get revenue breakdown by model."""
+    """
+    Get revenue breakdown by model.
+    
+    CRITICAL: This function parses specific log messages for revenue tracking.
+    See routstr/core/logging.py for documentation of critical log messages.
+    Changes to log messages may break revenue calculations per model.
+    """
     logs_dir = Path("logs")
     all_entries: list[dict] = []
     

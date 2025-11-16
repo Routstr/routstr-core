@@ -141,6 +141,8 @@ async def proxy(
             "unauthorized", "Unauthorized", 401, request=request
         )
 
+    # IMPORTANT: Do not modify this log message - used for usage statistics tracking
+    # This log is parsed by the usage tracking system to count total requests
     logger.info(  # TODO: move to middleware, async
         "Received proxy request",
         extra={
@@ -222,6 +224,9 @@ async def proxy(
 
     if response.status_code != 200:
         await revert_pay_for_request(key, session, max_cost_for_model)
+        # IMPORTANT: Do not modify this log message - used for usage statistics tracking
+        # This log is parsed to track refunds and failed requests
+        # The 'max_cost_for_model' field is used to calculate total refunds
         logger.warning(
             "Upstream request failed, revert payment",
             extra={
