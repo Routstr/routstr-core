@@ -137,6 +137,7 @@ async def test_insufficient_reserved_balance_for_revert(
     integration_session: AsyncSession,
 ) -> None:
     """Test revert_pay_for_request behavior with insufficient reserved balance."""
+    from fastapi import HTTPException
     from routstr.auth import revert_pay_for_request
 
     # Create key with zero reserved balance
@@ -149,17 +150,85 @@ async def test_insufficient_reserved_balance_for_revert(
     integration_session.add(test_key)
     await integration_session.commit()
 
-    # Try to revert more than available
-    # Note: Current implementation allows reserved_balance to go negative
+    # Try to revert more than available - should raise HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        await revert_pay_for_request(test_key, integration_session, 100)
+    
+    assert exc_info.value.status_code == 402
+
+    # Refresh to get updated values
+    await integration_session.refresh(test_key)
+
+    # Reserved balance should remain non-negative
+    assert test_key.reserved_balance >= 0, (
+        f"Reserved balance should not be negative, got: {test_key.reserved_balance}"
+    )
+    assert test_key.reserved_balance == 0, (
+        f"Expected reserved_balance to remain 0, got: {test_key.reserved_balance}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_revert_reserved_balance(
+    integration_session: AsyncSession,
+) -> None:
+    """Test revert_pay_for_request with partial reserved balance."""
+    from routstr.auth import revert_pay_for_request
+
+    # Create key with partial reserved balance
+    unique_key = f"test_partial_revert_key_{uuid.uuid4().hex[:8]}"
+    test_key = ApiKey(
+        hashed_key=unique_key,
+        balance=1000,
+        reserved_balance=50,
+        total_requests=5,
+    )
+    integration_session.add(test_key)
+    await integration_session.commit()
+
+    # Try to revert more than available - should partially revert
     await revert_pay_for_request(test_key, integration_session, 100)
 
     # Refresh to get updated values
     await integration_session.refresh(test_key)
 
-    # Current implementation allows negative reserved balance
-    assert test_key.reserved_balance == -100, (
-        f"Expected reserved_balance to be -100, got: {test_key.reserved_balance}"
+    # Reserved balance should be 0 (fully reverted, not negative)
+    assert test_key.reserved_balance == 0, (
+        f"Expected reserved_balance to be 0 after partial revert, got: {test_key.reserved_balance}"
     )
-    assert test_key.total_requests == -1, (
-        f"Expected total_requests to be -1, got: {test_key.total_requests}"
+    assert test_key.total_requests == 4, (
+        f"Expected total_requests to be 4, got: {test_key.total_requests}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_full_revert_reserved_balance(
+    integration_session: AsyncSession,
+) -> None:
+    """Test revert_pay_for_request with sufficient reserved balance."""
+    from routstr.auth import revert_pay_for_request
+
+    # Create key with sufficient reserved balance
+    unique_key = f"test_full_revert_key_{uuid.uuid4().hex[:8]}"
+    test_key = ApiKey(
+        hashed_key=unique_key,
+        balance=1000,
+        reserved_balance=100,
+        total_requests=5,
+    )
+    integration_session.add(test_key)
+    await integration_session.commit()
+
+    # Revert exact amount
+    await revert_pay_for_request(test_key, integration_session, 100)
+
+    # Refresh to get updated values
+    await integration_session.refresh(test_key)
+
+    # Reserved balance should be 0, not negative
+    assert test_key.reserved_balance == 0, (
+        f"Expected reserved_balance to be 0, got: {test_key.reserved_balance}"
+    )
+    assert test_key.total_requests == 4, (
+        f"Expected total_requests to be 4, got: {test_key.total_requests}"
     )

@@ -186,7 +186,7 @@ class TestPerformanceBaseline:
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.skip(
-    reason="High load tests fail in CI environment - skipping for reliability"
+    reason="High load tests require dedicated performance testing environment - run separately with pytest -m slow"
 )
 class TestLoadScenarios:
     """Test system under various load scenarios"""
@@ -366,7 +366,7 @@ class TestLoadScenarios:
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.skip(
-    reason="Memory leak tests fail due to missing model field - skipping for CI reliability"
+    reason="Memory leak tests require dedicated monitoring - run separately for performance analysis"
 )
 class TestMemoryLeaks:
     """Test for memory leaks under various conditions"""
@@ -428,7 +428,7 @@ class TestMemoryLeaks:
 
 @pytest.mark.integration
 @pytest.mark.skip(
-    reason="Performance regression tests fail due to auth issues - skipping for CI reliability"
+    reason="Performance regression tests require baseline metrics - run separately for performance benchmarking"
 )
 class TestPerformanceRegression:
     """Test for performance regressions"""

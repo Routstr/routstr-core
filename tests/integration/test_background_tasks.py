@@ -437,14 +437,6 @@ class TestRefundCheckTask:
 class TestPeriodicPayoutTask:
     """Test the periodic payout background task"""
 
-    @pytest.mark.skip(
-        reason="Timing-based test with complex mocking - skipping for CI reliability"
-    )
-    async def test_executes_at_configured_intervals(self) -> None:
-        """Test that payout task runs at the configured interval"""
-        pass
-
-    @pytest.mark.skip(reason="Database setup issues - skipping for CI reliability")
     async def test_calculates_payouts_accurately(
         self, integration_session: Any
     ) -> None:
@@ -562,7 +554,7 @@ class TestPeriodicPayoutTask:
 
 @pytest.mark.asyncio
 @pytest.mark.skip(
-    reason="Complex timing and concurrency tests - skipping for CI reliability"
+    reason="Complex timing and concurrency tests - requires proper async task testing infrastructure"
 )
 class TestTaskInteractions:
     """Test interactions between background tasks"""

@@ -379,13 +379,12 @@ class TestDataIntegrity:
     """Test data integrity constraints and validations"""
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Balance never negative is not implemented")
     async def test_balance_never_negative(
         self,
         authenticated_client: AsyncClient,
         integration_session: AsyncSession,
     ) -> None:
-        """Test that balance can never go negative"""
+        """Test that reserved balance can never go negative"""
         # Get API key info
         api_key_header = authenticated_client.headers["Authorization"].replace(
             "Bearer ", ""

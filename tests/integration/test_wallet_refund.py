@@ -167,7 +167,7 @@ async def test_refund_amount_validation(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Lightning address refund functionality not implemented")
+@pytest.mark.skip(reason="Lightning address refund functionality not yet implemented - feature placeholder")
 async def test_refund_with_lightning_address(
     integration_client: AsyncClient,
     testmint_wallet: Any,

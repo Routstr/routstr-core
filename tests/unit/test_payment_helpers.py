@@ -125,3 +125,226 @@ async def test_get_max_cost_for_model_tolerance() -> None:
                 "gpt-4", session=mock_session, model_obj=mock_model
             )
             assert cost == 450000  # 500 sats * 1000 * 0.9 = 450000
+
+
+async def test_calculate_discounted_max_cost_basic() -> None:
+    """Test calculate_discounted_max_cost with basic scenario."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+    from routstr.payment.models import Pricing
+
+    body = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 100,
+    }
+
+    mock_pricing = Pricing(
+        prompt=0.03,
+        completion=0.06,
+        request=0.0,
+        image=0.0,
+        web_search=0.0,
+        internal_reasoning=0.0,
+        max_cost=100.0,
+        max_prompt_cost=1000.0,
+        max_completion_cost=2000.0,
+    )
+    mock_model = Mock()
+    mock_model.sats_pricing = mock_pricing
+
+    with patch.object(settings, "fixed_pricing", False):
+        with patch.object(settings, "tolerance_percentage", 0):
+            result = await calculate_discounted_max_cost(
+                100000, body, model_obj=mock_model
+            )
+            assert isinstance(result, int)
+            assert result >= 0
+
+
+async def test_calculate_discounted_max_cost_with_images() -> None:
+    """Test calculate_discounted_max_cost with images in messages."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+    from routstr.payment.models import Pricing
+
+    body = {
+        "model": "gpt-4-vision",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                        },
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 100,
+    }
+
+    mock_pricing = Pricing(
+        prompt=0.03,
+        completion=0.06,
+        request=0.0,
+        image=0.0,
+        web_search=0.0,
+        internal_reasoning=0.0,
+        max_cost=100.0,
+        max_prompt_cost=1000.0,
+        max_completion_cost=2000.0,
+    )
+    mock_model = Mock()
+    mock_model.sats_pricing = mock_pricing
+
+    with patch.object(settings, "fixed_pricing", False):
+        with patch.object(settings, "tolerance_percentage", 0):
+            result = await calculate_discounted_max_cost(
+                100000, body, model_obj=mock_model
+            )
+            assert isinstance(result, int)
+            assert result >= 0
+
+
+async def test_calculate_discounted_max_cost_edge_cases() -> None:
+    """Test calculate_discounted_max_cost edge cases."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    with patch.object(settings, "fixed_pricing", True):
+        result = await calculate_discounted_max_cost(100000, {}, model_obj=None)
+        assert result == 100000
+
+    with patch.object(settings, "fixed_pricing", False):
+        result = await calculate_discounted_max_cost(100000, {}, model_obj=None)
+        assert result == 100000
+
+
+def test_estimate_tokens() -> None:
+    """Test estimate_tokens function."""
+    from routstr.payment.helpers import estimate_tokens
+
+    messages = [
+        {"role": "user", "content": "Hello, world!"},
+        {"role": "assistant", "content": "Hi there!"},
+    ]
+
+    tokens = estimate_tokens(messages)
+    assert isinstance(tokens, int)
+    assert tokens > 0
+
+
+def test_estimate_tokens_with_list_content() -> None:
+    """Test estimate_tokens with list content."""
+    from routstr.payment.helpers import estimate_tokens
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "text", "text": "World"},
+            ],
+        }
+    ]
+
+    tokens = estimate_tokens(messages)
+    assert isinstance(tokens, int)
+    assert tokens > 0
+
+
+def test_estimate_tokens_empty() -> None:
+    """Test estimate_tokens with empty messages."""
+    from routstr.payment.helpers import estimate_tokens
+
+    tokens = estimate_tokens([])
+    assert tokens == 0
+
+
+def test_check_token_balance() -> None:
+    """Test check_token_balance function."""
+    from fastapi import HTTPException
+    from routstr.payment.helpers import check_token_balance
+
+    headers = {"Authorization": "Bearer sk-test-key"}
+    body = {"model": "gpt-4"}
+    max_cost = 1000
+
+    check_token_balance(headers, body, max_cost)
+
+
+def test_check_token_balance_insufficient() -> None:
+    """Test check_token_balance with insufficient balance."""
+    from fastapi import HTTPException
+    from routstr.payment.helpers import check_token_balance
+    from routstr.wallet import deserialize_token_from_string
+
+    token_string = "cashuAeyJ0b2tlbiI6W3sibWludCI6Imh0dHA6Ly9sb2NhbGhvc3Q6MzMzOCIsInByb29mcyI6W3siaWQiOiJ0ZXN0Iiwic2VjcmV0IjoiMTIzIiwgIkMiOiIwMjM0NTY3ODkwYWJjZGVmMTIzNDU2Nzg5MGFiY2RlZjEyMzQ1Njc4OTBhYmNkZWYxMjM0NTY3ODkwYWJjZGVmMTIiIn1dfV0="
+
+    headers = {"Authorization": f"Bearer {token_string}"}
+    body = {"model": "gpt-4"}
+    max_cost = 1000000000
+
+    try:
+        check_token_balance(headers, body, max_cost)
+        assert False, "Should have raised HTTPException"
+    except HTTPException as e:
+        assert e.status_code == 413
+
+
+def test_check_token_balance_no_auth() -> None:
+    """Test check_token_balance with no authentication."""
+    from fastapi import HTTPException
+    from routstr.payment.helpers import check_token_balance
+
+    headers = {}
+    body = {"model": "gpt-4"}
+    max_cost = 1000
+
+    try:
+        check_token_balance(headers, body, max_cost)
+        assert False, "Should have raised HTTPException"
+    except HTTPException as e:
+        assert e.status_code == 401
+
+
+def test_create_error_response() -> None:
+    """Test create_error_response function."""
+    from fastapi import Request
+    from fastapi.testclient import TestClient
+    from routstr.payment.helpers import create_error_response
+
+    app = TestClient(lambda: None)
+    request = Request({"type": "http", "method": "GET", "url": "/test"})
+
+    response = create_error_response(
+        error_type="test_error",
+        message="Test error message",
+        status_code=400,
+        request=request,
+    )
+
+    assert response.status_code == 400
+    assert response.media_type == "application/json"
+
+
+def test_create_error_response_with_token() -> None:
+    """Test create_error_response with token."""
+    from fastapi import Request
+    from fastapi.testclient import TestClient
+    from routstr.payment.helpers import create_error_response
+
+    app = TestClient(lambda: None)
+    request = Request({"type": "http", "method": "GET", "url": "/test"})
+
+    response = create_error_response(
+        error_type="test_error",
+        message="Test error message",
+        status_code=400,
+        request=request,
+        token="test-token",
+    )
+
+    assert response.status_code == 400
+    assert "X-Cashu" in response.headers
