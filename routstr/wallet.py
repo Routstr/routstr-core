@@ -10,6 +10,7 @@ from sqlmodel import col, update
 from .core import db, get_logger
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
+from .payment.methods import PaymentMethodFactory, CashuPaymentMethod
 
 logger = get_logger(__name__)
 
@@ -22,19 +23,33 @@ async def get_balance(unit: str) -> int:
 async def recieve_token(
     token: str,
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
-    token_obj = deserialize_token_from_string(token)
-    if len(token_obj.keysets) > 1:
-        raise ValueError("Multiple keysets per token currently not supported")
-
-    wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
-    wallet.keyset_id = token_obj.keysets[0]
-
-    if token_obj.mint not in settings.cashu_mints:
-        return await swap_to_primary_mint(token_obj, wallet)
-
-    wallet.verify_proofs_dleq(token_obj.proofs)
-    await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
-    return token_obj.amount, token_obj.unit, token_obj.mint
+    """
+    Receive a payment token using the appropriate payment method.
+    
+    This function now uses the PaymentMethodFactory to support multiple
+    payment methods (Cashu, Lightning, USDT, etc.).
+    
+    Note: Currently only Cashu is fully implemented. Other methods will
+    raise NotImplementedError.
+    """
+    try:
+        # Try to auto-detect payment method from token format
+        payment_method = PaymentMethodFactory.detect_method(token)
+        logger.info(
+            f"Detected payment method: {payment_method.method_name}",
+            extra={"token_preview": token[:20]}
+        )
+    except ValueError:
+        # Fallback to Cashu for backward compatibility
+        logger.warning(
+            "Could not detect payment method, falling back to Cashu",
+            extra={"token_preview": token[:20]}
+        )
+        payment_method = PaymentMethodFactory.get_method("cashu")
+    
+    # Use the payment method to receive the token
+    payment_info = await payment_method.receive(token)
+    return payment_info["amount"], payment_info["unit"], payment_info["mint_url"]
 
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
@@ -54,7 +69,16 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 
 
 async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str:
-    _, token = await send(amount, unit, mint_url)
+    """
+    Send a payment token using the appropriate payment method.
+    
+    Currently uses Cashu payment method. In the future, this could be
+    extended to support multiple payment methods based on configuration
+    or user preference.
+    """
+    # For now, always use Cashu (can be extended to support method selection)
+    payment_method = PaymentMethodFactory.get_method("cashu")
+    _, token = await payment_method.send(amount, unit, mint_url)
     return token
 
 

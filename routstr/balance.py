@@ -11,6 +11,7 @@ from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
 from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
+from .payment.methods import PaymentMethodFactory
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -75,6 +76,7 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
 
 class TopupRequest(BaseModel):
     cashu_token: str
+    payment_method: str | None = None  # Optional: 'cashu', 'lightning', 'usdt', etc.
 
 
 @router.post("/topup")
@@ -84,14 +86,50 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
+    """
+    Top up wallet balance using various payment methods.
+    
+    Supports multiple payment methods:
+    - Cashu tokens (default, fully implemented)
+    - Lightning invoices (pseudo-implemented)
+    - USDT transactions (pseudo-implemented)
+    - On-chain Bitcoin (pseudo-implemented)
+    
+    The payment method is auto-detected from token format, or can be
+    explicitly specified in the request.
+    """
+    payment_method_name = None
     if topup_request is not None:
         cashu_token = topup_request.cashu_token
+        payment_method_name = topup_request.payment_method
     if cashu_token is None:
         raise HTTPException(status_code=400, detail="A cashu_token is required.")
 
     cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
-    if len(cashu_token) < 10 or "cashu" not in cashu_token:
-        raise HTTPException(status_code=400, detail="Invalid token format")
+    
+    # Validate token format using payment method
+    try:
+        if payment_method_name:
+            payment_method = PaymentMethodFactory.get_method(payment_method_name)
+        else:
+            # Auto-detect payment method from token format
+            payment_method = PaymentMethodFactory.detect_method(cashu_token)
+        
+        logger.info(
+            f"Processing topup with payment method: {payment_method.method_name}",
+            extra={"token_preview": cashu_token[:20]}
+        )
+        
+        if not await payment_method.validate_token(cashu_token):
+            raise HTTPException(status_code=400, detail="Invalid token format")
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"Payment method not yet implemented: {str(e)}"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
     try:
         amount_msats = await credit_balance(cashu_token, key, session)
     except ValueError as e:
@@ -102,6 +140,11 @@ async def topup_wallet_endpoint(
             raise HTTPException(status_code=400, detail="Invalid token format")
         else:
             raise HTTPException(status_code=400, detail="Failed to redeem token")
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"Payment method not fully implemented: {str(e)}"
+        )
     except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}
