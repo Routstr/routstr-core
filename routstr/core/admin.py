@@ -2891,7 +2891,7 @@ def _aggregate_metrics_by_time(
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=hours_back)
     
-    time_buckets: dict[str, dict[str, int]] = defaultdict(
+    time_buckets: dict[str, dict[str, int | float]] = defaultdict(
         lambda: {
             "total_requests": 0,
             "successful_chat_completions": 0,
@@ -2900,6 +2900,8 @@ def _aggregate_metrics_by_time(
             "warnings": 0,
             "payment_processed": 0,
             "upstream_errors": 0,
+            "revenue_msats": 0,
+            "refunds_msats": 0,
         }
     )
     
@@ -2946,6 +2948,18 @@ def _aggregate_metrics_by_time(
                 
             if "upstream" in message and level == "ERROR":
                 time_buckets[bucket_key]["upstream_errors"] += 1
+            
+            if "token adjustment completed" in message:
+                cost_data = entry.get("cost_data")
+                if isinstance(cost_data, dict):
+                    actual_cost = cost_data.get("actual_cost", 0)
+                    if isinstance(actual_cost, (int, float)) and actual_cost > 0:
+                        time_buckets[bucket_key]["revenue_msats"] += actual_cost
+                        
+            if "revert payment" in message:
+                max_cost = entry.get("max_cost_for_model", 0)
+                if isinstance(max_cost, (int, float)) and max_cost > 0:
+                    time_buckets[bucket_key]["refunds_msats"] += max_cost
                 
         except Exception:
             continue
@@ -2978,6 +2992,12 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
         "upstream_errors": 0,
         "unique_models": set(),
         "error_types": defaultdict(int),
+        "revenue_msats": 0,
+        "refunds_msats": 0,
+        "revenue_sats": 0.0,
+        "refunds_sats": 0.0,
+        "net_revenue_msats": 0,
+        "net_revenue_sats": 0.0,
     }
     
     for entry in entries:
@@ -3024,9 +3044,26 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
                 model = entry["model"]
                 if isinstance(model, str) and model != "unknown":
                     stats["unique_models"].add(model)
+            
+            if "token adjustment completed" in message:
+                cost_data = entry.get("cost_data")
+                if isinstance(cost_data, dict):
+                    actual_cost = cost_data.get("actual_cost", 0)
+                    if isinstance(actual_cost, (int, float)) and actual_cost > 0:
+                        stats["revenue_msats"] += actual_cost
+                        
+            if "revert payment" in message:
+                max_cost = entry.get("max_cost_for_model", 0)
+                if isinstance(max_cost, (int, float)) and max_cost > 0:
+                    stats["refunds_msats"] += max_cost
                     
         except Exception:
             continue
+    
+    stats["revenue_sats"] = stats["revenue_msats"] / 1000
+    stats["refunds_sats"] = stats["refunds_msats"] / 1000
+    stats["net_revenue_msats"] = stats["revenue_msats"] - stats["refunds_msats"]
+    stats["net_revenue_sats"] = stats["net_revenue_msats"] / 1000
     
     return {
         "total_entries": stats["total_entries"],
@@ -3042,6 +3079,22 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
         "error_types": dict(stats["error_types"]),
         "success_rate": (
             (stats["successful_chat_completions"] / stats["total_requests"] * 100)
+            if stats["total_requests"] > 0
+            else 0
+        ),
+        "revenue_msats": stats["revenue_msats"],
+        "refunds_msats": stats["refunds_msats"],
+        "revenue_sats": stats["revenue_sats"],
+        "refunds_sats": stats["refunds_sats"],
+        "net_revenue_msats": stats["net_revenue_msats"],
+        "net_revenue_sats": stats["net_revenue_sats"],
+        "avg_revenue_per_request_msats": (
+            stats["revenue_msats"] / stats["successful_chat_completions"]
+            if stats["successful_chat_completions"] > 0
+            else 0
+        ),
+        "refund_rate": (
+            (stats["failed_requests"] / stats["total_requests"] * 100)
             if stats["total_requests"] > 0
             else 0
         ),
@@ -3184,3 +3237,114 @@ async def get_error_details(
     errors.sort(key=lambda x: x["timestamp"], reverse=True)
     
     return {"errors": errors[:limit], "total_count": len(errors)}
+
+
+@admin_router.get("/api/usage/revenue-by-model", dependencies=[Depends(require_admin_api)])
+async def get_revenue_by_model(
+    request: Request,
+    hours: int = Query(default=24, ge=1, le=168, description="Hours of history to analyze"),
+    limit: int = Query(default=20, ge=1, le=100, description="Maximum number of models to return"),
+) -> dict:
+    """Get revenue breakdown by model."""
+    logs_dir = Path("logs")
+    all_entries: list[dict] = []
+    
+    if not logs_dir.exists():
+        return {"models": [], "total_revenue_sats": 0}
+    
+    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
+    
+    for log_file in sorted(logs_dir.glob("app_*.log")):
+        try:
+            file_date_str = log_file.stem.split("_")[1]
+            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            
+            if file_date < cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0):
+                continue
+            
+            entries = _parse_log_file(log_file)
+            all_entries.extend(entries)
+        except Exception as e:
+            logger.error(f"Error processing log file {log_file}: {e}")
+            continue
+    
+    now = datetime.now(timezone.utc)
+    model_stats: dict[str, dict[str, int | float]] = defaultdict(
+        lambda: {
+            "revenue_msats": 0,
+            "refunds_msats": 0,
+            "requests": 0,
+            "successful": 0,
+            "failed": 0,
+        }
+    )
+    
+    for entry in all_entries:
+        try:
+            timestamp_str = entry.get("asctime", "")
+            if not timestamp_str:
+                continue
+            
+            log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            log_time = log_time.replace(tzinfo=timezone.utc)
+            
+            if log_time < cutoff_date:
+                continue
+            
+            model = entry.get("model", "unknown")
+            if not isinstance(model, str):
+                model = "unknown"
+            
+            message = entry.get("message", "").lower()
+            
+            if "received proxy request" in message:
+                model_stats[model]["requests"] += 1
+            
+            if "token adjustment completed" in message:
+                model_stats[model]["successful"] += 1
+                cost_data = entry.get("cost_data")
+                if isinstance(cost_data, dict):
+                    actual_cost = cost_data.get("actual_cost", 0)
+                    if isinstance(actual_cost, (int, float)) and actual_cost > 0:
+                        model_stats[model]["revenue_msats"] += actual_cost
+            
+            if "revert payment" in message or "upstream request failed" in message:
+                model_stats[model]["failed"] += 1
+                if "revert payment" in message:
+                    max_cost = entry.get("max_cost_for_model", 0)
+                    if isinstance(max_cost, (int, float)) and max_cost > 0:
+                        model_stats[model]["refunds_msats"] += max_cost
+                        
+        except Exception:
+            continue
+    
+    models = []
+    total_revenue = 0
+    
+    for model, stats in model_stats.items():
+        revenue_sats = stats["revenue_msats"] / 1000
+        refunds_sats = stats["refunds_msats"] / 1000
+        net_revenue_sats = revenue_sats - refunds_sats
+        
+        total_revenue += net_revenue_sats
+        
+        models.append({
+            "model": model,
+            "revenue_sats": revenue_sats,
+            "refunds_sats": refunds_sats,
+            "net_revenue_sats": net_revenue_sats,
+            "requests": stats["requests"],
+            "successful": stats["successful"],
+            "failed": stats["failed"],
+            "avg_revenue_per_request": (
+                revenue_sats / stats["successful"] if stats["successful"] > 0 else 0
+            ),
+        })
+    
+    models.sort(key=lambda x: x["net_revenue_sats"], reverse=True)
+    
+    return {
+        "models": models[:limit],
+        "total_revenue_sats": total_revenue,
+        "total_models": len(models),
+    }
