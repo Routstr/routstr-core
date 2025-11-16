@@ -15,7 +15,8 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
-from .wallet import credit_balance, deserialize_token_from_string
+from .payment.methods import get_payment_method
+from .wallet import deserialize_token_from_string
 
 logger = get_logger(__name__)
 
@@ -104,165 +105,228 @@ async def validate_bearer_key(
                 extra={"key_preview": bearer_key[:10] + "..."},
             )
 
-    if bearer_key.startswith("cashu"):
+    # Try to detect and process payment credentials (Cashu, Lightning, USDT, Bitcoin, etc.)
+    try:
+        payment_method = get_payment_method(bearer_key)
         logger.debug(
-            "Processing Cashu token",
+            "Processing payment credential",
             extra={
-                "token_preview": bearer_key[:20] + "...",
-                "token_type": bearer_key[:6] if len(bearer_key) >= 6 else bearer_key,
+                "credential_preview": bearer_key[:20] + "...",
+                "payment_method": payment_method.__class__.__name__,
             },
         )
 
-        try:
-            hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
-            token_obj = deserialize_token_from_string(bearer_key)
-            logger.debug(
-                "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
+        hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
+        logger.debug(
+            "Generated credential hash", extra={"hash_preview": hashed_key[:16] + "..."}
+        )
+
+        if existing_key := await session.get(ApiKey, hashed_key):
+            logger.info(
+                "Existing payment credential found",
+                extra={
+                    "key_hash": existing_key.hashed_key[:8] + "...",
+                    "balance": existing_key.balance,
+                    "total_requests": existing_key.total_requests,
+                    "payment_method": payment_method.__class__.__name__,
+                },
             )
 
-            if existing_key := await session.get(ApiKey, hashed_key):
-                logger.info(
-                    "Existing Cashu token found",
+            if key_expiry_time is not None:
+                existing_key.key_expiry_time = key_expiry_time
+                logger.debug(
+                    "Updated key expiry time for existing key",
                     extra={
                         "key_hash": existing_key.hashed_key[:8] + "...",
-                        "balance": existing_key.balance,
-                        "total_requests": existing_key.total_requests,
+                        "expiry_time": key_expiry_time,
                     },
                 )
 
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                    logger.debug(
-                        "Updated key expiry time for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "expiry_time": key_expiry_time,
-                        },
-                    )
+            if refund_address is not None:
+                existing_key.refund_address = refund_address
+                logger.debug(
+                    "Updated refund address for existing key",
+                    extra={
+                        "key_hash": existing_key.hashed_key[:8] + "...",
+                        "refund_address_preview": refund_address[:20] + "..."
+                        if len(refund_address) > 20
+                        else refund_address,
+                    },
+                )
 
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-                    logger.debug(
-                        "Updated refund address for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "refund_address_preview": refund_address[:20] + "..."
-                            if len(refund_address) > 20
-                            else refund_address,
-                        },
-                    )
+            return existing_key
 
-                return existing_key
+        logger.info(
+            "Creating new payment credential entry",
+            extra={
+                "hash_preview": hashed_key[:16] + "...",
+                "has_refund_address": bool(refund_address),
+                "has_expiry_time": bool(key_expiry_time),
+                "payment_method": payment_method.__class__.__name__,
+            },
+        )
 
-            logger.info(
-                "Creating new Cashu token entry",
+        # Parse credential to extract payment method-specific metadata
+        try:
+            payment_creds = await payment_method.parse_credential(bearer_key)
+            refund_currency = payment_creds.metadata.get("unit", "sat") if payment_creds.metadata else "sat"
+            refund_mint_url = payment_creds.metadata.get("mint_url", settings.primary_mint) if payment_creds.metadata else settings.primary_mint
+            
+            # For Cashu tokens, check if mint is in our list
+            if payment_creds.payment_type == "cashu":
+                token_obj = deserialize_token_from_string(bearer_key)
+                if token_obj.mint not in settings.cashu_mints:
+                    refund_currency = "sat"
+                    refund_mint_url = settings.primary_mint
+        except Exception as parse_error:
+            logger.warning(
+                "Failed to parse payment credential metadata, using defaults",
                 extra={
-                    "hash_preview": hashed_key[:16] + "...",
-                    "has_refund_address": bool(refund_address),
-                    "has_expiry_time": bool(key_expiry_time),
+                    "error": str(parse_error),
+                    "payment_method": payment_method.__class__.__name__,
                 },
             )
-            if token_obj.mint in settings.cashu_mints:
-                refund_currency = token_obj.unit
-                refund_mint_url = token_obj.mint
-            else:
-                refund_currency = "sat"
-                refund_mint_url = settings.primary_mint
+            refund_currency = "sat"
+            refund_mint_url = settings.primary_mint
 
-            new_key = ApiKey(
-                hashed_key=hashed_key,
-                balance=0,
-                refund_address=refund_address,
-                key_expiry_time=key_expiry_time,
-                refund_currency=refund_currency,
-                refund_mint_url=refund_mint_url,
-            )
-            session.add(new_key)
+        new_key = ApiKey(
+            hashed_key=hashed_key,
+            balance=0,
+            refund_address=refund_address,
+            key_expiry_time=key_expiry_time,
+            refund_currency=str(refund_currency),
+            refund_mint_url=str(refund_mint_url),
+        )
+        session.add(new_key)
 
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Concurrent key creation detected, fetching existing key",
-                    extra={"key_hash": hashed_key[:8] + "..."},
-                )
-                existing_key = await session.get(ApiKey, hashed_key)
-                if not existing_key:
-                    raise Exception("Failed to fetch existing key after IntegrityError")
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-
-                return existing_key
-
-            logger.debug(
-                "New key created, starting token redemption",
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            logger.info(
+                "Concurrent key creation detected, fetching existing key",
                 extra={"key_hash": hashed_key[:8] + "..."},
             )
+            existing_key = await session.get(ApiKey, hashed_key)
+            if not existing_key:
+                raise Exception("Failed to fetch existing key after IntegrityError")
 
+            if key_expiry_time is not None:
+                existing_key.key_expiry_time = key_expiry_time
+            if refund_address is not None:
+                existing_key.refund_address = refund_address
+
+            return existing_key
+
+        logger.debug(
+            "New key created, starting payment processing",
+            extra={"key_hash": hashed_key[:8] + "..."},
+        )
+
+        logger.info(
+            "AUTH: About to receive payment",
+            extra={
+                "credential_preview": bearer_key[:50],
+                "payment_method": payment_method.__class__.__name__,
+            },
+        )
+        try:
+            payment_result = await payment_method.receive_payment(bearer_key, new_key, session)
             logger.info(
-                "AUTH: About to call credit_balance",
-                extra={"token_preview": bearer_key[:50]},
-            )
-            try:
-                msats = await credit_balance(bearer_key, new_key, session)
-                logger.info(
-                    "AUTH: credit_balance returned successfully", extra={"msats": msats}
-                )
-            except Exception as credit_error:
-                logger.error(
-                    "AUTH: credit_balance failed",
-                    extra={
-                        "error": str(credit_error),
-                        "error_type": type(credit_error).__name__,
-                    },
-                )
-                raise credit_error
-
-            if msats <= 0:
-                logger.error(
-                    "Token redemption returned zero or negative amount",
-                    extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
-                )
-                raise Exception("Token redemption failed")
-
-            await session.refresh(new_key)
-            await session.commit()
-
-            logger.info(
-                "New Cashu token successfully redeemed and stored",
+                "AUTH: Payment received successfully",
                 extra={
-                    "key_hash": hashed_key[:8] + "...",
-                    "redeemed_msats": msats,
-                    "final_balance": new_key.balance,
+                    "msats": payment_result.amount_msats,
+                    "payment_method": payment_result.payment_method,
+                    "currency": payment_result.currency,
                 },
             )
-
-            return new_key
-        except Exception as e:
+            msats = payment_result.amount_msats
+        except NotImplementedError as not_impl_error:
             logger.error(
-                "Cashu token redemption failed",
+                "Payment method not yet fully implemented",
                 extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "token_preview": bearer_key[:20] + "..."
-                    if len(bearer_key) > 20
-                    else bearer_key,
+                    "error": str(not_impl_error),
+                    "payment_method": payment_method.__class__.__name__,
                 },
             )
             raise HTTPException(
-                status_code=401,
+                status_code=501,
                 detail={
                     "error": {
-                        "message": f"Invalid or expired Cashu key: {str(e)}",
-                        "type": "invalid_request_error",
-                        "code": "invalid_api_key",
+                        "message": str(not_impl_error),
+                        "type": "not_implemented_error",
+                        "code": "payment_method_not_implemented",
                     }
                 },
             )
+        except Exception as payment_error:
+            logger.error(
+                "AUTH: Payment processing failed",
+                extra={
+                    "error": str(payment_error),
+                    "error_type": type(payment_error).__name__,
+                    "payment_method": payment_method.__class__.__name__,
+                },
+            )
+            raise payment_error
+
+        if msats <= 0:
+            logger.error(
+                "Payment processing returned zero or negative amount",
+                extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
+            )
+            raise Exception("Payment processing failed")
+
+        await session.refresh(new_key)
+        await session.commit()
+
+        logger.info(
+            "New payment credential successfully processed and stored",
+            extra={
+                "key_hash": hashed_key[:8] + "...",
+                "credited_msats": msats,
+                "final_balance": new_key.balance,
+                "payment_method": payment_method.__class__.__name__,
+            },
+        )
+
+        return new_key
+    except ValueError as ve:
+        # get_payment_method raises ValueError if no method can handle the credential
+        logger.debug(
+            "No payment method matched credential",
+            extra={
+                "error": str(ve),
+                "credential_preview": bearer_key[:20] + "..."
+                if len(bearer_key) > 20
+                else bearer_key,
+            },
+        )
+        # Fall through to standard key validation
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(
+            "Payment credential processing failed",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "credential_preview": bearer_key[:20] + "..."
+                if len(bearer_key) > 20
+                else bearer_key,
+            },
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": {
+                    "message": f"Invalid or expired payment credential: {str(e)}",
+                    "type": "invalid_request_error",
+                    "code": "invalid_api_key",
+                }
+            },
+        )
 
     logger.error(
         "Invalid API key format",

@@ -10,7 +10,8 @@ from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
-from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
+from .payment.methods import get_payment_method
+from .wallet import recieve_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -87,22 +88,60 @@ async def topup_wallet_endpoint(
     if topup_request is not None:
         cashu_token = topup_request.cashu_token
     if cashu_token is None:
-        raise HTTPException(status_code=400, detail="A cashu_token is required.")
+        raise HTTPException(status_code=400, detail="A payment credential is required.")
 
-    cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
-    if len(cashu_token) < 10 or "cashu" not in cashu_token:
-        raise HTTPException(status_code=400, detail="Invalid token format")
+    payment_credential = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
+    if len(payment_credential) < 10:
+        raise HTTPException(status_code=400, detail="Invalid payment credential format")
+    
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        payment_method = get_payment_method(payment_credential)
+        logger.info(
+            "Processing topup with payment method",
+            extra={
+                "payment_method": payment_method.__class__.__name__,
+                "key_hash": key.hashed_key[:8] + "...",
+            },
+        )
+        
+        payment_result = await payment_method.receive_payment(payment_credential, key, session)
+        amount_msats = payment_result.amount_msats
+        
+        logger.info(
+            "Topup successful",
+            extra={
+                "msats": amount_msats,
+                "payment_method": payment_result.payment_method,
+                "key_hash": key.hashed_key[:8] + "...",
+            },
+        )
     except ValueError as e:
         error_msg = str(e)
-        if "already spent" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Token already spent")
+        if "no payment method" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="Unsupported payment method")
+        elif "already spent" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="Payment already spent")
         elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Invalid token format")
+            raise HTTPException(status_code=400, detail="Invalid payment credential format")
         else:
-            raise HTTPException(status_code=400, detail="Failed to redeem token")
-    except Exception:
+            raise HTTPException(status_code=400, detail=f"Failed to process payment: {error_msg}")
+    except NotImplementedError as nie:
+        logger.warning(
+            "Payment method not yet implemented",
+            extra={"error": str(nie)},
+        )
+        raise HTTPException(
+            status_code=501,
+            detail=f"Payment method not yet implemented: {str(nie)}",
+        )
+    except Exception as e:
+        logger.error(
+            "Topup failed",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}
 
@@ -167,41 +206,64 @@ async def refund_wallet_endpoint(
 
     # Perform refund operation first, before modifying balance
     try:
-        if key.refund_address:
-            from .core.settings import settings as global_settings
-
-            await send_to_lnurl(
-                remaining_balance,
-                key.refund_currency or "sat",
-                key.refund_mint_url or global_settings.primary_mint,
-                key.refund_address,
-            )
-            result = {"recipient": key.refund_address}
-        else:
-            refund_currency = key.refund_currency or "sat"
-            token = await send_token(
-                remaining_balance, refund_currency, key.refund_mint_url
-            )
-            result = {"token": token}
-
-        if key.refund_currency == "sat":
-            result["sats"] = str(remaining_balance_msats // 1000)
-        else:
-            result["msats"] = str(remaining_balance_msats)
+        # Determine payment method from key metadata
+        # Default to Cashu for backward compatibility
+        from .payment.methods import CashuPaymentMethod
+        
+        # Try to detect payment method from refund metadata
+        # For now, we default to Cashu since it's the only fully implemented method
+        # In the future, we should store payment_method_type in ApiKey model
+        payment_method = CashuPaymentMethod()
+        
+        logger.info(
+            "Processing refund",
+            extra={
+                "payment_method": payment_method.__class__.__name__,
+                "key_hash": key.hashed_key[:8] + "...",
+                "amount_msats": remaining_balance_msats,
+            },
+        )
+        
+        result = await payment_method.refund_payment(key, remaining_balance_msats)
+        
+        logger.info(
+            "Refund successful",
+            extra={
+                "payment_method": payment_method.__class__.__name__,
+                "key_hash": key.hashed_key[:8] + "...",
+                "refund_details": str(result)[:100] + "...",
+            },
+        )
 
     except HTTPException:
         # Re-raise HTTP exceptions (like 400 for balance too small)
         raise
+    except NotImplementedError as nie:
+        logger.warning(
+            "Refund method not yet implemented",
+            extra={"error": str(nie)},
+        )
+        raise HTTPException(
+            status_code=501,
+            detail=f"Refund not yet implemented for this payment method: {str(nie)}",
+        )
     except Exception as e:
         # If refund fails, don't modify the database
         error_msg = str(e)
+        logger.error(
+            "Refund failed",
+            extra={
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            },
+        )
         if (
             "mint" in error_msg.lower()
             or "connection" in error_msg.lower()
             or isinstance(e, Exception)
             and "ConnectError" in str(type(e))
         ):
-            raise HTTPException(status_code=503, detail="Mint service unavailable")
+            raise HTTPException(status_code=503, detail="Service unavailable")
         else:
             raise HTTPException(status_code=500, detail="Refund failed")
 

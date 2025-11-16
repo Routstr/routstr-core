@@ -424,9 +424,9 @@ async def test_network_failure_during_token_verification(  # type: ignore[no-unt
     # Generate a valid token
     token = await testmint_wallet.mint_tokens(300)
 
-    # Mock credit_balance to simulate network failure during token verification
-    with patch("routstr.balance.credit_balance") as mock_credit_balance:
-        mock_credit_balance.side_effect = Exception("Network error: Connection timeout")
+    # Mock payment method to simulate network failure during token verification
+    with patch("routstr.payment.methods.CashuPaymentMethod.receive_payment") as mock_receive_payment:
+        mock_receive_payment.side_effect = Exception("Network error: Connection timeout")
 
         response = await authenticated_client.post(
             "/v1/wallet/topup", params={"cashu_token": token}

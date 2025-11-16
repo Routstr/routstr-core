@@ -99,6 +99,7 @@ nav:
       - Endpoints: api/endpoints.md
       - Errors: api/errors.md
   - Advanced:
+      - Payment Methods: advanced/payment-methods.md
       - Tor Support: advanced/tor.md
       - Nostr Discovery: advanced/nostr.md
       - Custom Pricing: advanced/custom-pricing.md
