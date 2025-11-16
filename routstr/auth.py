@@ -1,9 +1,7 @@
-import hashlib
 import math
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, update
 
 from .core import get_logger
@@ -15,7 +13,7 @@ from .payment.cost_caculation import (
     MaxCostData,
     calculate_cost,
 )
-from .wallet import credit_balance, deserialize_token_from_string
+from .payment.methods import TEMPORARY_BALANCE_PAYMENT_METHODS
 
 logger = get_logger(__name__)
 
@@ -104,151 +102,36 @@ async def validate_bearer_key(
                 extra={"key_preview": bearer_key[:10] + "..."},
             )
 
-    if bearer_key.startswith("cashu"):
+    for method in TEMPORARY_BALANCE_PAYMENT_METHODS:
+        if not method.supports(bearer_key):
+            continue
+
         logger.debug(
-            "Processing Cashu token",
+            "Delegating bearer key handling to payment method",
             extra={
-                "token_preview": bearer_key[:20] + "...",
-                "token_type": bearer_key[:6] if len(bearer_key) >= 6 else bearer_key,
+                "method": method.method_name,
+                "key_preview": bearer_key[:20] + "..."
+                if len(bearer_key) > 20
+                else bearer_key,
             },
         )
 
         try:
-            hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
-            token_obj = deserialize_token_from_string(bearer_key)
-            logger.debug(
-                "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
+            return await method.ensure_api_key(
+                bearer_key,
+                session,
+                refund_address,
+                key_expiry_time,
             )
-
-            if existing_key := await session.get(ApiKey, hashed_key):
-                logger.info(
-                    "Existing Cashu token found",
-                    extra={
-                        "key_hash": existing_key.hashed_key[:8] + "...",
-                        "balance": existing_key.balance,
-                        "total_requests": existing_key.total_requests,
-                    },
-                )
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                    logger.debug(
-                        "Updated key expiry time for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "expiry_time": key_expiry_time,
-                        },
-                    )
-
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-                    logger.debug(
-                        "Updated refund address for existing Cashu key",
-                        extra={
-                            "key_hash": existing_key.hashed_key[:8] + "...",
-                            "refund_address_preview": refund_address[:20] + "..."
-                            if len(refund_address) > 20
-                            else refund_address,
-                        },
-                    )
-
-                return existing_key
-
-            logger.info(
-                "Creating new Cashu token entry",
-                extra={
-                    "hash_preview": hashed_key[:16] + "...",
-                    "has_refund_address": bool(refund_address),
-                    "has_expiry_time": bool(key_expiry_time),
-                },
-            )
-            if token_obj.mint in settings.cashu_mints:
-                refund_currency = token_obj.unit
-                refund_mint_url = token_obj.mint
-            else:
-                refund_currency = "sat"
-                refund_mint_url = settings.primary_mint
-
-            new_key = ApiKey(
-                hashed_key=hashed_key,
-                balance=0,
-                refund_address=refund_address,
-                key_expiry_time=key_expiry_time,
-                refund_currency=refund_currency,
-                refund_mint_url=refund_mint_url,
-            )
-            session.add(new_key)
-
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Concurrent key creation detected, fetching existing key",
-                    extra={"key_hash": hashed_key[:8] + "..."},
-                )
-                existing_key = await session.get(ApiKey, hashed_key)
-                if not existing_key:
-                    raise Exception("Failed to fetch existing key after IntegrityError")
-
-                if key_expiry_time is not None:
-                    existing_key.key_expiry_time = key_expiry_time
-                if refund_address is not None:
-                    existing_key.refund_address = refund_address
-
-                return existing_key
-
-            logger.debug(
-                "New key created, starting token redemption",
-                extra={"key_hash": hashed_key[:8] + "..."},
-            )
-
-            logger.info(
-                "AUTH: About to call credit_balance",
-                extra={"token_preview": bearer_key[:50]},
-            )
-            try:
-                msats = await credit_balance(bearer_key, new_key, session)
-                logger.info(
-                    "AUTH: credit_balance returned successfully", extra={"msats": msats}
-                )
-            except Exception as credit_error:
-                logger.error(
-                    "AUTH: credit_balance failed",
-                    extra={
-                        "error": str(credit_error),
-                        "error_type": type(credit_error).__name__,
-                    },
-                )
-                raise credit_error
-
-            if msats <= 0:
-                logger.error(
-                    "Token redemption returned zero or negative amount",
-                    extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
-                )
-                raise Exception("Token redemption failed")
-
-            await session.refresh(new_key)
-            await session.commit()
-
-            logger.info(
-                "New Cashu token successfully redeemed and stored",
-                extra={
-                    "key_hash": hashed_key[:8] + "...",
-                    "redeemed_msats": msats,
-                    "final_balance": new_key.balance,
-                },
-            )
-
-            return new_key
-        except Exception as e:
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - we need the original error preserved
             logger.error(
-                "Cashu token redemption failed",
+                "Payment method failed to process bearer key",
                 extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "token_preview": bearer_key[:20] + "..."
+                    "method": method.method_name,
+                    "error": str(exc),
+                    "key_preview": bearer_key[:20] + "..."
                     if len(bearer_key) > 20
                     else bearer_key,
                 },
@@ -257,12 +140,12 @@ async def validate_bearer_key(
                 status_code=401,
                 detail={
                     "error": {
-                        "message": f"Invalid or expired Cashu key: {str(e)}",
+                        "message": "Unable to process payment for provided key",
                         "type": "invalid_request_error",
                         "code": "invalid_api_key",
                     }
                 },
-            )
+            ) from exc
 
     logger.error(
         "Invalid API key format",
