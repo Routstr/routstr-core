@@ -2886,7 +2886,7 @@ def _parse_log_file(file_path: Path) -> list[dict]:
 
 def _aggregate_metrics_by_time(
     entries: list[dict], interval_minutes: int, hours_back: int = 24
-) -> dict[str, list[dict]]:
+) -> dict:
     """
     Aggregate log metrics into time buckets.
     
@@ -3000,7 +3000,7 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=hours_back)
 
-    stats = {
+    stats: dict[str, int | float | set[str] | defaultdict[str, int]] = {
         "total_entries": 0,
         "total_requests": 0,
         "successful_chat_completions": 0,
@@ -3037,84 +3037,108 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
             level = entry.get("levelname", "").upper()
 
             if level == "ERROR":
+                assert isinstance(stats["total_errors"], int)
                 stats["total_errors"] += 1
                 if "error_type" in entry:
                     error_type = str(entry["error_type"])
-                    stats["error_types"][error_type] += 1
+                    error_types = stats["error_types"]
+                    assert isinstance(error_types, defaultdict)
+                    error_types[error_type] += 1
             elif level == "WARNING":
+                assert isinstance(stats["total_warnings"], int)
                 stats["total_warnings"] += 1
 
             if "received proxy request" in message:
+                assert isinstance(stats["total_requests"], int)
                 stats["total_requests"] += 1
 
             if "token adjustment completed" in message:
+                assert isinstance(stats["successful_chat_completions"], int)
                 stats["successful_chat_completions"] += 1
 
             if "upstream request failed" in message or "revert payment" in message:
+                assert isinstance(stats["failed_requests"], int)
                 stats["failed_requests"] += 1
 
             if "payment processed successfully" in message:
+                assert isinstance(stats["payment_processed"], int)
                 stats["payment_processed"] += 1
 
             if "upstream" in message and level == "ERROR":
+                assert isinstance(stats["upstream_errors"], int)
                 stats["upstream_errors"] += 1
 
             if "model" in entry:
                 model = entry["model"]
                 if isinstance(model, str) and model != "unknown":
-                    stats["unique_models"].add(model)
+                    unique_models = stats["unique_models"]
+                    assert isinstance(unique_models, set)
+                    unique_models.add(model)
 
             if "token adjustment completed" in message:
                 cost_data = entry.get("cost_data")
                 if isinstance(cost_data, dict):
                     actual_cost = cost_data.get("actual_cost", 0)
                     if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                        stats["revenue_msats"] += actual_cost
+                        assert isinstance(stats["revenue_msats"], (int, float))
+                        stats["revenue_msats"] = float(stats["revenue_msats"]) + float(actual_cost)
 
             if "revert payment" in message:
                 max_cost = entry.get("max_cost_for_model", 0)
                 if isinstance(max_cost, (int, float)) and max_cost > 0:
-                    stats["refunds_msats"] += max_cost
+                    assert isinstance(stats["refunds_msats"], (int, float))
+                    stats["refunds_msats"] = float(stats["refunds_msats"]) + float(max_cost)
 
         except Exception:
             continue
 
-    stats["revenue_sats"] = stats["revenue_msats"] / 1000
-    stats["refunds_sats"] = stats["refunds_msats"] / 1000
-    stats["net_revenue_msats"] = stats["revenue_msats"] - stats["refunds_msats"]
+    revenue_msats = float(stats["revenue_msats"])
+    refunds_msats = float(stats["refunds_msats"])
+    stats["revenue_sats"] = revenue_msats / 1000
+    stats["refunds_sats"] = refunds_msats / 1000
+    stats["net_revenue_msats"] = revenue_msats - refunds_msats
     stats["net_revenue_sats"] = stats["net_revenue_msats"] / 1000
 
+    unique_models = stats["unique_models"]
+    assert isinstance(unique_models, set)
+    error_types = stats["error_types"]
+    assert isinstance(error_types, defaultdict)
+    
+    total_requests = int(stats["total_requests"])
+    successful_completions = int(stats["successful_chat_completions"])
+    failed_requests = int(stats["failed_requests"])
+    
     return {
-        "total_entries": stats["total_entries"],
-        "total_requests": stats["total_requests"],
-        "successful_chat_completions": stats["successful_chat_completions"],
-        "failed_requests": stats["failed_requests"],
-        "total_errors": stats["total_errors"],
-        "total_warnings": stats["total_warnings"],
-        "payment_processed": stats["payment_processed"],
-        "upstream_errors": stats["upstream_errors"],
-        "unique_models_count": len(stats["unique_models"]),
-        "unique_models": sorted(list(stats["unique_models"])),
-        "error_types": dict(stats["error_types"]),
+        "total_entries": int(stats["total_entries"]),
+        "total_requests": total_requests,
+        "successful_chat_completions": successful_completions,
+        "failed_requests": failed_requests,
+        "total_errors": int(stats["total_errors"]),
+        "total_warnings": int(stats["total_warnings"]),
+        "payment_processed": int(stats["payment_processed"]),
+        "upstream_errors": int(stats["upstream_errors"]),
+        "unique_models_count": len(unique_models),
+        "unique_models": sorted(list(unique_models)),
+        "error_types": dict(error_types),
         "success_rate": (
-            (stats["successful_chat_completions"] / stats["total_requests"] * 100)
-            if stats["total_requests"] > 0
+            (successful_completions / total_requests * 100)
+            if total_requests > 0
             else 0
         ),
-        "revenue_msats": stats["revenue_msats"],
-        "refunds_msats": stats["refunds_msats"],
-        "revenue_sats": stats["revenue_sats"],
-        "refunds_sats": stats["refunds_sats"],
-        "net_revenue_msats": stats["net_revenue_msats"],
-        "net_revenue_sats": stats["net_revenue_sats"],
+        "revenue_msats": revenue_msats,
+        "refunds_msats": refunds_msats,
+        "revenue_sats": float(stats["revenue_sats"]),
+        "refunds_sats": float(stats["refunds_sats"]),
+        "net_revenue_msats": float(stats["net_revenue_msats"]),
+        "net_revenue_sats": float(stats["net_revenue_sats"]),
         "avg_revenue_per_request_msats": (
-            stats["revenue_msats"] / stats["successful_chat_completions"]
-            if stats["successful_chat_completions"] > 0
+            revenue_msats / successful_completions
+            if successful_completions > 0
             else 0
         ),
         "refund_rate": (
-            (stats["failed_requests"] / stats["total_requests"] * 100)
-            if stats["total_requests"] > 0
+            (failed_requests / total_requests * 100)
+            if total_requests > 0
             else 0
         ),
     }
@@ -3377,31 +3401,37 @@ async def get_revenue_by_model(
             continue
 
     models = []
-    total_revenue = 0
+    total_revenue = 0.0
 
     for model, stats in model_stats.items():
-        revenue_sats = stats["revenue_msats"] / 1000
-        refunds_sats = stats["refunds_msats"] / 1000
+        revenue_msats_val = float(stats["revenue_msats"])
+        refunds_msats_val = float(stats["refunds_msats"])
+        revenue_sats = revenue_msats_val / 1000
+        refunds_sats = refunds_msats_val / 1000
         net_revenue_sats = revenue_sats - refunds_sats
 
         total_revenue += net_revenue_sats
 
+        requests_val = int(stats["requests"])
+        successful_val = int(stats["successful"])
+        failed_val = int(stats["failed"])
+        
         models.append(
             {
                 "model": model,
                 "revenue_sats": revenue_sats,
                 "refunds_sats": refunds_sats,
                 "net_revenue_sats": net_revenue_sats,
-                "requests": stats["requests"],
-                "successful": stats["successful"],
-                "failed": stats["failed"],
+                "requests": requests_val,
+                "successful": successful_val,
+                "failed": failed_val,
                 "avg_revenue_per_request": (
-                    revenue_sats / stats["successful"] if stats["successful"] > 0 else 0
+                    revenue_sats / successful_val if successful_val > 0 else 0
                 ),
             }
         )
 
-    models.sort(key=lambda x: x["net_revenue_sats"], reverse=True)
+    models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
 
     return {
         "models": models[:limit],
