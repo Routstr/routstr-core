@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import {
+  ActivityIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
   ServerIcon,
@@ -33,6 +34,11 @@ const data = {
       title: 'Dashboard',
       url: '/',
       icon: LayoutDashboardIcon,
+    },
+    {
+      title: 'Usage',
+      url: '/usage',
+      icon: ActivityIcon,
     },
     {
       title: 'Models',
