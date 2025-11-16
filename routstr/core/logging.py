@@ -1,3 +1,40 @@
+"""
+Logging configuration for Routstr.
+
+CRITICAL LOG MESSAGES FOR USAGE STATISTICS:
+===========================================
+The following log messages are parsed by the usage tracking system (routstr/core/admin.py).
+DO NOT modify or remove these messages without updating the usage tracking logic:
+
+1. "Received proxy request" (INFO) - routstr/proxy.py
+   - Used to count total incoming requests
+   - Includes model information in context
+
+2. "Token adjustment completed for streaming" (INFO) - routstr/upstream/base.py
+   "Token adjustment completed for non-streaming" (INFO) - routstr/upstream/base.py
+   - Used to track successful completions and revenue
+   - The 'cost_data.actual_cost' field is extracted for revenue calculation
+   - Must include 'cost_data' in extra dict
+
+3. "Payment processed successfully" (INFO) - routstr/auth.py
+   - Used to count successful payment processing events
+   - Tracks payment-related metrics
+
+4. "Upstream request failed, revert payment" (WARNING) - routstr/proxy.py
+   - Used to track failed requests and refunds
+   - The 'max_cost_for_model' field is extracted for refund calculation
+   - Must include 'max_cost_for_model' in extra dict
+
+5. Any ERROR level logs with "upstream" in the message
+   - Used to count upstream provider errors
+   - Helps identify service reliability issues
+
+If you need to modify these messages, ensure you also update the parsing logic in:
+- routstr/core/admin.py:_aggregate_metrics_by_time()
+- routstr/core/admin.py:_get_summary_stats()
+- routstr/core/admin.py:get_revenue_by_model()
+"""
+
 import logging.config
 import logging.handlers
 import os
