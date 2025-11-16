@@ -106,49 +106,30 @@ async def swap_to_primary_mint(
 async def credit_balance(
     cashu_token: str, key: db.ApiKey, session: db.AsyncSession
 ) -> int:
+    """Credit balance using Cashu token (backward compatibility wrapper).
+    
+    This function is maintained for backward compatibility. New code should use
+    the payment method abstraction directly via PaymentMethod.process_payment().
+    """
+    from .payment.methods import CashuPaymentMethod
+
     logger.info(
-        "credit_balance: Starting token redemption",
+        "credit_balance: Starting token redemption (legacy wrapper)",
         extra={"token_preview": cashu_token[:50]},
     )
 
     try:
-        amount, unit, mint_url = await recieve_token(cashu_token)
+        method = CashuPaymentMethod()
+        result = await method.process_payment(cashu_token, key, session)
         logger.info(
-            "credit_balance: Token redeemed successfully",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+            "credit_balance: Balance credited successfully",
+            extra={
+                "amount_msats": result["amount_msats"],
+                "currency": result["currency"],
+                "mint_url": result["mint_url"],
+            },
         )
-
-        if unit == "sat":
-            amount = amount * 1000
-            logger.info(
-                "credit_balance: Converted to msat", extra={"amount_msat": amount}
-            )
-
-        logger.info(
-            "credit_balance: Updating balance",
-            extra={"old_balance": key.balance, "credit_amount": amount},
-        )
-
-        # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
-        stmt = (
-            update(db.ApiKey)
-            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-            .values(balance=(db.ApiKey.balance) + amount)
-        )
-        await session.exec(stmt)  # type: ignore[call-overload]
-        await session.commit()
-        await session.refresh(key)
-
-        logger.info(
-            "credit_balance: Balance updated successfully",
-            extra={"new_balance": key.balance},
-        )
-
-        logger.info(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
-        return amount
+        return result["amount_msats"]
     except Exception as e:
         logger.error(
             "credit_balance: Error during token redemption",

@@ -74,37 +74,77 @@ async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
 
 
 class TopupRequest(BaseModel):
-    cashu_token: str
+    payment_data: str
+    payment_method: str | None = None
 
 
 @router.post("/topup")
 async def topup_wallet_endpoint(
     cashu_token: str | None = None,
+    payment_data: str | None = None,
+    payment_method: str | None = None,
     topup_request: TopupRequest | None = None,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
-) -> dict[str, int]:
-    if topup_request is not None:
-        cashu_token = topup_request.cashu_token
-    if cashu_token is None:
-        raise HTTPException(status_code=400, detail="A cashu_token is required.")
+) -> dict[str, int | str]:
+    from .payment.methods import detect_payment_method, get_payment_method
 
-    cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
-    if len(cashu_token) < 10 or "cashu" not in cashu_token:
-        raise HTTPException(status_code=400, detail="Invalid token format")
+    if topup_request is not None:
+        payment_data = topup_request.payment_data
+        payment_method = topup_request.payment_method
+    elif cashu_token is not None:
+        payment_data = cashu_token
+        payment_method = "cashu"
+    elif payment_data is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Payment data is required. Provide 'payment_data' or 'cashu_token' (deprecated).",
+        )
+
+    if payment_data is None:
+        raise HTTPException(status_code=400, detail="Payment data is required.")
+
+    if payment_method is None:
+        detected_method = detect_payment_method(payment_data)
+        if detected_method == "unknown":
+            raise HTTPException(
+                status_code=400,
+                detail="Could not detect payment method. Please specify 'payment_method' parameter.",
+            )
+        payment_method = detected_method
+
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        method = get_payment_method(payment_method)
+        result = await method.process_payment(payment_data, key, session)
+        return {
+            "msats": result["amount_msats"],
+            "currency": result["currency"],
+            "payment_method": result["payment_method"],
+        }
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Token already spent")
+            raise HTTPException(status_code=400, detail="Payment already processed")
         elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Invalid token format")
+            raise HTTPException(status_code=400, detail=f"Invalid {payment_method} payment data format")
+        elif "not supported" in error_msg.lower() or "not implemented" in error_msg.lower():
+            raise HTTPException(
+                status_code=501,
+                detail=f"Payment method '{payment_method}' is not fully implemented yet",
+            )
         else:
-            raise HTTPException(status_code=400, detail="Failed to redeem token")
-    except Exception:
+            raise HTTPException(status_code=400, detail=f"Failed to process {payment_method} payment: {error_msg}")
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=501,
+            detail=f"Payment method '{payment_method}' is not fully implemented: {str(e)}",
+        )
+    except Exception as e:
+        logger.error(
+            "topup_wallet_endpoint: Unexpected error",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
-    return {"msats": amount_msats}
 
 
 _REFUND_CACHE_TTL_SECONDS: int = settings.refund_cache_ttl_seconds
