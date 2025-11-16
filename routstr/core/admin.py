@@ -3514,7 +3514,7 @@ async def get_revenue_by_model(
         except Exception:
             continue
 
-    models = []
+    models: list[dict[str, str | int | float]] = []
     total_revenue = 0.0
 
     for model, stats in model_stats.items():
@@ -3544,22 +3544,26 @@ async def get_revenue_by_model(
         assert isinstance(failed_raw, int)
         failed_val = failed_raw
         
-        models.append(
-            {
-                "model": model,
-                "revenue_sats": revenue_sats,
-                "refunds_sats": refunds_sats,
-                "net_revenue_sats": net_revenue_sats,
-                "requests": requests_val,
-                "successful": successful_val,
-                "failed": failed_val,
-                "avg_revenue_per_request": (
-                    revenue_sats / successful_val if successful_val > 0 else 0
-                ),
-            }
-        )
+        model_data: dict[str, str | int | float] = {
+            "model": model,
+            "revenue_sats": revenue_sats,
+            "refunds_sats": refunds_sats,
+            "net_revenue_sats": net_revenue_sats,
+            "requests": requests_val,
+            "successful": successful_val,
+            "failed": failed_val,
+            "avg_revenue_per_request": (
+                revenue_sats / successful_val if successful_val > 0 else 0
+            ),
+        }
+        models.append(model_data)
 
-    models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
+    def _sort_key(x: dict[str, str | int | float]) -> float:
+        val = x["net_revenue_sats"]
+        assert isinstance(val, (int, float))
+        return float(val)
+    
+    models.sort(key=_sort_key, reverse=True)
 
     return {
         "models": models[:limit],
