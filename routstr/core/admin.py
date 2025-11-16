@@ -2893,7 +2893,7 @@ def _aggregate_metrics_by_time(
     CRITICAL: This function parses specific log messages for usage tracking.
     The following log messages must not be modified without updating this function:
     - "received proxy request" -> counts total_requests
-    - "token adjustment completed" -> counts successful_chat_completions, extracts revenue_msats from cost_data.actual_cost
+    - "token adjustment completed" -> counts successful_chat_completions, extracts revenue_msats from cost_data.total_msats
     - "upstream request failed" OR "revert payment" -> counts failed_requests
     - "payment processed successfully" -> counts payment_processed
     - "revert payment" -> extracts refunds_msats from max_cost_for_model
@@ -2965,7 +2965,7 @@ def _aggregate_metrics_by_time(
             if "token adjustment completed" in message:
                 cost_data = entry.get("cost_data")
                 if isinstance(cost_data, dict):
-                    actual_cost = cost_data.get("actual_cost", 0)
+                    actual_cost = cost_data.get("total_msats", 0)
                     if isinstance(actual_cost, (int, float)) and actual_cost > 0:
                         time_buckets[bucket_key]["revenue_msats"] += actual_cost
 
@@ -3080,7 +3080,7 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
             if "token adjustment completed" in message:
                 cost_data = entry.get("cost_data")
                 if isinstance(cost_data, dict):
-                    actual_cost = cost_data.get("actual_cost", 0)
+                    actual_cost = cost_data.get("total_msats", 0)
                     if isinstance(actual_cost, (int, float)) and actual_cost > 0:
                         assert isinstance(stats["revenue_msats"], (int, float))
                         stats["revenue_msats"] = float(stats["revenue_msats"]) + float(actual_cost)
@@ -3407,7 +3407,7 @@ async def get_revenue_by_model(
                 model_stats[model]["successful"] += 1
                 cost_data = entry.get("cost_data")
                 if isinstance(cost_data, dict):
-                    actual_cost = cost_data.get("actual_cost", 0)
+                    actual_cost = cost_data.get("total_msats", 0)
                     if isinstance(actual_cost, (int, float)) and actual_cost > 0:
                         model_stats[model]["revenue_msats"] += actual_cost
 

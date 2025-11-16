@@ -13,7 +13,7 @@ DO NOT modify or remove these messages without updating the usage tracking logic
 2. "Token adjustment completed for streaming" (INFO) - routstr/upstream/base.py
    "Token adjustment completed for non-streaming" (INFO) - routstr/upstream/base.py
    - Used to track successful completions and revenue
-   - The 'cost_data.actual_cost' field is extracted for revenue calculation
+   - The 'cost_data.total_msats' field is extracted for revenue calculation
    - Must include 'cost_data' in extra dict
 
 3. "Payment processed successfully" (INFO) - routstr/auth.py
