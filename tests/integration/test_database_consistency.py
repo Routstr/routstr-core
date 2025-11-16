@@ -379,13 +379,15 @@ class TestDataIntegrity:
     """Test data integrity constraints and validations"""
 
     @pytest.mark.asyncio
-    @pytest.mark.skip(reason="Balance never negative is not implemented")
-    async def test_balance_never_negative(
+    async def test_reserved_balance_never_negative(
         self,
         authenticated_client: AsyncClient,
         integration_session: AsyncSession,
     ) -> None:
-        """Test that balance can never go negative"""
+        """Test that reserved_balance can never go negative"""
+        from routstr.auth import revert_pay_for_request
+        from fastapi import HTTPException
+
         # Get API key info
         api_key_header = authenticated_client.headers["Authorization"].replace(
             "Bearer ", ""
@@ -395,25 +397,26 @@ class TestDataIntegrity:
             api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
         )
 
-        # Set low balance
+        # Get the API key
         stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
-        api_key.balance = 0
+        
+        # Set reserved_balance to zero
+        api_key.reserved_balance = 0
+        api_key.total_requests = 0
         await integration_session.commit()
 
-        # Try to refund more than balance
-        response = await authenticated_client.post(
-            "/v1/wallet/refund", json={"amount": 1000}
-        )
+        # Try to revert more than available reserved balance
+        with pytest.raises(HTTPException) as exc_info:
+            await revert_pay_for_request(api_key, integration_session, 100)
+        
+        assert exc_info.value.status_code == 402
 
-        # Should fail
-        assert response.status_code == 400
-        assert "Balance too small to refund" in response.json()["detail"]
-
-        # Verify balance unchanged
+        # Verify reserved_balance unchanged and non-negative
         await integration_session.refresh(api_key)
-        assert api_key.balance == 100
+        assert api_key.reserved_balance >= 0
+        assert api_key.reserved_balance == 0
 
     @pytest.mark.asyncio
     async def test_primary_key_uniqueness(

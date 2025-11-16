@@ -136,7 +136,8 @@ async def test_reserved_balance_with_successful_requests(
 async def test_insufficient_reserved_balance_for_revert(
     integration_session: AsyncSession,
 ) -> None:
-    """Test revert_pay_for_request behavior with insufficient reserved balance."""
+    """Test revert_pay_for_request prevents negative reserved balance."""
+    from fastapi import HTTPException
     from routstr.auth import revert_pay_for_request
 
     # Create key with zero reserved balance
@@ -145,21 +146,57 @@ async def test_insufficient_reserved_balance_for_revert(
         hashed_key=unique_key,
         balance=1000,
         reserved_balance=0,
+        total_requests=0,
     )
     integration_session.add(test_key)
     await integration_session.commit()
 
-    # Try to revert more than available
-    # Note: Current implementation allows reserved_balance to go negative
+    # Try to revert more than available - should raise HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        await revert_pay_for_request(test_key, integration_session, 100)
+    
+    assert exc_info.value.status_code == 402
+
+    # Refresh to get updated values
+    await integration_session.refresh(test_key)
+
+    # Reserved balance should remain non-negative
+    assert test_key.reserved_balance >= 0, (
+        f"Reserved balance should not be negative, got: {test_key.reserved_balance}"
+    )
+    assert test_key.total_requests >= 0, (
+        f"Total requests should not be negative, got: {test_key.total_requests}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_revert_with_sufficient_reserved_balance(
+    integration_session: AsyncSession,
+) -> None:
+    """Test revert_pay_for_request works correctly with sufficient reserved balance."""
+    from routstr.auth import revert_pay_for_request
+
+    unique_key = f"test_revert_sufficient_{uuid.uuid4().hex[:8]}"
+    test_key = ApiKey(
+        hashed_key=unique_key,
+        balance=10000,
+        reserved_balance=500,
+        total_requests=5,
+    )
+    integration_session.add(test_key)
+    await integration_session.commit()
+
+    # Revert a valid amount
     await revert_pay_for_request(test_key, integration_session, 100)
 
     # Refresh to get updated values
     await integration_session.refresh(test_key)
 
-    # Current implementation allows negative reserved balance
-    assert test_key.reserved_balance == -100, (
-        f"Expected reserved_balance to be -100, got: {test_key.reserved_balance}"
+    # Reserved balance should be reduced but remain non-negative
+    assert test_key.reserved_balance == 400, (
+        f"Expected reserved_balance to be 400, got: {test_key.reserved_balance}"
     )
-    assert test_key.total_requests == -1, (
-        f"Expected total_requests to be -1, got: {test_key.total_requests}"
+    assert test_key.total_requests == 4, (
+        f"Expected total_requests to be 4, got: {test_key.total_requests}"
     )
+    assert test_key.reserved_balance >= 0

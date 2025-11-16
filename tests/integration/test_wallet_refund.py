@@ -167,14 +167,13 @@ async def test_refund_amount_validation(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Lightning address refund functionality not implemented")
-async def test_refund_with_lightning_address(
+async def test_refund_with_lightning_address_placeholder(
     integration_client: AsyncClient,
     testmint_wallet: Any,
     integration_session: Any,
     db_snapshot: Any,
 ) -> None:
-    """Test refund to Lightning address when refund_address is set"""
+    """Test that refund endpoint handles Lightning address (currently not implemented)"""
 
     # Create API key normally first
     token = await testmint_wallet.mint_tokens(500)
