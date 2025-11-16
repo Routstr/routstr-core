@@ -3031,7 +3031,9 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
             if log_time < cutoff:
                 continue
 
-            stats["total_entries"] += 1
+            total_entries = stats["total_entries"]
+            assert isinstance(total_entries, int)
+            stats["total_entries"] = total_entries + 1
 
             message = entry.get("message", "").lower()
             level = entry.get("levelname", "").upper()
@@ -3092,53 +3094,72 @@ def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
         except Exception:
             continue
 
-    revenue_msats = float(stats["revenue_msats"])
-    refunds_msats = float(stats["refunds_msats"])
-    stats["revenue_sats"] = revenue_msats / 1000
-    stats["refunds_sats"] = refunds_msats / 1000
-    stats["net_revenue_msats"] = revenue_msats - refunds_msats
-    stats["net_revenue_sats"] = stats["net_revenue_msats"] / 1000
+    revenue_msats_val = stats["revenue_msats"]
+    assert isinstance(revenue_msats_val, (int, float))
+    revenue_msats = float(revenue_msats_val)
+    
+    refunds_msats_val = stats["refunds_msats"]
+    assert isinstance(refunds_msats_val, (int, float))
+    refunds_msats = float(refunds_msats_val)
+    
+    revenue_sats = revenue_msats / 1000
+    refunds_sats = refunds_msats / 1000
+    net_revenue_msats = revenue_msats - refunds_msats
+    net_revenue_sats = net_revenue_msats / 1000
 
     unique_models = stats["unique_models"]
     assert isinstance(unique_models, set)
     error_types = stats["error_types"]
     assert isinstance(error_types, defaultdict)
     
-    total_requests = int(stats["total_requests"])
-    successful_completions = int(stats["successful_chat_completions"])
-    failed_requests = int(stats["failed_requests"])
+    total_entries_val = stats["total_entries"]
+    assert isinstance(total_entries_val, int)
+    total_requests_val = stats["total_requests"]
+    assert isinstance(total_requests_val, int)
+    successful_completions_val = stats["successful_chat_completions"]
+    assert isinstance(successful_completions_val, int)
+    failed_requests_val = stats["failed_requests"]
+    assert isinstance(failed_requests_val, int)
+    total_errors_val = stats["total_errors"]
+    assert isinstance(total_errors_val, int)
+    total_warnings_val = stats["total_warnings"]
+    assert isinstance(total_warnings_val, int)
+    payment_processed_val = stats["payment_processed"]
+    assert isinstance(payment_processed_val, int)
+    upstream_errors_val = stats["upstream_errors"]
+    assert isinstance(upstream_errors_val, int)
     
     return {
-        "total_entries": int(stats["total_entries"]),
-        "total_requests": total_requests,
-        "successful_chat_completions": successful_completions,
-        "failed_requests": failed_requests,
-        "total_errors": int(stats["total_errors"]),
-        "total_warnings": int(stats["total_warnings"]),
-        "payment_processed": int(stats["payment_processed"]),
-        "upstream_errors": int(stats["upstream_errors"]),
+        "total_entries": total_entries_val,
+        "total_requests": total_requests_val,
+        "successful_chat_completions": successful_completions_val,
+        "failed_requests": failed_requests_val,
+        "total_errors": total_errors_val,
+        "total_warnings": total_warnings_val,
+        "payment_processed": payment_processed_val,
+        "upstream_errors": upstream_errors_val,
         "unique_models_count": len(unique_models),
         "unique_models": sorted(list(unique_models)),
         "error_types": dict(error_types),
         "success_rate": (
-            (successful_completions / total_requests * 100)
-            if total_requests > 0
+            (successful_completions_val / total_requests_val * 100)
+            if total_requests_val > 0
             else 0
         ),
         "revenue_msats": revenue_msats,
         "refunds_msats": refunds_msats,
-        "revenue_sats": float(stats["revenue_sats"]),
-        "refunds_sats": float(stats["refunds_sats"]),
-        "net_revenue_msats": float(stats["net_revenue_msats"]),
-        "net_revenue_sats": float(stats["net_revenue_sats"]),
+        "revenue_sats": revenue_sats,
+        "refunds_sats": refunds_sats,
+        "net_revenue_msats": net_revenue_msats,
+        "net_revenue_sats": net_revenue_sats,
         "avg_revenue_per_request_msats": (
-            revenue_msats / successful_completions
-            if successful_completions > 0
+            revenue_msats / successful_completions_val
+            if successful_completions_val > 0
             else 0
         ),
         "refund_rate": (
-            (failed_requests / total_requests * 100)
-            if total_requests > 0
+            (failed_requests_val / total_requests_val * 100)
+            if total_requests_val > 0
             else 0
         ),
     }
@@ -3404,17 +3425,31 @@ async def get_revenue_by_model(
     total_revenue = 0.0
 
     for model, stats in model_stats.items():
-        revenue_msats_val = float(stats["revenue_msats"])
-        refunds_msats_val = float(stats["refunds_msats"])
+        revenue_msats_raw = stats["revenue_msats"]
+        assert isinstance(revenue_msats_raw, (int, float))
+        revenue_msats_val = float(revenue_msats_raw)
+        
+        refunds_msats_raw = stats["refunds_msats"]
+        assert isinstance(refunds_msats_raw, (int, float))
+        refunds_msats_val = float(refunds_msats_raw)
+        
         revenue_sats = revenue_msats_val / 1000
         refunds_sats = refunds_msats_val / 1000
         net_revenue_sats = revenue_sats - refunds_sats
 
         total_revenue += net_revenue_sats
 
-        requests_val = int(stats["requests"])
-        successful_val = int(stats["successful"])
-        failed_val = int(stats["failed"])
+        requests_raw = stats["requests"]
+        assert isinstance(requests_raw, int)
+        requests_val = requests_raw
+        
+        successful_raw = stats["successful"]
+        assert isinstance(successful_raw, int)
+        successful_val = successful_raw
+        
+        failed_raw = stats["failed"]
+        assert isinstance(failed_raw, int)
+        failed_val = failed_raw
         
         models.append(
             {
