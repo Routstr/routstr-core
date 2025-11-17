@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func
 from sqlmodel import col, update
 
 from .core import get_logger
@@ -390,9 +391,11 @@ async def revert_pay_for_request(
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.reserved_balance) >= cost_per_request)
+        .where(col(ApiKey.total_requests) > 0)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
-            total_requests=col(ApiKey.total_requests) - 1,
+            total_requests=func.greatest(col(ApiKey.total_requests) - 1, 0),
         )
     )
 
