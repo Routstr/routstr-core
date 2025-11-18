@@ -37,7 +37,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
 
-    def __init__(self, api_key: str, provider_fee: float = 1.01):
+    def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(
             base_url=self.default_base_url, api_key=api_key, provider_fee=provider_fee
         )
@@ -237,13 +237,13 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
             return account_data
 
     async def create_lightning_topup(
-        self, amount: int, currency: str = "SATS"
+        self, amount: int, currency: str
     ) -> dict[str, object]:
         """Create a Lightning Network top-up invoice for this account.
 
         Args:
             amount: Amount to top up (in the specified currency)
-            currency: Currency for the top-up (default: "SATS")
+            currency: Currency for the top-up (default: "USD")
 
         Returns:
             Dict containing invoice details including 'invoice_id', 'payment_request', etc.
@@ -264,6 +264,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         )
 
         async with httpx.AsyncClient(timeout=30.0) as client:
+            print(f"Payload: {payload}", "sending to", url)
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             invoice_data = response.json()
@@ -279,14 +280,14 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
             return invoice_data
 
-    async def check_topup_status(self, invoice_id: str) -> dict[str, object]:
+    async def check_topup_status(self, invoice_id: str) -> bool:
         """Check the status of a Lightning top-up invoice.
 
         Args:
             invoice_id: The invoice ID to check
 
         Returns:
-            Dict containing invoice status details
+            True if the invoice is paid (status == "Settled"), False otherwise
 
         Raises:
             httpx.HTTPStatusError: If the API request fails.
@@ -304,21 +305,24 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
             response.raise_for_status()
             status_data = response.json()
 
+            is_paid = status_data.get("status") == "Settled"
+
             logger.debug(
                 "Retrieved Lightning top-up status",
                 extra={
                     "invoice_id": invoice_id,
                     "status": status_data.get("status"),
+                    "is_paid": is_paid,
                 },
             )
 
-            return status_data
+            return is_paid
 
-    async def initiate_topup(self, amount_sats: int) -> TopupData:
+    async def initiate_topup(self, amount: int) -> TopupData:
         """Initiate a Lightning Network top-up for the PPQ.AI account.
 
         Args:
-            amount_sats: Amount in satoshis to top up (will be sent to PPQ.AI API)
+            amount: Amount in currency units to top up (will be sent to PPQ.AI API)
 
         Returns:
             TopupData with standardized invoice information
@@ -326,7 +330,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         Raises:
             httpx.HTTPStatusError: If the API request fails
         """
-        ppq_response = await self.create_lightning_topup(amount_sats, "SATS")
+        ppq_response = await self.create_lightning_topup(amount, "USD")
 
         logger.info(
             "PPQ.AI top-up response",
