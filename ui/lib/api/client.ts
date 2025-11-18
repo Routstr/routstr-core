@@ -64,6 +64,11 @@ class ApiClient {
         data,
         config
       );
+      console.log(`POST response from ${endpoint}:`, {
+        status: response.status,
+        data: response.data,
+        headers: response.headers,
+      });
       return response.data;
     } catch (error) {
       this.handleAuthError(error);

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Mapping
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
@@ -35,6 +36,17 @@ from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
+
+
+class TopupData(BaseModel):
+    """Universal top-up data schema for Lightning Network invoices."""
+
+    invoice_id: str
+    payment_request: str
+    amount: int
+    currency: str
+    expires_at: int | None = None
+    checkout_url: str | None = None
 
 
 class BaseUpstreamProvider:
@@ -87,7 +99,7 @@ class BaseUpstreamProvider:
         """Get metadata about this provider type for API responses.
 
         Returns:
-            Dict with provider type metadata including id, name, default_base_url, fixed_base_url, platform_url
+            Dict with provider type metadata including id, name, default_base_url, fixed_base_url, platform_url, can_create_account, can_topup, can_show_balance
         """
         return {
             "id": cls.provider_type,
@@ -95,6 +107,9 @@ class BaseUpstreamProvider:
             "default_base_url": cls.default_base_url or "",
             "fixed_base_url": bool(cls.default_base_url),
             "platform_url": cls.platform_url,
+            "can_create_account": False,
+            "can_topup": False,
+            "can_show_balance": False,
         }
 
     def prepare_headers(self, request_headers: dict) -> dict:
@@ -1832,3 +1847,59 @@ class BaseUpstreamProvider:
             Model object or None if not found
         """
         return self._models_by_id.get(model_id)
+
+    @classmethod
+    async def create_account_static(cls) -> dict[str, object]:
+        """Create a new account with the provider (class method, no instance needed).
+
+        Returns:
+            Dict with account creation details including api_key
+
+        Raises:
+            NotImplementedError: If provider does not support account creation
+        """
+        raise NotImplementedError(
+            f"Provider {cls.provider_type} does not support account creation"
+        )
+
+    async def create_account(self) -> dict[str, object]:
+        """Create a new account with the provider.
+
+        Returns:
+            Dict with account creation details including api_key
+
+        Raises:
+            NotImplementedError: If provider does not support account creation
+        """
+        raise NotImplementedError(
+            f"Provider {self.provider_type} does not support account creation"
+        )
+
+    async def initiate_topup(self, amount: int) -> TopupData:
+        """Initiate a Lightning Network top-up for the provider account.
+
+        Args:
+            amount: Amount in currency units to top up
+
+        Returns:
+            TopupData with standardized invoice information
+
+        Raises:
+            NotImplementedError: If provider does not support top-up
+        """
+        raise NotImplementedError(
+            f"Provider {self.provider_type} does not support top-up"
+        )
+
+    async def get_balance(self) -> dict[str, object]:
+        """Get the current account balance from the provider.
+
+        Returns:
+            Dict with balance information
+
+        Raises:
+            NotImplementedError: If provider does not support balance checking
+        """
+        raise NotImplementedError(
+            f"Provider {self.provider_type} does not support balance checking"
+        )
