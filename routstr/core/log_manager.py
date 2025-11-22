@@ -2,7 +2,7 @@ import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Generator, Iterator
+from typing import Any, Iterator
 
 from .logging import get_logger
 
@@ -14,14 +14,14 @@ class LogManager:
         self.logs_dir = logs_dir
 
     def _yield_log_entries(
-        self, 
+        self,
         hours_back: int | None = None,
         specific_date: str | None = None,
-        reverse_files: bool = False
+        reverse_files: bool = False,
     ) -> Iterator[dict[str, Any]]:
         """
         Yields log entries from files.
-        
+
         Args:
             hours_back: specific number of hours to look back.
             specific_date: specific date string (YYYY-MM-DD) to look at.
@@ -41,20 +41,22 @@ class LogManager:
             log_files = sorted(self.logs_dir.glob("app_*.log"))
             if reverse_files:
                 log_files.reverse()
-            
+
             # If we only care about hours back, we can optimize file selection
             if hours_back is not None:
                 cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours_back)
                 filtered_files = []
-                for f in log_files:
+                for log_path in log_files:
                     try:
-                        file_date_str = f.stem.split("_")[1]
-                        file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(
-                            tzinfo=timezone.utc
-                        )
+                        file_date_str = log_path.stem.split("_")[1]
+                        file_date = datetime.strptime(
+                            file_date_str, "%Y-%m-%d"
+                        ).replace(tzinfo=timezone.utc)
                         # Include file if it's from the same day or after the cutoff day
-                        if file_date >= cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0):
-                            filtered_files.append(f)
+                        if file_date >= cutoff_date.replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        ):
+                            filtered_files.append(log_path)
                     except Exception:
                         continue
                 log_files = filtered_files
@@ -73,16 +75,18 @@ class LogManager:
                     for line in lines:
                         try:
                             entry = json.loads(line.strip())
-                            
+
                             if cutoff_date:
                                 timestamp_str = entry.get("asctime", "")
                                 if not timestamp_str:
                                     continue
-                                log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                                log_time = datetime.strptime(
+                                    timestamp_str, "%Y-%m-%d %H:%M:%S"
+                                )
                                 log_time = log_time.replace(tzinfo=timezone.utc)
                                 if log_time < cutoff_date:
                                     continue
-                                    
+
                             yield entry
                         except json.JSONDecodeError:
                             continue
@@ -102,33 +106,36 @@ class LogManager:
         Search through log files and return matching entries.
         """
         log_entries: list[dict[str, Any]] = []
-        
+
         # Use reverse=True to get newest logs first by default
         # If date is specified, we only look at that file
-        
+
         search_text_lower = search_text.lower() if search_text else None
-        
+
         # We iterate efficiently
-        iterator = self._yield_log_entries(specific_date=date, reverse_files=True if not date else False)
-        
+        iterator = self._yield_log_entries(
+            specific_date=date, reverse_files=True if not date else False
+        )
+
         # If we are searching globally (no date), we might want to limit how far back we go?
         # PR 228 did: "glob("app_*.log") sorted by mtime reverse [:7]" (last 7 files)
         # My _yield_log_entries with reverse_files=True does all files.
         # Let's rely on limit to stop us.
-        
-        files_processed = 0
+
         # Optimization: if we are not searching by date, maybe limit to last 7 files inside _yield?
         # For now, let's just iterate.
-        
+
         for log_data in iterator:
-            if not self._matches_filters(log_data, level, request_id, search_text_lower):
+            if not self._matches_filters(
+                log_data, level, request_id, search_text_lower
+            ):
                 continue
 
             log_entries.append(log_data)
 
             if len(log_entries) >= limit:
                 break
-        
+
         # Sort by time descending (newest first)
         log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=True)
         return log_entries
@@ -152,7 +159,7 @@ class LogManager:
             pathname = str(log_data.get("pathname", "")).lower()
 
             if (
-                search_text_lower not in message 
+                search_text_lower not in message
                 and search_text_lower not in name
                 and search_text_lower not in pathname
             ):
@@ -171,28 +178,30 @@ class LogManager:
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
         errors: list[dict] = []
         # Iterate newest to oldest for errors?
-        # yield_log_entries sorts files by name (date) ascending by default. 
+        # yield_log_entries sorts files by name (date) ascending by default.
         # usage stats logic usually expects ascending time for aggregation (though dictionaries don't care).
         # For error details "last N errors", we probably want newest first.
-        
-        # Using list() loads everything into memory, which is what PR 229 did. 
+
+        # Using list() loads everything into memory, which is what PR 229 did.
         # For optimization, we could use reverse iterator.
-        
+
         # Let's just stick to PR 229 logic which filters 'ERROR' level.
-        
-        entries = self._yield_log_entries(hours_back=hours) # oldest to newest
-        
+
+        entries = self._yield_log_entries(hours_back=hours)  # oldest to newest
+
         for entry in entries:
-             if entry.get("levelname", "").upper() == "ERROR":
+            if entry.get("levelname", "").upper() == "ERROR":
                 timestamp_str = entry.get("asctime", "")
-                errors.append({
-                    "timestamp": timestamp_str,
-                    "message": entry.get("message", ""),
-                    "error_type": entry.get("error_type", "unknown"),
-                    "pathname": entry.get("pathname", ""),
-                    "lineno": entry.get("lineno", 0),
-                    "request_id": entry.get("request_id", ""),
-                })
+                errors.append(
+                    {
+                        "timestamp": timestamp_str,
+                        "message": entry.get("message", ""),
+                        "error_type": entry.get("error_type", "unknown"),
+                        "pathname": entry.get("pathname", ""),
+                        "lineno": entry.get("lineno", 0),
+                        "request_id": entry.get("request_id", ""),
+                    }
+                )
 
         # Sort reverse time
         errors.sort(key=lambda x: x["timestamp"], reverse=True)
@@ -200,7 +209,7 @@ class LogManager:
 
     def get_revenue_by_model(self, hours: int = 24, limit: int = 20) -> dict:
         entries = list(self._yield_log_entries(hours_back=hours))
-        
+
         model_stats: dict[str, dict[str, int | float]] = defaultdict(
             lambda: {
                 "revenue_msats": 0,
@@ -240,34 +249,36 @@ class LogManager:
             except Exception:
                 continue
 
-        models = []
+        models: list[dict[str, Any]] = []
         total_revenue = 0.0
 
         for model, stats in model_stats.items():
             revenue_msats = float(stats["revenue_msats"])
             refunds_msats = float(stats["refunds_msats"])
-            
+
             revenue_sats = revenue_msats / 1000
             refunds_sats = refunds_msats / 1000
             net_revenue_sats = revenue_sats - refunds_sats
 
             total_revenue += net_revenue_sats
-            
+
             requests = int(stats["requests"])
             successful = int(stats["successful"])
-            
-            models.append({
-                "model": model,
-                "revenue_sats": revenue_sats,
-                "refunds_sats": refunds_sats,
-                "net_revenue_sats": net_revenue_sats,
-                "requests": requests,
-                "successful": successful,
-                "failed": int(stats["failed"]),
-                "avg_revenue_per_request": (
-                    revenue_sats / successful if successful > 0 else 0
-                ),
-            })
+
+            models.append(
+                {
+                    "model": model,
+                    "revenue_sats": revenue_sats,
+                    "refunds_sats": refunds_sats,
+                    "net_revenue_sats": net_revenue_sats,
+                    "requests": requests,
+                    "successful": successful,
+                    "failed": int(stats["failed"]),
+                    "avg_revenue_per_request": (
+                        revenue_sats / successful if successful > 0 else 0
+                    ),
+                }
+            )
 
         models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
 
@@ -345,7 +356,7 @@ class LogManager:
         revenue_sats = stats["revenue_msats"] / 1000
         refunds_sats = stats["refunds_msats"] / 1000
         net_revenue_sats = revenue_sats - refunds_sats
-        
+
         total_requests = stats["total_requests"]
         successful = stats["successful_chat_completions"]
 
@@ -361,7 +372,9 @@ class LogManager:
             "unique_models_count": len(stats["unique_models"]),
             "unique_models": sorted(list(stats["unique_models"])),
             "error_types": dict(stats["error_types"]),
-            "success_rate": (successful / total_requests * 100) if total_requests > 0 else 0,
+            "success_rate": (successful / total_requests * 100)
+            if total_requests > 0
+            else 0,
             "revenue_msats": stats["revenue_msats"],
             "refunds_msats": stats["refunds_msats"],
             "revenue_sats": revenue_sats,
@@ -372,18 +385,18 @@ class LogManager:
                 stats["revenue_msats"] / successful if successful > 0 else 0
             ),
             "refund_rate": (
-                (stats["failed_requests"] / total_requests * 100) if total_requests > 0 else 0
+                (stats["failed_requests"] / total_requests * 100)
+                if total_requests > 0
+                else 0
             ),
         }
 
     def _aggregate_metrics_by_time(
         self, entries: list[dict], interval_minutes: int, hours_back: int
     ) -> dict:
-        time_buckets = defaultdict(lambda: {
-            "requests": 0,
-            "errors": 0,
-            "revenue_msats": 0.0
-        })
+        time_buckets: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"requests": 0, "errors": 0, "revenue_msats": 0.0}
+        )
 
         for entry in entries:
             try:
@@ -397,11 +410,13 @@ class LogManager:
                 # Round down to nearest interval
                 minutes = log_time.minute
                 rounded_minutes = (minutes // interval_minutes) * interval_minutes
-                bucket_time = log_time.replace(minute=rounded_minutes, second=0, microsecond=0)
+                bucket_time = log_time.replace(
+                    minute=rounded_minutes, second=0, microsecond=0
+                )
                 bucket_key = bucket_time.strftime("%Y-%m-%d %H:%M:%S")
 
                 bucket = time_buckets[bucket_key]
-                
+
                 message = entry.get("message", "").lower()
                 level = entry.get("levelname", "").upper()
 
@@ -430,5 +445,6 @@ class LogManager:
             "hours_back": hours_back,
             "total_buckets": len(result),
         }
+
 
 log_manager = LogManager()
