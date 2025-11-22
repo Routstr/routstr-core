@@ -1,7 +1,6 @@
 import json
 import secrets
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,7 +10,6 @@ from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
-from ..search import search_logs
 from ..wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -20,6 +18,7 @@ from ..wallet import (
     slow_filter_spend_proofs,
 )
 from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
+from .log_manager import log_manager
 from .logging import get_logger
 from .settings import SettingsService, settings
 
@@ -828,8 +827,8 @@ async def view_logs(request: Request, request_id: str) -> str:
             except Exception as e:
                 logger.error(f"Error reading log file {log_file}: {e}")
 
-    # Sort entries by timestamp if available (newest first)
-    log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=True)
+    # Sort entries by timestamp if available
+    log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=False)
 
     # Format log entries for display
     formatted_logs = []
@@ -908,72 +907,6 @@ async def view_logs(request: Request, request_id: str) -> str:
     </html>
     """
     )
-
-
-@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
-async def get_logs_api(
-    request: Request,
-    date: str | None = None,
-    level: str | None = None,
-    request_id: str | None = None,
-    search: str | None = None,
-    limit: int = 100,
-) -> dict[str, object]:
-    """
-    Get filtered log entries.
-
-    Args:
-        date: Filter by specific date (YYYY-MM-DD)
-        level: Filter by log level
-        request_id: Filter by request ID
-        search: Search text in message and name fields (case-insensitive)
-        limit: Maximum number of entries to return
-
-    Returns:
-        Dict containing logs and filter metadata
-    """
-    logs_dir = Path("logs")
-
-    # Use the search module for log filtering
-    log_entries = search_logs(
-        logs_dir=logs_dir,
-        date=date,
-        level=level,
-        request_id=request_id,
-        search_text=search,
-        limit=limit,
-    )
-
-    return {
-        "logs": log_entries,
-        "total": len(log_entries),
-        "date": date,
-        "level": level,
-        "request_id": request_id,
-        "search": search,
-        "limit": limit,
-    }
-
-
-@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
-async def get_log_dates_api(request: Request) -> dict[str, object]:
-    logs_dir = Path("logs")
-    dates = []
-
-    if logs_dir.exists():
-        log_files = sorted(
-            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
-        )
-
-        for log_file in log_files[:30]:
-            try:
-                filename = log_file.name
-                date_str = filename.replace("app_", "").replace(".log", "")
-                dates.append(date_str)
-            except Exception:
-                continue
-
-    return {"dates": dates}
 
 
 @admin_router.post("/withdraw", dependencies=[Depends(require_admin_api)])
@@ -2472,32 +2405,6 @@ def upstream_providers_page() -> str:
     )
 
 
-def logs_page() -> str:
-    return """
-    <!DOCTYPE html>
-    <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Logs - Admin Dashboard</title>
-            <script>
-                window.location.href = '/logs';
-            </script>
-        </head>
-        <body>
-            <p>Redirecting to logs page...</p>
-        </body>
-    </html>
-    """
-
-
-@admin_router.get("/logs", response_class=HTMLResponse)
-async def admin_logs(request: Request) -> str:
-    if is_admin_authenticated(request):
-        return logs_page()
-    return admin_auth()
-
-
 @admin_router.get("/upstream-providers", response_class=HTMLResponse)
 async def admin_upstream_providers(request: Request) -> str:
     if is_admin_authenticated(request):
@@ -2961,303 +2868,6 @@ h1 { color: #333; }
 """
 
 
-def _parse_log_file(file_path: Path) -> list[dict]:
-    """Parse JSON log file and return list of log entries."""
-    entries: list[dict] = []
-    try:
-        with open(file_path) as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    entries.append(entry)
-                except json.JSONDecodeError:
-                    continue
-    except Exception as e:
-        logger.error(f"Error reading log file {file_path}: {e}")
-    return entries
-
-
-def _aggregate_metrics_by_time(
-    entries: list[dict], interval_minutes: int, hours_back: int = 24
-) -> dict:
-    """
-    Aggregate log metrics into time buckets.
-    
-    CRITICAL: This function parses specific log messages for usage tracking.
-    The following log messages must not be modified without updating this function:
-    - "received proxy request" -> counts total_requests
-    - "token adjustment completed" -> counts successful_chat_completions, extracts revenue_msats from cost_data.total_msats
-    - "upstream request failed" OR "revert payment" -> counts failed_requests
-    - "payment processed successfully" -> counts payment_processed
-    - "revert payment" -> extracts refunds_msats from max_cost_for_model
-    - ERROR level with "upstream" -> counts upstream_errors
-    
-    See routstr/core/logging.py for full documentation of critical log messages.
-    """
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=hours_back)
-
-    time_buckets: dict[str, dict[str, int | float]] = defaultdict(
-        lambda: {
-            "total_requests": 0,
-            "successful_chat_completions": 0,
-            "failed_requests": 0,
-            "errors": 0,
-            "warnings": 0,
-            "payment_processed": 0,
-            "upstream_errors": 0,
-            "revenue_msats": 0,
-            "refunds_msats": 0,
-        }
-    )
-
-    for entry in entries:
-        try:
-            timestamp_str = entry.get("asctime", "")
-            if not timestamp_str:
-                continue
-
-            log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-            log_time = log_time.replace(tzinfo=timezone.utc)
-
-            if log_time < cutoff:
-                continue
-
-            bucket_time = log_time.replace(
-                minute=(log_time.minute // interval_minutes) * interval_minutes,
-                second=0,
-                microsecond=0,
-            )
-            bucket_key = bucket_time.isoformat()
-
-            message = entry.get("message", "").lower()
-            level = entry.get("levelname", "").upper()
-
-            if level == "ERROR":
-                time_buckets[bucket_key]["errors"] += 1
-            elif level == "WARNING":
-                time_buckets[bucket_key]["warnings"] += 1
-
-            if "received proxy request" in message:
-                time_buckets[bucket_key]["total_requests"] += 1
-
-            if "token adjustment completed for non-streaming" in message:
-                time_buckets[bucket_key]["successful_chat_completions"] += 1
-            elif "token adjustment completed for streaming" in message:
-                time_buckets[bucket_key]["successful_chat_completions"] += 1
-
-            if "upstream request failed" in message or "revert payment" in message:
-                time_buckets[bucket_key]["failed_requests"] += 1
-
-            if "payment processed successfully" in message:
-                time_buckets[bucket_key]["payment_processed"] += 1
-
-            if "upstream" in message and level == "ERROR":
-                time_buckets[bucket_key]["upstream_errors"] += 1
-
-            if "token adjustment completed" in message:
-                cost_data = entry.get("cost_data")
-                if isinstance(cost_data, dict):
-                    actual_cost = cost_data.get("total_msats", 0)
-                    if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                        time_buckets[bucket_key]["revenue_msats"] += actual_cost
-
-            if "revert payment" in message:
-                max_cost = entry.get("max_cost_for_model", 0)
-                if isinstance(max_cost, (int, float)) and max_cost > 0:
-                    time_buckets[bucket_key]["refunds_msats"] += max_cost
-
-        except Exception:
-            continue
-
-    result = []
-    for bucket_key in sorted(time_buckets.keys()):
-        result.append({"timestamp": bucket_key, **time_buckets[bucket_key]})
-
-    return {
-        "metrics": result,
-        "interval_minutes": interval_minutes,
-        "hours_back": hours_back,
-        "total_buckets": len(result),
-    }
-
-
-def _get_summary_stats(entries: list[dict], hours_back: int = 24) -> dict:
-    """
-    Calculate summary statistics from log entries.
-    
-    CRITICAL: This function parses specific log messages for usage tracking.
-    See routstr/core/logging.py for documentation of critical log messages.
-    Changes to log messages in proxy.py, auth.py, or upstream/base.py may break this function.
-    """
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=hours_back)
-
-    stats: dict[str, int | float | set[str] | defaultdict[str, int]] = {
-        "total_entries": 0,
-        "total_requests": 0,
-        "successful_chat_completions": 0,
-        "failed_requests": 0,
-        "total_errors": 0,
-        "total_warnings": 0,
-        "payment_processed": 0,
-        "upstream_errors": 0,
-        "unique_models": set(),
-        "error_types": defaultdict(int),
-        "revenue_msats": 0,
-        "refunds_msats": 0,
-        "revenue_sats": 0.0,
-        "refunds_sats": 0.0,
-        "net_revenue_msats": 0,
-        "net_revenue_sats": 0.0,
-    }
-
-    for entry in entries:
-        try:
-            timestamp_str = entry.get("asctime", "")
-            if not timestamp_str:
-                continue
-
-            log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-            log_time = log_time.replace(tzinfo=timezone.utc)
-
-            if log_time < cutoff:
-                continue
-
-            total_entries = stats["total_entries"]
-            assert isinstance(total_entries, int)
-            stats["total_entries"] = total_entries + 1
-
-            message = entry.get("message", "").lower()
-            level = entry.get("levelname", "").upper()
-
-            if level == "ERROR":
-                assert isinstance(stats["total_errors"], int)
-                stats["total_errors"] += 1
-                if "error_type" in entry:
-                    error_type = str(entry["error_type"])
-                    error_types = stats["error_types"]
-                    assert isinstance(error_types, defaultdict)
-                    error_types[error_type] += 1
-            elif level == "WARNING":
-                assert isinstance(stats["total_warnings"], int)
-                stats["total_warnings"] += 1
-
-            if "received proxy request" in message:
-                assert isinstance(stats["total_requests"], int)
-                stats["total_requests"] += 1
-
-            if "token adjustment completed" in message:
-                assert isinstance(stats["successful_chat_completions"], int)
-                stats["successful_chat_completions"] += 1
-
-            if "upstream request failed" in message or "revert payment" in message:
-                assert isinstance(stats["failed_requests"], int)
-                stats["failed_requests"] += 1
-
-            if "payment processed successfully" in message:
-                assert isinstance(stats["payment_processed"], int)
-                stats["payment_processed"] += 1
-
-            if "upstream" in message and level == "ERROR":
-                assert isinstance(stats["upstream_errors"], int)
-                stats["upstream_errors"] += 1
-
-            if "model" in entry:
-                model = entry["model"]
-                if isinstance(model, str) and model != "unknown":
-                    unique_models = stats["unique_models"]
-                    assert isinstance(unique_models, set)
-                    unique_models.add(model)
-
-            if "token adjustment completed" in message:
-                cost_data = entry.get("cost_data")
-                if isinstance(cost_data, dict):
-                    actual_cost = cost_data.get("total_msats", 0)
-                    if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                        assert isinstance(stats["revenue_msats"], (int, float))
-                        stats["revenue_msats"] = float(stats["revenue_msats"]) + float(actual_cost)
-
-            if "revert payment" in message:
-                max_cost = entry.get("max_cost_for_model", 0)
-                if isinstance(max_cost, (int, float)) and max_cost > 0:
-                    assert isinstance(stats["refunds_msats"], (int, float))
-                    stats["refunds_msats"] = float(stats["refunds_msats"]) + float(max_cost)
-
-        except Exception:
-            continue
-
-    revenue_msats_val = stats["revenue_msats"]
-    assert isinstance(revenue_msats_val, (int, float))
-    revenue_msats = float(revenue_msats_val)
-    
-    refunds_msats_val = stats["refunds_msats"]
-    assert isinstance(refunds_msats_val, (int, float))
-    refunds_msats = float(refunds_msats_val)
-    
-    revenue_sats = revenue_msats / 1000
-    refunds_sats = refunds_msats / 1000
-    net_revenue_msats = revenue_msats - refunds_msats
-    net_revenue_sats = net_revenue_msats / 1000
-
-    unique_models = stats["unique_models"]
-    assert isinstance(unique_models, set)
-    error_types = stats["error_types"]
-    assert isinstance(error_types, defaultdict)
-    
-    total_entries_val = stats["total_entries"]
-    assert isinstance(total_entries_val, int)
-    total_requests_val = stats["total_requests"]
-    assert isinstance(total_requests_val, int)
-    successful_completions_val = stats["successful_chat_completions"]
-    assert isinstance(successful_completions_val, int)
-    failed_requests_val = stats["failed_requests"]
-    assert isinstance(failed_requests_val, int)
-    total_errors_val = stats["total_errors"]
-    assert isinstance(total_errors_val, int)
-    total_warnings_val = stats["total_warnings"]
-    assert isinstance(total_warnings_val, int)
-    payment_processed_val = stats["payment_processed"]
-    assert isinstance(payment_processed_val, int)
-    upstream_errors_val = stats["upstream_errors"]
-    assert isinstance(upstream_errors_val, int)
-    
-    return {
-        "total_entries": total_entries_val,
-        "total_requests": total_requests_val,
-        "successful_chat_completions": successful_completions_val,
-        "failed_requests": failed_requests_val,
-        "total_errors": total_errors_val,
-        "total_warnings": total_warnings_val,
-        "payment_processed": payment_processed_val,
-        "upstream_errors": upstream_errors_val,
-        "unique_models_count": len(unique_models),
-        "unique_models": sorted(list(unique_models)),
-        "error_types": dict(error_types),
-        "success_rate": (
-            (successful_completions_val / total_requests_val * 100)
-            if total_requests_val > 0
-            else 0
-        ),
-        "revenue_msats": revenue_msats,
-        "refunds_msats": refunds_msats,
-        "revenue_sats": revenue_sats,
-        "refunds_sats": refunds_sats,
-        "net_revenue_msats": net_revenue_msats,
-        "net_revenue_sats": net_revenue_sats,
-        "avg_revenue_per_request_msats": (
-            revenue_msats / successful_completions_val
-            if successful_completions_val > 0
-            else 0
-        ),
-        "refund_rate": (
-            (failed_requests_val / total_requests_val * 100)
-            if total_requests_val > 0
-            else 0
-        ),
-    }
-
-
 @admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
 async def get_usage_metrics(
     request: Request,
@@ -3269,38 +2879,7 @@ async def get_usage_metrics(
     ),
 ) -> dict:
     """Get usage metrics aggregated by time interval."""
-    logs_dir = Path("logs")
-    all_entries: list[dict] = []
-
-    if not logs_dir.exists():
-        return {
-            "metrics": [],
-            "interval_minutes": interval,
-            "hours_back": hours,
-            "total_buckets": 0,
-        }
-
-    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-    for log_file in sorted(logs_dir.glob("app_*.log")):
-        try:
-            file_date_str = log_file.stem.split("_")[1]
-            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            )
-
-            if file_date < cutoff_date.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ):
-                continue
-
-            entries = _parse_log_file(log_file)
-            all_entries.extend(entries)
-        except Exception as e:
-            logger.error(f"Error processing log file {log_file}: {e}")
-            continue
-
-    return _aggregate_metrics_by_time(all_entries, interval, hours)
+    return log_manager.get_usage_metrics(interval=interval, hours=hours)
 
 
 @admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
@@ -3311,46 +2890,7 @@ async def get_usage_summary(
     ),
 ) -> dict:
     """Get summary statistics for the specified time period."""
-    logs_dir = Path("logs")
-    all_entries: list[dict] = []
-
-    if not logs_dir.exists():
-        return {
-            "total_entries": 0,
-            "total_requests": 0,
-            "successful_chat_completions": 0,
-            "failed_requests": 0,
-            "total_errors": 0,
-            "total_warnings": 0,
-            "payment_processed": 0,
-            "upstream_errors": 0,
-            "unique_models_count": 0,
-            "unique_models": [],
-            "error_types": {},
-            "success_rate": 0,
-        }
-
-    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-    for log_file in sorted(logs_dir.glob("app_*.log")):
-        try:
-            file_date_str = log_file.stem.split("_")[1]
-            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            )
-
-            if file_date < cutoff_date.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ):
-                continue
-
-            entries = _parse_log_file(log_file)
-            all_entries.extend(entries)
-        except Exception as e:
-            logger.error(f"Error processing log file {log_file}: {e}")
-            continue
-
-    return _get_summary_stats(all_entries, hours)
+    return log_manager.get_usage_summary(hours=hours)
 
 
 @admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
@@ -3364,60 +2904,7 @@ async def get_error_details(
     ),
 ) -> dict:
     """Get detailed error information."""
-    logs_dir = Path("logs")
-    errors: list[dict] = []
-
-    if not logs_dir.exists():
-        return {"errors": [], "total_count": 0}
-
-    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-    for log_file in sorted(logs_dir.glob("app_*.log"), reverse=True):
-        try:
-            file_date_str = log_file.stem.split("_")[1]
-            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            )
-
-            if file_date < cutoff_date.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ):
-                continue
-
-            entries = _parse_log_file(log_file)
-
-            for entry in entries:
-                if entry.get("levelname", "").upper() == "ERROR":
-                    timestamp_str = entry.get("asctime", "")
-                    if timestamp_str:
-                        log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-                        log_time = log_time.replace(tzinfo=timezone.utc)
-
-                        if log_time >= cutoff_date:
-                            errors.append(
-                                {
-                                    "timestamp": timestamp_str,
-                                    "message": entry.get("message", ""),
-                                    "error_type": entry.get("error_type", "unknown"),
-                                    "pathname": entry.get("pathname", ""),
-                                    "lineno": entry.get("lineno", 0),
-                                    "request_id": entry.get("request_id", ""),
-                                }
-                            )
-
-                if len(errors) >= limit:
-                    break
-
-        except Exception as e:
-            logger.error(f"Error processing log file {log_file}: {e}")
-            continue
-
-        if len(errors) >= limit:
-            break
-
-    errors.sort(key=lambda x: x["timestamp"], reverse=True)
-
-    return {"errors": errors[:limit], "total_count": len(errors)}
+    return log_manager.get_error_details(hours=hours, limit=limit)
 
 
 @admin_router.get(
@@ -3434,139 +2921,67 @@ async def get_revenue_by_model(
 ) -> dict:
     """
     Get revenue breakdown by model.
-    
-    CRITICAL: This function parses specific log messages for revenue tracking.
-    See routstr/core/logging.py for documentation of critical log messages.
-    Changes to log messages may break revenue calculations per model.
     """
-    logs_dir = Path("logs")
-    all_entries: list[dict] = []
+    return log_manager.get_revenue_by_model(hours=hours, limit=limit)
 
-    if not logs_dir.exists():
-        return {"models": [], "total_revenue_sats": 0}
 
-    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours)
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """
+    Get filtered log entries.
 
-    for log_file in sorted(logs_dir.glob("app_*.log")):
-        try:
-            file_date_str = log_file.stem.split("_")[1]
-            file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            )
+    Args:
+        date: Filter by specific date (YYYY-MM-DD)
+        level: Filter by log level
+        request_id: Filter by request ID
+        search: Search text in message and name fields (case-insensitive)
+        limit: Maximum number of entries to return
 
-            if file_date < cutoff_date.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ):
-                continue
-
-            entries = _parse_log_file(log_file)
-            all_entries.extend(entries)
-        except Exception as e:
-            logger.error(f"Error processing log file {log_file}: {e}")
-            continue
-
-    model_stats: dict[str, dict[str, int | float]] = defaultdict(
-        lambda: {
-            "revenue_msats": 0,
-            "refunds_msats": 0,
-            "requests": 0,
-            "successful": 0,
-            "failed": 0,
-        }
+    Returns:
+        Dict containing logs and filter metadata
+    """
+    log_entries = log_manager.search_logs(
+        date=date,
+        level=level,
+        request_id=request_id,
+        search_text=search,
+        limit=limit,
     )
 
-    for entry in all_entries:
-        try:
-            timestamp_str = entry.get("asctime", "")
-            if not timestamp_str:
-                continue
-
-            log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-            log_time = log_time.replace(tzinfo=timezone.utc)
-
-            if log_time < cutoff_date:
-                continue
-
-            model = entry.get("model", "unknown")
-            if not isinstance(model, str):
-                model = "unknown"
-
-            message = entry.get("message", "").lower()
-
-            if "received proxy request" in message:
-                model_stats[model]["requests"] += 1
-
-            if "token adjustment completed" in message:
-                model_stats[model]["successful"] += 1
-                cost_data = entry.get("cost_data")
-                if isinstance(cost_data, dict):
-                    actual_cost = cost_data.get("total_msats", 0)
-                    if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                        model_stats[model]["revenue_msats"] += actual_cost
-
-            if "revert payment" in message or "upstream request failed" in message:
-                model_stats[model]["failed"] += 1
-                if "revert payment" in message:
-                    max_cost = entry.get("max_cost_for_model", 0)
-                    if isinstance(max_cost, (int, float)) and max_cost > 0:
-                        model_stats[model]["refunds_msats"] += max_cost
-
-        except Exception:
-            continue
-
-    models: list[dict[str, str | int | float]] = []
-    total_revenue = 0.0
-
-    for model, stats in model_stats.items():
-        revenue_msats_raw = stats["revenue_msats"]
-        assert isinstance(revenue_msats_raw, (int, float))
-        revenue_msats_val = float(revenue_msats_raw)
-        
-        refunds_msats_raw = stats["refunds_msats"]
-        assert isinstance(refunds_msats_raw, (int, float))
-        refunds_msats_val = float(refunds_msats_raw)
-        
-        revenue_sats = revenue_msats_val / 1000
-        refunds_sats = refunds_msats_val / 1000
-        net_revenue_sats = revenue_sats - refunds_sats
-
-        total_revenue += net_revenue_sats
-
-        requests_raw = stats["requests"]
-        assert isinstance(requests_raw, int)
-        requests_val = requests_raw
-        
-        successful_raw = stats["successful"]
-        assert isinstance(successful_raw, int)
-        successful_val = successful_raw
-        
-        failed_raw = stats["failed"]
-        assert isinstance(failed_raw, int)
-        failed_val = failed_raw
-        
-        model_data: dict[str, str | int | float] = {
-            "model": model,
-            "revenue_sats": revenue_sats,
-            "refunds_sats": refunds_sats,
-            "net_revenue_sats": net_revenue_sats,
-            "requests": requests_val,
-            "successful": successful_val,
-            "failed": failed_val,
-            "avg_revenue_per_request": (
-                revenue_sats / successful_val if successful_val > 0 else 0
-            ),
-        }
-        models.append(model_data)
-
-    def _sort_key(x: dict[str, str | int | float]) -> float:
-        val = x["net_revenue_sats"]
-        assert isinstance(val, (int, float))
-        return float(val)
-    
-    models.sort(key=_sort_key, reverse=True)
-
     return {
-        "models": models[:limit],
-        "total_revenue_sats": total_revenue,
-        "total_models": len(models),
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
     }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, object]:
+    logs_dir = Path("logs")
+    dates = []
+
+    if logs_dir.exists():
+        log_files = sorted(
+            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
+        )
+
+        for log_file in log_files[:30]:
+            try:
+                filename = log_file.name
+                date_str = filename.replace("app_", "").replace(".log", "")
+                dates.append(date_str)
+            except Exception:
+                continue
+
+    return {"dates": dates}

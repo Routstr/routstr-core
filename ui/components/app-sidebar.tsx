@@ -3,11 +3,12 @@
 import * as React from 'react';
 import {
   ActivityIcon,
-  DatabaseIcon,
   FileTextIcon,
+  DatabaseIcon,
   LayoutDashboardIcon,
   ServerIcon,
   SettingsIcon,
+  WalletIcon,
 } from 'lucide-react';
 import Image from 'next/image';
 
@@ -37,9 +38,14 @@ const data = {
       icon: LayoutDashboardIcon,
     },
     {
-      title: 'Usage',
-      url: '/usage',
-      icon: ActivityIcon,
+      title: 'Balances',
+      url: '/balances',
+      icon: WalletIcon,
+    },
+    {
+      title: 'Logs',
+      url: '/logs',
+      icon: FileTextIcon,
     },
     {
       title: 'Models',
@@ -52,35 +58,10 @@ const data = {
       icon: ServerIcon,
     },
     {
-      title: 'Logs',
-      url: '/logs',
-      icon: FileTextIcon,
-    },
-    {
       title: 'Settings',
       url: '/settings',
       icon: SettingsIcon,
     },
-    // {
-    //   title: 'Transactions',
-    //   url: '/transactions',
-    //   icon: ReceiptIcon,
-    // },
-    // {
-    //   title: 'Credit',
-    //   url: '/credits',
-    //   icon: FolderIcon,
-    // },
-    // {
-    //   title: 'Users',
-    //   url: '/users',
-    //   icon: UsersIcon,
-    // },
-    // {
-    //   title: 'Organizations',
-    //   url: '/organizations',
-    //   icon: FolderIcon,
-    // },
   ],
   documents: [],
 };

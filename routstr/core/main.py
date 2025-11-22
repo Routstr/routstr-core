@@ -264,6 +264,15 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def redirect_transactions_index_txt() -> RedirectResponse:
         return RedirectResponse("/transactions")
 
+    @app.get("/balances", include_in_schema=False)
+    async def serve_balances_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "balances" / "index.html")
+
+    # Add explicit route for /balances/index.txt to redirect to /balances
+    @app.get("/balances/index.txt", include_in_schema=False)
+    async def redirect_balances_index_txt() -> RedirectResponse:
+        return RedirectResponse("/balances")
+
     @app.get("/logs", include_in_schema=False)
     async def serve_logs_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "logs" / "index.html")
@@ -273,15 +282,6 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def redirect_logs_index_txt() -> RedirectResponse:
         return RedirectResponse("/logs")
 
-    @app.get("/unauthorized", include_in_schema=False)
-    async def serve_unauthorized_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
-
-    # Add explicit route for /unauthorized/index.txt to redirect to /unauthorized
-    @app.get("/unauthorized/index.txt", include_in_schema=False)
-    async def redirect_unauthorized_index_txt() -> RedirectResponse:
-        return RedirectResponse("/unauthorized")
-
     @app.get("/usage", include_in_schema=False)
     async def serve_usage_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "usage" / "index.html")
@@ -290,6 +290,15 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     @app.get("/usage/index.txt", include_in_schema=False)
     async def redirect_usage_index_txt() -> RedirectResponse:
         return RedirectResponse("/usage")
+
+    @app.get("/unauthorized", include_in_schema=False)
+    async def serve_unauthorized_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
+
+    # Add explicit route for /unauthorized/index.txt to redirect to /unauthorized
+    @app.get("/unauthorized/index.txt", include_in_schema=False)
+    async def redirect_unauthorized_index_txt() -> RedirectResponse:
+        return RedirectResponse("/unauthorized")
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon() -> FileResponse:
