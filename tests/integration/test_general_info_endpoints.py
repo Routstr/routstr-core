@@ -62,7 +62,6 @@ async def test_root_endpoint_structure_and_performance(
         "mints",
         "http_url",
         "onion_url",
-        "models",
     ]
     for field in required_fields:
         assert field in data, f"Missing required field: {field}"
@@ -75,15 +74,9 @@ async def test_root_endpoint_structure_and_performance(
     assert isinstance(data["mints"], list)
     assert isinstance(data["http_url"], str)
     assert isinstance(data["onion_url"], str)
-    assert isinstance(data["models"], list)
 
-    # Validate models structure if any exist
-    for model in data["models"]:
-        assert isinstance(model, dict)
-        # Models should have at least basic fields
-        model_required_fields = ["id", "name"]
-        for field in model_required_fields:
-            assert field in model, f"Model missing required field: {field}"
+    # Ensure models field is not present (removed as per issue #184)
+    assert "models" not in data, "Models field should not be present in base URL output"
 
     # Verify no database state changes
     diff = await db_snapshot.diff()

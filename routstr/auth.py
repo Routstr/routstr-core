@@ -9,7 +9,7 @@ from sqlmodel import col, update
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession
 from .core.settings import settings
-from .payment.cost_caculation import (
+from .payment.cost_calculation import (
     CostData,
     CostDataError,
     MaxCostData,
