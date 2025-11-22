@@ -20,6 +20,7 @@ dependencies = [
     "nostr>=0.0.2",
     "mdurl==0.1.2",
     "pillow>=10",
+    "google-generativeai>=0.8.5",
 ]
 
 [dependency-groups]
