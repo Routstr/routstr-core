@@ -1,9 +1,13 @@
+import base64
 import json
 import math
+from io import BytesIO
 from typing import Any
 
+import httpx
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
+from PIL import Image
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
@@ -172,13 +176,23 @@ async def calculate_discounted_max_cost(
 
     if messages := body.get("messages"):
         prompt_tokens = estimate_tokens(messages)
+
+        image_tokens = await estimate_image_tokens_in_messages(messages)
+        if image_tokens > 0:
+            logger.debug(
+                "Found images in request",
+                extra={
+                    "model": model,
+                    "image_tokens": image_tokens,
+                },
+            )
+            prompt_tokens += image_tokens
+
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
         )
-        if estimated_prompt_delta_sats >= 0:
+        if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
-        else:
-            adjusted = adjusted + math.ceil(-estimated_prompt_delta_sats * 1000)
 
     max_tokens_raw = body.get("max_tokens", None)
     if max_tokens_raw is not None:
@@ -193,10 +207,8 @@ async def calculate_discounted_max_cost(
             estimated_completion_delta_sats = (
                 max_completion_allowed_sats - max_tokens_int * model_pricing.completion
             )
-            if estimated_completion_delta_sats >= 0:
+            if estimated_completion_delta_sats > 0:
                 adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
-            else:
-                adjusted = adjusted + math.ceil(-estimated_completion_delta_sats * 1000)
 
     logger.debug(
         "Discounted max cost computed",
@@ -212,7 +224,171 @@ async def calculate_discounted_max_cost(
 
 
 def estimate_tokens(messages: list) -> int:
-    return len(str(messages)) // 3
+    """Estimate tokens for text content, excluding image_url fields."""
+    total = 0
+    for msg in messages:
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                total += sum(
+                    len(item.get("text", ""))
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+    return total // 3
+
+
+def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
+    """Extract image dimensions from image bytes."""
+    try:
+        img = Image.open(BytesIO(image_data))
+        return img.size
+    except Exception as e:
+        logger.warning(
+            "Failed to get image dimensions, using default",
+            extra={"error": str(e)},
+        )
+        return (512, 512)
+
+
+async def _fetch_image_from_url(url: str) -> bytes | None:
+    """Fetch image from URL."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch image from URL",
+            extra={"error": str(e), "url": url[:100]},
+        )
+        return None
+
+
+def _calculate_image_tokens(width: int, height: int, detail: str = "auto") -> int:
+    """Calculate image tokens based on OpenAI's vision pricing.
+
+    For low detail: 85 tokens
+    For high detail/auto: 85 base tokens + 170 tokens per 512px tile
+    """
+    if detail == "low":
+        return 85
+
+    if width > 2048 or height > 2048:
+        aspect_ratio = width / height
+        if width > height:
+            width = 2048
+            height = int(width / aspect_ratio)
+        else:
+            height = 2048
+            width = int(height * aspect_ratio)
+
+    if width > 768 or height > 768:
+        aspect_ratio = width / height
+        if width > height:
+            width = 768
+            height = int(width / aspect_ratio)
+        else:
+            height = 768
+            width = int(height * aspect_ratio)
+
+    tiles_width = (width + 511) // 512
+    tiles_height = (height + 511) // 512
+    num_tiles = tiles_width * tiles_height
+
+    return 85 + (170 * num_tiles)
+
+
+async def estimate_image_tokens_in_messages(messages: list) -> int:
+    """Estimate total tokens for all images in messages.
+
+    Supports both base64 encoded images and image URLs.
+    """
+    total_image_tokens = 0
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+
+        content = message.get("content")
+        if not content:
+            continue
+
+        if isinstance(content, str):
+            continue
+
+        if not isinstance(content, list):
+            continue
+
+        for content_item in content:
+            if not isinstance(content_item, dict):
+                continue
+
+            content_type = content_item.get("type")
+            if content_type not in ("image_url", "input_image"):
+                continue
+
+            image_url_data = content_item.get("image_url")
+            if not image_url_data:
+                continue
+
+            if isinstance(image_url_data, str):
+                url = image_url_data
+                detail = "auto"
+            elif isinstance(image_url_data, dict):
+                url = image_url_data.get("url", "")
+                detail = image_url_data.get("detail", "auto")
+            else:
+                continue
+
+            if not url:
+                continue
+
+            if url.startswith("data:image/"):
+                try:
+                    header, base64_data = url.split(",", 1)
+                    image_bytes = base64.b64decode(base64_data)
+                    width, height = _get_image_dimensions(image_bytes)
+                    tokens = _calculate_image_tokens(width, height, detail)
+                    total_image_tokens += tokens
+                    logger.debug(
+                        "Calculated tokens for base64 image",
+                        extra={
+                            "width": width,
+                            "height": height,
+                            "detail": detail,
+                            "tokens": tokens,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to process base64 image",
+                        extra={"error": str(e)},
+                    )
+                    total_image_tokens += 85
+            else:
+                image_bytes_or_none = await _fetch_image_from_url(url)
+                if image_bytes_or_none:
+                    width, height = _get_image_dimensions(image_bytes_or_none)
+                    tokens = _calculate_image_tokens(width, height, detail)
+                    total_image_tokens += tokens
+                    logger.debug(
+                        "Calculated tokens for URL image",
+                        extra={
+                            "url": url[:100],
+                            "width": width,
+                            "height": height,
+                            "detail": detail,
+                            "tokens": tokens,
+                        },
+                    )
+                else:
+                    total_image_tokens += 85
+
+    return total_image_tokens
 
 
 def create_error_response(

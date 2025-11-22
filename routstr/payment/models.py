@@ -87,13 +87,15 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                     model["id"] = model_id[len(source_prefix) :]
                     model_id = model["id"]
 
+                # Check if model should be excluded based on configuration
+                try:
+                    excluded_ids = getattr(settings, "excluded_model_ids", [])
+                except Exception:
+                    excluded_ids = []
+                
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id == "openrouter/auto"
-                    or model_id == "google/gemini-2.5-pro-exp-03-25"
-                    or model_id == "opengvlab/internvl3-78b"
-                    or model_id == "openrouter/sonoma-dusk-alpha"
-                    or model_id == "openrouter/sonoma-sky-alpha"
+                    or model_id in excluded_ids
                 ):
                     continue
 
@@ -128,13 +130,15 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                     model["id"] = model_id[len(source_prefix) :]
                     model_id = model["id"]
 
+                # Check if model should be excluded based on configuration
+                try:
+                    excluded_ids = getattr(settings, "excluded_model_ids", [])
+                except Exception:
+                    excluded_ids = []
+                
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id == "openrouter/auto"
-                    or model_id == "google/gemini-2.5-pro-exp-03-25"
-                    or model_id == "opengvlab/internvl3-78b"
-                    or model_id == "openrouter/sonoma-dusk-alpha"
-                    or model_id == "openrouter/sonoma-sky-alpha"
+                    or model_id in excluded_ids
                 ):
                     continue
 
@@ -340,28 +344,34 @@ def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
         if (cl := model.top_provider.context_length) and (
             mct := model.top_provider.max_completion_tokens
         ):
+            if cl <= mct:
+                return (
+                    cl * prompt_price,
+                    cl * completion_price,
+                    cl * max(completion_price, prompt_price),
+                )
             return (
-                (cl - mct) * prompt_price,
+                cl * prompt_price,
                 mct * completion_price,
                 (cl - mct) * prompt_price + mct * completion_price,
             )
         elif cl := model.top_provider.context_length:
             return (
-                cl * 0.8 * prompt_price,
-                cl * 0.2 * completion_price,
                 cl * prompt_price,
+                cl * completion_price,
+                cl * max(completion_price, prompt_price),
             )
         elif mct := model.top_provider.max_completion_tokens:
             return (
-                mct * 4 * prompt_price,
+                mct * prompt_price,
                 mct * completion_price,
-                mct * 5 * prompt_price,
+                mct * completion_price,
             )
     elif model.context_length:
         return (
-            model.context_length * 0.8 * prompt_price,
-            model.context_length * 0.2 * completion_price,
             model.context_length * prompt_price,
+            model.context_length * completion_price,
+            model.context_length * max(completion_price, prompt_price),
         )
 
     p = prompt_price * 1_000_000

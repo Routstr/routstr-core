@@ -2739,45 +2739,9 @@ async def delete_upstream_provider(provider_id: int) -> dict[str, object]:
 @admin_router.get("/api/provider-types", dependencies=[Depends(require_admin_api)])
 async def get_provider_types() -> list[dict[str, object]]:
     """Get metadata about available provider types including default URLs and whether they're fixed."""
-    provider_types = [
-        {
-            "id": "openrouter",
-            "name": "OpenRouter",
-            "default_base_url": "https://openrouter.ai/api/v1",
-            "fixed_base_url": True,
-        },
-        {
-            "id": "openai",
-            "name": "OpenAI",
-            "default_base_url": "https://api.openai.com/v1",
-            "fixed_base_url": True,
-        },
-        {
-            "id": "anthropic",
-            "name": "Anthropic",
-            "default_base_url": "https://api.anthropic.com/v1",
-            "fixed_base_url": True,
-        },
-        {
-            "id": "azure",
-            "name": "Azure OpenAI",
-            "default_base_url": "",
-            "fixed_base_url": False,
-        },
-        {
-            "id": "ollama",
-            "name": "Ollama",
-            "default_base_url": "http://localhost:11434",
-            "fixed_base_url": False,
-        },
-        {
-            "id": "generic",
-            "name": "Generic",
-            "default_base_url": "",
-            "fixed_base_url": False,
-        },
-    ]
-    return provider_types
+    from ..upstream import upstream_provider_classes
+
+    return [cls.get_provider_metadata() for cls in upstream_provider_classes]
 
 
 @admin_router.get(
@@ -2785,7 +2749,7 @@ async def get_provider_types() -> list[dict[str, object]]:
     dependencies=[Depends(require_admin_api)],
 )
 async def get_provider_models(provider_id: int) -> dict[str, object]:
-    from ..upstream import _instantiate_provider
+    from ..upstream.helpers import _instantiate_provider
 
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, provider_id)

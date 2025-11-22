@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str) -> Any:  # type: ignore[override]
-            if field_name in {"cashu_mints", "cors_origins", "relays"}:
+            if field_name in {"cashu_mints", "cors_origins", "relays", "excluded_model_ids"}:
                 v = str(raw_value).strip()
                 if v == "":
                     return []
@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
+
+    # Model filtering
+    excluded_model_ids: list[str] = Field(
+        default_factory=lambda: [
+            "openrouter/auto",
+            "google/gemini-2.5-pro-exp-03-25",
+            "opengvlab/internvl3-78b",
+            "openrouter/sonoma-dusk-alpha",
+            "openrouter/sonoma-sky-alpha"
+        ],
+        env="EXCLUDED_MODEL_IDS"
+    )
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
@@ -235,7 +247,7 @@ class SettingsService:
 
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "", []) and v}
+                {k: v for k, v in db_json.items() if v not in (None, "", [], {})}
             )
 
             # Ensure primary_mint is consistent with cashu_mints if not explicitly set
