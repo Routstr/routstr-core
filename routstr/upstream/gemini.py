@@ -390,21 +390,15 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                     continue
 
                 model_id = model_name.replace("models/", "")
-                display_name = model_data.get("displayName", model_id)
+                display_name = model_data.get("display_name", model_id)
                 description = model_data.get(
                     "description", f"Google {display_name} model"
                 )
 
-                supported_methods = model_data.get("supportedGenerationMethods", [])
-                if "generateContent" not in supported_methods:
-                    logger.debug(
-                        f"Skipping model {model_id} - doesn't support generateContent",
-                        extra={"supported_methods": supported_methods},
-                    )
-                    continue
+                supported_methods = model_data.get("supported_generation_methods", ['generateContent'])
 
-                input_token_limit = model_data.get("inputTokenLimit", 32768)
-                output_token_limit = model_data.get("outputTokenLimit", 8192)
+                input_token_limit = model_data.get("input_token_limit", 32768)
+                output_token_limit = model_data.get("output_token_limit", 8192)
                 context_length = min(input_token_limit, 128000)
 
                 logger.debug(
@@ -429,35 +423,6 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                     max_completion_cost=0.001,
                     max_cost=0.001,
                 )
-
-                if "1.5-pro" in model_id.lower() or "2.0" in model_id.lower():
-                    pricing_config = Pricing(
-                        prompt=0.00000125,
-                        completion=0.000005,
-                        request=0.0,
-                        image=0.0,
-                        web_search=0.0,
-                        internal_reasoning=0.0,
-                        max_prompt_cost=0.001,
-                        max_completion_cost=0.001,
-                        max_cost=0.001,
-                    )
-                elif (
-                    "1.5-flash" in model_id.lower()
-                    or "2.5" in model_id.lower()
-                    or "flash" in model_id.lower()
-                ):
-                    pricing_config = Pricing(
-                        prompt=0.000000075,
-                        completion=0.0000003,
-                        request=0.0,
-                        image=0.0,
-                        web_search=0.0,
-                        internal_reasoning=0.0,
-                        max_prompt_cost=0.001,
-                        max_completion_cost=0.001,
-                        max_cost=0.001,
-                    )
 
                 models_list.append(
                     Model(

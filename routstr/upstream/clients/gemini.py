@@ -184,13 +184,13 @@ class GeminiClient(BaseAPIClient):
             return [
                 {
                     "name": model.name,
-                    "displayName": getattr(model, "display_name", model.name),
+                    "display_name": getattr(model, "display_name", model.name),
                     "description": getattr(model, "description", ""),
-                    "supportedGenerationMethods": getattr(
+                    "supported_generation_methods": getattr(
                         model, "supported_generation_methods", ["generateContent"]
                     ),
-                    "inputTokenLimit": getattr(model, "input_token_limit", 32768),
-                    "outputTokenLimit": getattr(model, "output_token_limit", 8192),
+                    "input_token_limit": getattr(model, "input_token_limit", 32768),
+                    "output_token_limit": getattr(model, "output_token_limit", 8192),
                 }
                 for model in models
             ]
