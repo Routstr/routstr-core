@@ -5,7 +5,7 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio.engine import create_async_engine
-from sqlmodel import Field, SQLModel, func, select
+from sqlmodel import Field, Relationship, SQLModel, func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
@@ -55,6 +55,9 @@ class ApiKey(SQLModel, table=True):  # type: ignore
 class ModelRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "models"
     id: str = Field(primary_key=True)
+    upstream_provider_id: int = Field(
+        primary_key=True, foreign_key="upstream_providers.id", ondelete="CASCADE"
+    )
     name: str = Field()
     created: int = Field()
     description: str = Field()
@@ -64,6 +67,29 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     sats_pricing: str | None = Field(default=None)
     per_request_limits: str | None = Field(default=None)
     top_provider: str | None = Field(default=None)
+    enabled: bool = Field(default=True, description="Whether this model is enabled")
+    upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
+
+
+class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
+    __tablename__ = "upstream_providers"
+    id: int | None = Field(default=None, primary_key=True)
+    provider_type: str = Field(
+        description="Provider type: custom, openai, anthropic, azure, openrouter, etc."
+    )
+    base_url: str = Field(unique=True, description="Base URL of the upstream API")
+    api_key: str = Field(description="API key for the upstream provider")
+    api_version: str | None = Field(
+        default=None, description="API version for Azure OpenAI"
+    )
+    enabled: bool = Field(default=True, description="Whether this provider is enabled")
+    provider_fee: float = Field(
+        default=1.01, description="Provider fee multiplier (default 1%)"
+    )
+    models: list["ModelRow"] = Relationship(
+        back_populates="upstream_provider",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
 
 
 async def balances_for_mint_and_unit(
@@ -79,6 +105,8 @@ async def balances_for_mint_and_unit(
 async def init_db() -> None:
     """Initializes the database and creates tables if they don't exist."""
     async with engine.begin() as conn:
+        if DATABASE_URL.startswith("sqlite"):
+            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.run_sync(SQLModel.metadata.create_all)
 
 

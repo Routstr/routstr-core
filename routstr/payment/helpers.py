@@ -1,17 +1,18 @@
+import base64
 import json
 import math
-from typing import Mapping
+from io import BytesIO
+from typing import Any
 
+import httpx
 from fastapi import HTTPException, Response
 from fastapi.requests import Request
-from sqlmodel import select
+from PIL import Image
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from ..core.db import ModelRow
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
-from .models import Pricing
 
 logger = get_logger(__name__)
 
@@ -85,19 +86,19 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
 
 
 async def get_max_cost_for_model(
-    model: str, session: AsyncSession | None = None
+    model: str,
+    session: AsyncSession,
+    model_obj: Any | None = None,
 ) -> int:
-    """Get the maximum cost for a specific model."""
+    """Get the maximum cost for a specific model from providers with overrides."""
     logger.debug(
         "Getting max cost for model",
         extra={
             "model": model,
             "fixed_pricing": settings.fixed_pricing,
-            "has_models": True,
         },
     )
 
-    # Fixed pricing: always use fixed_cost_per_request
     if settings.fixed_pricing:
         default_cost_msats = settings.fixed_cost_per_request * 1000
         logger.debug(
@@ -106,43 +107,40 @@ async def get_max_cost_for_model(
         )
         return max(settings.min_request_msat, default_cost_msats)
 
-    if session is None:
-        # Without a DB session, we can't resolve model pricing; fall back to fixed cost
-        fallback_msats = settings.fixed_cost_per_request * 1000
-        logger.warning(
-            "No DB session provided for model pricing; using fixed cost",
-            extra={"requested_model": model, "using_default_cost": fallback_msats},
-        )
-        return max(settings.min_request_msat, fallback_msats)
+    if not model_obj:
+        from ..proxy import get_model_instance
 
-    result = await session.exec(select(ModelRow.id))  # type: ignore
-    available_ids = [row[0] if isinstance(row, tuple) else row for row in result.all()]
-    if model not in available_ids:
-        # If no models or unknown model, fall back to fixed cost if provided, else minimal default
+        model_obj = get_model_instance(model)
+
+    if not model_obj:
         fallback_msats = settings.fixed_cost_per_request * 1000
         logger.warning(
-            "Model not found in available models",
+            "Model not found in providers or overrides",
             extra={
                 "requested_model": model,
-                "available_models": available_ids,
                 "using_default_cost": fallback_msats,
             },
         )
         return max(settings.min_request_msat, fallback_msats)
 
-    row = await session.get(ModelRow, model)
-    if row and row.sats_pricing:
+    if model_obj.sats_pricing:
         try:
-            sats = Pricing(**json.loads(row.sats_pricing))  # type: ignore
-            max_cost = sats.max_cost * 1000 * (1 - settings.tolerance_percentage / 100)
+            max_cost = (
+                model_obj.sats_pricing.max_cost
+                * 1000
+                * (1 - settings.tolerance_percentage / 100)
+            )
             logger.debug(
                 "Found model-specific max cost",
                 extra={"model": model, "max_cost_msats": max_cost},
             )
             calculated_msats = int(max_cost)
             return max(settings.min_request_msat, calculated_msats)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                "Error calculating max cost from model pricing",
+                extra={"model": model, "error": str(e)},
+            )
 
     logger.warning(
         "Model pricing not found, using fixed cost",
@@ -155,14 +153,17 @@ async def get_max_cost_for_model(
 
 
 async def calculate_discounted_max_cost(
-    max_cost_for_model: int, body: dict, session: AsyncSession | None = None
+    max_cost_for_model: int,
+    body: dict,
+    model_obj: Any | None = None,
 ) -> int:
     """Calculate the discounted max cost for a request using model pricing when available."""
-    if settings.fixed_pricing or session is None:
+    if settings.fixed_pricing:
         return max_cost_for_model
 
     model = body.get("model", "unknown")
-    model_pricing = await get_model_cost_info(model, session=session)
+
+    model_pricing = model_obj.sats_pricing if model_obj else None
     if not model_pricing:
         return max_cost_for_model
 
@@ -175,13 +176,23 @@ async def calculate_discounted_max_cost(
 
     if messages := body.get("messages"):
         prompt_tokens = estimate_tokens(messages)
+
+        image_tokens = await estimate_image_tokens_in_messages(messages)
+        if image_tokens > 0:
+            logger.debug(
+                "Found images in request",
+                extra={
+                    "model": model,
+                    "image_tokens": image_tokens,
+                },
+            )
+            prompt_tokens += image_tokens
+
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
         )
-        if estimated_prompt_delta_sats >= 0:
+        if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
-        else:
-            adjusted = adjusted + math.ceil(-estimated_prompt_delta_sats * 1000)
 
     max_tokens_raw = body.get("max_tokens", None)
     if max_tokens_raw is not None:
@@ -196,10 +207,8 @@ async def calculate_discounted_max_cost(
             estimated_completion_delta_sats = (
                 max_completion_allowed_sats - max_tokens_int * model_pricing.completion
             )
-            if estimated_completion_delta_sats >= 0:
+            if estimated_completion_delta_sats > 0:
                 adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
-            else:
-                adjusted = adjusted + math.ceil(-estimated_completion_delta_sats * 1000)
 
     logger.debug(
         "Discounted max cost computed",
@@ -215,23 +224,171 @@ async def calculate_discounted_max_cost(
 
 
 def estimate_tokens(messages: list) -> int:
-    return len(str(messages)) // 3
+    """Estimate tokens for text content, excluding image_url fields."""
+    total = 0
+    for msg in messages:
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                total += sum(
+                    len(item.get("text", ""))
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+    return total // 3
 
 
-async def get_model_cost_info(
-    model_id: str, session: AsyncSession | None = None
-) -> Pricing | None:
-    if not model_id or model_id == "unknown":
+def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
+    """Extract image dimensions from image bytes."""
+    try:
+        img = Image.open(BytesIO(image_data))
+        return img.size
+    except Exception as e:
+        logger.warning(
+            "Failed to get image dimensions, using default",
+            extra={"error": str(e)},
+        )
+        return (512, 512)
+
+
+async def _fetch_image_from_url(url: str) -> bytes | None:
+    """Fetch image from URL."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.content
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch image from URL",
+            extra={"error": str(e), "url": url[:100]},
+        )
         return None
-    if session is None:
-        return None
-    row = await session.get(ModelRow, model_id)
-    if row and row.sats_pricing:
-        try:
-            return Pricing(**json.loads(row.sats_pricing))  # type: ignore
-        except Exception:
-            return None
-    return None
+
+
+def _calculate_image_tokens(width: int, height: int, detail: str = "auto") -> int:
+    """Calculate image tokens based on OpenAI's vision pricing.
+
+    For low detail: 85 tokens
+    For high detail/auto: 85 base tokens + 170 tokens per 512px tile
+    """
+    if detail == "low":
+        return 85
+
+    if width > 2048 or height > 2048:
+        aspect_ratio = width / height
+        if width > height:
+            width = 2048
+            height = int(width / aspect_ratio)
+        else:
+            height = 2048
+            width = int(height * aspect_ratio)
+
+    if width > 768 or height > 768:
+        aspect_ratio = width / height
+        if width > height:
+            width = 768
+            height = int(width / aspect_ratio)
+        else:
+            height = 768
+            width = int(height * aspect_ratio)
+
+    tiles_width = (width + 511) // 512
+    tiles_height = (height + 511) // 512
+    num_tiles = tiles_width * tiles_height
+
+    return 85 + (170 * num_tiles)
+
+
+async def estimate_image_tokens_in_messages(messages: list) -> int:
+    """Estimate total tokens for all images in messages.
+
+    Supports both base64 encoded images and image URLs.
+    """
+    total_image_tokens = 0
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+
+        content = message.get("content")
+        if not content:
+            continue
+
+        if isinstance(content, str):
+            continue
+
+        if not isinstance(content, list):
+            continue
+
+        for content_item in content:
+            if not isinstance(content_item, dict):
+                continue
+
+            content_type = content_item.get("type")
+            if content_type not in ("image_url", "input_image"):
+                continue
+
+            image_url_data = content_item.get("image_url")
+            if not image_url_data:
+                continue
+
+            if isinstance(image_url_data, str):
+                url = image_url_data
+                detail = "auto"
+            elif isinstance(image_url_data, dict):
+                url = image_url_data.get("url", "")
+                detail = image_url_data.get("detail", "auto")
+            else:
+                continue
+
+            if not url:
+                continue
+
+            if url.startswith("data:image/"):
+                try:
+                    header, base64_data = url.split(",", 1)
+                    image_bytes = base64.b64decode(base64_data)
+                    width, height = _get_image_dimensions(image_bytes)
+                    tokens = _calculate_image_tokens(width, height, detail)
+                    total_image_tokens += tokens
+                    logger.debug(
+                        "Calculated tokens for base64 image",
+                        extra={
+                            "width": width,
+                            "height": height,
+                            "detail": detail,
+                            "tokens": tokens,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to process base64 image",
+                        extra={"error": str(e)},
+                    )
+                    total_image_tokens += 85
+            else:
+                image_bytes_or_none = await _fetch_image_from_url(url)
+                if image_bytes_or_none:
+                    width, height = _get_image_dimensions(image_bytes_or_none)
+                    tokens = _calculate_image_tokens(width, height, detail)
+                    total_image_tokens += tokens
+                    logger.debug(
+                        "Calculated tokens for URL image",
+                        extra={
+                            "url": url[:100],
+                            "width": width,
+                            "height": height,
+                            "detail": detail,
+                            "tokens": tokens,
+                        },
+                    )
+                else:
+                    total_image_tokens += 85
+
+    return total_image_tokens
 
 
 def create_error_response(
@@ -257,61 +414,3 @@ def create_error_response(
         media_type="application/json",
         headers={"X-Cashu": token} if token else {},
     )
-
-
-def prepare_upstream_headers(request_headers: dict) -> dict:
-    """Prepare headers for upstream request, removing sensitive/problematic ones."""
-    upstream_api_key = settings.upstream_api_key
-    logger.debug(
-        "Preparing upstream headers",
-        extra={
-            "original_headers_count": len(request_headers),
-            "has_upstream_api_key": bool(upstream_api_key),
-        },
-    )
-
-    headers = dict(request_headers)
-
-    # Remove headers that shouldn't be forwarded
-    removed_headers = []
-    for header in [
-        "host",
-        "content-length",
-        "refund-lnurl",
-        "key-expiry-time",
-        "x-cashu",
-    ]:
-        if headers.pop(header, None) is not None:
-            removed_headers.append(header)
-
-    # Handle authorization
-    if upstream_api_key:
-        headers["Authorization"] = f"Bearer {upstream_api_key}"
-        if headers.pop("authorization", None) is not None:
-            removed_headers.append("authorization (replaced with upstream key)")
-    else:
-        for auth_header in ["Authorization", "authorization"]:
-            if headers.pop(auth_header, None) is not None:
-                removed_headers.append(auth_header)
-
-    logger.debug(
-        "Headers prepared for upstream",
-        extra={
-            "final_headers_count": len(headers),
-            "removed_headers": removed_headers,
-            "added_upstream_auth": bool(upstream_api_key),
-        },
-    )
-
-    return headers
-
-
-def prepare_upstream_params(
-    path: str, query_params: Mapping[str, str] | None
-) -> dict[str, str]:
-    """Prepare query params for upstream request, optionally adding api-version for chat/completions."""
-    params: dict[str, str] = dict(query_params or {})
-    chat_api_version = settings.chat_completions_api_version
-    if path.endswith("chat/completions") and chat_api_version:
-        params["api-version"] = chat_api_version
-    return params

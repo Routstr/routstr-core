@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 from urllib.request import urlopen
 
+import httpx
 from fastapi import APIRouter, Depends
 from pydantic.v1 import BaseModel
 from sqlmodel import select
@@ -12,7 +13,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from ..core.db import ModelRow, create_session, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
-from .price import sats_usd_ask_price
+from .price import sats_usd_price
 
 logger = get_logger(__name__)
 
@@ -56,6 +57,13 @@ class Model(BaseModel):
     sats_pricing: Pricing | None = None
     per_request_limits: dict | None = None
     top_provider: TopProvider | None = None
+    enabled: bool = True
+    upstream_provider_id: int | None = None
+    canonical_slug: str | None = None
+    alias_ids: list[str] | None = None
+
+    def __hash__(self) -> int:
+        return hash(self.id)
 
 
 def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
@@ -83,6 +91,9 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                     "(free)" in model.get("name", "")
                     or model_id == "openrouter/auto"
                     or model_id == "google/gemini-2.5-pro-exp-03-25"
+                    or model_id == "opengvlab/internvl3-78b"
+                    or model_id == "openrouter/sonoma-dusk-alpha"
+                    or model_id == "openrouter/sonoma-sky-alpha"
                 ):
                     continue
 
@@ -92,6 +103,55 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     except Exception as e:
         logger.error(f"Error fetching models from OpenRouter API: {e}")
         return []
+
+
+async def async_fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
+    """Asynchronously fetch model information from OpenRouter API."""
+    base_url = "https://openrouter.ai/api/v1"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{base_url}/models", timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            models_data: list[dict] = []
+            for model in data.get("data", []):
+                model_id = model.get("id", "")
+
+                if source_filter:
+                    source_prefix = f"{source_filter}/"
+                    if not model_id.startswith(source_prefix):
+                        continue
+
+                    model = dict(model)
+                    model["id"] = model_id[len(source_prefix) :]
+                    model_id = model["id"]
+
+                if (
+                    "(free)" in model.get("name", "")
+                    or model_id == "openrouter/auto"
+                    or model_id == "google/gemini-2.5-pro-exp-03-25"
+                    or model_id == "opengvlab/internvl3-78b"
+                    or model_id == "openrouter/sonoma-dusk-alpha"
+                    or model_id == "openrouter/sonoma-sky-alpha"
+                ):
+                    continue
+
+                models_data.append(model)
+
+            return models_data
+    except Exception as e:
+        logger.error(f"Error (async) fetching models from OpenRouter API: {e}")
+        return []
+
+
+def is_openrouter_upstream() -> bool:
+    try:
+        base = (settings.upstream_base_url or "").strip().rstrip("/")
+    except Exception:
+        return False
+    return base.lower() == "https://openrouter.ai/api/v1"
 
 
 def load_models() -> list[Model]:
@@ -119,7 +179,13 @@ def load_models() -> list[Model]:
             logger.error(f"Error loading models from {models_path}: {e}")
             # Fall through to auto-generation
 
-    # Auto-generate models from OpenRouter API
+    # Only auto-generate from OpenRouter when upstream is OpenRouter
+    if not is_openrouter_upstream():
+        logger.info(
+            "Skipping auto-generation from OpenRouter because upstream_base_url is not https://openrouter.ai/api/v1"
+        )
+        return []
+
     logger.info("Auto-generating models from OpenRouter API")
     try:
         source_filter = settings.source or None
@@ -136,45 +202,58 @@ def load_models() -> list[Model]:
     return [Model(**model) for model in models_data]  # type: ignore
 
 
-def _row_to_model(row: ModelRow) -> Model:
+def _row_to_model(
+    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+) -> Model:
     architecture = json.loads(row.architecture)
     pricing = json.loads(row.pricing)
-    sats_pricing = json.loads(row.sats_pricing) if row.sats_pricing else None
     per_request_limits = (
         json.loads(row.per_request_limits) if row.per_request_limits else None
     )
-    top_provider = json.loads(row.top_provider) if row.top_provider else None
+    top_provider_dict = json.loads(row.top_provider) if row.top_provider else None
 
-    # Enforce minimum per-request fee on free/zero-priced models in API output
-    try:
-        if isinstance(pricing, dict):
-            if float(pricing.get("request", 0.0)) <= 0.0:
-                pricing["request"] = max(pricing.get("request", 0.0), 0.0)
-        if isinstance(sats_pricing, dict):
-            if float(sats_pricing.get("request", 0.0)) <= 0.0:
-                # Convert min_request_msat to sats for sats_pricing fields that are in sats
-                sats_min = max(1, int(settings.min_request_msat)) / 1000.0
-                sats_pricing["request"] = max(
-                    sats_pricing.get("request", 0.0), sats_min
-                )
-    except Exception:
-        pass
+    if apply_provider_fee and isinstance(pricing, dict):
+        pricing = {k: float(v) * provider_fee for k, v in pricing.items()}
 
-    return Model(
+    if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
+        pricing["request"] = max(pricing.get("request", 0.0), 0.0)
+
+    parsed_pricing = Pricing.parse_obj(pricing)
+    model = Model(
         id=row.id,
         name=row.name,
         created=row.created,
         description=row.description,
         context_length=row.context_length,
         architecture=Architecture.parse_obj(architecture),
-        pricing=Pricing.parse_obj(pricing),
-        sats_pricing=Pricing.parse_obj(sats_pricing) if sats_pricing else None,
+        pricing=parsed_pricing,
+        sats_pricing=None,
         per_request_limits=per_request_limits,
-        top_provider=TopProvider.parse_obj(top_provider) if top_provider else None,
+        top_provider=TopProvider.parse_obj(top_provider_dict)
+        if top_provider_dict
+        else None,
+        enabled=row.enabled,
+        upstream_provider_id=row.upstream_provider_id,
+        canonical_slug=getattr(row, "canonical_slug", None),
     )
 
+    if apply_provider_fee:
+        (
+            parsed_pricing.max_prompt_cost,
+            parsed_pricing.max_completion_cost,
+            parsed_pricing.max_cost,
+        ) = _calculate_usd_max_costs(model)
 
-def _model_to_row_payload(model: Model) -> dict[str, str | int | None]:
+    try:
+        sats_to_usd = sats_usd_price()
+        model = _update_model_sats_pricing(model, sats_to_usd)
+    except Exception as e:
+        logger.warning(f"Could not calculate sats pricing: {e}")
+
+    return model
+
+
+def _model_to_row_payload(model: Model) -> dict[str, str | int | bool | None]:
     return {
         "id": model.id,
         "name": model.name,
@@ -192,29 +271,163 @@ def _model_to_row_payload(model: Model) -> dict[str, str | int | None]:
         "top_provider": json.dumps(model.top_provider.dict())
         if model.top_provider is not None
         else None,
+        "enabled": model.enabled,
+        "upstream_provider_id": model.upstream_provider_id,
     }
 
 
-async def list_models(session: AsyncSession | None = None) -> list[Model]:
-    if session is not None:
-        result = await session.exec(select(ModelRow))  # type: ignore
-        rows = result.all()
-        return [_row_to_model(r) for r in rows]
-    async with create_session() as s:
-        result = await s.exec(select(ModelRow))  # type: ignore
-        rows = result.all()
-        return [_row_to_model(r) for r in rows]
+async def list_models(
+    session: AsyncSession,
+    upstream_id: int,
+    include_disabled: bool = False,
+) -> list[Model]:
+    from sqlmodel import select
+
+    from ..core.db import UpstreamProviderRow
+
+    query = select(ModelRow)
+    if upstream_id is not None:
+        query = query.where(ModelRow.upstream_provider_id == upstream_id)
+    if not include_disabled:
+        query = query.where(ModelRow.enabled)
+
+    rows = (await session.exec(query)).all()  # type: ignore
+    provider_result = await session.exec(select(UpstreamProviderRow))
+    providers_by_id = {p.id: p for p in provider_result.all()}
+    return [
+        _row_to_model(
+            r,
+            apply_provider_fee=True,
+            provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
+            if r.upstream_provider_id in providers_by_id
+            else 1.01,
+        )
+        for r in rows
+    ]
 
 
 async def get_model_by_id(
-    model_id: str, session: AsyncSession | None = None
+    model_id: str, provider_id: int, session: AsyncSession
 ) -> Model | None:
-    if session is not None:
-        row = await session.get(ModelRow, model_id)
-        return _row_to_model(row) if row else None
-    async with create_session() as s:
-        row = await s.get(ModelRow, model_id)
-        return _row_to_model(row) if row else None
+    from ..core.db import UpstreamProviderRow
+
+    row = await session.get(ModelRow, (model_id, provider_id))
+    if not row or not row.enabled:
+        return None
+    provider = await session.get(UpstreamProviderRow, provider_id)
+    provider_fee = provider.provider_fee if provider else 1.01
+    return _row_to_model(row, apply_provider_fee=True, provider_fee=provider_fee)
+
+
+def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
+    """Calculate max costs in USD based on model context/token limits.
+
+    Args:
+        model: Model object
+
+    Returns:
+        Tuple of (max_prompt_cost, max_completion_cost, max_cost) in USD
+    """
+    min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
+    min_req_usd = float(min_req_msat) / 1_000_000.0
+
+    prompt_price = model.pricing.prompt
+    completion_price = model.pricing.completion
+
+    if model.top_provider and (
+        model.top_provider.context_length or model.top_provider.max_completion_tokens
+    ):
+        if (cl := model.top_provider.context_length) and (
+            mct := model.top_provider.max_completion_tokens
+        ):
+            if cl <= mct:
+                return (
+                    cl * prompt_price,
+                    cl * completion_price,
+                    cl * max(completion_price, prompt_price),
+                )
+            return (
+                cl * prompt_price,
+                mct * completion_price,
+                (cl - mct) * prompt_price + mct * completion_price,
+            )
+        elif cl := model.top_provider.context_length:
+            return (
+                cl * prompt_price,
+                cl * completion_price,
+                cl * max(completion_price, prompt_price),
+            )
+        elif mct := model.top_provider.max_completion_tokens:
+            return (
+                mct * prompt_price,
+                mct * completion_price,
+                mct * completion_price,
+            )
+    elif model.context_length:
+        return (
+            model.context_length * prompt_price,
+            model.context_length * completion_price,
+            model.context_length * max(completion_price, prompt_price),
+        )
+
+    p = prompt_price * 1_000_000
+    c = completion_price * 32_000
+    r = model.pricing.request * 100_000
+    i = model.pricing.image * 100
+    w = model.pricing.web_search * 1000
+    ir = model.pricing.internal_reasoning * 100
+    return (p, c, max(p + c + r + i + w + ir, min_req_usd))
+
+
+def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
+    """Update a model's sats_pricing based on USD pricing and exchange rate.
+
+    Args:
+        model: Model object to update
+        sats_to_usd: Current sats to USD exchange rate
+
+    Returns:
+        Updated Model object with new sats_pricing
+    """
+    try:
+        min_req_msat = max(1, int(getattr(settings, "min_request_msat", 1)))
+        min_req_sats = float(min_req_msat) / 1000.0
+
+        sats = Pricing.parse_obj(
+            {k: v / sats_to_usd for k, v in model.pricing.dict().items()}
+        )
+
+        if sats.request <= 0.0:
+            sats.request = min_req_sats
+        if (sats.max_cost or 0.0) < min_req_sats:
+            sats.max_cost = min_req_sats
+
+        return Model(
+            id=model.id,
+            name=model.name,
+            created=model.created,
+            description=model.description,
+            context_length=model.context_length,
+            architecture=model.architecture,
+            pricing=model.pricing,
+            sats_pricing=sats,
+            per_request_limits=model.per_request_limits,
+            top_provider=model.top_provider,
+            enabled=model.enabled,
+            upstream_provider_id=model.upstream_provider_id,
+            canonical_slug=model.canonical_slug,
+            alias_ids=model.alias_ids,
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to update sats pricing for model",
+            extra={
+                "model_id": model.id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+        )
+        return model
 
 
 async def ensure_models_bootstrapped() -> None:
@@ -240,7 +453,7 @@ async def ensure_models_bootstrapped() -> None:
             except Exception as e:
                 logger.error(f"Error loading models from {models_path}: {e}")
 
-        if not models_to_insert:
+        if not models_to_insert and is_openrouter_upstream():
             logger.info("Bootstrapping models from OpenRouter API")
             source_filter = None
             try:
@@ -249,6 +462,10 @@ async def ensure_models_bootstrapped() -> None:
             except Exception:
                 pass
             models_to_insert = fetch_openrouter_models(source_filter=source_filter)
+        elif not models_to_insert:
+            logger.info(
+                "No models.json found and upstream is not OpenRouter; skipping bootstrap"
+            )
 
         for m in models_to_insert:
             try:
@@ -264,119 +481,165 @@ async def ensure_models_bootstrapped() -> None:
         await s.commit()
 
 
+async def _update_sats_pricing_once() -> None:
+    """Update sats pricing once for all provider models (in-memory only)."""
+    from ..proxy import get_upstreams
+
+    upstreams = get_upstreams()
+    sats_to_usd = sats_usd_price()
+
+    updated_count = 0
+    for upstream in upstreams:
+        updated_models = [
+            _update_model_sats_pricing(m, sats_to_usd)
+            for m in upstream.get_cached_models()
+        ]
+        upstream._models_cache = updated_models
+        upstream._models_by_id = {m.id: m for m in updated_models}
+        updated_count += len(updated_models)
+
+    if updated_count > 0:
+        logger.info("Updated sats pricing", extra={"models_updated": updated_count})
+
+
 async def update_sats_pricing() -> None:
+    """Periodically update sats pricing for all provider models and database overrides."""
+    try:
+        if not settings.enable_pricing_refresh:
+            return
+    except Exception:
+        pass
+
+    await _update_sats_pricing_once()
+
     while True:
-        try:
-            try:
-                if not settings.enable_pricing_refresh:
-                    return
-            except Exception:
-                pass
-            sats_to_usd = await sats_usd_ask_price()
-            async with create_session() as s:
-                result = await s.exec(select(ModelRow))  # type: ignore
-                rows = result.all()
-                changed = 0
-                for row in rows:
-                    try:
-                        pricing = Pricing.parse_obj(json.loads(row.pricing))
-                        top_provider = (
-                            TopProvider.parse_obj(json.loads(row.top_provider))
-                            if row.top_provider
-                            else None
-                        )
-                        sats = Pricing.parse_obj(
-                            {k: v / sats_to_usd for k, v in pricing.dict().items()}
-                        )
-                        # Enforce minimum per-request charge floor in sats
-                        try:
-                            min_req_msat = max(
-                                1, int(getattr(settings, "min_request_msat", 1))
-                            )
-                        except Exception:
-                            min_req_msat = 1
-                        min_req_sats = float(min_req_msat) / 1000.0
-                        if sats.request <= 0.0:
-                            sats.request = min_req_sats
-                        mspp = sats.prompt
-                        mspc = sats.completion
-                        if top_provider and (
-                            top_provider.context_length
-                            or top_provider.max_completion_tokens
-                        ):
-                            if (cl := top_provider.context_length) and (
-                                mct := top_provider.max_completion_tokens
-                            ):
-                                max_prompt_cost = (cl - mct) * mspp
-                                max_completion_cost = mct * mspc
-                                sats.max_prompt_cost = max_prompt_cost
-                                sats.max_completion_cost = max_completion_cost
-                                sats.max_cost = max_prompt_cost + max_completion_cost
-                            elif cl := top_provider.context_length:
-                                max_prompt_cost = cl * 0.8 * mspp
-                                max_completion_cost = cl * 0.2 * mspc
-                                sats.max_prompt_cost = max_prompt_cost
-                                sats.max_completion_cost = max_completion_cost
-                                sats.max_cost = max_prompt_cost + max_completion_cost
-                            elif mct := top_provider.max_completion_tokens:
-                                max_prompt_cost = mct * 4 * mspp
-                                max_completion_cost = mct * mspc
-                                sats.max_prompt_cost = max_prompt_cost
-                                sats.max_completion_cost = max_completion_cost
-                                sats.max_cost = max_prompt_cost + max_completion_cost
-                            else:
-                                max_prompt_cost = 1_000_000 * mspp
-                                max_completion_cost = 32_000 * mspc
-                                sats.max_prompt_cost = max_prompt_cost
-                                sats.max_completion_cost = max_completion_cost
-                                sats.max_cost = max_prompt_cost + max_completion_cost
-                        elif row.context_length:
-                            max_prompt_cost = mspp * row.context_length * 0.8
-                            max_completion_cost = mspc * row.context_length * 0.2
-                            sats.max_prompt_cost = max_prompt_cost
-                            sats.max_completion_cost = max_completion_cost
-                            sats.max_cost = max_prompt_cost + max_completion_cost
-                        else:
-                            p = mspp * 1_000_000
-                            c = mspc * 32_000
-                            r = sats.request * 100_000
-                            i = sats.image * 100
-                            w = sats.web_search * 1000
-                            ir = sats.internal_reasoning * 100
-                            sats.max_prompt_cost = p
-                            sats.max_completion_cost = c
-                            sats.max_cost = p + c + r + i + w + ir
-
-                        # Ensure overall minimum per-request total cost floor
-                        if (sats.max_cost or 0.0) < min_req_sats:
-                            sats.max_cost = min_req_sats
-
-                        new_json = json.dumps(sats.dict())
-                        if row.sats_pricing != new_json:
-                            row.sats_pricing = new_json
-                            s.add(row)
-                            changed += 1
-                    except Exception as per_row_error:
-                        logger.error(
-                            "Failed to update pricing for model",
-                            extra={
-                                "model_id": row.id,
-                                "error": str(per_row_error),
-                                "error_type": type(per_row_error).__name__,
-                            },
-                        )
-                if changed:
-                    await s.commit()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error updating sats pricing: {e}")
         try:
             interval = getattr(settings, "pricing_refresh_interval_seconds", 120)
             jitter = max(0.0, float(interval) * 0.1)
             await asyncio.sleep(interval + random.uniform(0, jitter))
         except asyncio.CancelledError:
             break
+
+        try:
+            try:
+                if not settings.enable_pricing_refresh:
+                    return
+            except Exception:
+                pass
+
+            await _update_sats_pricing_once()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error updating sats pricing: {e}")
+
+
+async def cleanup_enabled_models_periodically() -> None:
+    """Background task to clean up enabled models that match upstream pricing.
+
+    When model is enabled (enabled=True), remove it from DB if it matches upstream pricing.
+    Keep it in DB only if pricing differs from upstream or if it's disabled.
+    """
+    interval = getattr(
+        settings, "models_cleanup_interval_seconds", 300
+    )  # 5 minutes default
+    if not interval or interval <= 0:
+        return
+
+    while True:
+        try:
+            await _cleanup_enabled_models_once()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(
+                "Error during enabled models cleanup",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
+
+        try:
+            jitter = max(0.0, float(interval) * 0.1)
+            await asyncio.sleep(interval + random.uniform(0, jitter))
+        except asyncio.CancelledError:
+            break
+
+
+async def _cleanup_enabled_models_once() -> None:
+    """Clean up enabled models that match upstream pricing."""
+    from ..proxy import get_upstreams
+
+    async with create_session() as session:
+        # Get all enabled models from DB
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.enabled,  # Only enabled models
+            )
+        )
+        db_models = result.all()
+
+        if not db_models:
+            return
+
+        upstreams = get_upstreams()
+        models_to_remove = []
+
+        for db_model in db_models:
+            # Find corresponding upstream model
+            upstream_model = None
+            for upstream in upstreams:
+                upstream_model = upstream.get_cached_model_by_id(db_model.id)
+                if upstream_model:
+                    break
+
+            if not upstream_model:
+                continue
+
+            # Compare pricing to see if they match
+            db_pricing = json.loads(db_model.pricing)
+            upstream_pricing = upstream_model.pricing.dict()
+
+            # Check if pricing matches (with small tolerance for float comparison)
+            pricing_matches = _pricing_matches(db_pricing, upstream_pricing)
+
+            if pricing_matches:
+                models_to_remove.append(db_model)
+                logger.info(
+                    f"Removing enabled model {db_model.id} - matches upstream pricing",
+                    extra={"model_id": db_model.id},
+                )
+
+        # Remove models that match upstream pricing
+        for model in models_to_remove:
+            await session.delete(model)
+
+        if models_to_remove:
+            await session.commit()
+            logger.info(
+                f"Cleaned up {len(models_to_remove)} enabled models that match upstream pricing"
+            )
+
+
+def _pricing_matches(
+    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.0
+) -> bool:
+    """Check if pricing dictionaries match within tolerance."""
+    keys_to_compare = [
+        "prompt",
+        "completion",
+        "request",
+        "image",
+        "web_search",
+        "internal_reasoning",
+    ]
+
+    for key in keys_to_compare:
+        db_val = int(float(db_pricing.get(key, 0.0)) * 1000000)
+        upstream_val = int(float(upstream_pricing.get(key, 0.0)) * 1000000)
+
+        if abs(db_val - upstream_val) > tolerance:
+            return False
+
+    return True
 
 
 async def refresh_models_periodically() -> None:
@@ -388,6 +651,11 @@ async def refresh_models_periodically() -> None:
     """
     interval = getattr(settings, "models_refresh_interval_seconds", 0)
     if not interval or interval <= 0:
+        return
+
+    # Only refresh from OpenRouter when upstream is OpenRouter
+    if not is_openrouter_upstream():
+        logger.info("Skipping models refresh: upstream_base_url is not OpenRouter")
         return
 
     while True:
@@ -447,5 +715,8 @@ async def refresh_models_periodically() -> None:
 @models_router.get("/v1/models")
 @models_router.get("/models", include_in_schema=False)
 async def models(session: AsyncSession = Depends(get_session)) -> dict:
-    items = await list_models(session)
+    """Get all available models from all providers with database overrides applied."""
+    from ..proxy import get_unique_models
+
+    items = get_unique_models()
     return {"data": items}

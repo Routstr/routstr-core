@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     cashu_mints: list[str] = Field(default_factory=list, env="CASHU_MINTS")
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
+    primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
 
     # Pricing
     # Default behavior: derive pricing from MODELS
@@ -64,7 +65,7 @@ class Settings(BaseSettings):
         default=120, env="PRICING_REFRESH_INTERVAL_SECONDS"
     )
     models_refresh_interval_seconds: int = Field(
-        default=0, env="MODELS_REFRESH_INTERVAL_SECONDS"
+        default=360, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
@@ -234,7 +235,7 @@ class SettingsService:
 
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "")}
+                {k: v for k, v in db_json.items() if v not in (None, "", [], {})}
             )
 
             # Ensure primary_mint is consistent with cashu_mints if not explicitly set

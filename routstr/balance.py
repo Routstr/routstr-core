@@ -8,11 +8,14 @@ from pydantic import BaseModel
 
 from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
+from .core.logging import get_logger
 from .core.settings import settings
-from .wallet import credit_balance, send_to_lnurl, send_token
+from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
+
+logger = get_logger(__name__)
 
 
 async def get_key_from_header(
@@ -157,7 +160,14 @@ async def refund_wallet_endpoint(
     else:
         remaining_balance = remaining_balance_msats
 
-    if remaining_balance_msats <= 0:
+    if key.refund_currency == "sat":
+        remaining_balance = remaining_balance_msats // 1000
+    else:
+        remaining_balance = remaining_balance_msats
+
+    if remaining_balance_msats > 0 and remaining_balance <= 0:
+        raise HTTPException(status_code=400, detail="Balance too small to refund")
+    elif remaining_balance <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
 
     # Perform refund operation first, before modifying balance
@@ -173,6 +183,7 @@ async def refund_wallet_endpoint(
             )
             result = {"recipient": key.refund_address}
         else:
+            refund_currency = key.refund_currency or "sat"
             token = await send_token(
                 remaining_balance, refund_currency, key.refund_mint_url
             )
@@ -212,6 +223,19 @@ async def refund_wallet_endpoint(
     await session.commit()
 
     return result
+
+
+@router.post("/donate")
+async def donate(token: str, ref: str | None = None) -> str:
+    try:
+        amount, unit, _ = await recieve_token(token)
+        if ref:
+            logger.info(
+                "donation received", extra={"ref": ref, "amount": amount, "unit": unit}
+            )
+        return "Thanks!"
+    except Exception:
+        return "Invalid token."
 
 
 @router.api_route(

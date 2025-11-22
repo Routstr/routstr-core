@@ -63,6 +63,8 @@ else:
 
 # Set test environment variables before importing the app
 os.environ.update(test_env)
+os.environ.pop("ADMIN_PASSWORD", None)
+
 
 from routstr.core.db import ApiKey, get_session  # noqa: E402
 from routstr.core.main import app, lifespan  # noqa: E402
@@ -510,22 +512,26 @@ async def integration_app(
         from routstr.core.settings import settings as _settings
 
         # Passthrough discounted max cost to avoid dependence on MODELS in tests
-        def _passthrough_discount(max_cost_for_model: int, body: dict) -> int:
+        async def _passthrough_discount(
+            max_cost_for_model: int,
+            body: dict,
+            model_obj: Any = None,
+        ) -> int:
             return max_cost_for_model
 
         with (
             patch("routstr.core.db.engine", integration_engine),
             patch.object(_settings, "cashu_mints", [mint_url]),
-            patch("routstr.auth.credit_balance", testmint_wallet.credit_balance),
             patch("routstr.wallet.credit_balance", testmint_wallet.credit_balance),
-            patch("routstr.balance.credit_balance", testmint_wallet.credit_balance),
             patch("routstr.wallet.send_token", testmint_wallet.send_token),
-            patch("routstr.balance.send_token", testmint_wallet.send_token),
+            patch("routstr.wallet.send_to_lnurl", testmint_wallet.send_to_lnurl),
             patch("routstr.wallet.recieve_token", testmint_wallet.redeem_token),
             patch("routstr.wallet.get_balance", testmint_wallet.get_balance),
+            patch("routstr.balance.send_token", testmint_wallet.send_token),
+            patch("routstr.balance.send_to_lnurl", testmint_wallet.send_to_lnurl),
             patch("websockets.connect") as mock_websockets,
-            patch("routstr.payment.price.btc_usd_ask_price", return_value=50000.0),
-            patch("routstr.payment.price.sats_usd_ask_price", return_value=0.0005),
+            patch("routstr.payment.price.btc_usd_price", return_value=50000.0),
+            patch("routstr.payment.price.sats_usd_price", return_value=0.0005),
             patch(
                 "routstr.payment.helpers.calculate_discounted_max_cost",
                 side_effect=_passthrough_discount,
