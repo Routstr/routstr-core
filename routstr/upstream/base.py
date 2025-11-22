@@ -18,7 +18,7 @@ from ..core.db import ApiKey, AsyncSession, create_session
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
-from ..payment.cost_caculation import (
+from ..payment.cost_calculation import (
     CostData,
     CostDataError,
     MaxCostData,
