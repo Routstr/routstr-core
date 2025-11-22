@@ -136,6 +136,14 @@ class BaseUpstreamProvider:
                 if headers.pop(auth_header, None) is not None:
                     removed_headers.append(auth_header)
 
+        for header in ["authorization", "accept-encoding"]:
+            if headers.pop(header, None) is not None:
+                removed_headers.append(f"{header} (replaced with routstr-safe version)")
+
+        # Explicitly define the list of supported compression encodings
+        headers["accept-encoding"] = "gzip, deflate, br, identity"
+
+
         logger.debug(
             "Headers prepared for upstream",
             extra={
@@ -503,11 +511,16 @@ class BaseUpstreamProvider:
                 )
                 await finalize_without_usage()
                 raise
+        
+        # Remove inaccurate encoding headers from upstream response
+        response_headers = dict(response.headers)
+        response_headers.pop("content-encoding", None)
+        response_headers.pop("content-length", None)
 
         return StreamingResponse(
             stream_with_cost(max_cost_for_model),
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=response_headers, 
         )
 
     async def handle_non_streaming_chat_completion(
