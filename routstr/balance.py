@@ -154,6 +154,11 @@ async def refund_wallet_endpoint(
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
     remaining_balance_msats: int = key.balance
+    refund_currency = key.refund_currency or "sat"
+    if refund_currency == "sat":
+        remaining_balance = remaining_balance_msats // 1000
+    else:
+        remaining_balance = remaining_balance_msats
 
     if key.refund_currency == "sat":
         remaining_balance = remaining_balance_msats // 1000
@@ -172,7 +177,7 @@ async def refund_wallet_endpoint(
 
             await send_to_lnurl(
                 remaining_balance,
-                key.refund_currency or "sat",
+                refund_currency,
                 key.refund_mint_url or global_settings.primary_mint,
                 key.refund_address,
             )
@@ -183,11 +188,11 @@ async def refund_wallet_endpoint(
                 remaining_balance, refund_currency, key.refund_mint_url
             )
             result = {"token": token}
-
-        if key.refund_currency == "sat":
-            result["sats"] = str(remaining_balance_msats // 1000)
+        
+        if refund_currency == "sat":
+            result["sats"] = str(remaining_balance)
         else:
-            result["msats"] = str(remaining_balance_msats)
+            result["msats"] = str(remaining_balance)
 
     except HTTPException:
         # Re-raise HTTP exceptions (like 400 for balance too small)
@@ -203,6 +208,13 @@ async def refund_wallet_endpoint(
         ):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
+            from .core.logging import get_logger
+
+            logger = get_logger(__name__)
+            logger.error(
+                "Refund failed",
+                extra={"error": error_msg},
+            )
             raise HTTPException(status_code=500, detail="Refund failed")
 
     await _refund_cache_set(bearer_value, result)
