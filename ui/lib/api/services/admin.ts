@@ -797,6 +797,27 @@ export class AdminService {
     return await apiClient.post<{ ok: boolean }>('/admin/api/logout', {});
   }
 
+  static async getLogs(
+    date?: string,
+    level?: string,
+    requestId?: string,
+    search?: string,
+    limit: number = 100
+  ): Promise<LogResponse> {
+    const params = new URLSearchParams();
+    if (date) params.append('date', date);
+    if (level) params.append('level', level);
+    if (requestId) params.append('request_id', requestId);
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+
+    return await apiClient.get<LogResponse>(`/admin/api/logs?${params.toString()}`);
+  }
+
+  static async getLogDates(): Promise<{ dates: string[] }> {
+    return await apiClient.get<{ dates: string[] }>('/admin/api/logs/dates');
+  }
+
   static async getTemporaryBalances(): Promise<TemporaryBalance[]> {
     return await apiClient.get<TemporaryBalance[]>(
       '/admin/api/temporary-balances'
@@ -921,4 +942,25 @@ export interface RevenueByModel {
   models: ModelRevenueData[];
   total_revenue_sats: number;
   total_models: number;
+}
+
+export interface LogEntry {
+  asctime: string;
+  name: string;
+  levelname: string;
+  message: string;
+  pathname?: string;
+  lineno?: number;
+  request_id?: string;
+  [key: string]: unknown;
+}
+
+export interface LogResponse {
+  logs: LogEntry[];
+  total: number;
+  date: string | null;
+  level: string | null;
+  request_id: string | null;
+  search: string | null;
+  limit: number;
 }
