@@ -28,7 +28,7 @@ async def test_root_endpoint_structure_and_performance(
     responses = []
     for i in range(10):
         start = validator.start_timing("root_endpoint")
-        response = await integration_client.get("/")
+        response = await integration_client.get("/v1/info")
         duration = validator.end_timing("root_endpoint", start)
         responses.append(response)
 
@@ -100,7 +100,7 @@ async def test_root_endpoint_environment_variables(
 ) -> None:
     """Test that root endpoint reflects environment variable configuration"""
 
-    response = await integration_client.get("/")
+    response = await integration_client.get("/v1/info")
     assert response.status_code == 200
 
     data = response.json()
@@ -271,86 +271,18 @@ async def test_models_endpoint_accept_headers(integration_client: AsyncClient) -
 async def test_admin_endpoint_unauthenticated(
     integration_client: AsyncClient, db_snapshot: Any
 ) -> None:
-    """Test GET /admin/ endpoint without authentication"""
-
-    # Capture initial database state
+    """Test GET /admin/ endpoint redirects to /"""
     await db_snapshot.capture()
 
     response = await integration_client.get("/admin/")
 
-    # Should return 200 with login form (not 401/403)
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
+    assert response.status_code == 307
+    assert response.headers.get("location") == "/"
 
-    # Response should be HTML
-    html_content = response.text
-    assert "<!DOCTYPE html>" in html_content
-    assert "<html>" in html_content
-
-    # Either shows login form or message about setting ADMIN_PASSWORD
-    if "ADMIN_PASSWORD" in html_content:
-        # When ADMIN_PASSWORD is not set, it shows a message
-        assert "Please set a secure ADMIN_PASSWORD" in html_content
-    else:
-        # When ADMIN_PASSWORD is set, it shows a login form
-        assert "<form" in html_content
-        assert 'type="password"' in html_content
-        assert "password" in html_content.lower()
-        assert "login" in html_content.lower()
-        # Should have JavaScript for form handling
-        assert "<script>" in html_content or "<script " in html_content
-
-    # Verify no database state changes
     diff = await db_snapshot.diff()
     assert len(diff["api_keys"]["added"]) == 0
     assert len(diff["api_keys"]["removed"]) == 0
     assert len(diff["api_keys"]["modified"]) == 0
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_admin_endpoint_html_structure(integration_client: AsyncClient) -> None:
-    """Test admin endpoint returns valid HTML structure"""
-
-    response = await integration_client.get("/admin/")
-    assert response.status_code == 200
-
-    html_content = response.text
-
-    # Validate HTML structure
-    assert html_content.startswith("<!DOCTYPE html>")
-    assert "<html>" in html_content and "</html>" in html_content
-    assert "<head>" in html_content and "</head>" in html_content
-    assert "<body>" in html_content and "</body>" in html_content
-
-    # Should have CSS styling
-    assert "<style>" in html_content or "<link" in html_content
-
-    # Should have admin-related content
-    assert any(word in html_content.lower() for word in ["admin", "password", "login"])
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_admin_endpoint_accept_headers(integration_client: AsyncClient) -> None:
-    """Test admin endpoint always returns HTML regardless of Accept headers"""
-
-    # Test with JSON accept header
-    response = await integration_client.get(
-        "/admin/", headers={"Accept": "application/json"}
-    )
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-
-    # Test with wildcard
-    response = await integration_client.get("/admin/", headers={"Accept": "*/*"})
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-
-    # Test with no accept header
-    response = await integration_client.get("/admin/")
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
 
 
 @pytest.mark.integration
@@ -364,7 +296,7 @@ async def test_all_info_endpoints_no_database_changes(
     initial_state = await db_snapshot.capture()
 
     # Make requests to all info endpoints
-    endpoints = ["/", "/v1/models", "/admin/"]
+    endpoints = ["/v1/info", "/v1/models"]
 
     for endpoint in endpoints:
         response = await integration_client.get(endpoint)
@@ -398,9 +330,11 @@ async def test_concurrent_info_endpoint_requests(
 
     # Create concurrent requests to all endpoints
     requests = []
-    for endpoint in ["/", "/v1/models", "/admin/"]:
+    for endpoint in ["/", "/v1/models"]:
         for _ in range(5):  # 5 requests per endpoint
-            requests.append({"method": "GET", "url": endpoint})
+            # Use /v1/info instead of / for JSON API
+            url = "/v1/info" if endpoint == "/" else endpoint
+            requests.append({"method": "GET", "url": url})
 
     # Execute concurrently
     tester = ConcurrencyTester()
@@ -409,15 +343,10 @@ async def test_concurrent_info_endpoint_requests(
     )
 
     # All should succeed
-    assert len(responses) == 15  # 3 endpoints × 5 requests each
+    assert len(responses) == 10  # 2 endpoints × 5 requests each
     for response in responses:
         assert response.status_code == 200
-
-        # Verify content type based on endpoint
-        if "/admin/" in str(response.url):
-            assert "text/html" in response.headers["content-type"]
-        else:
-            assert "application/json" in response.headers["content-type"]
+        assert "application/json" in response.headers["content-type"]
 
 
 @pytest.mark.integration
@@ -430,7 +359,7 @@ async def test_info_endpoints_response_consistency(
     # Test root endpoint consistency
     responses = []
     for _ in range(5):
-        response = await integration_client.get("/")
+        response = await integration_client.get("/v1/info")
         assert response.status_code == 200
         responses.append(response.json())
 

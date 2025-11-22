@@ -8,10 +8,13 @@ wallet.sqlite3
 build/
 dist/
 *.egg
+.mypy_cache/**
 
 # Development 
 .notes
 .*keys.db
+*.db-shm
+*.db-wal
 .*wallet.sqlite3
 *models.json
 .cashu
@@ -33,3 +36,5 @@ logs/*
 # deployment
 proof_backups
 
+*.todo
+ui_out
