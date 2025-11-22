@@ -452,6 +452,7 @@ class BaseUpstreamProvider:
                                                     )
                                                 )
                                                 usage_finalized = True
+                                                # IMPORTANT: Do not modify this log string; analytics relies on the wording.
                                                 logger.info(
                                                     "Token adjustment completed for streaming",
                                                     extra={
@@ -555,6 +556,7 @@ class BaseUpstreamProvider:
             )
             response_json["cost"] = cost_data
 
+            # IMPORTANT: Do not modify this log string; analytics relies on the wording.
             logger.info(
                 "Token adjustment completed for non-streaming",
                 extra={

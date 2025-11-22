@@ -3,11 +3,20 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..logs import (
+    LogSearchFilters,
+    collect_error_details,
+    get_available_log_dates,
+    revenue_by_model as aggregate_revenue_by_model,
+    search_logs,
+    summarize_usage,
+    usage_metrics,
+)
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import (
@@ -906,6 +915,96 @@ async def view_logs(request: Request, request_id: str) -> str:
     </html>
     """
     )
+
+
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    logs_dir = Path("logs")
+    limit = max(1, min(limit, 1000))
+    filters = LogSearchFilters(
+        date=None if not date or date.lower() == "all" else date,
+        level=None if not level or level.lower() == "all" else level,
+        request_id=request_id or None,
+        search_text=search or None,
+    )
+    log_entries = search_logs(logs_dir, filters, limit)
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
+    }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, list[str]]:
+    logs_dir = Path("logs")
+    dates = get_available_log_dates(logs_dir)
+    return {"dates": dates}
+
+
+@admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics_api(
+    request: Request,
+    interval: int = Query(
+        default=15, ge=1, le=1440, description="Time interval in minutes"
+    ),
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict[str, object]:
+    return usage_metrics(Path("logs"), interval, hours)
+
+
+@admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
+async def get_usage_summary_api(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict[str, object]:
+    return summarize_usage(Path("logs"), hours)
+
+
+@admin_router.get(
+    "/api/usage/error-details", dependencies=[Depends(require_admin_api)]
+)
+async def get_error_details_api(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=100, ge=1, le=1000, description="Maximum number of errors to return"
+    ),
+) -> dict[str, object]:
+    return collect_error_details(Path("logs"), hours, limit)
+
+
+@admin_router.get(
+    "/api/usage/revenue-by-model", dependencies=[Depends(require_admin_api)]
+)
+async def get_revenue_by_model_api(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=20, ge=1, le=100, description="Maximum number of models to return"
+    ),
+) -> dict[str, object]:
+    return aggregate_revenue_by_model(Path("logs"), hours, limit)
 
 
 @admin_router.post("/withdraw", dependencies=[Depends(require_admin_api)])
@@ -2402,6 +2501,58 @@ def upstream_providers_page() -> str:
 </html>
     """
     )
+
+
+def logs_page() -> str:
+    return """
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Logs - Admin Dashboard</title>
+            <script>
+                window.location.href = '/logs';
+            </script>
+        </head>
+        <body>
+            <p>Redirecting to logs page...</p>
+        </body>
+    </html>
+    """
+
+
+def usage_page() -> str:
+    return """
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Usage - Admin Dashboard</title>
+            <script>
+                window.location.href = '/usage';
+            </script>
+        </head>
+        <body>
+            <p>Redirecting to usage dashboard...</p>
+        </body>
+    </html>
+    """
+
+
+@admin_router.get("/logs", response_class=HTMLResponse)
+async def admin_logs(request: Request) -> str:
+    if is_admin_authenticated(request):
+        return logs_page()
+    return admin_auth()
+
+
+@admin_router.get("/usage", response_class=HTMLResponse)
+async def admin_usage(request: Request) -> str:
+    if is_admin_authenticated(request):
+        return usage_page()
+    return admin_auth()
 
 
 @admin_router.get("/upstream-providers", response_class=HTMLResponse)

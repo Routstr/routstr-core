@@ -802,6 +802,68 @@ export class AdminService {
       '/admin/api/temporary-balances'
     );
   }
+
+  static async getLogs(params: {
+    date?: string;
+    level?: string;
+    requestId?: string;
+    search?: string;
+    limit?: number;
+  }): Promise<LogsResponse> {
+    const query: Record<string, string | number | undefined> = {
+      date: params.date,
+      level: params.level,
+      request_id: params.requestId,
+      search: params.search,
+      limit: params.limit,
+    };
+    Object.keys(query).forEach((key) => {
+      if (query[key] === undefined || query[key] === '') {
+        delete query[key];
+      }
+    });
+    return await apiClient.get<LogsResponse>('/admin/api/logs', query);
+  }
+
+  static async getLogDates(): Promise<string[]> {
+    const response = await apiClient.get<{ dates: string[] }>(
+      '/admin/api/logs/dates'
+    );
+    return response.dates;
+  }
+
+  static async getUsageMetrics(
+    interval: number = 15,
+    hours: number = 24
+  ): Promise<UsageMetrics> {
+    return await apiClient.get<UsageMetrics>(
+      `/admin/api/usage/metrics?interval=${interval}&hours=${hours}`
+    );
+  }
+
+  static async getUsageSummary(hours: number = 24): Promise<UsageSummary> {
+    return await apiClient.get<UsageSummary>(
+      `/admin/api/usage/summary?hours=${hours}`
+    );
+  }
+
+  static async getErrorDetails(
+    hours: number = 24,
+    limit: number = 100
+  ): Promise<ErrorDetails> {
+    return await apiClient.get<ErrorDetails>(
+      `/admin/api/usage/error-details?hours=${hours}&limit=${limit}`
+    );
+  }
+
+  static async getRevenueByModel(
+    hours: number = 24,
+    limit: number = 20
+  ): Promise<RevenueByModel> {
+    return await apiClient.get<RevenueByModel>(
+      `/admin/api/usage/revenue-by-model?hours=${hours}&limit=${limit}`
+    );
+  }
 }
 
 export const TemporaryBalanceSchema = z.object({
@@ -814,3 +876,100 @@ export const TemporaryBalanceSchema = z.object({
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
+
+export interface LogEntry {
+  asctime?: string;
+  name?: string;
+  levelname?: string;
+  message?: string;
+  pathname?: string;
+  lineno?: number;
+  version?: string;
+  request_id?: string;
+  [key: string]: unknown;
+}
+
+export interface LogsResponse {
+  logs: LogEntry[];
+  total: number;
+  date: string | null;
+  level: string | null;
+  request_id: string | null;
+  search: string | null;
+  limit: number;
+}
+
+export interface UsageMetricData {
+  timestamp: string;
+  total_requests: number;
+  successful_chat_completions: number;
+  failed_requests: number;
+  errors: number;
+  warnings: number;
+  payment_processed: number;
+  upstream_errors: number;
+  revenue_msats: number;
+  refunds_msats: number;
+  [key: string]: unknown;
+}
+
+export interface UsageMetrics {
+  metrics: UsageMetricData[];
+  interval_minutes: number;
+  hours_back: number;
+  total_buckets: number;
+}
+
+export interface UsageSummary {
+  total_entries: number;
+  total_requests: number;
+  successful_chat_completions: number;
+  failed_requests: number;
+  total_errors: number;
+  total_warnings: number;
+  payment_processed: number;
+  upstream_errors: number;
+  unique_models_count: number;
+  unique_models: string[];
+  error_types: Record<string, number>;
+  success_rate: number;
+  revenue_msats: number;
+  refunds_msats: number;
+  revenue_sats: number;
+  refunds_sats: number;
+  net_revenue_msats: number;
+  net_revenue_sats: number;
+  avg_revenue_per_request_msats: number;
+  refund_rate: number;
+}
+
+export interface ErrorDetail {
+  timestamp: string;
+  message: string;
+  error_type: string;
+  pathname: string;
+  lineno: number;
+  request_id: string;
+}
+
+export interface ErrorDetails {
+  errors: ErrorDetail[];
+  total_count: number;
+}
+
+export interface ModelRevenueData {
+  model: string;
+  revenue_sats: number;
+  refunds_sats: number;
+  net_revenue_sats: number;
+  requests: number;
+  successful: number;
+  failed: number;
+  avg_revenue_per_request: number;
+}
+
+export interface RevenueByModel {
+  models: ModelRevenueData[];
+  total_revenue_sats: number;
+  total_models: number;
+}

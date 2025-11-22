@@ -264,6 +264,22 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def redirect_transactions_index_txt() -> RedirectResponse:
         return RedirectResponse("/transactions")
 
+    @app.get("/logs", include_in_schema=False)
+    async def serve_logs_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "logs" / "index.html")
+
+    @app.get("/logs/index.txt", include_in_schema=False)
+    async def redirect_logs_index_txt() -> RedirectResponse:
+        return RedirectResponse("/logs")
+
+    @app.get("/usage", include_in_schema=False)
+    async def serve_usage_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "usage" / "index.html")
+
+    @app.get("/usage/index.txt", include_in_schema=False)
+    async def redirect_usage_index_txt() -> RedirectResponse:
+        return RedirectResponse("/usage")
+
     @app.get("/unauthorized", include_in_schema=False)
     async def serve_unauthorized_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")

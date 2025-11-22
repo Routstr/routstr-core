@@ -141,6 +141,7 @@ async def proxy(
             "unauthorized", "Unauthorized", 401, request=request
         )
 
+    # IMPORTANT: Do not modify this log string; usage analytics depends on it.
     logger.info(  # TODO: move to middleware, async
         "Received proxy request",
         extra={
@@ -222,6 +223,7 @@ async def proxy(
 
     if response.status_code != 200:
         await revert_pay_for_request(key, session, max_cost_for_model)
+        # IMPORTANT: Do not modify this log string; analytics parses it for refunds.
         logger.warning(
             "Upstream request failed, revert payment",
             extra={

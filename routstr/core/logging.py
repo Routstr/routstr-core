@@ -1,3 +1,26 @@
+"""
+Logging configuration for Routstr.
+
+CRITICAL LOG MESSAGES FOR USAGE STATISTICS:
+===========================================
+The usage analytics pipeline parses specific log messages emitted by the proxy,
+auth, and upstream layers. If you need to modify any of the following log
+statements, update routstr/logs/service.py accordingly to keep the dashboard
+accurate:
+
+1. "Received proxy request" (INFO) - counts total requests per model.
+2. "Token adjustment completed for streaming|non-streaming" (INFO) - marks
+   successful completions and extracts cost_data.total_msats for revenue.
+3. "Payment processed successfully" (INFO) - tracks payment lifecycle events.
+4. "Upstream request failed, revert payment" (WARNING) and "revert payment"
+   (any level) - mark failed requests and extract max_cost_for_model for refunds.
+5. Any ERROR level log containing the word "upstream" - counted as upstream
+   provider failures.
+
+Keep the wording of these messages stable or adjust the parsers in the log
+service whenever you make changes.
+"""
+
 import logging.config
 import logging.handlers
 import os
