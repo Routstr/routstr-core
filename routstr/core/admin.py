@@ -1,7 +1,6 @@
 import json
 import secrets
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -19,8 +18,8 @@ from ..wallet import (
     slow_filter_spend_proofs,
 )
 from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
-from .logging import get_logger
 from .log_manager import log_manager
+from .logging import get_logger
 from .settings import SettingsService, settings
 
 logger = get_logger(__name__)
@@ -2867,7 +2866,6 @@ h1 { color: #333; }
 .no-logs { text-align: center; color: #666; padding: 40px; }
 .request-id-display { background-color: #e9ecef; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; }
 """
-
 
 
 @admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
