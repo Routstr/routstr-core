@@ -8,6 +8,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
+from ..logs import (
+    aggregate_metrics_by_time,
+    get_available_log_dates,
+    get_error_details,
+    get_revenue_by_model,
+    get_summary_stats,
+    search_logs,
+)
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import (
@@ -2799,6 +2807,190 @@ async def get_openrouter_presets() -> list[dict[str, object]]:
 
     models_data = await async_fetch_openrouter_models()
     return models_data
+
+
+# Log Search Endpoints
+
+
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """
+    Get filtered log entries.
+    
+    Args:
+        date: Filter by specific date (YYYY-MM-DD)
+        level: Filter by log level
+        request_id: Filter by request ID
+        search: Search text in message and name fields (case-insensitive)
+        limit: Maximum number of entries to return
+        
+    Returns:
+        Dict containing logs and filter metadata
+    """
+    logs_dir = Path("logs")
+
+    log_entries = search_logs(
+        logs_dir=logs_dir,
+        date=date,
+        level=level,
+        request_id=request_id,
+        search_text=search,
+        limit=limit,
+    )
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
+    }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, object]:
+    """Get list of available log dates."""
+    logs_dir = Path("logs")
+    dates = get_available_log_dates(logs_dir)
+    return {"dates": dates}
+
+
+@admin_router.get("/logs", response_class=HTMLResponse)
+async def admin_logs_page(request: Request) -> str:
+    """Redirect to frontend logs page."""
+    if is_admin_authenticated(request):
+        return """
+        <!DOCTYPE html>
+        <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Logs - Admin Dashboard</title>
+                <script>
+                    window.location.href = '/logs';
+                </script>
+            </head>
+            <body>
+                <p>Redirecting to logs page...</p>
+            </body>
+        </html>
+        """
+    return admin_auth()
+
+
+# Usage Analytics Endpoints
+
+
+@admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics(
+    request: Request,
+    interval: int = 15,
+    hours: int = 24,
+) -> dict:
+    """
+    Get time-series usage metrics aggregated into intervals.
+    
+    Args:
+        interval: Interval size in minutes (5, 15, 30, or 60)
+        hours: Hours of history to analyze (1-168)
+        
+    Returns:
+        Dictionary containing time-series metrics
+    """
+    logs_dir = Path("logs")
+    return aggregate_metrics_by_time(logs_dir, interval, hours)
+
+
+@admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
+async def get_usage_summary(
+    request: Request,
+    hours: int = 24,
+) -> dict:
+    """
+    Get summary statistics for the specified time period.
+    
+    Args:
+        hours: Hours of history to analyze (1-168)
+        
+    Returns:
+        Dictionary containing summary statistics
+    """
+    logs_dir = Path("logs")
+    return get_summary_stats(logs_dir, hours)
+
+
+@admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
+async def get_usage_error_details(
+    request: Request,
+    hours: int = 24,
+    limit: int = 100,
+) -> dict:
+    """
+    Get detailed error information.
+    
+    Args:
+        hours: Hours of history to analyze (1-168)
+        limit: Maximum number of errors to return (1-1000)
+        
+    Returns:
+        Dictionary containing error details
+    """
+    logs_dir = Path("logs")
+    return get_error_details(logs_dir, hours, limit)
+
+
+@admin_router.get(
+    "/api/usage/revenue-by-model", dependencies=[Depends(require_admin_api)]
+)
+async def get_usage_revenue_by_model(
+    request: Request,
+    hours: int = 24,
+    limit: int = 20,
+) -> dict:
+    """
+    Get revenue breakdown by model.
+    
+    Args:
+        hours: Hours of history to analyze (1-168)
+        limit: Maximum number of models to return (1-100)
+        
+    Returns:
+        Dictionary containing revenue breakdown by model
+    """
+    logs_dir = Path("logs")
+    return get_revenue_by_model(logs_dir, hours, limit)
+
+
+@admin_router.get("/usage", response_class=HTMLResponse)
+async def admin_usage_page(request: Request) -> str:
+    """Redirect to frontend usage page."""
+    if is_admin_authenticated(request):
+        return """
+        <!DOCTYPE html>
+        <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Usage Analytics - Admin Dashboard</title>
+                <script>
+                    window.location.href = '/usage';
+                </script>
+            </head>
+            <body>
+                <p>Redirecting to usage analytics page...</p>
+            </body>
+        </html>
+        """
+    return admin_auth()
 
 
 DASHBOARD_CSS: str = """

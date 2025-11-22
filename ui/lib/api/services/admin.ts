@@ -802,6 +802,98 @@ export class AdminService {
       '/admin/api/temporary-balances'
     );
   }
+
+  static async getUsageMetrics(
+    interval: number,
+    hours: number
+  ): Promise<{
+    metrics: Array<{
+      timestamp: string;
+      total_requests: number;
+      successful_chat_completions: number;
+      failed_requests: number;
+      errors: number;
+      warnings: number;
+      payment_processed: number;
+      upstream_errors: number;
+      revenue_msats: number;
+      refunds_msats: number;
+    }>;
+    interval_minutes: number;
+    hours_back: number;
+    total_buckets: number;
+  }> {
+    return await apiClient.get('/admin/api/usage/metrics', {
+      interval,
+      hours,
+    });
+  }
+
+  static async getUsageSummary(hours: number): Promise<{
+    total_entries: number;
+    total_requests: number;
+    successful_chat_completions: number;
+    failed_requests: number;
+    total_errors: number;
+    total_warnings: number;
+    payment_processed: number;
+    upstream_errors: number;
+    unique_models_count: number;
+    unique_models: string[];
+    error_types: Record<string, number>;
+    revenue_msats: number;
+    refunds_msats: number;
+    revenue_sats: number;
+    refunds_sats: number;
+    net_revenue_msats: number;
+    net_revenue_sats: number;
+    success_rate: number;
+  }> {
+    return await apiClient.get('/admin/api/usage/summary', { hours });
+  }
+
+  static async getErrorDetails(
+    hours: number,
+    limit: number
+  ): Promise<{
+    errors: Array<{
+      timestamp: string;
+      message: string;
+      error_type: string;
+      pathname: string;
+      lineno: number;
+      request_id: string;
+    }>;
+    total_count: number;
+  }> {
+    return await apiClient.get('/admin/api/usage/error-details', {
+      hours,
+      limit,
+    });
+  }
+
+  static async getRevenueByModel(
+    hours: number,
+    limit: number
+  ): Promise<{
+    models: Array<{
+      model: string;
+      revenue_sats: number;
+      refunds_sats: number;
+      net_revenue_sats: number;
+      requests: number;
+      successful: number;
+      failed: number;
+      avg_revenue_per_request: number;
+    }>;
+    total_revenue_sats: number;
+    total_models: number;
+  }> {
+    return await apiClient.get('/admin/api/usage/revenue-by-model', {
+      hours,
+      limit,
+    });
+  }
 }
 
 export const TemporaryBalanceSchema = z.object({
