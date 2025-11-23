@@ -25,7 +25,8 @@ export function formatFromMsat(
 
   if (displayUnit === 'sat') {
     const sats = amountMsat / 1000;
-    return `${sats.toLocaleString()} sats`;
+    // Format as integer for sats
+    return `${Math.floor(sats).toLocaleString()} sats`;
   }
 
   if (usdPerSat === null) {
@@ -34,12 +35,11 @@ export function formatFromMsat(
 
   const sats = amountMsat / 1000;
   const usd = sats * usdPerSat;
-  const precision = Math.abs(usd) >= 1 ? 2 : 4;
   const formatter = new Intl.NumberFormat(undefined, {
     style: 'currency',
     currency: 'USD',
-    minimumFractionDigits: precision,
-    maximumFractionDigits: Math.max(precision, 6),
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   });
   return formatter.format(usd);
 }
