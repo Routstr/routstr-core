@@ -264,6 +264,15 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def redirect_transactions_index_txt() -> RedirectResponse:
         return RedirectResponse("/transactions")
 
+    @app.get("/balances", include_in_schema=False)
+    async def serve_balances_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "balances" / "index.html")
+
+    # Add explicit route for /balances/index.txt to redirect to /balances
+    @app.get("/balances/index.txt", include_in_schema=False)
+    async def redirect_balances_index_txt() -> RedirectResponse:
+        return RedirectResponse("/balances")
+
     @app.get("/logs", include_in_schema=False)
     async def serve_logs_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "logs" / "index.html")
