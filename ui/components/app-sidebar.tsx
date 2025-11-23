@@ -2,7 +2,6 @@
 
 import * as React from 'react';
 import {
-  ActivityIcon,
   FileTextIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
