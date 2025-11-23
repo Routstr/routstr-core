@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AppSidebar } from '@/components/app-sidebar';
 import { SiteHeader } from '@/components/site-header';
@@ -23,11 +23,36 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { RefreshCw } from 'lucide-react';
 import { useCurrencyStore } from '@/lib/stores/currency';
 import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
+import { CheatSheet } from '@/components/landing/cheat-sheet';
+import { ConfigurationService } from '@/lib/api/services/configuration';
 
 export default function DashboardPage() {
   const [timeRange, setTimeRange] = useState('24');
   const [interval, setInterval] = useState('15');
   const { displayUnit } = useCurrencyStore();
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return ConfigurationService.isTokenValid();
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const syncAuthState = (): void => {
+      setIsAuthenticated(ConfigurationService.isTokenValid());
+    };
+
+    syncAuthState();
+    window.addEventListener('storage', syncAuthState);
+
+    return () => {
+      window.removeEventListener('storage', syncAuthState);
+    };
+  }, []);
   
   const { data: btcUsdPrice } = useQuery({
     queryKey: ['btc-usd-price'],
@@ -82,6 +107,10 @@ export default function DashboardPage() {
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
+
+  if (!isAuthenticated) {
+    return <CheatSheet />;
+  }
 
   const handleRefresh = () => {
     refetchMetrics();

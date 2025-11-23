@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 from pathlib import Path
+from typing import Final
 from urllib.request import urlopen
 
 import httpx
@@ -18,6 +19,14 @@ from .price import sats_usd_price
 logger = get_logger(__name__)
 
 models_router = APIRouter()
+
+DEFAULT_EXCLUDED_MODEL_IDS: Final[set[str]] = {
+    "openrouter/auto",
+    "google/gemini-2.5-pro-exp-03-25",
+    "opengvlab/internvl3-78b",
+    "openrouter/sonoma-dusk-alpha",
+    "openrouter/sonoma-sky-alpha",
+}
 
 
 class Architecture(BaseModel):
@@ -89,11 +98,7 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
 
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id == "openrouter/auto"
-                    or model_id == "google/gemini-2.5-pro-exp-03-25"
-                    or model_id == "opengvlab/internvl3-78b"
-                    or model_id == "openrouter/sonoma-dusk-alpha"
-                    or model_id == "openrouter/sonoma-sky-alpha"
+                    or model_id in DEFAULT_EXCLUDED_MODEL_IDS
                 ):
                     continue
 
@@ -130,11 +135,7 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
 
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id == "openrouter/auto"
-                    or model_id == "google/gemini-2.5-pro-exp-03-25"
-                    or model_id == "opengvlab/internvl3-78b"
-                    or model_id == "openrouter/sonoma-dusk-alpha"
-                    or model_id == "openrouter/sonoma-sky-alpha"
+                    or model_id in DEFAULT_EXCLUDED_MODEL_IDS
                 ):
                     continue
 

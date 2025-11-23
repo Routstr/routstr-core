@@ -182,7 +182,6 @@ async def info() -> dict:
         "mints": global_settings.cashu_mints,
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
-        "models": [],  # kept for back-compat; prefer /v1/models
     }
 
 
