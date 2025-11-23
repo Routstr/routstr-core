@@ -10,8 +10,8 @@ DO NOT modify or remove these messages without updating the usage tracking logic
    - Used to count total incoming requests
    - Includes model information in context
 
-2. "Token adjustment completed for streaming" (INFO) - routstr/upstream/base.py
-   "Token adjustment completed for non-streaming" (INFO) - routstr/upstream/base.py
+    2. "Payment adjustment completed for streaming" (INFO) - routstr/upstream/base.py
+       "Payment adjustment completed for non-streaming" (INFO) - routstr/upstream/base.py
    - Used to track successful completions and revenue
    - The 'cost_data.total_msats' field is extracted for revenue calculation
    - Must include 'cost_data' in extra dict

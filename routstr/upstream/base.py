@@ -453,11 +453,12 @@ class BaseUpstreamProvider:
                                                 )
                                                 usage_finalized = True
                                                 logger.info(
-                                                    "Token adjustment completed for streaming",
+                                                    "Payment adjustment completed for streaming",
                                                     extra={
                                                         "key_hash": key.hashed_key[:8]
                                                         + "...",
                                                         "cost_data": cost_data,
+                                                        "model": last_model_seen,
                                                         "balance_after_adjustment": fresh_key.balance,
                                                     },
                                                 )
@@ -556,7 +557,7 @@ class BaseUpstreamProvider:
             response_json["cost"] = cost_data
 
             logger.info(
-                "Token adjustment completed for non-streaming",
+                "Payment adjustment completed for non-streaming",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
                     "cost_data": cost_data,

@@ -231,7 +231,10 @@ class LogManager:
                 if "received proxy request" in message:
                     model_stats[model]["requests"] += 1
 
-                if "token adjustment completed" in message:
+                if (
+                    "completed for streaming" in message
+                    or "completed for non-streaming" in message
+                ):
                     model_stats[model]["successful"] += 1
                     cost_data = entry.get("cost_data")
                     if isinstance(cost_data, dict):
@@ -321,7 +324,10 @@ class LogManager:
                 if "received proxy request" in message:
                     stats["total_requests"] += 1
 
-                if "token adjustment completed" in message:
+                if (
+                    "completed for streaming" in message
+                    or "completed for non-streaming" in message
+                ):
                     stats["successful_chat_completions"] += 1
 
                 if "upstream request failed" in message or "revert payment" in message:
@@ -338,7 +344,10 @@ class LogManager:
                     if isinstance(model, str) and model != "unknown":
                         stats["unique_models"].add(model)
 
-                if "token adjustment completed" in message:
+                if (
+                    "completed for streaming" in message
+                    or "completed for non-streaming" in message
+                ):
                     cost_data = entry.get("cost_data")
                     if isinstance(cost_data, dict):
                         actual_cost = cost_data.get("total_msats", 0)
@@ -426,7 +435,10 @@ class LogManager:
                 if level == "ERROR":
                     bucket["errors"] += 1
 
-                if "token adjustment completed" in message:
+                if (
+                    "completed for streaming" in message
+                    or "completed for non-streaming" in message
+                ):
                     cost_data = entry.get("cost_data")
                     if isinstance(cost_data, dict):
                         actual_cost = cost_data.get("total_msats", 0)
