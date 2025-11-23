@@ -802,6 +802,30 @@ export class AdminService {
       '/admin/api/temporary-balances'
     );
   }
+
+  static async getUsageMetricDefinitions(): Promise<UsageMetricDefinition[]> {
+    return await apiClient.get<UsageMetricDefinition[]>(
+      '/admin/api/usage-metrics/definitions'
+    );
+  }
+
+  static async getUsageMetrics(params: {
+    metrics: UsageMetricName[];
+    bucket_minutes: number;
+    hours: number;
+  }): Promise<UsageMetricsResponse> {
+    const query: Record<string, string | number> = {
+      bucket_minutes: params.bucket_minutes,
+      hours: params.hours,
+    };
+    if (params.metrics.length > 0) {
+      query.metrics = params.metrics.join(',');
+    }
+    return await apiClient.get<UsageMetricsResponse>(
+      '/admin/api/usage-metrics',
+      query
+    );
+  }
 }
 
 export const TemporaryBalanceSchema = z.object({
@@ -814,3 +838,32 @@ export const TemporaryBalanceSchema = z.object({
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
+
+export type UsageMetricName = 'errors' | 'chat_completions_success';
+
+export interface UsageMetricDefinition {
+  name: UsageMetricName;
+  label: string;
+  description: string;
+}
+
+export interface UsageMetricPoint {
+  bucket_start: string;
+  count: number;
+}
+
+export interface UsageMetricSeries {
+  name: UsageMetricName;
+  label: string;
+  description: string;
+  total: number;
+  points: UsageMetricPoint[];
+}
+
+export interface UsageMetricsResponse {
+  bucket_minutes: number;
+  bucket_count: number;
+  start: string;
+  end: string;
+  series: UsageMetricSeries[];
+}
