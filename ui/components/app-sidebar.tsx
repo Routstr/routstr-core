@@ -2,8 +2,9 @@
 
 import * as React from 'react';
 import {
-  DatabaseIcon,
+  ActivityIcon,
   FileTextIcon,
+  DatabaseIcon,
   LayoutDashboardIcon,
   ServerIcon,
   SettingsIcon,
@@ -36,6 +37,16 @@ const data = {
       icon: LayoutDashboardIcon,
     },
     {
+      title: 'Usage',
+      url: '/usage',
+      icon: ActivityIcon,
+    },
+    {
+      title: 'Logs',
+      url: '/logs',
+      icon: FileTextIcon,
+    },
+    {
       title: 'Models',
       url: '/model',
       icon: DatabaseIcon,
@@ -44,11 +55,6 @@ const data = {
       title: 'Providers',
       url: '/providers',
       icon: ServerIcon,
-    },
-    {
-      title: 'Logs',
-      url: '/logs',
-      icon: FileTextIcon,
     },
     {
       title: 'Settings',

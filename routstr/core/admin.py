@@ -1,6 +1,7 @@
 import json
 import secrets
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -10,7 +11,6 @@ from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
-from ..search import search_logs
 from ..wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -20,8 +20,8 @@ from ..wallet import (
 )
 from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
 from .logging import get_logger
+from .log_manager import log_manager
 from .settings import SettingsService, settings
-from .usage_metrics import UsageMetricsService, list_metric_definitions
 
 logger = get_logger(__name__)
 
@@ -168,38 +168,6 @@ async def get_temporary_balances_api(request: Request) -> list[dict[str, object]
 async def get_balances_api(request: Request) -> list[dict[str, object]]:
     balance_details, _tw, _tu, _ow = await fetch_all_balances()
     return [dict(d) for d in balance_details]
-
-
-@admin_router.get(
-    "/api/usage-metrics/definitions", dependencies=[Depends(require_admin_api)]
-)
-async def get_usage_metric_definitions() -> list[dict[str, str]]:
-    return list_metric_definitions()
-
-
-@admin_router.get("/api/usage-metrics", dependencies=[Depends(require_admin_api)])
-async def get_usage_metrics(
-    metrics: str | None = Query(
-        default=None,
-        description="Comma-separated list of usage metric identifiers to include",
-    ),
-    bucket_minutes: int = Query(default=15, ge=1, le=24 * 60),
-    hours: int = Query(default=24, ge=1, le=24 * 7),
-) -> dict[str, object]:
-    metric_list = (
-        [item.strip() for item in metrics.split(",") if item.strip()]
-        if metrics
-        else []
-    )
-    try:
-        result = await UsageMetricsService.collect(
-            metrics=metric_list,
-            bucket_minutes=bucket_minutes,
-            hours=hours,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return result.to_dict()
 
 
 @admin_router.get("/api/settings", dependencies=[Depends(require_admin_api)])
@@ -860,8 +828,8 @@ async def view_logs(request: Request, request_id: str) -> str:
             except Exception as e:
                 logger.error(f"Error reading log file {log_file}: {e}")
 
-    # Sort entries by timestamp if available (newest first)
-    log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=True)
+    # Sort entries by timestamp if available
+    log_entries.sort(key=lambda x: x.get("asctime", ""), reverse=False)
 
     # Format log entries for display
     formatted_logs = []
@@ -940,72 +908,6 @@ async def view_logs(request: Request, request_id: str) -> str:
     </html>
     """
     )
-
-
-@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
-async def get_logs_api(
-    request: Request,
-    date: str | None = None,
-    level: str | None = None,
-    request_id: str | None = None,
-    search: str | None = None,
-    limit: int = 100,
-) -> dict[str, object]:
-    """
-    Get filtered log entries.
-
-    Args:
-        date: Filter by specific date (YYYY-MM-DD)
-        level: Filter by log level
-        request_id: Filter by request ID
-        search: Search text in message and name fields (case-insensitive)
-        limit: Maximum number of entries to return
-
-    Returns:
-        Dict containing logs and filter metadata
-    """
-    logs_dir = Path("logs")
-
-    # Use the search module for log filtering
-    log_entries = search_logs(
-        logs_dir=logs_dir,
-        date=date,
-        level=level,
-        request_id=request_id,
-        search_text=search,
-        limit=limit,
-    )
-
-    return {
-        "logs": log_entries,
-        "total": len(log_entries),
-        "date": date,
-        "level": level,
-        "request_id": request_id,
-        "search": search,
-        "limit": limit,
-    }
-
-
-@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
-async def get_log_dates_api(request: Request) -> dict[str, object]:
-    logs_dir = Path("logs")
-    dates = []
-
-    if logs_dir.exists():
-        log_files = sorted(
-            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
-        )
-
-        for log_file in log_files[:30]:
-            try:
-                filename = log_file.name
-                date_str = filename.replace("app_", "").replace(".log", "")
-                dates.append(date_str)
-            except Exception:
-                continue
-
-    return {"dates": dates}
 
 
 @admin_router.post("/withdraw", dependencies=[Depends(require_admin_api)])
@@ -2504,32 +2406,6 @@ def upstream_providers_page() -> str:
     )
 
 
-def logs_page() -> str:
-    return """
-    <!DOCTYPE html>
-    <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Logs - Admin Dashboard</title>
-            <script>
-                window.location.href = '/logs';
-            </script>
-        </head>
-        <body>
-            <p>Redirecting to logs page...</p>
-        </body>
-    </html>
-    """
-
-
-@admin_router.get("/logs", response_class=HTMLResponse)
-async def admin_logs(request: Request) -> str:
-    if is_admin_authenticated(request):
-        return logs_page()
-    return admin_auth()
-
-
 @admin_router.get("/upstream-providers", response_class=HTMLResponse)
 async def admin_upstream_providers(request: Request) -> str:
     if is_admin_authenticated(request):
@@ -2991,3 +2867,123 @@ h1 { color: #333; }
 .no-logs { text-align: center; color: #666; padding: 40px; }
 .request-id-display { background-color: #e9ecef; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; }
 """
+
+
+
+@admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics(
+    request: Request,
+    interval: int = Query(
+        default=15, ge=1, le=1440, description="Time interval in minutes"
+    ),
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict:
+    """Get usage metrics aggregated by time interval."""
+    return log_manager.get_usage_metrics(interval=interval, hours=hours)
+
+
+@admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
+async def get_usage_summary(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict:
+    """Get summary statistics for the specified time period."""
+    return log_manager.get_usage_summary(hours=hours)
+
+
+@admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
+async def get_error_details(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=100, ge=1, le=1000, description="Maximum number of errors to return"
+    ),
+) -> dict:
+    """Get detailed error information."""
+    return log_manager.get_error_details(hours=hours, limit=limit)
+
+
+@admin_router.get(
+    "/api/usage/revenue-by-model", dependencies=[Depends(require_admin_api)]
+)
+async def get_revenue_by_model(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=20, ge=1, le=100, description="Maximum number of models to return"
+    ),
+) -> dict:
+    """
+    Get revenue breakdown by model.
+    """
+    return log_manager.get_revenue_by_model(hours=hours, limit=limit)
+
+
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """
+    Get filtered log entries.
+
+    Args:
+        date: Filter by specific date (YYYY-MM-DD)
+        level: Filter by log level
+        request_id: Filter by request ID
+        search: Search text in message and name fields (case-insensitive)
+        limit: Maximum number of entries to return
+
+    Returns:
+        Dict containing logs and filter metadata
+    """
+    log_entries = log_manager.search_logs(
+        date=date,
+        level=level,
+        request_id=request_id,
+        search_text=search,
+        limit=limit,
+    )
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
+    }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, object]:
+    logs_dir = Path("logs")
+    dates = []
+
+    if logs_dir.exists():
+        log_files = sorted(
+            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
+        )
+
+        for log_file in log_files[:30]:
+            try:
+                filename = log_file.name
+                date_str = filename.replace("app_", "").replace(".log", "")
+                dates.append(date_str)
+            except Exception:
+                continue
+
+    return {"dates": dates}

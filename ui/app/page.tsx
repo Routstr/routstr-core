@@ -10,7 +10,6 @@ import { TemporaryBalances } from '@/components/temporary-balances';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import type { DisplayUnit } from '@/lib/types/units';
 import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
-import { UsageTracking } from '@/components/usage-tracking';
 
 export default function Page() {
   const [displayUnit, setDisplayUnit] = useState<DisplayUnit>('sat');
@@ -66,25 +65,22 @@ export default function Page() {
             </div>
           </div>
 
-            <div className='grid gap-6'>
-              <div className='col-span-full'>
-                <DetailedWalletBalance
-                  refreshInterval={30000}
-                  displayUnit={displayUnit}
-                  usdPerSat={usdPerSat}
-                />
-              </div>
-              <div className='col-span-full'>
-                <TemporaryBalances
-                  refreshInterval={60000}
-                  displayUnit={displayUnit}
-                  usdPerSat={usdPerSat}
-                />
-              </div>
-              <div className='col-span-full'>
-                <UsageTracking />
-              </div>
+          <div className='grid gap-6'>
+            <div className='col-span-full'>
+              <DetailedWalletBalance
+                refreshInterval={30000}
+                displayUnit={displayUnit}
+                usdPerSat={usdPerSat}
+              />
             </div>
+            <div className='col-span-full'>
+              <TemporaryBalances
+                refreshInterval={60000}
+                displayUnit={displayUnit}
+                usdPerSat={usdPerSat}
+              />
+            </div>
+          </div>
         </div>
       </SidebarInset>
     </SidebarProvider>
