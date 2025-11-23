@@ -18,6 +18,7 @@ class LogManager:
         hours_back: int | None = None,
         specific_date: str | None = None,
         reverse_files: bool = False,
+        max_files: int | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Yields log entries from files.
@@ -26,6 +27,7 @@ class LogManager:
             hours_back: specific number of hours to look back.
             specific_date: specific date string (YYYY-MM-DD) to look at.
             reverse_files: if True, process files in reverse order (newest first).
+            max_files: maximum number of log files to process (most recent if reverse_files is True).
         """
         if not self.logs_dir.exists():
             return
@@ -60,6 +62,9 @@ class LogManager:
                     except Exception:
                         continue
                 log_files = filtered_files
+
+            if max_files is not None and len(log_files) > max_files:
+                log_files = log_files[:max_files]
 
         for log_file in log_files:
             try:
@@ -114,7 +119,9 @@ class LogManager:
 
         # We iterate efficiently
         iterator = self._yield_log_entries(
-            specific_date=date, reverse_files=True if not date else False
+            specific_date=date,
+            reverse_files=True if not date else False,
+            max_files=7 if not date else None,
         )
 
         # If we are searching globally (no date), we might want to limit how far back we go?
