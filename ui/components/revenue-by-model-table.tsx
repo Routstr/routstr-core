@@ -11,6 +11,10 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { ModelRevenueData } from '@/lib/api/services/admin';
+import { useCurrencyStore } from '@/lib/stores/currency';
+import { useQuery } from '@tanstack/react-query';
+import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
+import { formatFromMsat, convertToMsat } from '@/lib/currency';
 
 interface RevenueByModelTableProps {
   models: ModelRevenueData[];
@@ -21,12 +25,24 @@ export function RevenueByModelTable({
   models,
   totalRevenue,
 }: RevenueByModelTableProps) {
+  const { displayUnit } = useCurrencyStore();
+  const { data: btcUsdPrice } = useQuery({
+    queryKey: ['btc-usd-price'],
+    queryFn: fetchBtcUsdPrice,
+    refetchInterval: 120_000,
+    staleTime: 60_000,
+  });
+  const usdPerSat = btcUsdPrice ? btcToSatsRate(btcUsdPrice) : null;
+
+  const formatAmount = (sats: number) =>
+    formatFromMsat(convertToMsat(sats, 'sat'), displayUnit, usdPerSat);
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Revenue by Model</CardTitle>
         <p className="text-sm text-muted-foreground">
-          Total Revenue: <span className="font-mono font-medium text-foreground">{totalRevenue.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span> sats
+          Total Revenue: <span className="font-mono font-medium text-foreground">{formatAmount(totalRevenue)}</span>
         </p>
       </CardHeader>
       <CardContent>
@@ -37,10 +53,10 @@ export function RevenueByModelTable({
               <TableHead className="text-right">Requests</TableHead>
               <TableHead className="text-right">Successful</TableHead>
               <TableHead className="text-right">Failed</TableHead>
-              <TableHead className="text-right">Revenue (sats)</TableHead>
+              <TableHead className="text-right">Revenue</TableHead>
               <TableHead className="w-[100px]">Share</TableHead>
-              <TableHead className="text-right">Refunds (sats)</TableHead>
-              <TableHead className="text-right">Net Revenue (sats)</TableHead>
+              <TableHead className="text-right">Refunds</TableHead>
+              <TableHead className="text-right">Net Revenue</TableHead>
               <TableHead className="text-right">Avg/Request</TableHead>
             </TableRow>
           </TableHeader>
@@ -61,7 +77,7 @@ export function RevenueByModelTable({
                     <TableCell className="text-right text-green-600 font-mono">{model.successful}</TableCell>
                     <TableCell className="text-right text-red-600 font-mono">{model.failed}</TableCell>
                     <TableCell className="text-right font-mono">
-                      {model.revenue_sats.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      {formatAmount(model.revenue_sats)}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
@@ -70,13 +86,13 @@ export function RevenueByModelTable({
                       </div>
                     </TableCell>
                     <TableCell className="text-right text-red-500 font-mono">
-                      {model.refunds_sats.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      {formatAmount(model.refunds_sats)}
                     </TableCell>
                     <TableCell className="text-right font-semibold font-mono">
-                      {model.net_revenue_sats.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      {formatAmount(model.net_revenue_sats)}
                     </TableCell>
                     <TableCell className="text-right text-muted-foreground font-mono">
-                      {model.avg_revenue_per_request.toLocaleString(undefined, { maximumFractionDigits: 3 })}
+                      {formatAmount(model.avg_revenue_per_request)}
                     </TableCell>
                   </TableRow>
                 );

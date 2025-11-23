@@ -14,12 +14,28 @@ import {
   TrendingDown,
   Coins,
 } from 'lucide-react';
+import { useCurrencyStore } from '@/lib/stores/currency';
+import { useQuery } from '@tanstack/react-query';
+import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
+import { formatFromMsat } from '@/lib/currency';
 
 interface UsageSummaryCardsProps {
   summary: UsageSummary;
 }
 
 export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
+  const { displayUnit } = useCurrencyStore();
+  const { data: btcUsdPrice } = useQuery({
+    queryKey: ['btc-usd-price'],
+    queryFn: fetchBtcUsdPrice,
+    refetchInterval: 120_000,
+    staleTime: 60_000,
+  });
+  const usdPerSat = btcUsdPrice ? btcToSatsRate(btcUsdPrice) : null;
+
+  const formatAmount = (msat: number) =>
+    formatFromMsat(msat, displayUnit, usdPerSat);
+
   const cards = [
     {
       title: 'Total Requests',
@@ -34,32 +50,26 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
       color: 'text-green-500',
     },
     {
-      title: 'Revenue (sats)',
-      value: summary.revenue_sats.toLocaleString(undefined, {
-        maximumFractionDigits: 2,
-      }),
+      title: 'Revenue',
+      value: formatAmount(summary.revenue_msats),
       icon: Coins,
       color: 'text-green-600',
     },
     {
-      title: 'Net Revenue (sats)',
-      value: summary.net_revenue_sats.toLocaleString(undefined, {
-        maximumFractionDigits: 2,
-      }),
+      title: 'Net Revenue',
+      value: formatAmount(summary.net_revenue_msats),
       icon: DollarSign,
       color: 'text-emerald-600',
     },
     {
-      title: 'Refunds (sats)',
-      value: summary.refunds_sats.toLocaleString(undefined, {
-        maximumFractionDigits: 2,
-      }),
+      title: 'Refunds',
+      value: formatAmount(summary.refunds_msats),
       icon: TrendingDown,
       color: 'text-red-500',
     },
     {
       title: 'Avg Revenue/Request',
-      value: `${(summary.avg_revenue_per_request_msats / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 })} sats`,
+      value: formatAmount(summary.avg_revenue_per_request_msats),
       icon: CreditCard,
       color: 'text-cyan-500',
     },
