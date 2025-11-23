@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 from pathlib import Path
+from typing import Final
 from urllib.request import urlopen
 
 import httpx
@@ -18,6 +19,14 @@ from .price import sats_usd_price
 logger = get_logger(__name__)
 
 models_router = APIRouter()
+
+DEFAULT_EXCLUDED_MODEL_IDS: Final[set[str]] = {
+    "openrouter/auto",
+    "google/gemini-2.5-pro-exp-03-25",
+    "opengvlab/internvl3-78b",
+    "openrouter/sonoma-dusk-alpha",
+    "openrouter/sonoma-sky-alpha",
+}
 
 
 class Architecture(BaseModel):
@@ -87,15 +96,9 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                     model["id"] = model_id[len(source_prefix) :]
                     model_id = model["id"]
 
-                # Check if model should be excluded based on configuration
-                try:
-                    excluded_ids = getattr(settings, "excluded_model_ids", [])
-                except Exception:
-                    excluded_ids = []
-                
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id in excluded_ids
+                    or model_id in DEFAULT_EXCLUDED_MODEL_IDS
                 ):
                     continue
 
@@ -130,15 +133,9 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                     model["id"] = model_id[len(source_prefix) :]
                     model_id = model["id"]
 
-                # Check if model should be excluded based on configuration
-                try:
-                    excluded_ids = getattr(settings, "excluded_model_ids", [])
-                except Exception:
-                    excluded_ids = []
-                
                 if (
                     "(free)" in model.get("name", "")
-                    or model_id in excluded_ids
+                    or model_id in DEFAULT_EXCLUDED_MODEL_IDS
                 ):
                     continue
 
