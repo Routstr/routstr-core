@@ -57,6 +57,7 @@ export default function DashboardPage() {
   const { data: btcUsdPrice } = useQuery({
     queryKey: ['btc-usd-price'],
     queryFn: fetchBtcUsdPrice,
+    enabled: isAuthenticated,
     refetchInterval: 120_000,
     staleTime: 60_000,
   });
@@ -71,6 +72,7 @@ export default function DashboardPage() {
     queryKey: ['usage-metrics', interval, timeRange],
     queryFn: () =>
       AdminService.getUsageMetrics(parseInt(interval), parseInt(timeRange)),
+    enabled: isAuthenticated,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -82,6 +84,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ['usage-summary', timeRange],
     queryFn: () => AdminService.getUsageSummary(parseInt(timeRange)),
+    enabled: isAuthenticated,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -93,6 +96,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ['usage-errors', timeRange],
     queryFn: () => AdminService.getErrorDetails(parseInt(timeRange), 100),
+    enabled: isAuthenticated,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -104,6 +108,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ['revenue-by-model', timeRange],
     queryFn: () => AdminService.getRevenueByModel(parseInt(timeRange), 20),
+    enabled: isAuthenticated,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
