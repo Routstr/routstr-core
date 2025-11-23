@@ -63,7 +63,9 @@ export function LogFilters({
   );
   const [isCustom, setIsCustom] = useState<boolean>(!isPreset);
   const [date, setDate] = useState<Date | undefined>(
-    selectedDate && selectedDate !== 'all' ? new Date(selectedDate) : undefined
+    selectedDate && selectedDate !== 'all'
+      ? new Date(selectedDate + 'T00:00:00')
+      : undefined
   );
 
   useEffect(() => {
@@ -78,11 +80,8 @@ export function LogFilters({
     if (selectedDate === 'all' || !selectedDate) {
       setDate(undefined);
     } else {
-      try {
-        setDate(new Date(selectedDate));
-      } catch {
-        setDate(undefined);
-      }
+      const d = new Date(selectedDate + 'T00:00:00');
+      setDate(isNaN(d.getTime()) ? undefined : d);
     }
   }, [selectedDate]);
 
