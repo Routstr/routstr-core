@@ -24,7 +24,7 @@ class BaseAPIClient(ABC):
         pass
 
     @abstractmethod
-    async def generate_content_stream(
+    def generate_content_stream(
         self,
         model: str,
         messages: list[dict[str, Any]],
@@ -32,7 +32,6 @@ class BaseAPIClient(ABC):
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Generate content with streaming."""
         pass
 
     @abstractmethod

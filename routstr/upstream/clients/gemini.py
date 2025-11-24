@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Awaitable, Callable
+from typing import Any, AsyncGenerator
 
 from openai import AsyncOpenAI
 
@@ -26,19 +26,15 @@ class GeminiClient(BaseAPIClient):
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Generate content using Gemini API via OpenAI SDK (non-streaming)."""
-        args = {
-            "model": model,
-            "messages": messages,
-        }
-        if temperature is not None:
-            args["temperature"] = temperature
-        if max_tokens is not None:
-            args["max_tokens"] = max_tokens
-        if "top_p" in kwargs:
-            args["top_p"] = kwargs["top_p"]
+        from openai import NOT_GIVEN
 
-        response = await self.client.chat.completions.create(**args)
+        response = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,  # type: ignore
+            temperature=temperature if temperature is not None else NOT_GIVEN,
+            max_tokens=max_tokens if max_tokens is not None else NOT_GIVEN,
+            top_p=kwargs.get("top_p", NOT_GIVEN),
+        )
         return response.model_dump()
 
     async def generate_content_stream(
@@ -47,26 +43,22 @@ class GeminiClient(BaseAPIClient):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
-        usage_callback: Callable[[dict[str, Any]], None] | None = None,
-        completion_callback: Callable[[str, dict[str, Any] | None], Awaitable[None]]
-        | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Generate content using Gemini API via OpenAI SDK (streaming)."""
-        args = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if temperature is not None:
-            args["temperature"] = temperature
-        if max_tokens is not None:
-            args["max_tokens"] = max_tokens
-        if "top_p" in kwargs:
-            args["top_p"] = kwargs["top_p"]
+        from openai import NOT_GIVEN
 
-        stream = await self.client.chat.completions.create(**args)
+        usage_callback = kwargs.get("usage_callback")
+        completion_callback = kwargs.get("completion_callback")
+
+        stream = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,  # type: ignore
+            stream=True,
+            stream_options={"include_usage": True},
+            temperature=temperature if temperature is not None else NOT_GIVEN,
+            max_tokens=max_tokens if max_tokens is not None else NOT_GIVEN,
+            top_p=kwargs.get("top_p", NOT_GIVEN),
+        )
 
         final_usage = None
 
