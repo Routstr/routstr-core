@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
@@ -188,69 +188,72 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
             )
 
             if is_streaming:
+                final_usage_data: dict | None = None
+
+                def usage_callback(usage_data: dict[str, Any]) -> None:
+                    """Callback to capture usage data during streaming"""
+                    nonlocal final_usage_data
+                    final_usage_data = usage_data
+
+                async def completion_callback(
+                    model: str, usage_data: dict[str, Any] | None
+                ) -> None:
+                    """Callback to handle payment when streaming completes"""
+                    nonlocal final_usage_data
+                    if usage_data:
+                        final_usage_data = usage_data
+
+                    payment_data = {
+                        "model": model,
+                        "usage": final_usage_data,
+                    }
+
+                    from ..auth import adjust_payment_for_tokens
+                    from ..core.db import create_session
+
+                    async with create_session() as new_session:
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                        if fresh_key:
+                            try:
+                                cost_data = await adjust_payment_for_tokens(
+                                    fresh_key,
+                                    payment_data,
+                                    new_session,
+                                    max_cost_for_model,
+                                )
+
+                                logger.info(
+                                    "Gemini streaming payment finalized",
+                                    extra={
+                                        "cost_data": cost_data,
+                                        "usage_data": final_usage_data,
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                    },
+                                )
+                            except Exception as cost_error:
+                                logger.error(
+                                    "Error finalizing Gemini streaming payment",
+                                    extra={
+                                        "error": str(cost_error),
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                    },
+                                )
+
                 response_generator = self.client.generate_content_stream(
                     model=model_obj.id,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     top_p=top_p,
+                    usage_callback=usage_callback,
+                    completion_callback=completion_callback,
                 )
 
                 async def stream_with_cost() -> AsyncGenerator[bytes, None]:
-                    last_model_seen: str = model_obj.id
-                    final_usage_data: dict | None = None
-
                     try:
                         async for chunk in response_generator:
-                            if chunk.get("usage"):
-                                final_usage_data = chunk["usage"]
-
                             sse_data = f"data: {json.dumps(chunk)}\n\n"
                             yield sse_data.encode()
-
-                            if (
-                                chunk.get("choices", [{}])[0].get("finish_reason")
-                                == "stop"
-                            ):
-                                break
-
-                        payment_data = {
-                            "model": last_model_seen,
-                            "usage": final_usage_data,
-                        }
-
-                        from ..auth import adjust_payment_for_tokens
-                        from ..core.db import create_session
-
-                        async with create_session() as new_session:
-                            fresh_key = await new_session.get(
-                                key.__class__, key.hashed_key
-                            )
-                            if fresh_key:
-                                try:
-                                    cost_data = await adjust_payment_for_tokens(
-                                        fresh_key,
-                                        payment_data,
-                                        new_session,
-                                        max_cost_for_model,
-                                    )
-
-                                    logger.info(
-                                        "Gemini streaming payment finalized",
-                                        extra={
-                                            "cost_data": cost_data,
-                                            "usage_data": final_usage_data,
-                                            "key_hash": key.hashed_key[:8] + "...",
-                                        },
-                                    )
-                                except Exception as cost_error:
-                                    logger.error(
-                                        "Error finalizing Gemini streaming payment",
-                                        extra={
-                                            "error": str(cost_error),
-                                            "key_hash": key.hashed_key[:8] + "...",
-                                        },
-                                    )
 
                     except Exception as e:
                         logger.error(
@@ -395,7 +398,9 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                     "description", f"Google {display_name} model"
                 )
 
-                supported_methods = model_data.get("supported_generation_methods", ['generateContent'])
+                supported_methods = model_data.get(
+                    "supported_generation_methods", ["generateContent"]
+                )
 
                 input_token_limit = model_data.get("input_token_limit", 32768)
                 output_token_limit = model_data.get("output_token_limit", 8192)

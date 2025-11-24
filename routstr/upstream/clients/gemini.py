@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Awaitable, Callable
 
 import google.generativeai as genai
 
@@ -95,6 +95,9 @@ class GeminiClient(BaseAPIClient):
         messages: list[dict[str, Any]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        usage_callback: Callable[[dict[str, Any]], None] | None = None,
+        completion_callback: Callable[[str, dict[str, Any] | None], Awaitable[None]]
+        | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Generate content using Gemini API (streaming)."""
@@ -171,10 +174,14 @@ class GeminiClient(BaseAPIClient):
 
             if usage_data:
                 chunk_data["usage"] = usage_data
+                if usage_callback:
+                    usage_callback(usage_data)
 
             yield chunk_data
 
             if finish_reason == "stop":
+                if completion_callback:
+                    await completion_callback(model, usage_data)
                 break
 
     async def list_models(self) -> list[dict[str, Any]]:
