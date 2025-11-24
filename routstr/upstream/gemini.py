@@ -64,75 +64,10 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
             "platform_url": cls.platform_url,
         }
 
-    def prepare_headers(self, request_headers: dict) -> dict:
-        headers = dict(request_headers)
-        removed_headers = []
-
-        for header in [
-            "host",
-            "content-length",
-            "refund-lnurl",
-            "key-expiry-time",
-            "x-cashu",
-            "authorization",
-        ]:
-            if headers.pop(header, None) is not None:
-                removed_headers.append(header)
-
-        if self.api_key:
-            headers["x-goog-api-key"] = self.api_key
-
-        return headers
-
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("gemini/")
 
-    def prepare_request_body(
-        self, body: bytes | None, model_obj: Model
-    ) -> bytes | None:
-        if not body:
-            return body
 
-        try:
-            openai_data = json.loads(body)
-            if not isinstance(openai_data, dict):
-                return body
-
-            gemini_data = {}
-
-            if "messages" in openai_data:
-                contents = []
-                for message in openai_data["messages"]:
-                    role = message.get("role", "user")
-                    content = message.get("content", "")
-
-                    if role == "system":
-                        continue
-                    elif role == "assistant":
-                        role = "model"
-
-                    contents.append({"role": role, "parts": [{"text": content}]})
-                gemini_data["contents"] = contents
-
-            generation_config = {}
-            if "temperature" in openai_data:
-                generation_config["temperature"] = openai_data["temperature"]
-            if "max_tokens" in openai_data:
-                generation_config["maxOutputTokens"] = openai_data["max_tokens"]
-            if "top_p" in openai_data:
-                generation_config["topP"] = openai_data["top_p"]
-
-            if generation_config:
-                gemini_data["generationConfig"] = generation_config  # type: ignore
-
-            return json.dumps(gemini_data).encode()
-
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning(
-                f"Failed to transform request body for Gemini: {e}",
-                extra={"error": str(e), "error_type": type(e).__name__},
-            )
-            return body
 
     async def forward_request(
         self,
@@ -324,61 +259,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                 model_obj,
             )
 
-    def _transform_gemini_to_openai(self, gemini_response: dict, model_id: str) -> dict:
-        """Transform Gemini API response to OpenAI format."""
-        candidates = gemini_response.get("candidates", [])
-        if not candidates:
-            return {
-                "id": f"chatcmpl-{hash(str(gemini_response))}"[1:16],
-                "object": "chat.completion",
-                "created": int(__import__("time").time()),
-                "model": model_id,
-                "choices": [],
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-            }
 
-        first_candidate = candidates[0]
-        content = ""
-        if "content" in first_candidate and "parts" in first_candidate["content"]:
-            parts = first_candidate["content"]["parts"]
-            if parts and "text" in parts[0]:
-                content = parts[0]["text"]
-
-        finish_reason = first_candidate.get("finishReason", "stop")
-        if finish_reason == "STOP":
-            finish_reason = "stop"
-        elif finish_reason == "MAX_TOKENS":
-            finish_reason = "length"
-
-        usage_metadata = gemini_response.get("usageMetadata", {})
-        prompt_tokens = usage_metadata.get("promptTokenCount", 0)
-        completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
-
-        return {
-            "id": f"chatcmpl-{hash(str(gemini_response))}"[1:16],
-            "object": "chat.completion",
-            "created": int(__import__("time").time()),
-            "model": model_id,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": content,
-                    },
-                    "finish_reason": finish_reason,
-                }
-            ],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-        }
 
     async def fetch_models(self) -> list[Model]:
         from ..payment.models import Architecture, Model, Pricing, TopProvider
@@ -388,34 +269,15 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
 
             models_list = []
             for model_data in models_data:
-                model_name = model_data.get("name", "")
-                if not model_name:
+                model_id = model_data.get("id", "")
+                if not model_id:
                     continue
 
-                model_id = model_name.replace("models/", "")
-                display_name = model_data.get("display_name", model_id)
-                description = model_data.get(
-                    "description", f"Google {display_name} model"
-                )
+                display_name = model_id
+                description = f"Google {display_name} model"
 
-                supported_methods = model_data.get(
-                    "supported_generation_methods", ["generateContent"]
-                )
-
-                input_token_limit = model_data.get("input_token_limit", 32768)
-                output_token_limit = model_data.get("output_token_limit", 8192)
-                context_length = min(input_token_limit, 128000)
-
-                logger.debug(
-                    f"Found Gemini model: {model_id}",
-                    extra={
-                        "display_name": display_name,
-                        "supported_methods": supported_methods,
-                        "input_token_limit": input_token_limit,
-                        "output_token_limit": output_token_limit,
-                        "context_length": context_length,
-                    },
-                )
+                context_length = 128000
+                output_token_limit = 8192
 
                 pricing_config = Pricing(
                     prompt=0.000003,
