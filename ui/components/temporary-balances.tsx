@@ -9,7 +9,6 @@ import {
   Key,
   Clock,
   DollarSign,
-  Activity,
 } from 'lucide-react';
 import { AdminService, TemporaryBalance } from '@/lib/api/services/admin';
 import {
@@ -56,21 +55,17 @@ export function TemporaryBalances({
 
   const calculateTotals = (balances: TemporaryBalance[]) => {
     let totalBalance = 0;
-    let totalSpent = 0;
-    let totalRequests = 0;
 
     balances.forEach((balance) => {
       totalBalance += balance.balance || 0;
-      totalSpent += balance.total_spent || 0;
-      totalRequests += balance.total_requests || 0;
     });
 
-    return { totalBalance, totalSpent, totalRequests };
+    return { totalBalance };
   };
 
   const totals = data
     ? calculateTotals(data)
-    : { totalBalance: 0, totalSpent: 0, totalRequests: 0 };
+    : { totalBalance: 0 };
 
   return (
     <>
@@ -142,32 +137,6 @@ export function TemporaryBalances({
                     {formatBalance(totals.totalBalance)}
                   </div>
                 </div>
-                <div className='rounded-lg border border-green-200 bg-gradient-to-r from-green-50 to-emerald-50 p-4'>
-                  <div className='flex items-center justify-between'>
-                    <div className='flex items-center gap-2'>
-                      <Activity className='h-5 w-5 text-green-600' />
-                      <span className='text-sm font-medium text-green-800'>
-                        Total Spent
-                      </span>
-                    </div>
-                  </div>
-                  <div className='mt-2 text-2xl font-bold text-green-900'>
-                    {formatBalance(totals.totalSpent)}
-                  </div>
-                </div>
-                <div className='rounded-lg border border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50 p-4'>
-                  <div className='flex items-center justify-between'>
-                    <div className='flex items-center gap-2'>
-                      <Key className='h-5 w-5 text-purple-600' />
-                      <span className='text-sm font-medium text-purple-800'>
-                        Total Requests
-                      </span>
-                    </div>
-                  </div>
-                  <div className='mt-2 text-2xl font-bold text-purple-900'>
-                    {totals.totalRequests.toLocaleString()}
-                  </div>
-                </div>
               </div>
 
               {/* Table */}
@@ -176,9 +145,9 @@ export function TemporaryBalances({
                 <div className='bg-muted hidden grid-cols-6 gap-2 p-3 text-sm font-semibold md:grid'>
                   <div>Hashed Key</div>
                   <div className='text-right'>Balance</div>
-                  <div className='text-right'>Total Spent</div>
-                  <div className='text-right'>Total Requests</div>
                   <div>Refund Address</div>
+                  <div>Refund Mint</div>
+                  <div>Currency</div>
                   <div className='text-right'>Expiry Time</div>
                 </div>
 
@@ -199,22 +168,22 @@ export function TemporaryBalances({
                         <div className='text-right font-mono'>
                           {formatBalance(balance.balance)}
                         </div>
-                        <div className='text-right font-mono'>
-                          {formatBalance(balance.total_spent)}
-                        </div>
-                        <div className='text-right font-mono'>
-                          {balance.total_requests.toLocaleString()}
-                        </div>
                         <div className='max-w-32 truncate font-mono text-xs break-all'>
                           {balance.refund_address || '-'}
                         </div>
+                        <div className='max-w-32 truncate font-mono text-xs break-all'>
+                          {balance.refund_mint_url || '-'}
+                        </div>
+                        <div className='truncate font-mono text-xs'>
+                          {balance.refund_currency || '-'}
+                        </div>
                         <div className='text-right font-mono text-xs'>
-                          {balance.key_expiry_time ? (
+                          {balance.refund_expiration_time ? (
                             <div className='flex items-center justify-end gap-1'>
                               <Clock className='h-3 w-3' />
                               <span>
                                 {new Date(
-                                  balance.key_expiry_time * 1000
+                                  balance.refund_expiration_time * 1000
                                 ).toLocaleDateString()}
                               </span>
                             </div>
@@ -246,10 +215,10 @@ export function TemporaryBalances({
                           </div>
                           <div className='space-y-1'>
                             <div className='text-muted-foreground text-xs font-medium'>
-                              Spent
+                              Currency
                             </div>
                             <div className='truncate font-mono text-sm'>
-                              {formatBalance(balance.total_spent)}
+                              {balance.refund_currency || '-'}
                             </div>
                           </div>
                         </div>
@@ -257,23 +226,15 @@ export function TemporaryBalances({
                         <div className='grid grid-cols-2 gap-3'>
                           <div className='space-y-1'>
                             <div className='text-muted-foreground text-xs font-medium'>
-                              Requests
-                            </div>
-                            <div className='truncate font-mono text-sm'>
-                              {balance.total_requests.toLocaleString()}
-                            </div>
-                          </div>
-                          <div className='space-y-1'>
-                            <div className='text-muted-foreground text-xs font-medium'>
                               Expires
                             </div>
                             <div className='font-mono text-xs'>
-                              {balance.key_expiry_time ? (
+                              {balance.refund_expiration_time ? (
                                 <div className='flex items-center gap-1'>
                                   <Clock className='h-3 w-3 flex-shrink-0' />
                                   <span className='truncate'>
                                     {new Date(
-                                      balance.key_expiry_time * 1000
+                                      balance.refund_expiration_time * 1000
                                     ).toLocaleDateString()}
                                   </span>
                                 </div>
@@ -291,6 +252,17 @@ export function TemporaryBalances({
                             </div>
                             <div className='font-mono text-xs break-all'>
                               {balance.refund_address}
+                            </div>
+                          </div>
+                        )}
+                        
+                         {balance.refund_mint_url && (
+                          <div className='space-y-1 pt-2'>
+                            <div className='text-muted-foreground text-xs font-medium'>
+                              Refund Mint
+                            </div>
+                            <div className='font-mono text-xs break-all'>
+                              {balance.refund_mint_url}
                             </div>
                           </div>
                         )}

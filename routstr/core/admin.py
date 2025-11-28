@@ -134,9 +134,9 @@ async def partial_TemporaryCredits(request: Request) -> str:
             <tr>
                 <th>Hashed Key</th>
                 <th>Balance (mSats)</th>
-                <th>Total Spent (mSats)</th>
-                <th>Total Requests</th>
                 <th>Refund Address</th>
+                <th>Refund Mint</th>
+                <th>Currency</th>
                 <th>Refund Time</th>
             </tr>
             {rows}
