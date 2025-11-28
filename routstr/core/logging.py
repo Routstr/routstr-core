@@ -156,20 +156,18 @@ class SecurityFilter(logging.Filter):
         try:
             message = record.getMessage()
             standalone_patterns = [
-                        r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",       # Bearer token (must be 10 characters or more to reduce false-positives)
-                        r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",      # Cashu tokens
-                        r"nsec[a-z0-9]+"                    # Nostr Public / Private Key 
-                    ]
+                r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
+                r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+                r"nsec[a-z0-9]+",  # Nostr Public / Private Key
+            ]
             for pattern in standalone_patterns:
-                message = re.sub(
-                    pattern, f"[REDACTED]", message, flags=re.IGNORECASE
-                )
+                message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
 
             for key in self.SENSITIVE_KEYS:
                 if key in message.lower():
                     key_patterns = [
-                        rf'{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)', # key:value or key=value (including any variant with spaces)
-                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',    # key:"value" or key='value' (including any variant with spaces)
+                        rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
+                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
                     ]
                     for pattern in key_patterns:
                         message = re.sub(
