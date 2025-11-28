@@ -9,3 +9,5 @@ compose.testing.yml
 .github
 .vscode
 .DS_Store
+**/node_modules
+ui/.next

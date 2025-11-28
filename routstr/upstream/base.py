@@ -18,7 +18,7 @@ from ..core.db import ApiKey, AsyncSession, create_session
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
-from ..payment.cost_caculation import (
+from ..payment.cost_calculation import (
     CostData,
     CostDataError,
     MaxCostData,
@@ -135,6 +135,13 @@ class BaseUpstreamProvider:
             for auth_header in ["Authorization", "authorization"]:
                 if headers.pop(auth_header, None) is not None:
                     removed_headers.append(auth_header)
+
+        for header in ["authorization", "accept-encoding"]:
+            if headers.pop(header, None) is not None:
+                removed_headers.append(f"{header} (replaced with routstr-safe version)")
+
+        # Explicitly define the list of supported compression encodings
+        headers["accept-encoding"] = "gzip, deflate, br, identity"
 
         logger.debug(
             "Headers prepared for upstream",
@@ -453,11 +460,12 @@ class BaseUpstreamProvider:
                                                 )
                                                 usage_finalized = True
                                                 logger.info(
-                                                    "Token adjustment completed for streaming",
+                                                    "Payment adjustment completed for streaming",
                                                     extra={
                                                         "key_hash": key.hashed_key[:8]
                                                         + "...",
                                                         "cost_data": cost_data,
+                                                        "model": last_model_seen,
                                                         "balance_after_adjustment": fresh_key.balance,
                                                     },
                                                 )
@@ -504,10 +512,15 @@ class BaseUpstreamProvider:
                 await finalize_without_usage()
                 raise
 
+        # Remove inaccurate encoding headers from upstream response
+        response_headers = dict(response.headers)
+        response_headers.pop("content-encoding", None)
+        response_headers.pop("content-length", None)
+
         return StreamingResponse(
             stream_with_cost(max_cost_for_model),
             status_code=response.status_code,
-            headers=dict(response.headers),
+            headers=response_headers,
         )
 
     async def handle_non_streaming_chat_completion(
@@ -556,7 +569,7 @@ class BaseUpstreamProvider:
             response_json["cost"] = cost_data
 
             logger.info(
-                "Token adjustment completed for non-streaming",
+                "Payment adjustment completed for non-streaming",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
                     "cost_data": cost_data,

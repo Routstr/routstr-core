@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import { adminLogout } from '@/lib/api/services/auth';
 import { toast } from 'sonner';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { CurrencyToggle } from '@/components/currency-toggle';
 
 export function SiteHeader() {
   const router = useRouter();
@@ -35,6 +36,7 @@ export function SiteHeader() {
           <h1 className='text-base font-medium lg:hidden'>Routstr Node</h1>
         </div>
         <div className='flex items-center gap-2'>
+          <CurrencyToggle />
           <ThemeToggle />
           <Button
             variant='ghost'
