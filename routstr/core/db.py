@@ -1,5 +1,6 @@
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import AsyncGenerator
 
 from alembic import command
@@ -18,38 +19,39 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
 
 
-class ApiKey(SQLModel, table=True):  # type: ignore
-    __tablename__ = "api_keys"
+class TemporaryCredit(SQLModel, table=True):  # type: ignore
+    __tablename__ = "temporary_credit"
 
     hashed_key: str = Field(primary_key=True)
-    balance: int = Field(default=0, description="Balance in millisatoshis (msats)")
-    reserved_balance: int = Field(
-        default=0, description="Reserved balance in millisatoshis (msats)"
-    )
+    balance: int = Field(default=0, description="Balance in msats")
+    reserved_balance: int = Field(default=0, description="Blocked balance in msats")
+    created: datetime | None = Field(None, description="Timestamp of creation")
     refund_address: str | None = Field(
-        default=None,
-        description="Lightning address to refund remaining balance after key expires",
+        None, description="Address to refund on expiration"
     )
-    key_expiry_time: int | None = Field(
-        default=None,
-        description="Unix-timestamp after which the cashu-token's balance gets refunded to the refund_address",
-    )
-    total_spent: int = Field(
-        default=0, description="Total spent in millisatoshis (msats)"
-    )
-    total_requests: int = Field(default=0)
     refund_mint_url: str | None = Field(
-        default=None,
-        description="URL of the mint used to create the cashu-token",
+        default=None, description="Mint used to issue the refund token"
     )
-    refund_currency: str | None = Field(
-        default=None,
-        description="Currency of the cashu-token",
+    refund_currency: str | None = Field(None, description="Currency of the cashu-token")
+    refund_expiration_time: int | None = Field(
+        None, description="Refund not allowed after timeout"
     )
 
     @property
-    def total_balance(self) -> int:
+    def total_balance_msat(self) -> int:
         return self.balance - self.reserved_balance
+
+    @property
+    def total_balance_sat(self) -> int:
+        return self.total_balance_msat // 1000
+
+    @property
+    def total_balance(self) -> int:
+        return self.total_balance_msat
+
+    @property
+    def api_key(self) -> str:
+        return "sk-" + self.hashed_key
 
 
 class ModelRow(SQLModel, table=True):  # type: ignore
@@ -95,8 +97,9 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
 async def balances_for_mint_and_unit(
     db_session: AsyncSession, mint_url: str, unit: str
 ) -> int:
-    query = select(func.sum(ApiKey.balance)).where(
-        ApiKey.refund_mint_url == mint_url, ApiKey.refund_currency == unit
+    query = select(func.sum(TemporaryCredit.balance)).where(
+        TemporaryCredit.refund_mint_url == mint_url,
+        TemporaryCredit.refund_currency == unit,
     )
     result = await db_session.exec(query)
     return result.one() or 0

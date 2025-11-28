@@ -8,8 +8,8 @@ import httpx
 import websockets
 from fastapi import APIRouter
 
-from .core.logging import get_logger
-from .core.settings import settings
+from ..core.logging import get_logger
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 

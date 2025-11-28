@@ -9,8 +9,8 @@ from fastapi.responses import Response, StreamingResponse
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
-    from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow
-    from ..payment.models import Model
+    from ..core.db import AsyncSession, TemporaryCredit, UpstreamProviderRow
+    from ..models import Model
 
 from ..core.logging import get_logger
 
@@ -73,7 +73,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         path: str,
         headers: dict,
         request_body: bytes | None,
-        key: ApiKey,
+        key: TemporaryCredit,
         max_cost_for_model: int,
         session: AsyncSession,
         model_obj: Model,
@@ -102,7 +102,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
 
     async def fetch_models(self) -> list[Model]:
         """Fetch models from Ollama API using /api/tags endpoint."""
-        from ..payment.models import Architecture, Model, Pricing, TopProvider
+        from ..models.models import Architecture, Model, Pricing, TopProvider
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -199,7 +199,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
     async def refresh_models_cache(self) -> None:
         """Refresh the in-memory models cache from upstream API."""
         try:
-            from ..payment.models import _update_model_sats_pricing
+            from ..models.models import _update_model_sats_pricing
             from ..payment.price import sats_usd_price
 
             models = await self.fetch_models()
@@ -252,7 +252,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
-        from ..payment.models import Model, Pricing, _calculate_usd_max_costs
+        from ..models.models import Model, Pricing, _calculate_usd_max_costs
 
         adjusted_pricing = Pricing.parse_obj(
             {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
