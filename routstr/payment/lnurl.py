@@ -305,3 +305,12 @@ async def raw_send_to_lnurl(
         quote_id=melt_quote_resp.quote,
     )
     return final_amount
+
+
+async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
+    from .wallet import get_wallet
+
+    wallet = await get_wallet(mint, unit)
+    proofs = wallet._get_proofs_per_keyset(wallet.proofs)[wallet.keyset_id]
+    proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
+    return await raw_send_to_lnurl(wallet, proofs, address, unit)

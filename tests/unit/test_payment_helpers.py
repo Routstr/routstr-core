@@ -7,11 +7,11 @@ os.environ["UPSTREAM_BASE_URL"] = "http://test"
 os.environ["UPSTREAM_API_KEY"] = "test"
 
 from routstr.core.settings import settings  # noqa: E402
-from routstr.payment.helpers import get_max_cost_for_model  # noqa: E402
+from routstr.payment.cost import get_max_cost_for_model  # noqa: E402
 
 
 async def test_get_max_cost_for_model_known() -> None:
-    from routstr.payment.models import Pricing
+    from routstr.models.models import Pricing
 
     # Mock DB session behavior
     mock_session = AsyncMock()
@@ -63,48 +63,32 @@ async def test_get_max_cost_for_model_known() -> None:
 
     with patch.object(settings, "fixed_pricing", False):
         with patch.object(settings, "tolerance_percentage", 0):
-            cost = await get_max_cost_for_model(
-                "gpt-4", session=mock_session, model_obj=mock_model
-            )
+            cost = get_max_cost_for_model(model_obj=mock_model)
             assert cost == 500000  # 500 sats * 1000 = msats
 
 
 async def test_get_max_cost_for_model_unknown() -> None:
-    mock_session = AsyncMock()
+    mock_model = Mock()
+    mock_model.sats_pricing = None
+    mock_model.id = "unknown-model"
 
-    # Mock the exec results to return no model override
-    async def async_mock_exec(query: Any) -> Any:
-        result = Mock()
-        result.first = Mock(return_value=None)
-        result.all = Mock(return_value=[])
-        return result
-
-    mock_session.exec = AsyncMock(side_effect=async_mock_exec)
-    mock_session.get = AsyncMock(return_value=None)
-
-    # Mock get_upstreams to return empty list
-    with patch("routstr.proxy.get_upstreams", return_value=[]):
-        with patch.object(settings, "fixed_cost_per_request", 100):
-            with patch.object(settings, "tolerance_percentage", 0):
-                cost = await get_max_cost_for_model(
-                    "unknown-model", session=mock_session, model_obj=None
-                )
-                assert cost == 100000
+    with patch.object(settings, "fixed_cost_per_request", 100):
+        with patch.object(settings, "tolerance_percentage", 0):
+            cost = get_max_cost_for_model(model_obj=mock_model)
+            assert cost == 100000
 
 
 async def test_get_max_cost_for_model_disabled() -> None:
-    mock_session = AsyncMock()
+    mock_model = Mock()
     with patch.object(settings, "fixed_pricing", True):
         with patch.object(settings, "fixed_cost_per_request", 200):
             with patch.object(settings, "tolerance_percentage", 0):
-                cost = await get_max_cost_for_model("any-model", session=mock_session)
+                cost = get_max_cost_for_model(model_obj=mock_model)
                 assert cost == 200000
 
 
 async def test_get_max_cost_for_model_tolerance() -> None:
-    from routstr.payment.models import Pricing
-
-    mock_session = AsyncMock()
+    from routstr.models.models import Pricing
 
     # Mock the model with sats_pricing
     mock_pricing = Pricing(
@@ -121,7 +105,5 @@ async def test_get_max_cost_for_model_tolerance() -> None:
 
     with patch.object(settings, "fixed_pricing", False):
         with patch.object(settings, "tolerance_percentage", 10):
-            cost = await get_max_cost_for_model(
-                "gpt-4", session=mock_session, model_obj=mock_model
-            )
+            cost = get_max_cost_for_model(model_obj=mock_model)
             assert cost == 450000  # 500 sats * 1000 * 0.9 = 450000

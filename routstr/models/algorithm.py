@@ -2,11 +2,13 @@
 
 from typing import TYPE_CHECKING
 
-from .core.logging import get_logger
+from ..core import get_logger
+from ..models.crud import _row_to_model
+from ..upstream.helpers import resolve_model_alias
 
 if TYPE_CHECKING:
-    from .payment.models import Model
-    from .upstream import BaseUpstreamProvider
+    from ..upstream import BaseUpstreamProvider
+    from .models import Model
 
 logger = get_logger(__name__)
 
@@ -153,9 +155,9 @@ def should_prefer_model(
     # Log provider changes when candidate wins
     if should_replace:
         candidate_provider_name = getattr(
-            candidate_provider, "provider_type", "unknown"
+            candidate_provider, "upstream_name", "unknown"
         )
-        current_provider_name = getattr(current_provider, "provider_type", "unknown")
+        current_provider_name = getattr(current_provider, "upstream_name", "unknown")
         logger.debug(
             f"Model selection for alias '{alias}': choosing {candidate_provider_name} "
             f"(cost: ${candidate_adjusted:.6f}) over {current_provider_name} "
@@ -192,8 +194,6 @@ def create_model_mappings(
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
     """
-    from .payment.models import _row_to_model
-    from .upstream.helpers import resolve_model_alias
 
     model_instances: dict[str, "Model"] = {}
     provider_map: dict[str, "BaseUpstreamProvider"] = {}

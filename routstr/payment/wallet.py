@@ -7,9 +7,9 @@ from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
 from sqlmodel import col, update
 
-from .core import db, get_logger
-from .core.settings import settings
-from .payment.lnurl import raw_send_to_lnurl
+from ..core import db, get_logger
+from ..core.settings import settings
+from ..payment.lnurl import raw_send_to_lnurl
 
 logger = get_logger(__name__)
 
@@ -19,9 +19,7 @@ async def get_balance(unit: str) -> int:
     return wallet.available_balance.amount
 
 
-async def recieve_token(
-    token: str,
-) -> tuple[int, str, str]:  # amount, unit, mint_url
+async def recieve_token(token: str) -> tuple[int, str, str]:  # amount, unit, mint_url
     token_obj = deserialize_token_from_string(token)
     if len(token_obj.keysets) > 1:
         raise ValueError("Multiple keysets per token currently not supported")
@@ -104,7 +102,7 @@ async def swap_to_primary_mint(
 
 
 async def credit_balance(
-    cashu_token: str, key: db.ApiKey, session: db.AsyncSession
+    cashu_token: str, credit: db.TemporaryCredit, session: db.AsyncSession
 ) -> int:
     logger.info(
         "credit_balance: Starting token redemption",
@@ -126,22 +124,22 @@ async def credit_balance(
 
         logger.info(
             "credit_balance: Updating balance",
-            extra={"old_balance": key.balance, "credit_amount": amount},
+            extra={"old_balance": credit.balance, "credit_amount": amount},
         )
 
         # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
         stmt = (
-            update(db.ApiKey)
-            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-            .values(balance=(db.ApiKey.balance) + amount)
+            update(db.TemporaryCredit)
+            .where(col(db.TemporaryCredit.hashed_key) == credit.hashed_key)
+            .values(balance=(db.TemporaryCredit.balance) + amount)
         )
         await session.exec(stmt)  # type: ignore[call-overload]
         await session.commit()
-        await session.refresh(key)
+        await session.refresh(credit)
 
         logger.info(
             "credit_balance: Balance updated successfully",
-            extra={"new_balance": key.balance},
+            extra={"new_balance": credit.balance},
         )
 
         logger.info(
@@ -351,34 +349,3 @@ async def periodic_payout() -> None:
                 f"Error sending payout: {type(e).__name__}",
                 extra={"error": str(e)},
             )
-
-
-async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
-    wallet = await get_wallet(mint, unit)
-    proofs = wallet._get_proofs_per_keyset(wallet.proofs)[wallet.keyset_id]
-    proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
-    return await raw_send_to_lnurl(wallet, proofs, address, unit)
-
-
-# class Payment:
-#     """
-#     Stores all cashu payment related data
-#     """
-
-#     def __init__(self, token: str) -> None:
-#         self.initial_token = token
-#         amount, unit, mint_url = self.parse_token(token)
-#         self.amount = amount
-#         self.unit = unit
-#         self.mint_url = mint_url
-
-#         self.claimed_proofs = redeem_to_proofs(token)
-
-#     def parse_token(self, token: str) -> tuple[int, CurrencyUnit, str]:
-#         raise NotImplementedError
-
-#     def refund_full(self) -> None:
-#         raise NotImplementedError
-
-#     def refund_partial(self, amount: int) -> None:
-#         raise NotImplementedError

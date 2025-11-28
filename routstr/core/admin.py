@@ -8,16 +8,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from ..payment.models import _row_to_model, list_models
-from ..proxy import refresh_model_maps, reinitialize_upstreams
-from ..wallet import (
+from ..models.crud import _row_to_model, list_models
+from ..payment.wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
     get_wallet,
     send_token,
     slow_filter_spend_proofs,
 )
-from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
+from ..proxy import refresh_model_maps, reinitialize_upstreams
+from .db import ModelRow, TemporaryCredit, UpstreamProviderRow, create_session
 from .log_manager import log_manager
 from .logging import get_logger
 from .settings import SettingsService, settings
@@ -107,13 +107,13 @@ async def partial_balances(request: Request) -> str:
 
 
 @admin_router.get(
-    "/partials/apikeys",
+    "/partials/TemporaryCredits",
     dependencies=[Depends(require_admin_api)],
     response_class=HTMLResponse,
 )
-async def partial_apikeys(request: Request) -> str:
+async def partial_TemporaryCredits(request: Request) -> str:
     async with create_session() as session:
-        result = await session.exec(select(ApiKey))
+        result = await session.exec(select(TemporaryCredit))
         api_keys = result.all()
 
     def fmt_time(ts: int | None) -> str:
@@ -124,7 +124,7 @@ async def partial_apikeys(request: Request) -> str:
 
     rows = "".join(
         [
-            f"<tr><td>{key.hashed_key}</td><td>{key.balance}</td><td>{key.total_spent}</td><td>{key.total_requests}</td><td>{key.refund_address}</td><td>{fmt_time(key.key_expiry_time)}</td></tr>"
+            f"<tr><td>{key.hashed_key}</td><td>{key.balance}</td><td>{key.refund_address}</td><td>{key.refund_mint_url}</td><td>{key.refund_currency}</td><td>{fmt_time(key.refund_expiration_time)}</td></tr>"
             for key in api_keys
         ]
     )
@@ -134,9 +134,9 @@ async def partial_apikeys(request: Request) -> str:
             <tr>
                 <th>Hashed Key</th>
                 <th>Balance (mSats)</th>
-                <th>Total Spent (mSats)</th>
-                <th>Total Requests</th>
                 <th>Refund Address</th>
+                <th>Refund Mint</th>
+                <th>Currency</th>
                 <th>Refund Time</th>
             </tr>
             {rows}
@@ -147,17 +147,17 @@ async def partial_apikeys(request: Request) -> str:
 @admin_router.get("/api/temporary-balances", dependencies=[Depends(require_admin_api)])
 async def get_temporary_balances_api(request: Request) -> list[dict[str, object]]:
     async with create_session() as session:
-        result = await session.exec(select(ApiKey))
+        result = await session.exec(select(TemporaryCredit))
         api_keys = result.all()
 
     return [
         {
             "hashed_key": key.hashed_key,
             "balance": key.balance,
-            "total_spent": key.total_spent,
-            "total_requests": key.total_requests,
             "refund_address": key.refund_address,
-            "key_expiry_time": key.key_expiry_time,
+            "refund_mint_url": key.refund_mint_url,
+            "refund_currency": key.refund_currency,
+            "refund_expiration_time": key.refund_expiration_time,
         }
         for key in api_keys
     ]
@@ -777,8 +777,8 @@ async def dashboard(request: Request) -> str:
                 <p><em>Save this token! It represents your withdrawn balance.</em></p>
             </div>
 
-            <div id="apikeys-table"
-                 hx-get="/admin/partials/apikeys"
+            <div id="TemporaryCredits-table"
+                 hx-get="/admin/partials/TemporaryCredits"
                  hx-trigger="load"
                  hx-swap="outerHTML">
                 <h2>Temporary Balances</h2>
@@ -1763,9 +1763,9 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
             provider_fee: feeValue ? parseFloat(feeValue) : defaultFee,
         };
 
-        const apiKey = document.getElementById('provider-api-key').value;
-        if (apiKey) {
-            payload.api_key = apiKey;
+        const TemporaryCredit = document.getElementById('provider-api-key').value;
+        if (TemporaryCredit) {
+            payload.api_key = TemporaryCredit;
         }
 
         const saveBtn = document.getElementById('provider-save-btn');
@@ -1783,7 +1783,7 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
                     body: JSON.stringify(payload)
                 });
             } else {
-                if (!apiKey) {
+                if (!TemporaryCredit) {
                     throw new Error('API Key is required for new providers');
                 }
                 resp = await fetch('/admin/api/upstream-providers', {
@@ -2525,7 +2525,7 @@ async def update_provider_model(
         await session.refresh(row)
 
     if was_disabled and payload.enabled:
-        from ..payment.models import _cleanup_enabled_models_once
+        from ..models.models import _cleanup_enabled_models_once
 
         try:
             await _cleanup_enabled_models_once()
@@ -2796,7 +2796,7 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
     dependencies=[Depends(require_admin_api)],
 )
 async def get_openrouter_presets() -> list[dict[str, object]]:
-    from ..payment.models import async_fetch_openrouter_models
+    from ..models import async_fetch_openrouter_models
 
     models_data = await async_fetch_openrouter_models()
     return models_data

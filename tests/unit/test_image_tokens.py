@@ -4,10 +4,10 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from routstr.payment.helpers import (
+from routstr.payment.cost import (
     _calculate_image_tokens,
+    _estimate_image_tokens_in_messages,
     _get_image_dimensions,
-    estimate_image_tokens_in_messages,
 )
 
 
@@ -81,7 +81,7 @@ async def test_estimate_image_tokens_base64() -> None:
         }
     ]
 
-    tokens = await estimate_image_tokens_in_messages(messages)
+    tokens = await _estimate_image_tokens_in_messages(messages)
     assert tokens > 0
 
 
@@ -108,7 +108,7 @@ async def test_estimate_image_tokens_multiple_images() -> None:
         }
     ]
 
-    tokens = await estimate_image_tokens_in_messages(messages)
+    tokens = await _estimate_image_tokens_in_messages(messages)
     assert tokens > 0
 
 
@@ -148,8 +148,8 @@ async def test_estimate_image_tokens_with_detail() -> None:
         }
     ]
 
-    tokens_low = await estimate_image_tokens_in_messages(messages_low)
-    tokens_high = await estimate_image_tokens_in_messages(messages_high)
+    tokens_low = await _estimate_image_tokens_in_messages(messages_low)
+    tokens_high = await _estimate_image_tokens_in_messages(messages_high)
 
     assert tokens_low == 85
     assert tokens_high > tokens_low
@@ -163,7 +163,7 @@ async def test_estimate_image_tokens_no_images() -> None:
         {"role": "assistant", "content": "I'm doing well, thank you!"},
     ]
 
-    tokens = await estimate_image_tokens_in_messages(messages)
+    tokens = await _estimate_image_tokens_in_messages(messages)
     assert tokens == 0
 
 
@@ -185,5 +185,5 @@ async def test_estimate_image_tokens_input_image_type() -> None:
         }
     ]
 
-    tokens = await estimate_image_tokens_in_messages(messages)
+    tokens = await _estimate_image_tokens_in_messages(messages)
     assert tokens > 0

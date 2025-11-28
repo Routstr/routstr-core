@@ -44,9 +44,9 @@ def check_imports() -> bool:
         print("Conftest fixtures imported successfully")
 
         # Check routstr modules - imports are for verification only
-        from routstr.core.db import ApiKey
+        from routstr.core.db import TemporaryCredit
 
-        del ApiKey
+        del TemporaryCredit
 
         print("Router modules imported successfully")
 

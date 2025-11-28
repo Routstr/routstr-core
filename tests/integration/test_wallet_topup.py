@@ -11,7 +11,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 from .utils import (
     CashuTokenGenerator,
@@ -64,7 +64,7 @@ async def test_topup_with_valid_token(  # type: ignore[no-untyped-def]
     # Get the hashed key from the API key
     hashed_key = api_key[3:]  # Remove "sk-" prefix
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     db_key = result.scalar_one()
 

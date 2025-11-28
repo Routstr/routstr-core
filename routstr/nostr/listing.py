@@ -18,15 +18,15 @@ from nostr.key import PrivateKey
 from nostr.message_type import ClientMessageType
 from nostr.relay_manager import RelayManager
 
-from .core import get_logger
-from .core.settings import settings
+from ..core import get_logger
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 
 
 def get_app_version() -> str | None:
     try:
-        from .core.main import __version__ as imported_version
+        from ..core.main import __version__ as imported_version
 
         return imported_version
     except Exception:

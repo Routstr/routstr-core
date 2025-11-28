@@ -861,10 +861,10 @@ export class AdminService {
 export const TemporaryBalanceSchema = z.object({
   hashed_key: z.string(),
   balance: z.number(),
-  total_spent: z.number(),
-  total_requests: z.number(),
   refund_address: z.string().nullable(),
-  key_expiry_time: z.number().nullable(),
+  refund_mint_url: z.string().nullable(),
+  refund_currency: z.string().nullable(),
+  refund_expiration_time: z.number().nullable(),
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;

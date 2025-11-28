@@ -11,28 +11,23 @@ import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
-from ..core.db import ApiKey, AsyncSession, create_session
+from ..core.db import AsyncSession, TemporaryCredit, create_session
+from ..payment.helpers import adjust_payment_for_tokens
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
-from ..payment.cost_calculation import (
-    CostData,
-    CostDataError,
-    MaxCostData,
-    calculate_cost,
-)
-from ..payment.helpers import create_error_response
-from ..payment.models import (
+from ..models.models import (
     Model,
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
 )
+from ..payment.cost import CostData, CostDataError, MaxCostData, calculate_cost
+from ..payment.helpers import create_error_response
 from ..payment.price import sats_usd_price
-from ..wallet import recieve_token, send_token
+from ..payment.wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
 
@@ -337,7 +332,7 @@ class BaseUpstreamProvider:
         )
 
     async def handle_streaming_chat_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
+        self, response: httpx.Response, key: TemporaryCredit, max_cost_for_model: int
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -526,7 +521,7 @@ class BaseUpstreamProvider:
     async def handle_non_streaming_chat_completion(
         self,
         response: httpx.Response,
-        key: ApiKey,
+        key: TemporaryCredit,
         session: AsyncSession,
         deducted_max_cost: int,
     ) -> Response:
@@ -632,7 +627,7 @@ class BaseUpstreamProvider:
         path: str,
         headers: dict,
         request_body: bytes | None,
-        key: ApiKey,
+        key: TemporaryCredit,
         max_cost_for_model: int,
         session: AsyncSession,
         model_obj: Model,

@@ -5,24 +5,20 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
 
-from .algorithm import create_model_mappings
-from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
+from .auth import get_credit
 from .core import get_logger
 from .core.db import (
-    ApiKey,
     AsyncSession,
     ModelRow,
     UpstreamProviderRow,
     create_session,
     get_session,
 )
-from .payment.helpers import (
-    calculate_discounted_max_cost,
-    check_token_balance,
-    create_error_response,
-    get_max_cost_for_model,
-)
-from .payment.models import Model
+from .models.algorithm import create_model_mappings
+from .models.models import Model
+from .payment.cashu import check_token_balance
+from .payment.cost import calculate_discounted_max_cost, get_max_cost_for_model
+from .payment.helpers import pay_for_request, revert_pay_for_request
 from .upstream import BaseUpstreamProvider
 from .upstream.helpers import init_upstreams
 
@@ -130,18 +126,21 @@ async def refresh_model_maps_periodically() -> None:
             )
 
 
-@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
-async def proxy(
-    request: Request, path: str, session: AsyncSession = Depends(get_session)
-) -> Response | StreamingResponse:
+async def parse_request(request: Request) -> tuple[dict, dict, bytes]:
     headers = dict(request.headers)
+    body_bytes = await request.body()
+    body_dict = parse_request_body_json(body_bytes)
+    return headers, body_dict, body_bytes
 
+
+def ensure_authorization(headers: dict) -> None:
     if "x-cashu" not in headers and "authorization" not in headers.keys():
-        return create_error_response(
-            "unauthorized", "Unauthorized", 401, request=request
-        )
+        # return create_error_response("unauthorized", "Unauthorized", 401, request=request)
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-    logger.info(  # TODO: move to middleware, async
+
+def log_request(request: Request, path: str) -> None:
+    logger.info(
         "Received proxy request",
         extra={
             "method": request.method,
@@ -151,58 +150,49 @@ async def proxy(
         },
     )
 
-    request_body = await request.body()
-    request_body_dict = parse_request_body_json(request_body, path)
 
-    model_id = request_body_dict.get("model", "unknown")
+def get_model_and_upstream(request_body: dict) -> tuple[Model, BaseUpstreamProvider]:
+    model_id = request_body.get("model", "unknown")
 
-    model_obj = get_model_instance(model_id)
-    if not model_obj:
-        return create_error_response(
-            "invalid_model", f"Model '{model_id}' not found", 400, request=request
-        )
+    if not (model := get_model_instance(model_id)):
+        raise HTTPException(status_code=400, detail=f"Model '{model_id}' not found")
 
-    upstream = get_provider_for_model(model_id)
-    if not upstream:
-        return create_error_response(
-            "invalid_model",
-            f"No provider found for model '{model_id}'",
-            400,
-            request=request,
-        )
+    if not (upstream := get_provider_for_model(model_id)):
+        raise HTTPException(status_code=400, detail=f"No provider with '{model_id}'")
 
-    _max_cost_for_model = await get_max_cost_for_model(
-        model=model_id, session=session, model_obj=model_obj
-    )
+    return model, upstream
+
+
+@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
+async def proxy(
+    request: Request,
+    path: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response | StreamingResponse:
+    headers, body_dict, body_bytes = await parse_request(request)
+
+    ensure_authorization(headers)
+
+    log_request(request, path)
+
+    model, upstream = get_model_and_upstream(body_dict)
+
+    _max_cost_for_model = get_max_cost_for_model(model_obj=model)
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj
+        _max_cost_for_model, body_dict, model_obj=model
     )
-    check_token_balance(headers, request_body_dict, max_cost_for_model)
+    check_token_balance(headers, body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
         return await upstream.handle_x_cashu(
-            request, x_cashu, path, max_cost_for_model, model_obj
+            request, x_cashu, path, max_cost_for_model, model
         )
 
     elif auth := headers.get("authorization", None):
-        key = await get_bearer_token_key(headers, path, session, auth)
-
-    else:
-        if request.method not in ["GET"]:
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {"type": "invalid_request_error", "code": "unauthorized"}
-                },
-            )
-
-        logger.debug("Processing unauthenticated GET request", extra={"path": path})
-        # TODO: why is this needed? can we remove it?
-        headers = upstream.prepare_headers(dict(request.headers))
-        return await upstream.forward_get_request(request, path, headers)
+        key = await get_credit(auth, session)
 
     # Only pay for request if we have request body data (for completions endpoints)
-    if request_body_dict:
+    if body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
     # Prepare headers for upstream
@@ -213,11 +203,11 @@ async def proxy(
         request,
         path,
         headers,
-        request_body,
+        body_bytes,
         key,
         max_cost_for_model,
         session,
-        model_obj,
+        model,
     )
 
     if response.status_code != 200:
@@ -241,87 +231,7 @@ async def proxy(
     return response
 
 
-async def get_bearer_token_key(
-    headers: dict, path: str, session: AsyncSession, auth: str
-) -> ApiKey:
-    """Handle bearer token authentication proxy requests."""
-    bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
-    refund_address = headers.get("Refund-LNURL", None)
-    key_expiry_time = headers.get("Key-Expiry-Time", None)
-
-    logger.debug(
-        "Processing bearer token",
-        extra={
-            "path": path,
-            "has_refund_address": bool(refund_address),
-            "has_expiry_time": bool(key_expiry_time),
-            "bearer_key_preview": bearer_key[:20] + "..."
-            if len(bearer_key) > 20
-            else bearer_key,
-        },
-    )
-
-    # Validate key_expiry_time header
-    if key_expiry_time:
-        try:
-            key_expiry_time = int(key_expiry_time)  # type: ignore
-            logger.debug(
-                "Key expiry time validated",
-                extra={"expiry_time": key_expiry_time, "path": path},
-            )
-        except ValueError:
-            logger.error(
-                "Invalid Key-Expiry-Time header",
-                extra={"key_expiry_time": key_expiry_time, "path": path},
-            )
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid Key-Expiry-Time: must be a valid Unix timestamp",
-            )
-        if not refund_address:
-            logger.error(
-                "Missing Refund-LNURL header with Key-Expiry-Time",
-                extra={"path": path, "expiry_time": key_expiry_time},
-            )
-            raise HTTPException(
-                status_code=400,
-                detail="Error: Refund-LNURL header required when using Key-Expiry-Time",
-            )
-    else:
-        key_expiry_time = None
-
-    try:
-        key = await validate_bearer_key(
-            bearer_key,
-            session,
-            refund_address,
-            key_expiry_time,  # type: ignore
-        )
-        logger.info(
-            "Bearer token validated successfully",
-            extra={
-                "path": path,
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-            },
-        )
-        return key
-    except Exception as e:
-        logger.error(
-            "Bearer token validation failed",
-            extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "path": path,
-                "bearer_key_preview": bearer_key[:20] + "..."
-                if len(bearer_key) > 20
-                else bearer_key,
-            },
-        )
-        raise
-
-
-def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
+def parse_request_body_json(request_body: bytes) -> dict[str, Any]:
     request_body_dict = {}
     if request_body:
         try:
@@ -341,7 +251,6 @@ def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
             logger.debug(
                 "Request body parsed",
                 extra={
-                    "path": path,
                     "body_keys": list(request_body_dict.keys()),
                     "model": request_body_dict.get("model", "not_specified"),
                 },
@@ -351,7 +260,6 @@ def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:
                 "Invalid JSON in request body",
                 extra={
                     "error": str(e),
-                    "path": path,
                     "body_preview": request_body[:200].decode(errors="ignore")
                     if request_body
                     else "empty",

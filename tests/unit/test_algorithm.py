@@ -7,12 +7,12 @@ from unittest.mock import Mock
 os.environ["UPSTREAM_BASE_URL"] = "http://test"
 os.environ["UPSTREAM_API_KEY"] = "test"
 
-from routstr.algorithm import (  # noqa: E402
+from routstr.models.algorithm import (  # noqa: E402
     calculate_model_cost_score,
     get_provider_penalty,
     should_prefer_model,
 )
-from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
+from routstr.models.models import Architecture, Model, Pricing  # noqa: E402
 
 
 def create_test_model(

@@ -7,7 +7,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.db import ApiKey, create_session
+from routstr.core.db import TemporaryCredit, create_session
 
 
 @pytest.mark.asyncio
@@ -16,7 +16,7 @@ async def test_reserved_balance_never_negative(integration_client: AsyncClient) 
 
     # Create a test API key with limited balance
     async with create_session() as session:
-        test_key = ApiKey(
+        test_key = TemporaryCredit(
             hashed_key="test_reserved_balance_key",
             balance=1000,  # 1 sat
             reserved_balance=0,
@@ -40,7 +40,7 @@ async def test_reserved_balance_never_negative(integration_client: AsyncClient) 
 
     # Check reserved balance after failed request
     async with create_session() as session:
-        key = await session.get(ApiKey, "test_reserved_balance_key")
+        key = await session.get(TemporaryCredit, "test_reserved_balance_key")
         assert key is not None
         assert key.reserved_balance >= 0, (
             f"Reserved balance went negative: {key.reserved_balance}"
@@ -69,7 +69,7 @@ async def test_reserved_balance_never_negative(integration_client: AsyncClient) 
 
     # Check final state
     async with create_session() as session:
-        key = await session.get(ApiKey, "test_reserved_balance_key")
+        key = await session.get(TemporaryCredit, "test_reserved_balance_key")
         assert key is not None
         assert key.reserved_balance >= 0, (
             f"Reserved balance went negative after concurrent requests: {key.reserved_balance}"
@@ -86,7 +86,7 @@ async def test_reserved_balance_with_successful_requests(
     # Create a test API key with more balance
     async with create_session() as session:
         unique_key = f"test_successful_key_{uuid.uuid4().hex[:8]}"
-        test_key = ApiKey(
+        test_key = TemporaryCredit(
             hashed_key=unique_key,
             balance=100000,  # 100 sats
             reserved_balance=0,
@@ -111,24 +111,23 @@ async def test_reserved_balance_with_successful_requests(
 
     # Check that reserved balance was properly adjusted
     async with create_session() as session:
-        key = await session.get(ApiKey, unique_key)
+        key = await session.get(TemporaryCredit, unique_key)
         assert key is not None
         assert key.reserved_balance >= 0, (
             f"Reserved balance went negative: {key.reserved_balance}"
         )
         # Check if the request was processed (might fail due to model pricing in test env)
         # The important part is that reserved_balance doesn't go negative
-        if key.total_spent > 0:
-            assert key.balance < 100000, (
-                "Balance should decrease after successful request"
-            )
+        if key.balance < 100000:
+            # Balance decreased
+            pass
         else:
             # Request failed, but reserved balance should still be non-negative
             assert key.balance == 100000, (
                 "Balance should remain unchanged if request failed"
             )
         print(
-            f"After successful request - Balance: {key.balance}, Reserved: {key.reserved_balance}, Spent: {key.total_spent}"
+            f"After successful request - Balance: {key.balance}, Reserved: {key.reserved_balance}"
         )
 
 
@@ -137,11 +136,11 @@ async def test_insufficient_reserved_balance_for_revert(
     integration_session: AsyncSession,
 ) -> None:
     """Test revert_pay_for_request behavior with insufficient reserved balance."""
-    from routstr.auth import revert_pay_for_request
+    from routstr.payment.helpers import revert_pay_for_request
 
     # Create key with zero reserved balance
     unique_key = f"test_revert_key_{uuid.uuid4().hex[:8]}"
-    test_key = ApiKey(
+    test_key = TemporaryCredit(
         hashed_key=unique_key,
         balance=1000,
         reserved_balance=0,
@@ -159,7 +158,4 @@ async def test_insufficient_reserved_balance_for_revert(
     # Current implementation allows negative reserved balance
     assert test_key.reserved_balance == -100, (
         f"Expected reserved_balance to be -100, got: {test_key.reserved_balance}"
-    )
-    assert test_key.total_requests == -1, (
-        f"Expected total_requests to be -1, got: {test_key.total_requests}"
     )

@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 
 class TestTransactionAtomicity:
@@ -34,7 +34,7 @@ class TestTransactionAtomicity:
             api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
         )
 
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         initial_balance = api_key.balance
@@ -47,7 +47,9 @@ class TestTransactionAtomicity:
             try:
                 # Get api key in new session
                 result = await test_session.execute(
-                    select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+                    select(TemporaryCredit).where(
+                        TemporaryCredit.hashed_key == api_key_hash
+                    )  # type: ignore[arg-type]
                 )
                 test_api_key = result.scalar_one()
 
@@ -72,14 +74,14 @@ class TestTransactionAtomicity:
 
         try:
             await integration_session.execute(
-                update(ApiKey)
-                .where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
-                .values(balance=ApiKey.balance - 1000)
+                update(TemporaryCredit)
+                .where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
+                .values(balance=TemporaryCredit.balance - 1000)
             )
             # Force a constraint violation or error
             await integration_session.execute(
-                update(ApiKey)
-                .where(ApiKey.hashed_key == "non_existent_key")  # type: ignore[arg-type]
+                update(TemporaryCredit)
+                .where(TemporaryCredit.hashed_key == "non_existent_key")  # type: ignore[arg-type]
                 .values(balance=-1)  # This should fail
             )
             await integration_session.commit()
@@ -108,13 +110,13 @@ class TestTransactionAtomicity:
             api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
         )
 
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         initial_balance = api_key.balance
 
         # Mock wallet to fail after token validation
-        with patch("routstr.wallet.send_token") as mock_wallet_func:
+        with patch("routstr.payment.wallet.send_token") as mock_wallet_func:
             mock_proof = MagicMock()
             mock_proof.amount = 1000
             mock_wallet = AsyncMock()
@@ -158,7 +160,7 @@ class TestTransactionAtomicity:
         )
 
         # Set a known balance
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         api_key.balance = 10000
@@ -166,12 +168,12 @@ class TestTransactionAtomicity:
 
         # Simulate concurrent balance updates through direct database operations
         async def update_balance(session: AsyncSession, amount: int) -> bool:
-            stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+            stmt = select(TemporaryCredit).where(
+                TemporaryCredit.hashed_key == api_key_hash
+            )  # type: ignore[arg-type]
             result = await session.execute(stmt)
             key = result.scalar_one()
             key.balance -= amount
-            key.total_spent += amount
-            key.total_requests += 1
             try:
                 await session.commit()
                 return True
@@ -248,7 +250,7 @@ class TestConcurrentOperations:
         )
 
         # Set initial balance
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         initial_balance = 5000
@@ -256,7 +258,7 @@ class TestConcurrentOperations:
         await integration_session.commit()
 
         # Mock wallet for topup
-        with patch("routstr.wallet.send_token") as mock_wallet_func:
+        with patch("routstr.payment.wallet.send_token") as mock_wallet_func:
             mock_proof = MagicMock()
             mock_proof.amount = 2000
             mock_wallet = AsyncMock()
@@ -323,12 +325,10 @@ class TestConcurrentOperations:
         )
 
         # Set a specific balance
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         api_key.balance = 1000
-        api_key.total_spent = 0
-        api_key.total_requests = 0
         await integration_session.commit()
 
         # Create a controlled race condition scenario
@@ -336,7 +336,9 @@ class TestConcurrentOperations:
 
         async def check_and_update_balance() -> bool:
             # Read current balance
-            stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+            stmt = select(TemporaryCredit).where(
+                TemporaryCredit.hashed_key == api_key_hash
+            )  # type: ignore[arg-type]
             result = await integration_session.execute(stmt)
             current_api_key = result.scalar_one()
             current_balance = current_api_key.balance
@@ -347,8 +349,6 @@ class TestConcurrentOperations:
 
             # Try to update based on read value
             current_api_key.balance = current_balance - 100
-            current_api_key.total_spent += 100
-            current_api_key.total_requests += 1
 
             try:
                 await integration_session.commit()
@@ -371,8 +371,6 @@ class TestConcurrentOperations:
         # Final balance should reflect successful updates
         expected_balance = 1000 - (successful_updates * 100)
         assert api_key.balance == expected_balance
-        assert api_key.total_spent == successful_updates * 100
-        assert api_key.total_requests == successful_updates
 
 
 class TestDataIntegrity:
@@ -396,7 +394,7 @@ class TestDataIntegrity:
         )
 
         # Set low balance
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         api_key.balance = 0
@@ -431,9 +429,7 @@ class TestDataIntegrity:
         )
 
         # Try to manually insert duplicate key with same hash
-        duplicate_key = ApiKey(
-            hashed_key=api_key_hash, balance=5000, total_spent=0, total_requests=0
-        )
+        duplicate_key = TemporaryCredit(hashed_key=api_key_hash, balance=5000)
 
         integration_session.add(duplicate_key)
 
@@ -481,20 +477,13 @@ class TestDataIntegrity:
             api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
         )
 
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
 
         # Test setting invalid values directly
         # These should maintain integrity
         assert api_key.balance >= 0
-        assert api_key.total_spent >= 0
-        assert api_key.total_requests >= 0
-
-        # Verify calculations are consistent
-        if api_key.total_requests > 0:
-            average_cost = api_key.total_spent / api_key.total_requests
-            assert average_cost >= 0
 
 
 class TestPerformance:
@@ -522,7 +511,7 @@ class TestPerformance:
             operation_times["select"].append((end - start) * 1000)  # Convert to ms
 
         # Test UPDATE performance (via topup)
-        with patch("routstr.wallet.send_token") as mock_wallet_func:
+        with patch("routstr.payment.wallet.send_token") as mock_wallet_func:
             mock_proof = MagicMock()
             mock_proof.amount = 100
             mock_wallet = AsyncMock()
@@ -607,7 +596,7 @@ class TestPerformance:
 
         # Primary key lookup should be fast
         start = time.time()
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         end = time.time()

@@ -6,11 +6,12 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from .auth import validate_bearer_key
-from .core.db import ApiKey, AsyncSession, get_session
+from .auth import get_credit
+from .core.db import AsyncSession, TemporaryCredit, get_session
 from .core.logging import get_logger
 from .core.settings import settings
-from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
+from .payment.lnurl import send_to_lnurl
+from .payment.wallet import credit_balance, recieve_token, send_token
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -18,26 +19,15 @@ balance_router = APIRouter(prefix="/v1/balance")
 logger = get_logger(__name__)
 
 
-async def get_key_from_header(
-    authorization: Annotated[str, Header(...)],
-    session: AsyncSession = Depends(get_session),
-) -> ApiKey:
-    if authorization.startswith("Bearer "):
-        return await validate_bearer_key(authorization[7:], session)
-
-    raise HTTPException(
-        status_code=401,
-        detail="Invalid authorization. Use 'Bearer <cashu-token>' or 'Bearer <api-key>'",
-    )
-
-
 # TODO: remove this endpoint when frontend is updated
 @router.get("/", include_in_schema=False)
-async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
+async def account_info(
+    credit: TemporaryCredit = Depends(get_credit),
+) -> dict:
     return {
-        "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-        "reserved": key.reserved_balance,
+        "api_key": credit.api_key,
+        "balance": credit.balance,
+        "reserved": credit.reserved_balance,
     }
 
 
@@ -57,19 +47,18 @@ async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
 async def create_balance(
     initial_balance_token: str, session: AsyncSession = Depends(get_session)
 ) -> dict:
-    key = await validate_bearer_key(initial_balance_token, session)
-    return {
-        "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-    }
+    credit = await get_credit(initial_balance_token, session)
+    return {"api_key": credit.api_key, "balance": credit.balance}
 
 
 @router.get("/info")
-async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
+async def wallet_info(
+    credit: TemporaryCredit = Depends(get_credit),
+) -> dict:
     return {
-        "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-        "reserved": key.reserved_balance,
+        "api_key": credit.api_key,
+        "balance": credit.balance,
+        "reserved": credit.reserved_balance,
     }
 
 
@@ -81,7 +70,7 @@ class TopupRequest(BaseModel):
 async def topup_wallet_endpoint(
     cashu_token: str | None = None,
     topup_request: TopupRequest | None = None,
-    key: ApiKey = Depends(get_key_from_header),
+    credit: TemporaryCredit = Depends(get_credit),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
     if topup_request is not None:
@@ -93,7 +82,7 @@ async def topup_wallet_endpoint(
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        amount_msats = await credit_balance(cashu_token, credit, session)
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
@@ -152,7 +141,7 @@ async def refund_wallet_endpoint(
     if cached := await _refund_cache_get(bearer_value):
         return cached
 
-    key: ApiKey = await validate_bearer_key(bearer_value, session)
+    key: TemporaryCredit = await get_credit(bearer_value, session)
     remaining_balance_msats: int = key.balance
 
     if key.refund_currency == "sat":

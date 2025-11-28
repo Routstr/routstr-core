@@ -4,8 +4,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from routstr.core.db import ApiKey
-from routstr.wallet import credit_balance, get_balance, recieve_token, send_token
+from routstr.core.db import TemporaryCredit
+from routstr.payment.wallet import (
+    credit_balance,
+    get_balance,
+    recieve_token,
+    send_token,
+)
 
 
 @pytest.mark.asyncio
@@ -15,7 +20,7 @@ async def test_get_balance() -> None:
     mock_wallet.load_mint = AsyncMock()
     mock_wallet.load_proofs = AsyncMock()
 
-    with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
+    with patch("routstr.payment.wallet.Wallet.with_db", return_value=mock_wallet):
         balance = await get_balance("sat")
         assert balance == 50000
 
@@ -43,7 +48,9 @@ async def test_recieve_token_valid() -> None:
     from routstr.core.settings import settings
 
     with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
-        with patch("routstr.wallet.deserialize_token_from_string") as mock_deserialize:
+        with patch(
+            "routstr.payment.wallet.deserialize_token_from_string"
+        ) as mock_deserialize:
             mock_token = Mock()
             mock_token.keysets = ["keyset1"]
             mock_token.mint = "http://mint:3338"
@@ -54,7 +61,9 @@ async def test_recieve_token_valid() -> None:
 
             mock_wallet.load_mint = AsyncMock()
             mock_wallet.load_proofs = AsyncMock()
-            with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
+            with patch(
+                "routstr.payment.wallet.Wallet.with_db", return_value=mock_wallet
+            ):
                 amount, unit, mint = await recieve_token(token_str)
                 assert amount == 1000
                 assert unit == "sat"
@@ -65,8 +74,8 @@ async def test_recieve_token_valid() -> None:
 async def test_send_token() -> None:
     mock_wallet = Mock()
 
-    with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
-        with patch("routstr.wallet.send", return_value=(1000, "test_token")):
+    with patch("routstr.payment.wallet.Wallet.with_db", return_value=mock_wallet):
+        with patch("routstr.payment.wallet.send", return_value=(1000, "test_token")):
             token = await send_token(1000, "sat", "http://mint:3338")
             assert token == "test_token"
 
@@ -87,7 +96,7 @@ async def test_credit_balance() -> None:
     mock_session = AsyncMock()
 
     # Mock session.refresh to update the balance (simulates DB reload)
-    async def mock_refresh(key: ApiKey) -> None:
+    async def mock_refresh(key: TemporaryCredit) -> None:
         key.balance = 6000000
 
     mock_session.refresh.side_effect = mock_refresh
@@ -96,7 +105,7 @@ async def test_credit_balance() -> None:
 
     with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
         with patch(
-            "routstr.wallet.recieve_token",
+            "routstr.payment.wallet.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),
         ):
             amount = await credit_balance(token_str, mock_key, mock_session)
@@ -112,7 +121,9 @@ async def test_credit_balance() -> None:
 async def test_recieve_token_untrusted_mint() -> None:
     mock_wallet = Mock()
 
-    with patch("routstr.wallet.deserialize_token_from_string") as mock_deserialize:
+    with patch(
+        "routstr.payment.wallet.deserialize_token_from_string"
+    ) as mock_deserialize:
         mock_token = Mock()
         mock_token.keysets = ["keyset1"]
         mock_token.mint = "http://untrusted:3338"
@@ -122,9 +133,9 @@ async def test_recieve_token_untrusted_mint() -> None:
 
         mock_wallet.load_mint = AsyncMock()
         mock_wallet.load_proofs = AsyncMock()
-        with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
+        with patch("routstr.payment.wallet.Wallet.with_db", return_value=mock_wallet):
             with patch(
-                "routstr.wallet.swap_to_primary_mint",
+                "routstr.payment.wallet.swap_to_primary_mint",
                 return_value=(900, "sat", "http://mint:3338"),
             ):
                 amount, unit, mint = await recieve_token("test_token")

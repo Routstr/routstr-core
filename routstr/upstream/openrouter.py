@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from ..payment.models import Model, async_fetch_openrouter_models
+from ..models.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
