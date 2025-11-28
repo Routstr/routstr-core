@@ -53,7 +53,15 @@ async def cashu_token_to_credit(
         await db_session.rollback()
         return await api_key_to_credit(f"sk-{token_hash}", db_session)
 
-    msats = await credit_balance(cashu_token, new_credit, db_session)
+    try:
+        msats = await credit_balance(cashu_token, new_credit, db_session)
+    except Exception as e:
+        await db_session.rollback()
+        logger.error(
+            "Token redemption failed",
+            extra={"error": str(e)},
+        )
+        raise HTTPException(status_code=400, detail="Token redemption failed")
 
     await db_session.refresh(new_credit)
     await db_session.commit()
