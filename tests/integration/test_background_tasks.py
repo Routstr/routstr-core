@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from routstr.core.db import ApiKey
-from routstr.payment.models import Model, Pricing, update_sats_pricing
-from routstr.wallet import periodic_payout
+from routstr.core.db import TemporaryCredit
+from routstr.models.models import Model, Pricing, update_sats_pricing
+from routstr.payment.wallet import periodic_payout
 
 
 @pytest.mark.asyncio
@@ -201,12 +201,12 @@ class TestRefundCheckTask:
     ) -> None:
         """Test that expired keys with balance and refund address are refunded"""
         # Create an expired API key with balance
-        expired_key = ApiKey(
+        expired_key = TemporaryCredit(
             hashed_key="expired_test_key",
             balance=5000,  # 5 sats in msats
             refund_address="lnurl1test",
-            key_expiry_time=int(time.time()) - 3600,  # Expired 1 hour ago
-            created_at=datetime.utcnow() - timedelta(days=1),
+            refund_expiration_time=int(time.time()) - 3600,  # Expired 1 hour ago
+            created=datetime.utcnow() - timedelta(days=1),
         )
         integration_session.add(expired_key)
         await integration_session.commit()
@@ -214,7 +214,7 @@ class TestRefundCheckTask:
         # Mock the wallet send_to_lnurl method and get_session
         with (
             patch(
-                "routstr.wallet.send_to_lnurl", AsyncMock(return_value=5)
+                "routstr.payment.lnurl.send_to_lnurl", AsyncMock(return_value=5)
             ) as mock_send_to_lnurl,
             patch("routstr.core.db.get_session") as mock_get_session,
         ):
@@ -233,8 +233,8 @@ class TestRefundCheckTask:
             if (
                 expired_key.balance > 0
                 and expired_key.refund_address
-                and expired_key.key_expiry_time
-                and expired_key.key_expiry_time < current_time
+                and expired_key.refund_expiration_time
+                and expired_key.refund_expiration_time < current_time
             ):
                 # Call wallet send_to_lnurl to trigger the refund
                 amount_sats = expired_key.balance // 1000
@@ -258,12 +258,12 @@ class TestRefundCheckTask:
         """Test that refund check continues after mint errors"""
         # Create multiple expired keys
         for i in range(3):
-            key = ApiKey(
+            key = TemporaryCredit(
                 hashed_key=f"expired_key_{i}",
                 balance=1000 * (i + 1),
                 refund_address=f"lnurl{i}",
-                key_expiry_time=int(time.time()) - 3600,
-                created_at=datetime.utcnow(),
+                refund_expiration_time=int(time.time()) - 3600,
+                created=datetime.utcnow(),
             )
             integration_session.add(key)
         await integration_session.commit()
@@ -279,7 +279,7 @@ class TestRefundCheckTask:
 
         with (
             patch(
-                "routstr.wallet.send_to_lnurl", mock_send_to_lnurl
+                "routstr.payment.lnurl.send_to_lnurl", mock_send_to_lnurl
             ) as mock_send_to_lnurl_patch,
             patch("routstr.core.db.get_session") as mock_get_session,
         ):
@@ -293,15 +293,15 @@ class TestRefundCheckTask:
             current_time = int(time.time())
             from sqlalchemy import select as sa_select
 
-            result = await integration_session.execute(sa_select(ApiKey))
+            result = await integration_session.execute(sa_select(TemporaryCredit))
             keys = result.scalars().all()
 
             for key in keys:
                 if (
                     key.balance > 0
                     and key.refund_address
-                    and key.key_expiry_time
-                    and key.key_expiry_time < current_time
+                    and key.refund_expiration_time
+                    and key.refund_expiration_time < current_time
                 ):
                     amount_sats = key.balance // 1000
                     try:
@@ -352,21 +352,21 @@ class TestRefundCheckTask:
 
         current_time = int(time.time())
         for data in keys_data:
-            key = ApiKey(
+            key = TemporaryCredit(
                 hashed_key=data["hashed_key"],
                 balance=data["balance"],
                 refund_address=data["refund_address"],
-                key_expiry_time=current_time - 3600
+                refund_expiration_time=current_time - 3600
                 if data["expired"]
                 else current_time + 3600,
-                created_at=datetime.utcnow(),
+                created=datetime.utcnow(),
             )
             integration_session.add(key)
         await integration_session.commit()
 
         with (
             patch(
-                "routstr.wallet.send_to_lnurl", AsyncMock(return_value=1)
+                "routstr.payment.lnurl.send_to_lnurl", AsyncMock(return_value=1)
             ) as mock_send_to_lnurl,
             patch("routstr.core.db.get_session") as mock_get_session,
         ):
@@ -382,15 +382,15 @@ class TestRefundCheckTask:
             current_time = int(time.time())
             from sqlalchemy import select as sa_select
 
-            result = await integration_session.execute(sa_select(ApiKey))
+            result = await integration_session.execute(sa_select(TemporaryCredit))
             keys = result.scalars().all()
 
             for key in keys:
                 if (
                     key.balance > 0
                     and key.refund_address
-                    and key.key_expiry_time
-                    and key.key_expiry_time < current_time
+                    and key.refund_expiration_time
+                    and key.refund_expiration_time < current_time
                 ):
                     amount_sats = key.balance // 1000
                     await mock_send_to_lnurl(key.refund_address, amount=amount_sats)
@@ -410,7 +410,7 @@ class TestRefundCheckTask:
             # Check final state
             from sqlalchemy import select as sa_select
 
-            result = await integration_session.execute(sa_select(ApiKey))
+            result = await integration_session.execute(sa_select(TemporaryCredit))
             remaining_keys_list = result.scalars().all()
             remaining_ids = [k.hashed_key for k in remaining_keys_list]
 
@@ -454,10 +454,10 @@ class TestPeriodicPayoutTask:
         for i in range(5):
             balance = 10000 * (i + 1)  # 10, 20, 30, 40, 50 sats
             total_user_balance += balance
-            key = ApiKey(
+            key = TemporaryCredit(
                 hashed_key=f"user_key_{i}",
                 balance=balance,
-                created_at=datetime.utcnow(),
+                created=datetime.utcnow(),
             )
             integration_session.add(key)
         await integration_session.commit()
@@ -466,9 +466,12 @@ class TestPeriodicPayoutTask:
         wallet_balance = 200000  # 200 sats total
 
         with (
-            patch("routstr.wallet.get_balance", AsyncMock(return_value=wallet_balance)),
             patch(
-                "routstr.wallet.send_to_lnurl", AsyncMock(return_value=None)
+                "routstr.payment.wallet.get_balance",
+                AsyncMock(return_value=wallet_balance),
+            ),
+            patch(
+                "routstr.payment.lnurl.send_to_lnurl", AsyncMock(return_value=None)
             ) as mock_send_to_lnurl,
         ):
             # Mock environment variables
@@ -481,7 +484,7 @@ class TestPeriodicPayoutTask:
                 },
             ):
                 # Call periodic_payout directly (pay_out was renamed/refactored)
-                from routstr.wallet import periodic_payout
+                from routstr.payment.wallet import periodic_payout
 
                 await periodic_payout()
 
@@ -501,7 +504,7 @@ class TestPeriodicPayoutTask:
     #     key = ApiKey(
     #         hashed_key="single_user",
     #         balance=50000,  # 50 sats
-    #         created_at=datetime.utcnow(),
+    #         created=datetime.utcnow(),
     #     )
     #     integration_session.add(key)
     #     await integration_session.commit()
@@ -538,7 +541,7 @@ class TestPeriodicPayoutTask:
     #     key = ApiKey(
     #         hashed_key="low_revenue_user",
     #         balance=95000,  # 95 sats
-    #         created_at=datetime.utcnow(),
+    #         created=datetime.utcnow(),
     #     )
     #     integration_session.add(key)
     #     await integration_session.commit()
@@ -648,14 +651,14 @@ class TestTaskInteractions:
         """Test that database operations don't deadlock during concurrent task execution"""
         # Create test data
         for i in range(10):
-            key = ApiKey(
+            key = TemporaryCredit(
                 hashed_key=f"concurrent_key_{i}",
                 balance=1000 * i,
                 refund_address=f"lnurl{i}" if i % 2 == 0 else None,
-                key_expiry_time=int(time.time()) - 3600
+                refund_expiration_time=int(time.time()) - 3600
                 if i % 3 == 0
                 else int(time.time()) + 3600,
-                created_at=datetime.utcnow(),
+                created=datetime.utcnow(),
             )
             integration_session.add(key)
         await integration_session.commit()
@@ -664,14 +667,14 @@ class TestTaskInteractions:
         async def read_operation() -> int:
             from sqlalchemy import select as sa_select
 
-            result = await integration_session.execute(sa_select(ApiKey))
+            result = await integration_session.execute(sa_select(TemporaryCredit))
             return len(result.scalars().all())
 
         async def write_operation(key_id: int) -> None:
             from sqlalchemy import select as sa_select
 
-            stmt = sa_select(ApiKey).where(
-                ApiKey.hashed_key == f"concurrent_key_{key_id}"  # type: ignore[arg-type]
+            stmt = sa_select(TemporaryCredit).where(
+                TemporaryCredit.hashed_key == f"concurrent_key_{key_id}"  # type: ignore[arg-type]
             )
             result = await integration_session.execute(stmt)
             key = result.scalar_one_or_none()
@@ -708,14 +711,16 @@ class TestTaskInteractions:
         # Patch the actual task functions
         with (
             patch(
-                "routstr.payment.models.update_sats_pricing",
+                "routstr.models.models.update_sats_pricing",
                 lambda: task_with_cleanup("pricing"),
             ),
             patch(
-                "routstr.wallet.periodic_payout", lambda: task_with_cleanup("refund")
+                "routstr.payment.wallet.periodic_payout",
+                lambda: task_with_cleanup("refund"),
             ),
             patch(
-                "routstr.wallet.periodic_payout", lambda: task_with_cleanup("payout")
+                "routstr.payment.wallet.periodic_payout",
+                lambda: task_with_cleanup("payout"),
             ),
         ):
             # Start all tasks

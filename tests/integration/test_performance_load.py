@@ -149,15 +149,13 @@ class TestPerformanceBaseline:
         """Test database operation performance"""
         from sqlmodel import select
 
-        from routstr.core.db import ApiKey
+        from routstr.core.db import TemporaryCredit
 
         # Create test data
         for i in range(100):
-            key = ApiKey(
+            key = TemporaryCredit(
                 hashed_key=f"test_key_{i}",
                 balance=1000000,
-                total_spent=0,
-                total_requests=0,
             )
             integration_session.add(key)
         await integration_session.commit()
@@ -168,7 +166,7 @@ class TestPerformanceBaseline:
         for _ in range(100):
             start = time.time()
             result = await integration_session.execute(
-                select(ApiKey).where(ApiKey.balance > 0)  # type: ignore[arg-type]
+                select(TemporaryCredit).where(TemporaryCredit.balance > 0)  # type: ignore[arg-type]
             )
             _ = result.all()
             duration = (time.time() - start) * 1000

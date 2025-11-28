@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient, ConnectError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 
 class TestNetworkFailureScenarios:
@@ -27,7 +27,7 @@ class TestNetworkFailureScenarios:
         # Patch the wallet send function to simulate failure across all modules
         with (
             patch(
-                "routstr.wallet.send_token",
+                "routstr.payment.wallet.send_token",
                 AsyncMock(side_effect=ConnectError("Mint service unavailable")),
             ),
             patch(
@@ -422,7 +422,7 @@ class TestRecoveryScenarios:
             api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
         )
 
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         initial_key = result.scalar_one()
         initial_balance = initial_key.balance
@@ -458,17 +458,15 @@ class TestRecoveryScenarios:
             api_key_header[3:] if api_key_header.startswith("sk-") else api_key_header
         )
 
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         api_key = result.scalar_one()
         initial_balance = api_key.balance
-        initial_requests = api_key.total_requests
 
         # Simulate operations that might be interrupted
         try:
             # Start a transaction
             api_key.reserved_balance += 1000
-            api_key.total_requests += 1
             # Don't commit - simulate crash
             raise Exception("Simulated database crash")
         except Exception:
@@ -478,7 +476,6 @@ class TestRecoveryScenarios:
         # Verify state is consistent after "recovery"
         await integration_session.refresh(api_key)
         assert api_key.balance == initial_balance
-        assert api_key.total_requests == initial_requests
 
     @pytest.mark.asyncio
     async def test_state_consistency_after_failures(
@@ -527,10 +524,7 @@ class TestRecoveryScenarios:
             for mod in diff["api_keys"]["modified"]:
                 # Only acceptable changes are request counts
                 for field, change in mod["changes"].items():
-                    if field == "total_requests":
-                        # Request count might increase
-                        assert change["delta"] >= 0
-                    elif field == "balance":
+                    if field == "balance":
                         # Balance should not decrease from failed operations
                         assert change["delta"] >= 0
                     else:
@@ -641,12 +635,10 @@ class TestEdgeCaseCombinations:
         api_key_hash = test_key[3:]  # Remove sk- prefix
 
         # Create the API key with only 500 msats (less than one request cost)
-        new_key = ApiKey(
+        new_key = TemporaryCredit(
             hashed_key=api_key_hash,
             balance=500,  # Less than fixed cost per request (1000 msats)
             reserved_balance=0,
-            total_spent=0,
-            total_requests=0,
         )
         integration_session.add(new_key)
         await integration_session.commit()
@@ -687,7 +679,7 @@ class TestEdgeCaseCombinations:
         assert insufficient_funds_count > 0
 
         # Balance should never go negative
-        stmt = select(ApiKey).where(ApiKey.hashed_key == api_key_hash)  # type: ignore[arg-type]
+        stmt = select(TemporaryCredit).where(TemporaryCredit.hashed_key == api_key_hash)  # type: ignore[arg-type]
         result = await integration_session.execute(stmt)
         final_key = result.scalar_one()
         assert final_key.balance >= 0

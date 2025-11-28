@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from httpx import AsyncClient
 
-from routstr.discovery import _PROVIDERS_CACHE
+from routstr.nostr.discovery import _PROVIDERS_CACHE
 
 from .utils import PerformanceValidator, ResponseValidator
 
@@ -62,9 +62,9 @@ async def test_providers_endpoint_default_response(
     }
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             # Configure mock to return appropriate responses
             mock_fetch.side_effect = lambda url: mock_fetch_responses.get(
                 url, {"status_code": 500, "json": {"error": "Unknown provider"}}
@@ -126,9 +126,9 @@ async def test_providers_endpoint_with_include_json(
     }
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {
                 "status_code": 200,
                 "json": mock_provider_response,
@@ -200,9 +200,9 @@ async def test_providers_data_structure_validation(
     }
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = mock_health_response
 
             response = await integration_client.get("/v1/providers/?include_json=true")
@@ -247,7 +247,7 @@ async def test_providers_endpoint_no_providers_found(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
         response = await integration_client.get("/v1/providers/")
 
@@ -308,10 +308,10 @@ async def test_providers_endpoint_offline_providers(
             }
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
         with patch(
-            "routstr.discovery.fetch_provider_health",
+            "routstr.nostr.discovery.fetch_provider_health",
             side_effect=mock_fetch_provider_health,
         ):
             response = await integration_client.get("/v1/providers/?include_json=true")
@@ -377,9 +377,9 @@ async def test_providers_endpoint_duplicate_urls(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {
                 "status_code": 200,
                 "endpoint": "root",
@@ -416,7 +416,7 @@ async def test_providers_endpoint_nostr_relay_failures(
         raise Exception("Connection to relay failed")
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", side_effect=failing_query
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", side_effect=failing_query
     ):
         response = await integration_client.get("/v1/providers/")
 
@@ -454,9 +454,9 @@ async def test_providers_endpoint_malformed_urls(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
 
             response = await integration_client.get("/v1/providers/")
@@ -486,9 +486,9 @@ async def test_providers_endpoint_response_format(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
 
             # Test default format
@@ -536,9 +536,9 @@ async def test_providers_endpoint_performance(integration_client: AsyncClient) -
     validator = PerformanceValidator()
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
 
             # Test multiple requests
@@ -576,9 +576,9 @@ async def test_providers_endpoint_concurrent_requests(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
 
             # Create concurrent requests
@@ -618,9 +618,9 @@ async def test_providers_endpoint_parameter_validation(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
 
             # Test various parameter values
@@ -670,9 +670,9 @@ async def test_no_database_changes_during_provider_operations(
     ]
 
     with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
+        "routstr.nostr.discovery.query_nostr_relay_for_providers", return_value=mock_events
     ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
+        with patch("routstr.nostr.discovery.fetch_provider_health") as mock_fetch:
             mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
 
             # Make multiple requests with different parameters

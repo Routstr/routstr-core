@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 
 @pytest.mark.integration
@@ -123,7 +123,9 @@ async def test_zero_balance_refund_handling(
     from sqlmodel import update
 
     await integration_session.execute(
-        update(ApiKey).where(ApiKey.hashed_key == hashed_key).values(balance=0)  # type: ignore[arg-type]
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)
+        .values(balance=0)  # type: ignore[arg-type]
     )
     await integration_session.commit()
 
@@ -136,7 +138,7 @@ async def test_zero_balance_refund_handling(
 
     # Key should still exist
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     assert result.scalar_one_or_none() is not None
 
@@ -159,7 +161,7 @@ async def test_refund_amount_validation(
 
     # Verify the key has no refund address (needed for the "too small" check)
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     key = result.scalar_one()
     assert key.refund_address is None
@@ -192,8 +194,8 @@ async def test_refund_with_lightning_address(
     from sqlmodel import update
 
     await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
         .values(refund_address=refund_address)
     )
     await integration_session.commit()
@@ -252,7 +254,7 @@ async def test_database_state_after_refund(
 
     # Verify key exists before refund
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     key_before = result.scalar_one()
     assert key_before.balance == 10_000_000
@@ -263,12 +265,12 @@ async def test_database_state_after_refund(
 
     # Verify key is deleted after refund
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     assert result.scalar_one_or_none() is None
 
     # Count total keys to ensure only the specific one was deleted
-    result = await integration_session.execute(select(ApiKey))
+    result = await integration_session.execute(select(TemporaryCredit))
     remaining_keys = result.scalars().all()
     # Should have no keys left (assuming clean test environment)
     assert len(remaining_keys) == 0
@@ -480,8 +482,8 @@ async def test_refund_error_handling(
     from sqlmodel import update
 
     await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
         .values(balance=-1000)  # Invalid negative balance
     )
     await integration_session.commit()
@@ -517,9 +519,9 @@ async def test_refund_with_expired_key(
     from sqlmodel import update
 
     await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
-        .values(key_expiry_time=past_expiry, refund_address="expired@ln.address")
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
+        .values(refund_expiration_time=past_expiry, refund_address="expired@ln.address")
     )
     await integration_session.commit()
 

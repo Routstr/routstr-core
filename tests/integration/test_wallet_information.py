@@ -11,7 +11,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select, update
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 from .utils import ConcurrencyTester, ResponseValidator
 
@@ -49,7 +49,7 @@ async def test_wallet_endpoint_with_valid_api_key(
     hashed_key = api_key[3:]  # Remove "sk-" prefix
 
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     db_key = result.scalar_one()
 
@@ -138,7 +138,9 @@ async def test_wallet_with_zero_balance(
     # Manually set balance to zero in database
     hashed_key = api_key[3:]  # Remove "sk-" prefix
     await integration_session.execute(
-        update(ApiKey).where(ApiKey.hashed_key == hashed_key).values(balance=0)  # type: ignore[arg-type]
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)
+        .values(balance=0)  # type: ignore[arg-type]
     )
     await integration_session.commit()
 
@@ -181,9 +183,11 @@ async def test_expired_api_key_behavior(
     from sqlmodel import update
 
     await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
-        .values(key_expiry_time=past_expiry, refund_address="test@lightning.address")
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
+        .values(
+            refund_expiration_time=past_expiry, refund_address="test@lightning.address"
+        )
     )
     await integration_session.commit()
 
@@ -197,10 +201,10 @@ async def test_expired_api_key_behavior(
     # Verify expiry time was stored
     hashed_key = api_key[3:]  # Remove "sk-" prefix
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     db_key = result.scalar_one()
-    assert db_key.key_expiry_time == past_expiry
+    assert db_key.refund_expiration_time == past_expiry
     assert db_key.refund_address == "test@lightning.address"
 
 
@@ -270,7 +274,7 @@ async def test_wallet_info_data_consistency(
     # Verify against database
     hashed_key = api_key[3:]  # Remove "sk-" prefix
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     db_key = result.scalar_one()
 
@@ -360,12 +364,10 @@ async def test_wallet_after_partial_spending(
     hashed_key = api_key[3:]  # Remove "sk-" prefix
 
     await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
         .values(
             balance=initial_balance - spent_amount,
-            total_spent=spent_amount,
-            total_requests=5,  # Simulate 5 requests
         )
     )
     await integration_session.commit()

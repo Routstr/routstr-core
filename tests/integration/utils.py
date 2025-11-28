@@ -9,7 +9,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 
 class CashuTokenGenerator:
@@ -97,11 +97,11 @@ class DatabaseStateValidator:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get_api_key(self, api_key: str) -> Optional[ApiKey]:
+    async def get_api_key(self, api_key: str) -> Optional[TemporaryCredit]:
         """Get API key from database"""
         hashed_key = hashlib.sha256(api_key.encode()).hexdigest()
         result = await self.session.execute(
-            select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+            select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
         )
         return result.scalar_one_or_none()
 
@@ -123,20 +123,6 @@ class DatabaseStateValidator:
             "difference": difference,
             "tolerance": tolerance,
             "current_balance": key_obj.balance,
-        }
-
-    async def validate_request_count(
-        self, api_key: str, expected_count: int
-    ) -> Dict[str, Any]:
-        """Validate request count for an API key"""
-        key_obj = await self.get_api_key(api_key)
-        if not key_obj:
-            return {"valid": False, "error": "API key not found"}
-
-        return {
-            "valid": key_obj.total_requests == expected_count,
-            "expected": expected_count,
-            "actual": key_obj.total_requests,
         }
 
     async def validate_atomic_update(
@@ -315,7 +301,7 @@ class ConcurrencyTester:
                 )
 
         tasks = [make_request(req) for req in requests]
-        return await asyncio.gather(*tasks, return_exceptions=False)
+        return await asyncio.gather(*tasks, return_exceptions=False)  # type: ignore
 
     @staticmethod
     async def test_race_condition(
@@ -463,8 +449,6 @@ class TestDataBuilder:
         """Create test API key data"""
         data: Dict[str, Any] = {
             "balance": balance,
-            "total_spent": 0,
-            "total_requests": 0,
         }
 
         if refund_address:

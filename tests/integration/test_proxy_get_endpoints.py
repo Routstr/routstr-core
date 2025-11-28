@@ -14,7 +14,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import TemporaryCredit
 
 from .utils import (
     ConcurrencyTester,
@@ -297,8 +297,8 @@ async def test_proxy_get_insufficient_balance(
     from sqlmodel import update
 
     await integration_session.execute(
-        update(ApiKey)
-        .where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        update(TemporaryCredit)
+        .where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
         .values(balance=100)  # Only 0.1 sats
     )
     await integration_session.commit()
@@ -382,7 +382,7 @@ async def test_proxy_get_database_state_verification(
 
     # Get initial key state
     result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
+        select(TemporaryCredit).where(TemporaryCredit.hashed_key == hashed_key)  # type: ignore[arg-type]
     )
     initial_key = result.scalar_one()
     initial_balance = initial_key.balance

@@ -12,7 +12,7 @@ from routstr.algorithm import (  # noqa: E402
     get_provider_penalty,
     should_prefer_model,
 )
-from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
+from routstr.models.models import Architecture, Model, Pricing  # noqa: E402
 
 
 def create_test_model(

@@ -66,7 +66,7 @@ os.environ.update(test_env)
 os.environ.pop("ADMIN_PASSWORD", None)
 
 
-from routstr.core.db import ApiKey, get_session  # noqa: E402
+from routstr.core.db import TemporaryCredit, get_session  # noqa: E402
 from routstr.core.main import app, lifespan  # noqa: E402
 
 
@@ -280,7 +280,7 @@ class TestmintWallet:
         return 100000  # 100k sats
 
     async def credit_balance(
-        self, cashu_token: str, key: ApiKey, session: AsyncSession
+        self, cashu_token: str, key: TemporaryCredit, session: AsyncSession
     ) -> int:
         """Credit balance to API key - test implementation"""
         try:
@@ -301,9 +301,9 @@ class TestmintWallet:
 
             # Use atomic update to avoid lost update problem in concurrent scenarios
             stmt = (
-                update(ApiKey)
-                .where(col(ApiKey.hashed_key) == key.hashed_key)
-                .values(balance=ApiKey.balance + amount_msat)
+                update(TemporaryCredit)
+                .where(col(TemporaryCredit.hashed_key) == key.hashed_key)
+                .values(balance=TemporaryCredit.balance + amount_msat)
             )
             await session.execute(stmt)
             await session.commit()
@@ -390,7 +390,7 @@ class DatabaseSnapshot:
     async def capture(self) -> Dict[str, List[Dict]]:
         """Capture current database state"""
         # Get all API keys with their data
-        result = await self.session.execute(select(ApiKey))
+        result = await self.session.execute(select(TemporaryCredit))
         api_keys = result.scalars().all()
 
         snapshot = {
@@ -398,10 +398,8 @@ class DatabaseSnapshot:
                 {
                     "hashed_key": key.hashed_key,
                     "balance": key.balance,
-                    "total_spent": key.total_spent,
-                    "total_requests": key.total_requests,
                     "refund_address": key.refund_address,
-                    "key_expiry_time": key.key_expiry_time,
+                    "refund_expiration_time": key.refund_expiration_time,
                 }
                 for key in api_keys
             ]
@@ -447,10 +445,8 @@ class DatabaseSnapshot:
 
                 for field in [
                     "balance",
-                    "total_spent",
-                    "total_requests",
                     "refund_address",
-                    "key_expiry_time",
+                    "refund_expiration_time",
                 ]:
                     if old[field] != new[field]:
                         changes[field] = {
@@ -522,18 +518,17 @@ async def integration_app(
         with (
             patch("routstr.core.db.engine", integration_engine),
             patch.object(_settings, "cashu_mints", [mint_url]),
-            patch("routstr.wallet.credit_balance", testmint_wallet.credit_balance),
-            patch("routstr.wallet.send_token", testmint_wallet.send_token),
-            patch("routstr.wallet.send_to_lnurl", testmint_wallet.send_to_lnurl),
-            patch("routstr.wallet.recieve_token", testmint_wallet.redeem_token),
-            patch("routstr.wallet.get_balance", testmint_wallet.get_balance),
+            patch("routstr.payment.wallet.credit_balance", testmint_wallet.credit_balance),
+            patch("routstr.payment.wallet.send_token", testmint_wallet.send_token),
+            patch("routstr.payment.wallet.recieve_token", testmint_wallet.redeem_token),
+            patch("routstr.payment.wallet.get_balance", testmint_wallet.get_balance),
             patch("routstr.balance.send_token", testmint_wallet.send_token),
             patch("routstr.balance.send_to_lnurl", testmint_wallet.send_to_lnurl),
             patch("websockets.connect") as mock_websockets,
             patch("routstr.payment.price.btc_usd_price", return_value=50000.0),
             patch("routstr.payment.price.sats_usd_price", return_value=0.0005),
             patch(
-                "routstr.payment.helpers.calculate_discounted_max_cost",
+                "routstr.payment.cost.calculate_discounted_max_cost",
                 side_effect=_passthrough_discount,
             ),
         ):
@@ -705,8 +700,8 @@ async def background_tasks_controller() -> AsyncGenerator[Any, None]:
     original_periodic_payout: Optional[Callable] = None
 
     try:
-        from routstr.payment.models import update_sats_pricing
-        from routstr.wallet import periodic_payout
+        from routstr.models.models import update_sats_pricing
+        from routstr.payment.wallet import periodic_payout
 
         async def controlled_update_pricing() -> None:
             while not controller.cancelled:

@@ -21,11 +21,11 @@ import pytest
 os.environ["UPSTREAM_BASE_URL"] = "http://test"
 os.environ["UPSTREAM_API_KEY"] = "test"
 
-from routstr.payment.models import (  # noqa: E402
+from routstr.models.crud import _model_to_row_payload
+from routstr.models.models import (  # noqa: E402
     Architecture,
     Model,
     Pricing,
-    _model_to_row_payload,
 )
 
 
