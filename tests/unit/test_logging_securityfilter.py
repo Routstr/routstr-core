@@ -6,6 +6,7 @@ sensitive information from log messages without causing false positives.
 """
 
 import logging
+
 import pytest
 
 from routstr.core.logging import SecurityFilter
@@ -20,6 +21,7 @@ def security_filter() -> SecurityFilter:
 @pytest.fixture
 def filter_message(security_filter: SecurityFilter):
     """A helper fixture to apply the filter to a message string."""
+
     def _filter(msg: str) -> str:
         record = logging.LogRecord(
             name="test_logger",
@@ -32,6 +34,7 @@ def filter_message(security_filter: SecurityFilter):
         )
         security_filter.filter(record)
         return record.getMessage()
+
     return _filter
 
 
@@ -45,7 +48,7 @@ def test_redacts_unquoted_key_value_pairs(filter_message) -> None:
 def test_redacts_quoted_key_value_pairs(filter_message) -> None:
     """Test that a quoted token is correctly redacted."""
     original = 'User authenticated with token="cashuA123abc"'
-    expected = 'User authenticated with token: [REDACTED]'
+    expected = "User authenticated with token: [REDACTED]"
     assert filter_message(original) == expected
 
 
