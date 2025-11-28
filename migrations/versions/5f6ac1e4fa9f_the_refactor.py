@@ -19,39 +19,42 @@ def upgrade() -> None:
     # Rename the table
     op.rename_table("api_keys", "temporary_credit")
 
-    # Perform column modifications in batch mode for SQLite support
-    with op.batch_alter_table("temporary_credit", schema=None) as batch_op:
-        batch_op.add_column(sa.Column("created", sa.DateTime(), nullable=True))
-        batch_op.add_column(
-            sa.Column("refund_expiration_time", sa.Integer(), nullable=True)
-        )
-        batch_op.drop_column("key_expiry_time")
-        batch_op.drop_column("total_spent")
-        batch_op.drop_column("total_requests")
+    op.add_column(
+        "temporary_credit", sa.Column("created", sa.DateTime(), nullable=True)
+    )
+    op.add_column(
+        "temporary_credit",
+        sa.Column("refund_expiration_time", sa.Integer(), nullable=True),
+    )
+    op.drop_column("temporary_credit", "key_expiry_time")
+    op.drop_column("temporary_credit", "total_spent")
+    op.drop_column("temporary_credit", "total_requests")
 
 
 def downgrade() -> None:
-    # Revert column modifications
-    with op.batch_alter_table("temporary_credit", schema=None) as batch_op:
-        batch_op.add_column(
-            sa.Column(
-                "total_requests",
-                sa.Integer(),
-                nullable=False,
-                server_default=sa.text("0"),
-            )
-        )
-        batch_op.add_column(
-            sa.Column(
-                "total_spent",
-                sa.Integer(),
-                nullable=False,
-                server_default=sa.text("0"),
-            )
-        )
-        batch_op.add_column(sa.Column("key_expiry_time", sa.Integer(), nullable=True))
-        batch_op.drop_column("refund_expiration_time")
-        batch_op.drop_column("created")
+    op.add_column(
+        "temporary_credit",
+        sa.Column(
+            "total_requests",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
+    )
+    op.add_column(
+        "temporary_credit",
+        sa.Column(
+            "total_spent",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("0"),
+        ),
+    )
+    op.add_column(
+        "temporary_credit", sa.Column("key_expiry_time", sa.Integer(), nullable=True)
+    )
+    op.drop_column("temporary_credit", "refund_expiration_time")
+    op.drop_column("temporary_credit", "created")
 
     # Revert table rename
     op.rename_table("temporary_credit", "api_keys")
