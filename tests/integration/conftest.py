@@ -219,13 +219,37 @@ class TestmintWallet:
             token_json = base64.urlsafe_b64decode(token_base64).decode()
             token_data = json.loads(token_json)
 
+            if "token" not in token_data or not isinstance(token_data["token"], list):
+                raise ValueError("Invalid token structure: missing or invalid 'token' field")
+
             total_amount = 0
             mint_url = self.mint_url
             unit = token_data.get("unit", "sat")
 
             for mint_tokens in token_data["token"]:
+                if not isinstance(mint_tokens, dict):
+                    raise ValueError("Invalid token structure: mint_tokens must be a dict")
+                
                 mint_url = mint_tokens.get("mint", self.mint_url)
-                for proof in mint_tokens["proofs"]:
+                proofs = mint_tokens.get("proofs", [])
+                
+                if not isinstance(proofs, list):
+                    raise ValueError("Invalid token structure: proofs must be a list")
+                
+                for proof in proofs:
+                    if not isinstance(proof, dict):
+                        raise ValueError("Invalid proof structure: proof must be a dict")
+                    
+                    # Validate required proof fields
+                    if "id" not in proof:
+                        raise ValueError("Invalid proof structure: missing 'id' field")
+                    if "amount" not in proof:
+                        raise ValueError("Invalid proof structure: missing 'amount' field")
+                    if "secret" not in proof:
+                        raise ValueError("Invalid proof structure: missing 'secret' field")
+                    if "C" not in proof:
+                        raise ValueError("Invalid proof structure: missing 'C' field")
+                    
                     # Check if token was already spent
                     if proof["id"] in self.spent_tokens:
                         raise ValueError("Token already spent")
@@ -235,6 +259,8 @@ class TestmintWallet:
 
             return total_amount, unit, mint_url
 
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Failed to decode token: {str(e)}")
 
