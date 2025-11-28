@@ -143,7 +143,6 @@ class BaseUpstreamProvider:
         # Explicitly define the list of supported compression encodings
         headers["accept-encoding"] = "gzip, deflate, br, identity"
 
-
         logger.debug(
             "Headers prepared for upstream",
             extra={
@@ -512,7 +511,7 @@ class BaseUpstreamProvider:
                 )
                 await finalize_without_usage()
                 raise
-        
+
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
         response_headers.pop("content-encoding", None)
@@ -521,7 +520,7 @@ class BaseUpstreamProvider:
         return StreamingResponse(
             stream_with_cost(max_cost_for_model),
             status_code=response.status_code,
-            headers=response_headers, 
+            headers=response_headers,
         )
 
     async def handle_non_streaming_chat_completion(
