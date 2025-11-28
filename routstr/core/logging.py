@@ -192,21 +192,24 @@ class SecurityFilter(logging.Filter):
         """Filter out sensitive information from log records."""
         try:
             message = record.getMessage()
+            standalone_patterns = [
+                r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
+                r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+                r"nsec[a-z0-9]+",  # Nostr Public / Private Key
+            ]
+            for pattern in standalone_patterns:
+                message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
 
             for key in self.SENSITIVE_KEYS:
                 if key in message.lower():
-                    patterns = [
-                        rf"{key}[:\s=]+([a-zA-Z0-9_\-\.]+)",  # key: value or key=value
-                        rf'{key}[:\s=]+["\']([^"\']+)["\']',  # key: "value" or key='value'
-                        r"Bearer\s+([a-zA-Z0-9_\-\.]+)",  # Bearer token
-                        r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+                    key_patterns = [
+                        rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
+                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
                     ]
-
-                    for pattern in patterns:
+                    for pattern in key_patterns:
                         message = re.sub(
                             pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
                         )
-
             record.msg = message
             record.args = ()
 
