@@ -337,7 +337,7 @@ async def pay_for_request(
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
-        .where(col(ApiKey.balance) >= cost_per_request)
+        .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
             total_requests=col(ApiKey.total_requests) + 1,
