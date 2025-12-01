@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
+    enable_revenue_stats_publishing: bool = Field(
+        default=True, env="ENABLE_REVENUE_STATS_PUBLISHING"
+    )
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
 
     # Logging

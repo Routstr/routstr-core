@@ -20,6 +20,7 @@ from ..payment.models import (
 )
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
+from ..revenue_stats import publish_revenue_stats_task
 from ..wallet import periodic_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
@@ -47,6 +48,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     pricing_task = None
     payout_task = None
     nip91_task = None
+    revenue_stats_task = None
     providers_task = None
     models_refresh_task = None
     models_cleanup_task = None
@@ -93,6 +95,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
         nip91_task = asyncio.create_task(announce_provider())
+        revenue_stats_task = asyncio.create_task(publish_revenue_stats_task())
         providers_task = asyncio.create_task(providers_cache_refresher())
 
         yield
@@ -114,6 +117,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             payout_task.cancel()
         if nip91_task is not None:
             nip91_task.cancel()
+        if revenue_stats_task is not None:
+            revenue_stats_task.cancel()
         if providers_task is not None:
             providers_task.cancel()
         if models_refresh_task is not None:
@@ -133,6 +138,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(payout_task)
             if nip91_task is not None:
                 tasks_to_wait.append(nip91_task)
+            if revenue_stats_task is not None:
+                tasks_to_wait.append(revenue_stats_task)
             if providers_task is not None:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:
