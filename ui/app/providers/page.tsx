@@ -71,7 +71,12 @@ export default function ProvidersPage() {
     api_key: '',
     api_version: null,
     enabled: true,
+    provider_fee: 1.06,
   });
+
+  const getProviderFeePlaceholder = (type: string) => {
+    return type === 'openrouter' ? 'Default: 1.06 (6%)' : 'Default: 1.01 (1%)';
+  };
 
   const { data: providerTypes = [] } = useQuery({
     queryKey: ['provider-types'],
@@ -149,7 +154,11 @@ export default function ProvidersPage() {
   };
 
   const handleCreate = () => {
-    createMutation.mutate(formData);
+    const data = { ...formData };
+    if (data.provider_fee === undefined || data.provider_fee === null) {
+      data.provider_fee = data.provider_type === 'openrouter' ? 1.06 : 1.01;
+    }
+    createMutation.mutate(data);
   };
 
   const handleEdit = (provider: UpstreamProvider) => {
@@ -160,6 +169,7 @@ export default function ProvidersPage() {
       api_key: '',
       api_version: provider.api_version || null,
       enabled: provider.enabled,
+      provider_fee: provider.provider_fee,
     });
     setIsEditDialogOpen(true);
   };
@@ -171,6 +181,7 @@ export default function ProvidersPage() {
       base_url: formData.base_url,
       api_version: formData.api_version,
       enabled: formData.enabled,
+      provider_fee: formData.provider_fee,
     };
     if (formData.api_key) {
       updateData.api_key = formData.api_key;
@@ -253,11 +264,12 @@ export default function ProvidersPage() {
                       <Select
                         value={formData.provider_type}
                         onValueChange={(value) => {
-                          setFormData({
-                            ...formData,
+                          setFormData((prev) => ({
+                            ...prev,
                             provider_type: value,
                             base_url: getDefaultBaseUrl(value),
-                          });
+                            provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+                          }));
                         }}
                       >
                         <SelectTrigger>
@@ -338,6 +350,33 @@ export default function ProvidersPage() {
                         }
                       />
                       <Label htmlFor='enabled'>Enabled</Label>
+                    </div>
+                    <div className='grid gap-2'>
+                      <Label htmlFor='provider_fee'>
+                        Provider Fee (Multiplier)
+                      </Label>
+                      <Input
+                        id='provider_fee'
+                        type='number'
+                        step='0.001'
+                        min='1.0'
+                        value={formData.provider_fee || ''}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            provider_fee: e.target.value
+                              ? parseFloat(e.target.value)
+                              : undefined,
+                          })
+                        }
+                        placeholder={getProviderFeePlaceholder(
+                          formData.provider_type
+                        )}
+                      />
+                      <p className='text-muted-foreground text-xs'>
+                        1.01 means +1% e.g. currency exchange, card
+                        fees, etc.
+                      </p>
                     </div>
                   </div>
                   <DialogFooter>
@@ -674,11 +713,12 @@ export default function ProvidersPage() {
                 <Select
                   value={formData.provider_type}
                   onValueChange={(value) => {
-                    setFormData({
-                      ...formData,
+                    setFormData((prev) => ({
+                      ...prev,
                       provider_type: value,
                       base_url: getDefaultBaseUrl(value),
-                    });
+                      provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+                    }));
                   }}
                 >
                   <SelectTrigger>
@@ -753,7 +793,7 @@ export default function ProvidersPage() {
                 </div>
               )}
               <div className='flex items-center space-x-2'>
-                <Switch
+                      <Switch
                   id='edit_enabled'
                   checked={formData.enabled}
                   onCheckedChange={(checked) =>
@@ -761,6 +801,32 @@ export default function ProvidersPage() {
                   }
                 />
                 <Label htmlFor='edit_enabled'>Enabled</Label>
+              </div>
+              <div className='grid gap-2'>
+                <Label htmlFor='edit_provider_fee'>
+                  Provider Fee (Multiplier)
+                </Label>
+                <Input
+                  id='edit_provider_fee'
+                  type='number'
+                  step='0.001'
+                  min='1.0'
+                  value={formData.provider_fee || ''}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      provider_fee: e.target.value
+                        ? parseFloat(e.target.value)
+                        : undefined,
+                    })
+                  }
+                  placeholder={getProviderFeePlaceholder(
+                    formData.provider_type
+                  )}
+                />
+                <p className='text-muted-foreground text-xs'>
+                  Leave empty to use default (OpenRouter: 1.06, Others: 1.01)
+                </p>
               </div>
             </div>
             <DialogFooter>
