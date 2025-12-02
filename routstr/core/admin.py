@@ -2791,6 +2791,186 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
         }
 
 
+class CreateAccountRequest(BaseModel):
+    provider_type: str
+
+
+@admin_router.post(
+    "/api/upstream-providers/create-account",
+    dependencies=[Depends(require_admin_api)],
+)
+async def create_provider_account_by_type(
+    payload: CreateAccountRequest,
+) -> dict[str, object]:
+    """Create a new account with a provider by provider type (before provider exists in DB)."""
+    from ..upstream import upstream_provider_classes
+
+    provider_class = next(
+        (
+            cls
+            for cls in upstream_provider_classes
+            if cls.provider_type == payload.provider_type
+        ),
+        None,
+    )
+    if not provider_class:
+        raise HTTPException(status_code=404, detail="Provider type not found")
+
+    try:
+        account_data = await provider_class.create_account_static()
+
+        return {
+            "ok": True,
+            "account_data": account_data,
+            "message": "Account created successfully",
+        }
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider does not support account creation: {str(e)}",
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to create account for provider type {payload.provider_type}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TopupRequest(BaseModel):
+    amount: int
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/topup",
+    dependencies=[Depends(require_admin_api)],
+)
+async def initiate_provider_topup(
+    provider_id: int, payload: TopupRequest
+) -> dict[str, object]:
+    """Initiate a Lightning Network top-up for the upstream provider account."""
+    from ..upstream.helpers import _instantiate_provider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        try:
+            logger.info(
+                f"Initiating top-up for provider {provider_id}",
+                extra={"amount": payload.amount},
+            )
+            topup_data = await upstream_instance.initiate_topup(payload.amount)
+            logger.info(
+                "Top-up initiated successfully",
+                extra={
+                    "provider_id": provider_id,
+                    "invoice_id": topup_data.invoice_id,
+                    "amount": topup_data.amount,
+                },
+            )
+
+            response_data = {
+                "ok": True,
+                "topup_data": {
+                    "invoice_id": topup_data.invoice_id,
+                    "payment_request": topup_data.payment_request,
+                    "amount": topup_data.amount,
+                    "currency": topup_data.currency,
+                    "expires_at": topup_data.expires_at,
+                    "checkout_url": topup_data.checkout_url,
+                },
+                "message": "Top-up initiated successfully",
+            }
+            logger.info("Returning response", extra={"response": response_data})
+            return response_data
+        except NotImplementedError as e:
+            logger.error(f"Provider does not support top-up: {e}")
+            raise HTTPException(
+                status_code=400, detail=f"Provider does not support top-up: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to initiate top-up for provider {provider_id}: {e}",
+                extra={"error_type": type(e).__name__, "error": str(e)},
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/topup/{invoice_id}/status",
+    dependencies=[Depends(require_admin_api)],
+)
+async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, object]:
+    """Check the status of a Lightning Network top-up invoice."""
+    from ..upstream.helpers import _instantiate_provider
+    from ..upstream.ppqai import PPQAIUpstreamProvider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        if not isinstance(upstream_instance, PPQAIUpstreamProvider):
+            raise HTTPException(
+                status_code=400,
+                detail="Provider does not support top-up status checking",
+            )
+
+        try:
+            paid = await upstream_instance.check_topup_status(invoice_id)
+            return {"ok": True, "paid": paid}
+        except Exception as e:
+            logger.error(
+                f"Failed to check top-up status for provider {provider_id}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/balance",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_provider_balance(provider_id: int) -> dict[str, object]:
+    """Get the current account balance for the upstream provider."""
+    from ..upstream.helpers import _instantiate_provider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        try:
+            balance_data = await upstream_instance.get_balance()
+            return {"ok": True, "balance_data": balance_data}
+        except NotImplementedError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provider does not support balance checking: {str(e)}",
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch balance for provider {provider_id}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
 @admin_router.get(
     "/api/openrouter-presets",
     dependencies=[Depends(require_admin_api)],

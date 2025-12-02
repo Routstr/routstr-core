@@ -7,6 +7,9 @@ export const ProviderTypeSchema = z.object({
   default_base_url: z.string(),
   fixed_base_url: z.boolean(),
   platform_url: z.string().nullable(),
+  can_create_account: z.boolean(),
+  can_topup: z.boolean(),
+  can_show_balance: z.boolean(),
 });
 
 export const UpstreamProviderSchema = z.object({
@@ -855,6 +858,54 @@ export class AdminService {
     return await apiClient.get<RevenueByModel>(
       `/admin/api/usage/revenue-by-model?hours=${hours}&limit=${limit}`
     );
+  }
+
+  static async createProviderAccountByType(
+    providerType: string
+  ): Promise<{
+    ok: boolean;
+    account_data: Record<string, unknown>;
+    message: string;
+  }> {
+    return await apiClient.post<{
+      ok: boolean;
+      account_data: Record<string, unknown>;
+      message: string;
+    }>('/admin/api/upstream-providers/create-account', {
+      provider_type: providerType,
+    });
+  }
+
+  static async initiateProviderTopup(
+    providerId: number,
+    amount: number
+  ): Promise<{ ok: boolean; topup_data: Record<string, unknown>; message: string }> {
+    return await apiClient.post<{
+      ok: boolean;
+      topup_data: Record<string, unknown>;
+      message: string;
+    }>(`/admin/api/upstream-providers/${providerId}/topup`, {
+      amount: amount,
+    });
+  }
+
+  static async checkTopupStatus(
+    providerId: number,
+    invoiceId: string
+  ): Promise<{ ok: boolean; paid: boolean }> {
+    return await apiClient.get<{
+      ok: boolean;
+      paid: boolean;
+    }>(`/admin/api/upstream-providers/${providerId}/topup/${invoiceId}/status`);
+  }
+
+  static async getProviderBalance(
+    providerId: number
+  ): Promise<{ ok: boolean; balance_data: Record<string, unknown> }> {
+    return await apiClient.get<{
+      ok: boolean;
+      balance_data: Record<string, unknown>;
+    }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
 }
 
