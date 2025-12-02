@@ -825,7 +825,8 @@ export default function ProvidersPage() {
                   )}
                 />
                 <p className='text-muted-foreground text-xs'>
-                  Leave empty to use default (OpenRouter: 1.06, Others: 1.01)
+                  1.01 means +1% e.g. currency exchange, card
+                  fees, etc.
                 </p>
               </div>
             </div>
