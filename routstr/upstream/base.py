@@ -1780,15 +1780,32 @@ class BaseUpstreamProvider:
     async def _fetch_openrouter_models(self) -> list[dict]:
         """Fetch models from OpenRouter API."""
         url = "https://openrouter.ai/api/v1/models"
+        embeddings_url = "https://openrouter.ai/api/v1/embeddings/models"
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            models = response.json()
-            return [
-                model
-                for model in models.get("data", [])
-                if ":free" not in model.get("id", "").lower()
-            ]
+            models_response, embeddings_response = await asyncio.gather(
+                client.get(url),
+                client.get(embeddings_url),
+                return_exceptions=True
+            )
+
+            all_models = []
+
+            def process_models_response(response):
+                if not isinstance(response, Exception):
+                    response.raise_for_status()
+                    data = response.json()
+                    return [
+                        model
+                        for model in data.get("data", [])
+                        if ":free" not in model.get("id", "").lower()
+                    ]
+                return []
+
+            all_models.extend(process_models_response(models_response))
+            all_models.extend(process_models_response(embeddings_response))
+
+            return all_models
 
     async def _fetch_provider_models(self) -> dict:
         """Fetch models from provider's API."""
