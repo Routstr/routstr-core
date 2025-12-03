@@ -78,6 +78,10 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
         session: AsyncSession,
         model_obj: Model,
     ) -> Response | StreamingResponse:
+        # Remove provider prefix from model ID for Gemini API
+        if "/" in model_obj.id:
+            model_obj.id = model_obj.id.split("/", 1)[1]
+
         if not path.startswith("chat/completions"):
             return await super().forward_request(
                 request,
