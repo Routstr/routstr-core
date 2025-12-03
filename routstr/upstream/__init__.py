@@ -2,6 +2,7 @@ from .anthropic import AnthropicUpstreamProvider
 from .azure import AzureUpstreamProvider
 from .base import BaseUpstreamProvider
 from .fireworks import FireworksUpstreamProvider
+from .gemini import GeminiUpstreamProvider
 from .generic import GenericUpstreamProvider
 from .groq import GroqUpstreamProvider
 from .ollama import OllamaUpstreamProvider
@@ -15,6 +16,7 @@ upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     AnthropicUpstreamProvider,
     AzureUpstreamProvider,
     FireworksUpstreamProvider,
+    GeminiUpstreamProvider,
     GenericUpstreamProvider,
     GroqUpstreamProvider,
     OllamaUpstreamProvider,
