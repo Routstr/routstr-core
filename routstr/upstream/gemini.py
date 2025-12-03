@@ -67,8 +67,6 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("gemini/")
 
-
-
     async def forward_request(
         self,
         request: Request,
@@ -259,72 +257,16 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                 model_obj,
             )
 
-
-
-    async def fetch_models(self) -> list[Model]:
-        from ..payment.models import Architecture, Model, Pricing, TopProvider
-
+    async def _fetch_provider_models(self) -> dict:
+        """Fetch models from Gemini API."""
         try:
             models_data = await self.client.list_models()
 
-            models_list = []
-            for model_data in models_data:
-                model_id = model_data.get("id", "")
-                if not model_id:
-                    continue
+            for model in models_data:
+                if "id" in model and model["id"].startswith("models/"):
+                    model["id"] = model["id"].removeprefix("models/")
 
-                display_name = model_id
-                description = f"Google {display_name} model"
-
-                context_length = 128000
-                output_token_limit = 8192
-
-                pricing_config = Pricing(
-                    prompt=0.000003,
-                    completion=0.000003,
-                    request=0.0,
-                    image=0.0,
-                    web_search=0.0,
-                    internal_reasoning=0.0,
-                    max_prompt_cost=0.001,
-                    max_completion_cost=0.001,
-                    max_cost=0.001,
-                )
-
-                models_list.append(
-                    Model(
-                        id=model_id,
-                        name=display_name,
-                        created=0,
-                        description=description,
-                        context_length=context_length,
-                        architecture=Architecture(
-                            modality="text",
-                            input_modalities=["text"],
-                            output_modalities=["text"],
-                            tokenizer="gemini",
-                            instruct_type=None,
-                        ),
-                        pricing=pricing_config,
-                        sats_pricing=None,
-                        per_request_limits=None,
-                        top_provider=TopProvider(
-                            context_length=context_length,
-                            max_completion_tokens=output_token_limit,
-                            is_moderated=True,
-                        ),
-                        enabled=True,
-                        upstream_provider_id=None,
-                        canonical_slug=None,
-                    )
-                )
-
-            logger.info(
-                f"Fetched {len(models_list)} models from Gemini",
-                extra={"model_count": len(models_list), "base_url": self.base_url},
-            )
-            return models_list
-
+            return {"data": models_data}
         except Exception as e:
             logger.error(
                 f"Failed to fetch models from Gemini API: {e}",
@@ -334,7 +276,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                     "base_url": self.base_url,
                 },
             )
-            return []
+            return {"data": []}
 
     async def refresh_models_cache(self) -> None:
         try:
