@@ -82,7 +82,7 @@ async def get_all_models_with_overrides(
     """
     from sqlmodel import select
 
-    from ..payment.models import _row_to_model
+    from ..models.crud import row_to_model
 
     async with create_session() as session:
         result = await session.exec(select(ModelRow).where(ModelRow.enabled))
@@ -108,7 +108,7 @@ async def get_all_models_with_overrides(
         for model in upstream.get_cached_models():
             if model.id in overrides_by_id:
                 override_row, provider_fee = overrides_by_id[model.id]
-                all_models[model.id] = _row_to_model(
+                all_models[model.id] = row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
             elif model.enabled:

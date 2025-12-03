@@ -71,7 +71,7 @@ def nsec_to_keypair(nsec: str) -> tuple[str, str] | None:
         return None
 
 
-def create_nip91_event(
+def create_listing_event(
     private_key_hex: str,
     provider_id: str,
     endpoint_urls: list[str],
@@ -164,7 +164,7 @@ def events_semantically_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return True
 
 
-async def query_nip91_events(
+async def query_listing_events(
     relay_url: str,
     pubkey: str,
     provider_id: str | None = None,
@@ -188,7 +188,7 @@ async def query_nip91_events(
 
             flt = Filter(kinds=[38421], authors=[pubkey], limit=10)
             filters = Filters([flt])
-            sub_id = f"nip91_{int(time.time())}"
+            sub_id = f"routstr_listing_{int(time.time())}"
             rm.add_subscription(sub_id, filters)
             req: list[Any] = [ClientMessageType.REQUEST, sub_id]
             req.extend(filters.to_json_array())
@@ -294,7 +294,7 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
     async def query_single_relay(relay_url: str) -> list[dict[str, Any]]:
         try:
-            events, _ok = await query_nip91_events(relay_url, public_key_hex, None)
+            events, _ok = await query_listing_events(relay_url, public_key_hex, None)
             return events
         except Exception:
             return []
@@ -434,7 +434,7 @@ async def announce_provider() -> None:
 
     # Create the candidate event that we would publish
     version_str = get_app_version()
-    candidate_event = create_nip91_event(
+    candidate_event = create_listing_event(
         private_key_hex=private_key_hex,
         provider_id=provider_id,
         endpoint_urls=endpoint_urls,
@@ -474,7 +474,7 @@ async def announce_provider() -> None:
         if _should_skip(relay_url):
             logger.debug(f"Skipping {relay_url} due to backoff")
             continue
-        events, ok = await query_nip91_events(relay_url, public_key_hex, provider_id)
+        events, ok = await query_listing_events(relay_url, public_key_hex, provider_id)
         if ok:
             _register_success(relay_url)
             existing_events.extend(events)
@@ -518,7 +518,7 @@ async def announce_provider() -> None:
 
             # Build fresh candidate event for comparison
             version_str = get_app_version()
-            candidate_event = create_nip91_event(
+            candidate_event = create_listing_event(
                 private_key_hex=private_key_hex,
                 provider_id=provider_id,
                 endpoint_urls=endpoint_urls,
@@ -533,7 +533,7 @@ async def announce_provider() -> None:
                 if _should_skip(relay_url):
                     logger.debug(f"Skipping {relay_url} due to backoff")
                     continue
-                events, ok = await query_nip91_events(
+                events, ok = await query_listing_events(
                     relay_url, public_key_hex, provider_id
                 )
                 if ok:

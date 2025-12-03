@@ -1,5 +1,0 @@
-# Example crontab entries for Routstr tasks
-
-# Update models.json daily at 03:15 (optional)
-# OUTPUT_FILE=/app/models.json SOURCE=openrouter
-15 3 * * * /usr/local/bin/python /app/scripts/models_meta.py >> /var/log/cron.log 2>&1

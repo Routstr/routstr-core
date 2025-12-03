@@ -34,7 +34,7 @@ sequenceDiagram
 - **Model-Based Pricing** – Convert USD prices in `models.json` to sats using live BTC/USD rates
 - **Admin Dashboard** – Simple HTML interface at `/admin/` to view balances and API keys
 - **Discovery** – Fetch available providers from Nostr relays using NIP-91 protocol
-- **NIP-91 Auto-Announcement** – Automatically announce this provider to Nostr relays when NSEC is provided
+- **Auto-Listing** – Automatically announce this provider to Nostr relays when NSEC is provided
 - **Docker Support** – Provided `Dockerfile` and `compose.yml` for running with an optional Tor hidden service
 
 ## Getting Started
@@ -99,7 +99,7 @@ The most common settings are shown below. See `.env.example` for the full list.
 - `NPUB` – Nostr public key of the proxy
 - `HTTP_URL` – Public-facing URL of the proxy
 - `ONION_URL` – Tor hidden service URL of the proxy
-- `NEXT_PUBLIC_API_URL` - UI Configuration for Next.js frontend (proxy URL, default: 'http://127.0.0.1:8000' )
+- `NEXT_PUBLIC_API_URL` - UI Configuration for Next.js frontend (proxy URL, default: '<http://127.0.0.1:8000>' )
 
 ## Database Migrations
 

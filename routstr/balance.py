@@ -143,8 +143,9 @@ async def refund_wallet_endpoint(
 
     key: TemporaryCredit = await get_credit(bearer_value, session)
     remaining_balance_msats: int = key.balance
+    refund_currency = key.refund_currency or "sat"
 
-    if key.refund_currency == "sat":
+    if refund_currency == "sat":
         remaining_balance = remaining_balance_msats // 1000
     else:
         remaining_balance = remaining_balance_msats
@@ -161,19 +162,18 @@ async def refund_wallet_endpoint(
 
             await send_to_lnurl(
                 remaining_balance,
-                key.refund_currency or "sat",
+                refund_currency,
                 key.refund_mint_url or global_settings.primary_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}
         else:
-            refund_currency = key.refund_currency or "sat"
             token = await send_token(
                 remaining_balance, refund_currency, key.refund_mint_url
             )
             result = {"token": token}
 
-        if key.refund_currency == "sat":
+        if refund_currency == "sat":
             result["sats"] = str(remaining_balance_msats // 1000)
         else:
             result["msats"] = str(remaining_balance_msats)

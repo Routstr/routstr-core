@@ -8,9 +8,8 @@ from ..models.models import (
     cleanup_enabled_models_periodically,
     update_sats_pricing,
 )
-from ..nostr.discovery import providers_cache_refresher
-from ..nostr.listing import announce_provider
-from ..payment.price import _update_prices, update_prices_periodically
+from ..nostr import announce_provider, providers_cache_refresher
+from ..payment.price import update_prices_periodically
 from ..payment.wallet import periodic_payout
 from ..proxy import get_upstreams, initialize_upstreams, refresh_model_maps_periodically
 from ..upstream.helpers import refresh_upstreams_models_periodically
@@ -32,7 +31,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     btc_price_task = None
     pricing_task = None
     payout_task = None
-    nip91_task = None
+    listing_task = None
     providers_task = None
     models_refresh_task = None
     models_cleanup_task = None
@@ -60,10 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             pass
 
-        # await ensure_models_bootstrapped()
-
-        await _update_prices()
-        await initialize_upstreams()
+        _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
@@ -74,8 +70,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         models_cleanup_task = asyncio.create_task(cleanup_enabled_models_periodically())
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
-        nip91_task = asyncio.create_task(announce_provider())
+        listing_task = asyncio.create_task(announce_provider())
         providers_task = asyncio.create_task(providers_cache_refresher())
+
+        await _initialize_upstreams_task
 
         yield
 
@@ -94,8 +92,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             pricing_task.cancel()
         if payout_task is not None:
             payout_task.cancel()
-        if nip91_task is not None:
-            nip91_task.cancel()
+        if listing_task is not None:
+            listing_task.cancel()
         if providers_task is not None:
             providers_task.cancel()
         if models_refresh_task is not None:
@@ -113,8 +111,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(pricing_task)
             if payout_task is not None:
                 tasks_to_wait.append(payout_task)
-            if nip91_task is not None:
-                tasks_to_wait.append(nip91_task)
+            if listing_task is not None:
+                tasks_to_wait.append(listing_task)
             if providers_task is not None:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:

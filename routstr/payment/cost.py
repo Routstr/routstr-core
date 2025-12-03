@@ -8,7 +8,6 @@ from PIL import Image
 from pydantic.v1 import BaseModel
 
 from ..core import get_logger
-from ..core.db import AsyncSession
 from ..core.settings import settings
 from ..models.models import Model
 
@@ -31,8 +30,8 @@ class CostDataError(BaseModel):
     code: str
 
 
-async def calculate_cost(  # todo: can be sync
-    response_data: dict, max_cost: int, session: AsyncSession
+def calculate_cost(
+    response_data: dict, max_cost: int
 ) -> CostData | MaxCostData | CostDataError:
     """
     Calculate the cost of an API request based on token usage.

@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING
 
 from ..core import get_logger
-from ..models.crud import _row_to_model
+from ..models.crud import row_to_model
 from ..upstream.helpers import resolve_model_alias
 
 if TYPE_CHECKING:
@@ -245,7 +245,7 @@ def create_model_mappings(
             # Apply overrides if present
             if model.id in overrides_by_id:
                 override_row, provider_fee = overrides_by_id[model.id]
-                model_to_use = _row_to_model(
+                model_to_use = row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
             else:

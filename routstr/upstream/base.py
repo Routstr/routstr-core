@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 from ..models.models import (
     Model,
     Pricing,
-    _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    calculate_usd_max_costs,
 )
 from ..payment.cost import CostData, CostDataError, MaxCostData, calculate_cost
 from ..payment.helpers import create_error_response
@@ -941,45 +941,43 @@ class BaseUpstreamProvider:
             extra={"model": model, "has_usage": "usage" in response_data},
         )
 
-        async with create_session() as session:
-            match await calculate_cost(response_data, max_cost_for_model, session):
-                case MaxCostData() as cost:
-                    logger.debug(
-                        "Using max cost pricing",
-                        extra={"model": model, "max_cost_msats": cost.total_msats},
-                    )
-                    return cost
-                case CostData() as cost:
-                    logger.debug(
-                        "Using token-based pricing",
-                        extra={
-                            "model": model,
-                            "total_cost_msats": cost.total_msats,
-                            "input_msats": cost.input_msats,
-                            "output_msats": cost.output_msats,
-                        },
-                    )
-                    return cost
-                case CostDataError() as error:
-                    logger.error(
-                        "Cost calculation error",
-                        extra={
-                            "model": model,
-                            "error_message": error.message,
-                            "error_code": error.code,
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": {
-                                "message": error.message,
-                                "type": "invalid_request_error",
-                                "code": error.code,
-                            }
-                        },
-                    )
-        return None
+        match calculate_cost(response_data, max_cost_for_model):
+            case MaxCostData() as cost:
+                logger.debug(
+                    "Using max cost pricing",
+                    extra={"model": model, "max_cost_msats": cost.total_msats},
+                )
+                return cost
+            case CostData() as cost:
+                logger.debug(
+                    "Using token-based pricing",
+                    extra={
+                        "model": model,
+                        "total_cost_msats": cost.total_msats,
+                        "input_msats": cost.input_msats,
+                        "output_msats": cost.output_msats,
+                    },
+                )
+                return cost
+            case CostDataError() as error:
+                logger.error(
+                    "Cost calculation error",
+                    extra={
+                        "model": model,
+                        "error_message": error.message,
+                        "error_code": error.code,
+                    },
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "message": error.message,
+                            "type": "invalid_request_error",
+                            "code": error.code,
+                        }
+                    },
+                )
 
     async def send_refund(self, amount: int, unit: str, mint: str | None = None) -> str:
         """Create and send a refund token to the user.
@@ -1681,7 +1679,7 @@ class BaseUpstreamProvider:
             adjusted_pricing.max_prompt_cost,
             adjusted_pricing.max_completion_cost,
             adjusted_pricing.max_cost,
-        ) = _calculate_usd_max_costs(temp_model)
+        ) = calculate_usd_max_costs(temp_model)
 
         return Model(
             id=model.id,

@@ -16,7 +16,7 @@ from .core.db import (
 )
 from .models.algorithm import create_model_mappings
 from .models.models import Model
-from .payment.cashu import check_token_balance
+from .payment.cashu import pre_check_header_token_balance
 from .payment.cost import calculate_discounted_max_cost, get_max_cost_for_model
 from .payment.helpers import pay_for_request, revert_pay_for_request
 from .upstream import BaseUpstreamProvider
@@ -181,7 +181,7 @@ async def proxy(
     max_cost_for_model = await calculate_discounted_max_cost(
         _max_cost_for_model, body_dict, model_obj=model
     )
-    check_token_balance(headers, body_dict, max_cost_for_model)
+    pre_check_header_token_balance(headers, body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
         return await upstream.handle_x_cashu(

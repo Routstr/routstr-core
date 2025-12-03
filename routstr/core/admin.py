@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from ..models.crud import _row_to_model, list_models
+from ..models.crud import row_to_model, list_models
 from ..payment.wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -2456,7 +2456,7 @@ async def create_provider_model(
         await session.refresh(row)
 
     await refresh_model_maps()
-    return _row_to_model(
+    return row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
 
@@ -2476,7 +2476,7 @@ async def get_provider_model(provider_id: int, model_id: str) -> dict[str, objec
             raise HTTPException(
                 status_code=404, detail="Model not found for this provider"
             )
-        return _row_to_model(
+        return row_to_model(
             row, apply_provider_fee=True, provider_fee=provider.provider_fee
         ).dict()  # type: ignore
 
@@ -2536,7 +2536,7 @@ async def update_provider_model(
             )
 
     await refresh_model_maps()
-    return _row_to_model(
+    return row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
 

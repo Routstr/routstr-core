@@ -92,7 +92,10 @@ async def pay_for_request(
     stmt = (
         update(TemporaryCredit)
         .where(col(TemporaryCredit.hashed_key) == key.hashed_key)
-        .where(col(TemporaryCredit.balance) >= cost_per_request)
+        .where(
+            col(TemporaryCredit.balance) - col(TemporaryCredit.reserved_balance)
+            >= cost_per_request
+        )
         .values(
             reserved_balance=col(TemporaryCredit.reserved_balance) + cost_per_request
         )
@@ -195,7 +198,7 @@ async def adjust_payment_for_tokens(
         },
     )
 
-    match await calculate_cost(response_data, deducted_max_cost, session):
+    match calculate_cost(response_data, deducted_max_cost):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import random
-from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from pydantic.v1 import BaseModel
@@ -12,7 +11,6 @@ from ..core.db import ModelRow, create_session, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from ..payment.price import sats_usd_price
-from .metadata import async_fetch_openrouter_models
 
 logger = get_logger(__name__)
 
@@ -73,7 +71,7 @@ def is_openrouter_upstream() -> bool:
     return base.lower() == "https://openrouter.ai/api/v1"
 
 
-def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
+def calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
     """Calculate max costs in USD based on model context/token limits.
 
     Args:
@@ -182,61 +180,6 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             },
         )
         return model
-
-
-async def ensure_models_bootstrapped() -> None:
-    from .crud import _model_to_row_payload
-
-    async with create_session() as s:
-        existing = (await s.exec(select(ModelRow.id).limit(1))).all()  # type: ignore
-        if existing:
-            return
-
-        try:
-            models_path = Path(settings.models_path)
-        except Exception:
-            models_path = Path("models.json")
-
-        models_to_insert: list[dict] = []
-        if models_path.exists():
-            try:
-                with models_path.open("r") as f:
-                    data = json.load(f)
-                models_to_insert = data.get("models", [])
-                logger.info(
-                    f"Bootstrapping {len(models_to_insert)} models from {models_path}"
-                )
-            except Exception as e:
-                logger.error(f"Error loading models from {models_path}: {e}")
-
-        if not models_to_insert and is_openrouter_upstream():
-            logger.info("Bootstrapping models from OpenRouter API")
-            source_filter = None
-            try:
-                src = settings.source or None
-                source_filter = src if src and src.strip() else None
-            except Exception:
-                pass
-            models_to_insert = await async_fetch_openrouter_models(
-                source_filter=source_filter
-            )
-        elif not models_to_insert:
-            logger.info(
-                "No models.json found and upstream is not OpenRouter; skipping bootstrap"
-            )
-
-        for m in models_to_insert:
-            try:
-                model = Model(**m)  # type: ignore
-            except Exception:
-                # Some OpenRouter models include extra fields; only map required ones
-                continue
-            exists = await s.get(ModelRow, model.id)
-            if exists:
-                continue
-            payload = _model_to_row_payload(model)
-            s.add(ModelRow(**payload))  # type: ignore
-        await s.commit()
 
 
 async def _update_sats_pricing_once() -> None:
@@ -400,76 +343,27 @@ def _pricing_matches(
     return True
 
 
-async def refresh_models_periodically() -> None:
-    """Background task: periodically fetch OpenRouter models and insert new ones.
-
-    - Respects optional SOURCE filter from settings
-    - Does not overwrite existing rows
-    - Sleeps according to settings.models_refresh_interval_seconds; disabled when 0
-    """
-    from .crud import _model_to_row_payload
-
-    interval = getattr(settings, "models_refresh_interval_seconds", 0)
-    if not interval or interval <= 0:
-        return
-
-    # Only refresh from OpenRouter when upstream is OpenRouter
-    if not is_openrouter_upstream():
-        logger.info("Skipping models refresh: upstream_base_url is not OpenRouter")
-        return
-
-    while True:
-        try:
-            try:
-                if not settings.enable_models_refresh:
-                    return
-            except Exception:
-                pass
-            try:
-                src = settings.source or None
-                source_filter = src if src and src.strip() else None
-            except Exception:
-                source_filter = None
-
-            models = await async_fetch_openrouter_models(source_filter=source_filter)
-            if not models:
-                await asyncio.sleep(interval)
-                continue
-
-            async with create_session() as s:
-                result = await s.exec(select(ModelRow.id))  # type: ignore
-                existing_ids = {
-                    row[0] if isinstance(row, tuple) else row for row in result.all()
-                }
-                inserted = 0
-                for m in models:
-                    try:
-                        model = Model(**m)  # type: ignore
-                    except Exception:
-                        continue
-                    if model.id in existing_ids:
-                        continue
-                    payload = _model_to_row_payload(model)
-                    try:
-                        s.add(ModelRow(**payload))  # type: ignore
-                    except Exception:
-                        pass
-                    inserted += 1
-                if inserted:
-                    await s.commit()
-                    logger.info(f"Inserted {inserted} new models from OpenRouter")
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(
-                "Error during models refresh",
-                extra={"error": str(e), "error_type": type(e).__name__},
-            )
-        try:
-            jitter = max(0.0, float(interval) * 0.1)
-            await asyncio.sleep(interval + random.uniform(0, jitter))
-        except asyncio.CancelledError:
-            break
+def _model_to_row_payload(model: Model) -> dict[str, str | int | bool | None]:
+    return {
+        "id": model.id,
+        "name": model.name,
+        "created": model.created,
+        "description": model.description,
+        "context_length": model.context_length,
+        "architecture": json.dumps(model.architecture.dict()),
+        "pricing": json.dumps(model.pricing.dict()),
+        "sats_pricing": json.dumps(model.sats_pricing.dict())
+        if model.sats_pricing
+        else None,
+        "per_request_limits": json.dumps(model.per_request_limits)
+        if model.per_request_limits is not None
+        else None,
+        "top_provider": json.dumps(model.top_provider.dict())
+        if model.top_provider is not None
+        else None,
+        "enabled": model.enabled,
+        "upstream_provider_id": model.upstream_provider_id,
+    }
 
 
 @models_router.get("/v1/models")

@@ -6,61 +6,35 @@ from ..core import get_logger
 logger = get_logger(__name__)
 
 
-def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
+def get_token_balance_msat(cashu_token: str) -> int:
+    try:
+        token = deserialize_token_from_string(cashu_token)
+    except Exception:
+        raise HTTPException(401, "Invalid authentication token format")
+
+    if token.unit == "sat":
+        return token.amount * 1000
+    if token.unit == "msat":
+        return token.amount
+
+    raise HTTPException(401, f"Unit {token.unit} not supported yet")
+
+
+def pre_check_header_token_balance(
+    headers: dict, body: dict, max_cost_for_model: int
+) -> None:
     if x_cashu := headers.get("x-cashu", None):
         cashu_token = x_cashu
-        logger.debug(
-            "Using X-Cashu token",
-            extra={
-                "token_preview": cashu_token[:20] + "..."
-                if len(cashu_token) > 20
-                else cashu_token
-            },
-        )
     elif auth := headers.get("authorization", None):
         cashu_token = auth.split(" ")[1] if len(auth.split(" ")) > 1 else ""
-        logger.debug(
-            "Using Authorization header token",
-            extra={
-                "token_preview": cashu_token[:20] + "..."
-                if len(cashu_token) > 20
-                else cashu_token
-            },
-        )
     else:
-        logger.error("No authentication token provided")
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Handle empty token
-    if not cashu_token:
-        logger.error("Empty token provided")
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "message": "API key or Cashu token required",
-                    "type": "invalid_request_error",
-                    "code": "missing_api_key",
-                }
-            },
-        )
 
     # Handle regular API keys (sk-*)
     if cashu_token.startswith("sk-"):
         return
 
-    try:
-        token_obj = deserialize_token_from_string(cashu_token)
-    except Exception:
-        # Invalid token format - let the auth system handle it
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid authentication token format",
-        )
-
-    amount_msat = (
-        token_obj.amount if token_obj.unit == "msat" else token_obj.amount * 1000
-    )
+    amount_msat = get_token_balance_msat(cashu_token)
 
     if max_cost_for_model > amount_msat:
         raise HTTPException(
