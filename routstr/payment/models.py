@@ -114,11 +114,13 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
             models_response, embeddings_response = await asyncio.gather(
                 client.get(f"{base_url}/models", timeout=30),
                 client.get(f"{base_url}/embeddings/models", timeout=30),
-                return_exceptions=True
+                return_exceptions=True,
             )
 
-            def process_models_response(response):
-                if not isinstance(response, Exception):
+            def process_models_response(
+                response: httpx.Response | BaseException,
+            ) -> list[dict]:
+                if not isinstance(response, BaseException):
                     response.raise_for_status()
                     data = response.json()
                     return [
