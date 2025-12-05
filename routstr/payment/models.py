@@ -66,6 +66,29 @@ class Model(BaseModel):
         return hash(self.id)
 
 
+def _has_complete_pricing(model: dict) -> bool:
+    """Check if model has complete pricing information."""
+    pricing = model.get("pricing", {})
+    required_fields = [
+        "prompt",
+        "completion",
+        "request",
+        "image",
+        "web_search",
+        "internal_reasoning",
+    ]
+
+    for field in required_fields:
+        if field not in pricing:
+            return False
+        # Check if the value can be converted to float
+        try:
+            float(pricing[field])
+        except (ValueError, TypeError):
+            return False
+    return True
+
+
 def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
     """Fetches model information from OpenRouter API."""
     base_url = "https://openrouter.ai/api/v1"
@@ -95,6 +118,9 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                     or model_id == "openrouter/sonoma-dusk-alpha"
                     or model_id == "openrouter/sonoma-sky-alpha"
                 ):
+                    continue
+
+                if not _has_complete_pricing(model):
                     continue
 
                 models_data.append(model)
@@ -136,6 +162,9 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                     or model_id == "openrouter/sonoma-dusk-alpha"
                     or model_id == "openrouter/sonoma-sky-alpha"
                 ):
+                    continue
+
+                if not _has_complete_pricing(model):
                     continue
 
                 models_data.append(model)
@@ -199,7 +228,22 @@ def load_models() -> list[Model]:
         return []
 
     logger.info(f"Successfully fetched {len(models_data)} models from OpenRouter API")
-    return [Model(**model) for model in models_data]  # type: ignore
+
+    valid_models = []
+    for model_data in models_data:
+        try:
+            model = Model(**model_data)  # type: ignore
+            valid_models.append(model)
+        except Exception as e:
+            model_id = model_data.get("id", "unknown")
+            logger.warning(f"Skipping model {model_id} - validation failed: {e}")
+
+    if len(valid_models) != len(models_data):
+        logger.warning(
+            f"Filtered out {len(models_data) - len(valid_models)} models with incomplete data"
+        )
+
+    return valid_models
 
 
 def _row_to_model(
