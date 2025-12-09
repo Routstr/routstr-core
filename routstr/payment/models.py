@@ -22,6 +22,7 @@ models_router = APIRouter()
 
 DEFAULT_EXCLUDED_MODEL_IDS: Final[set[str]] = {
     "openrouter/auto",
+    "openrouter/bodybuilder",
     "google/gemini-2.5-pro-exp-03-25",
     "opengvlab/internvl3-78b",
     "openrouter/sonoma-dusk-alpha",
