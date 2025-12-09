@@ -131,7 +131,9 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             (
                                 model
                                 for model in or_models
-                                if model.id == ppqai_model.id
+                                if (model.id == ppqai_model.id)
+                                or (model.id.split("/")[-1] == ppqai_model.id)
+                                or (model.id == ppqai_model.id.split("/")[-1])
                             ),
                             None,
                         )
