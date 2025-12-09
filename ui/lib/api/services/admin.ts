@@ -67,7 +67,9 @@ export const AdminModelSchema = z.object({
   pricing: AdminModelPricingSchema.or(z.record(z.any())),
   per_request_limits: z.record(z.any()).nullable().optional(),
   top_provider: z.record(z.any()).nullable().optional(),
-  upstream_provider_id: z.number().nullable().optional(),
+  upstream_provider_id: z.union([z.string(), z.number()]).nullable().optional(),
+  canonical_slug: z.string().nullable().optional(),
+  alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
 });
 

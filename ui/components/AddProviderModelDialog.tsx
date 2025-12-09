@@ -55,16 +55,16 @@ const listToString = (value: string[] | undefined | null): string =>
 const FormSchema = z.object({
   id: z.string().min(1, 'Model ID is required'),
   name: z.string().min(1, 'Name is required'),
-  description: z.string().optional(),
+  description: z.string().default(''),
   context_length: z.coerce.number().min(0).default(8192),
   modality: z.string().min(1, 'Modality is required'),
-  input_modalities_raw: z.string().optional(),
-  output_modalities_raw: z.string().optional(),
-  tokenizer: z.string().optional().default(''),
-  instruct_type: z.string().optional(),
-  canonical_slug: z.string().optional(),
-  alias_ids_raw: z.string().optional(),
-  upstream_provider_id: z.string().optional(),
+  input_modalities_raw: z.string().default(''),
+  output_modalities_raw: z.string().default(''),
+  tokenizer: z.string().default(''),
+  instruct_type: z.string().default(''),
+  canonical_slug: z.string().default(''),
+  alias_ids_raw: z.string().default(''),
+  upstream_provider_id: z.string().default(''),
   input_cost: z.coerce.number().min(0).default(0),
   output_cost: z.coerce.number().min(0).default(0),
   request_cost: z.coerce.number().min(0).default(0),
@@ -74,14 +74,14 @@ const FormSchema = z.object({
   max_prompt_cost: z.coerce.number().min(0).default(0),
   max_completion_cost: z.coerce.number().min(0).default(0),
   max_cost: z.coerce.number().min(0).default(0),
-  per_request_limits_raw: z.string().optional(),
+  per_request_limits_raw: z.string().default(''),
   top_provider_context_length: z.coerce.number().min(0).optional(),
   top_provider_max_completion_tokens: z.coerce.number().min(0).optional(),
   top_provider_is_moderated: z.boolean().default(false),
   enabled: z.boolean().default(true),
 });
 
-type FormData = z.infer<typeof FormSchema>;
+type FormData = z.output<typeof FormSchema>;
 
 export interface AddProviderModelDialogProps {
   providerId: number;
@@ -105,7 +105,7 @@ export function AddProviderModelDialog({
   const [selectedPresetLabel, setSelectedPresetLabel] = useState('Select a preset');
 
   const form = useForm<FormData>({
-    resolver: zodResolver(FormSchema),
+    resolver: zodResolver(FormSchema) as never,
     defaultValues: {
       id: '',
       name: '',
@@ -321,7 +321,7 @@ export function AddProviderModelDialog({
       if (data.per_request_limits_raw && data.per_request_limits_raw.trim().length) {
         try {
           perRequestLimits = JSON.parse(data.per_request_limits_raw);
-        } catch (err) {
+        } catch {
           toast.error('Per-request limits must be valid JSON');
           setIsSubmitting(false);
           return;
