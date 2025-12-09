@@ -901,10 +901,10 @@ export class AdminService {
 
   static async getProviderBalance(
     providerId: number
-  ): Promise<{ ok: boolean; balance_data: Record<string, unknown> }> {
+  ): Promise<{ ok: boolean; balance_data: number | null | Record<string, unknown> }> {
     return await apiClient.get<{
       ok: boolean;
-      balance_data: Record<string, unknown>;
+      balance_data: number | null | Record<string, unknown>;
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
 }

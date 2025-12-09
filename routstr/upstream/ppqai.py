@@ -373,16 +373,20 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
         return topup_data
 
-    async def get_balance(self) -> dict[str, object]:
+    async def get_balance(self) -> float | None:
         """Get the current account balance from PPQ.AI.
 
         Returns:
-            Dict with balance information
+            Float representing the balance amount (in USD), or None if unavailable.
 
         Raises:
             httpx.HTTPStatusError: If the API request fails
         """
-        return await self.check_balance()
+        data = await self.check_balance()
+        balance = data.get("balance")
+        if isinstance(balance, (int, float)):
+            return float(balance)
+        return None
 
     async def check_balance(self) -> dict[str, object]:
         """Check the account balance for this PPQ.AI account.

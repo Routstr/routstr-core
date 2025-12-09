@@ -1904,14 +1904,15 @@ class BaseUpstreamProvider:
             f"Provider {self.provider_type} does not support top-up"
         )
 
-    async def get_balance(self) -> dict[str, object]:
+    async def get_balance(self) -> float | None:
         """Get the current account balance from the provider.
 
         Returns:
-            Dict with balance information
+            Float representing the balance amount, or None if not supported/available.
+            Typically in USD or the provider's credit unit.
 
         Raises:
-            NotImplementedError: If provider does not support balance checking
+            NotImplementedError: If provider does not support balance checking (default behavior)
         """
         raise NotImplementedError(
             f"Provider {self.provider_type} does not support balance checking"

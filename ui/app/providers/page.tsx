@@ -54,7 +54,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 
-function ProviderBalance({ providerId }: { providerId: number }) {
+function ProviderBalance({
+  providerId,
+  platformUrl,
+}: {
+  providerId: number;
+  platformUrl?: string | null;
+}) {
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
   const [topupAmount, setTopupAmount] = useState('');
   const [topupError, setTopupError] = useState('');
@@ -136,6 +142,10 @@ function ProviderBalance({ providerId }: { providerId: number }) {
   });
 
   const handleTopup = () => {
+    // If no dialog open logic (which depends on API implementation),
+    // we check if we should redirect or open dialog based on available info
+    // But since this function is called inside the dialog, we might want to change
+    // how the "Top Up" button behaves instead.
     const amount = parseFloat(topupAmount);
 
     if (isNaN(amount)) {
@@ -149,6 +159,31 @@ function ProviderBalance({ providerId }: { providerId: number }) {
     }
 
     topupMutation.mutate(amount);
+  };
+
+  const handleTopUpClick = () => {
+    // Check if the provider supports direct topup (currently only PPQ.AI effectively)
+    // We can infer this if it's NOT OpenRouter or OpenAI, or strictly checking provider capability
+    // For now, we'll try to initiate topup for anyone, but if we know it fails (or isn't implemented),
+    // we should redirect.
+    // However, the prompt asks to redirect if topup is not implemented.
+    // The backend throws 500/400 if not implemented.
+    // A better approach is to check if we have a platform URL and maybe redirect there
+    // if we know it's not supported.
+    
+    // BUT, we don't know for sure if it's supported without checking metadata or trying.
+    // Let's rely on the "can_topup" metadata if available, but currently we only have "can_show_balance".
+    
+    // Simple heuristic: If platformUrl exists and we suspect no direct topup, redirect?
+    // Actually, let's try to open the dialog, but if it's OpenRouter/OpenAI, maybe we just redirect?
+    // The user specifically mentioned "like in openrouter".
+    
+    if (platformUrl && (platformUrl.includes('openrouter.ai') || platformUrl.includes('openai.com'))) {
+        window.open(platformUrl, '_blank');
+        return;
+    }
+    
+    setIsTopupDialogOpen(true);
   };
 
   const handleCloseDialog = () => {
@@ -170,12 +205,18 @@ function ProviderBalance({ providerId }: { providerId: number }) {
   const balance = balanceData.balance_data;
   let displayValue = 'N/A';
 
-  if (typeof balance.balance === 'number') {
-    displayValue = `$${balance.balance.toFixed(2)}`;
-  } else if (typeof balance.balance === 'string') {
-    displayValue = balance.balance;
-  } else if (balance.amount !== undefined) {
-    displayValue = `$${Number(balance.amount).toFixed(2)}`;
+  if (typeof balance === 'number') {
+    displayValue = `$${balance.toFixed(2)}`;
+  } else if (balance && typeof balance === 'object') {
+    // Legacy support for object response
+    const b = balance as Record<string, unknown>;
+    if (typeof b.balance === 'number') {
+      displayValue = `$${b.balance.toFixed(2)}`;
+    } else if (typeof b.balance === 'string') {
+      displayValue = b.balance;
+    } else if (b.amount !== undefined) {
+      displayValue = `$${Number(b.amount).toFixed(2)}`;
+    }
   }
 
   return (
@@ -183,7 +224,7 @@ function ProviderBalance({ providerId }: { providerId: number }) {
       <Button
         variant='outline'
         size='sm'
-        onClick={() => setIsTopupDialogOpen(true)}
+        onClick={handleTopUpClick}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
         className='w-full font-mono sm:w-auto'
@@ -775,7 +816,10 @@ export default function ProvidersPage() {
                         <div className='flex flex-wrap items-center gap-2'>
                           {canShowBalance(provider.provider_type) &&
                             provider.api_key && (
-                              <ProviderBalance providerId={provider.id} />
+                              <ProviderBalance 
+                                providerId={provider.id} 
+                                platformUrl={getPlatformUrl(provider.provider_type)}
+                              />
                             )}
                           <Button
                             variant='outline'
