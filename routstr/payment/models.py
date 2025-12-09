@@ -67,7 +67,7 @@ class Model(BaseModel):
     per_request_limits: dict | None = None
     top_provider: TopProvider | None = None
     enabled: bool = True
-    upstream_provider_id: int | None = None
+    upstream_provider_id: int | str | None = None
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
 

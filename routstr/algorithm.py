@@ -254,7 +254,12 @@ def create_model_mappings(
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
             if not is_openrouter or base_id not in unique_models:
-                unique_model = model_to_use.copy(update={"id": base_id})
+                unique_model = model_to_use.copy(
+                    update={
+                        "id": base_id,
+                        "upstream_provider_id": upstream.provider_type,
+                    }
+                )
                 unique_models[base_id] = unique_model
 
             # Get all aliases for this model
