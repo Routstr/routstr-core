@@ -40,10 +40,10 @@ class Architecture(BaseModel):
 class Pricing(BaseModel):
     prompt: float
     completion: float
-    request: float
-    image: float
-    web_search: float
-    internal_reasoning: float
+    request: float = 0.0
+    image: float = 0.0
+    web_search: float = 0.0
+    internal_reasoning: float = 0.0
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
