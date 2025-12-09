@@ -36,6 +36,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "ppqai"
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
+    IGNORED_MODEL_IDS: list[str] = ["auto"]
 
     def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(
@@ -127,6 +128,9 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 for model_data in models_data:
                     try:
                         ppqai_model = PPQAIModel.parse_obj(model_data)
+                        if ppqai_model.id in self.IGNORED_MODEL_IDS:
+                            continue
+
                         or_model = next(
                             (
                                 model
