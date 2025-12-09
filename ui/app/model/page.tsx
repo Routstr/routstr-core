@@ -204,8 +204,8 @@ export default function ModelsPage() {
                                     </div>
                                   </div>
                                 </div>
-                                {totalModels === 0 ? (
-                                  <Alert>
+                                {totalModels === 0 && (
+                                  <Alert className="mb-4">
                                     <AlertCircle className='h-4 w-4' />
                                     <AlertDescription>
                                       <div className='space-y-2'>
@@ -237,14 +237,13 @@ export default function ModelsPage() {
                                       </div>
                                     </AlertDescription>
                                   </Alert>
-                                ) : (
-                                  <ModelSelector
-                                    filterProvider={provider}
-                                    groupData={groupData}
-                                    showProviderActions={true}
-                                    showDeleteAllButton={false}
-                                  />
                                 )}
+                                <ModelSelector
+                                  filterProvider={provider}
+                                  groupData={groupData}
+                                  showProviderActions={true}
+                                  showDeleteAllButton={false}
+                                />
                               </div>
                             </TabsContent>
                           );
