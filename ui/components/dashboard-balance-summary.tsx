@@ -96,4 +96,3 @@ export function DashboardBalanceSummary({
     </div>
   );
 }
-

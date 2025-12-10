@@ -53,7 +53,7 @@ export default function DashboardPage() {
       window.removeEventListener('storage', syncAuthState);
     };
   }, []);
-  
+
   const { data: btcUsdPrice } = useQuery({
     queryKey: ['btc-usd-price'],
     queryFn: fetchBtcUsdPrice,
@@ -131,8 +131,13 @@ export default function DashboardPage() {
         <SiteHeader />
         <div className='container max-w-7xl px-4 py-8 md:px-6 lg:px-8'>
           <div className='mb-8'>
-            <h1 className='text-3xl font-bold tracking-tight mb-6'>Dashboard</h1>
-            <DashboardBalanceSummary displayUnit={displayUnit} usdPerSat={usdPerSat} />
+            <h1 className='mb-6 text-3xl font-bold tracking-tight'>
+              Dashboard
+            </h1>
+            <DashboardBalanceSummary
+              displayUnit={displayUnit}
+              usdPerSat={usdPerSat}
+            />
           </div>
 
           <div className='mb-6 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between'>
@@ -140,8 +145,9 @@ export default function DashboardPage() {
               <h2 className='text-xl font-semibold tracking-tight'>
                 Usage Analytics
               </h2>
-              <p className='text-muted-foreground text-sm mt-1'>
-                Monitor requests, errors, and revenue over the last {timeRange} hours
+              <p className='text-muted-foreground mt-1 text-sm'>
+                Monitor requests, errors, and revenue over the last {timeRange}{' '}
+                hours
               </p>
             </div>
             <div className='flex items-center gap-4'>
@@ -176,27 +182,31 @@ export default function DashboardPage() {
 
           <div className='space-y-6'>
             {summaryLoading ? (
-              <div className='text-center py-8'>Loading summary...</div>
+              <div className='py-8 text-center'>Loading summary...</div>
             ) : summaryData ? (
               <UsageSummaryCards summary={summaryData} />
             ) : null}
 
             <div className='grid gap-6 lg:grid-cols-2'>
               {metricsLoading ? (
-                <div className='text-center py-8 col-span-2'>
+                <div className='col-span-2 py-8 text-center'>
                   Loading metrics...
                 </div>
               ) : metricsData && metricsData.metrics.length > 0 ? (
                 <>
-                  <div className="col-span-full">
+                  <div className='col-span-full'>
                     <UsageMetricsChart
-                      data={metricsData.metrics.map((m) => ({
-                        ...m,
-                        revenue_sats: m.revenue_msats / 1000,
-                        refunds_sats: m.refunds_msats / 1000,
-                        net_revenue_sats:
-                          (m.revenue_msats - m.refunds_msats) / 1000,
-                      })) as Array<Record<string, unknown> & { timestamp: string }>}
+                      data={
+                        metricsData.metrics.map((m) => ({
+                          ...m,
+                          revenue_sats: m.revenue_msats / 1000,
+                          refunds_sats: m.refunds_msats / 1000,
+                          net_revenue_sats:
+                            (m.revenue_msats - m.refunds_msats) / 1000,
+                        })) as Array<
+                          Record<string, unknown> & { timestamp: string }
+                        >
+                      }
                       title='Revenue Over Time (sats)'
                       dataKeys={[
                         {
@@ -218,7 +228,11 @@ export default function DashboardPage() {
                     />
                   </div>
                   <UsageMetricsChart
-                    data={metricsData.metrics as Array<Record<string, unknown> & { timestamp: string }>}
+                    data={
+                      metricsData.metrics as Array<
+                        Record<string, unknown> & { timestamp: string }
+                      >
+                    }
                     title='Request Volume'
                     dataKeys={[
                       {
@@ -239,7 +253,11 @@ export default function DashboardPage() {
                     ]}
                   />
                   <UsageMetricsChart
-                    data={metricsData.metrics as Array<Record<string, unknown> & { timestamp: string }>}
+                    data={
+                      metricsData.metrics as Array<
+                        Record<string, unknown> & { timestamp: string }
+                      >
+                    }
                     title='Error Tracking'
                     dataKeys={[
                       {
@@ -260,7 +278,11 @@ export default function DashboardPage() {
                     ]}
                   />
                   <UsageMetricsChart
-                    data={metricsData.metrics as Array<Record<string, unknown> & { timestamp: string }>}
+                    data={
+                      metricsData.metrics as Array<
+                        Record<string, unknown> & { timestamp: string }
+                      >
+                    }
                     title='Payment Activity'
                     dataKeys={[
                       {
@@ -270,7 +292,7 @@ export default function DashboardPage() {
                       },
                     ]}
                   />
-                  <div className="space-y-6">
+                  <div className='space-y-6'>
                     {summaryData && summaryData.unique_models.length > 0 && (
                       <Card>
                         <CardHeader>
@@ -306,7 +328,9 @@ export default function DashboardPage() {
                                     key={type}
                                     className='flex items-center justify-between'
                                   >
-                                    <span className='text-sm font-medium'>{type}</span>
+                                    <span className='text-sm font-medium'>
+                                      {type}
+                                    </span>
                                     <span className='text-muted-foreground text-sm'>
                                       {count}
                                     </span>
@@ -335,16 +359,18 @@ export default function DashboardPage() {
             </div>
 
             {revenueByModelLoading ? (
-              <div className='text-center py-8'>Loading revenue by model...</div>
+              <div className='py-8 text-center'>
+                Loading revenue by model...
+              </div>
             ) : revenueByModelData && revenueByModelData.models.length > 0 ? (
-              <RevenueByModelTable 
+              <RevenueByModelTable
                 models={revenueByModelData.models}
                 totalRevenue={revenueByModelData.total_revenue_sats}
               />
             ) : null}
 
             {errorLoading ? (
-              <div className='text-center py-8'>Loading errors...</div>
+              <div className='py-8 text-center'>Loading errors...</div>
             ) : errorData ? (
               <ErrorDetailsTable errors={errorData.errors} />
             ) : null}

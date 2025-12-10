@@ -48,20 +48,26 @@ export function CurrencyToggle() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="h-9 w-9 px-0 gap-2 w-auto px-3 font-normal">
-          <Coins className="h-4 w-4" />
-          <span className="hidden sm:inline-block">{getLabel(displayUnit)}</span>
-          <span className="sm:hidden uppercase">{displayUnit}</span>
+        <Button
+          variant='ghost'
+          size='sm'
+          className='h-9 w-9 w-auto gap-2 px-0 px-3 font-normal'
+        >
+          <Coins className='h-4 w-4' />
+          <span className='hidden sm:inline-block'>
+            {getLabel(displayUnit)}
+          </span>
+          <span className='uppercase sm:hidden'>{displayUnit}</span>
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      <DropdownMenuContent align='end'>
         <DropdownMenuItem onClick={() => setDisplayUnit('msat')}>
           Millisatoshis (mSAT)
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setDisplayUnit('sat')}>
           Satoshis (sat)
         </DropdownMenuItem>
-        <DropdownMenuItem 
+        <DropdownMenuItem
           onClick={() => setDisplayUnit('usd')}
           disabled={!usdPerSat}
         >
@@ -71,4 +77,3 @@ export function CurrencyToggle() {
     </DropdownMenu>
   );
 }
-

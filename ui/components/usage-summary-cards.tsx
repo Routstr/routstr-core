@@ -114,15 +114,19 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
   return (
     <div className='grid gap-6 md:grid-cols-2 lg:grid-cols-4'>
       {cards.map((card) => (
-        <Card key={card.title} className="hover:bg-muted/50 transition-colors">
+        <Card key={card.title} className='hover:bg-muted/50 transition-colors'>
           <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-            <CardTitle className='text-sm font-medium text-muted-foreground'>{card.title}</CardTitle>
-            <div className={`p-2 rounded-full bg-secondary`}>
-                <card.icon className={`h-4 w-4 ${card.color}`} />
+            <CardTitle className='text-muted-foreground text-sm font-medium'>
+              {card.title}
+            </CardTitle>
+            <div className={`bg-secondary rounded-full p-2`}>
+              <card.icon className={`h-4 w-4 ${card.color}`} />
             </div>
           </CardHeader>
           <CardContent>
-            <div className='text-2xl font-bold tracking-tight'>{card.value}</div>
+            <div className='text-2xl font-bold tracking-tight'>
+              {card.value}
+            </div>
           </CardContent>
         </Card>
       ))}
