@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING
 
+import httpx
+
 from ..payment.models import Model, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider
 
@@ -42,9 +44,33 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
             "default_base_url": cls.default_base_url,
             "fixed_base_url": True,
             "platform_url": cls.platform_url,
+            "can_show_balance": True,
         }
 
     async def fetch_models(self) -> list[Model]:
         """Fetch all OpenRouter models."""
         models_data = await async_fetch_openrouter_models()
         return [Model(**model) for model in models_data]  # type: ignore
+
+    async def get_balance(self) -> float | None:
+        """Get the current account balance from OpenRouter.
+
+        Returns:
+            Float representing the balance amount (in credits/USD), or None if unavailable.
+        """
+        url = f"{self.base_url}/credits"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+
+                credits_data = data.get("data", {})
+                total_credits = float(credits_data.get("total_credits", 0.0))
+                total_usage = float(credits_data.get("total_usage", 0.0))
+
+                return total_credits - total_usage
+        except Exception:
+            return None

@@ -153,9 +153,9 @@ def should_prefer_model(
     # Log provider changes when candidate wins
     if should_replace:
         candidate_provider_name = getattr(
-            candidate_provider, "upstream_name", "unknown"
+            candidate_provider, "provider_type", "unknown"
         )
-        current_provider_name = getattr(current_provider, "upstream_name", "unknown")
+        current_provider_name = getattr(current_provider, "provider_type", "unknown")
         logger.debug(
             f"Model selection for alias '{alias}': choosing {candidate_provider_name} "
             f"(cost: ${candidate_adjusted:.6f}) over {current_provider_name} "
@@ -254,7 +254,12 @@ def create_model_mappings(
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
             if not is_openrouter or base_id not in unique_models:
-                unique_model = model_to_use.copy(update={"id": base_id})
+                unique_model = model_to_use.copy(
+                    update={
+                        "id": base_id,
+                        "upstream_provider_id": upstream.provider_type,
+                    }
+                )
                 unique_models[base_id] = unique_model
 
             # Get all aliases for this model

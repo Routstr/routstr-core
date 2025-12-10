@@ -18,7 +18,9 @@ import {
   UpstreamProvider,
   CreateUpstreamProvider,
   UpdateUpstreamProvider,
+  AdminModel,
 } from '@/lib/api/services/admin';
+import { AddProviderModelDialog } from '@/components/AddProviderModelDialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   AlertCircle,
@@ -54,7 +56,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
 
-function ProviderBalance({ providerId }: { providerId: number }) {
+function ProviderBalance({
+  providerId,
+  platformUrl,
+}: {
+  providerId: number;
+  platformUrl?: string | null;
+}) {
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
   const [topupAmount, setTopupAmount] = useState('');
   const [topupError, setTopupError] = useState('');
@@ -136,6 +144,10 @@ function ProviderBalance({ providerId }: { providerId: number }) {
   });
 
   const handleTopup = () => {
+    // If no dialog open logic (which depends on API implementation),
+    // we check if we should redirect or open dialog based on available info
+    // But since this function is called inside the dialog, we might want to change
+    // how the "Top Up" button behaves instead.
     const amount = parseFloat(topupAmount);
 
     if (isNaN(amount)) {
@@ -149,6 +161,31 @@ function ProviderBalance({ providerId }: { providerId: number }) {
     }
 
     topupMutation.mutate(amount);
+  };
+
+  const handleTopUpClick = () => {
+    // Check if the provider supports direct topup (currently only PPQ.AI effectively)
+    // We can infer this if it's NOT OpenRouter or OpenAI, or strictly checking provider capability
+    // For now, we'll try to initiate topup for anyone, but if we know it fails (or isn't implemented),
+    // we should redirect.
+    // However, the prompt asks to redirect if topup is not implemented.
+    // The backend throws 500/400 if not implemented.
+    // A better approach is to check if we have a platform URL and maybe redirect there
+    // if we know it's not supported.
+    
+    // BUT, we don't know for sure if it's supported without checking metadata or trying.
+    // Let's rely on the "can_topup" metadata if available, but currently we only have "can_show_balance".
+    
+    // Simple heuristic: If platformUrl exists and we suspect no direct topup, redirect?
+    // Actually, let's try to open the dialog, but if it's OpenRouter/OpenAI, maybe we just redirect?
+    // The user specifically mentioned "like in openrouter".
+    
+    if (platformUrl && (platformUrl.includes('openrouter.ai') || platformUrl.includes('openai.com'))) {
+        window.open(platformUrl, '_blank');
+        return;
+    }
+    
+    setIsTopupDialogOpen(true);
   };
 
   const handleCloseDialog = () => {
@@ -170,12 +207,18 @@ function ProviderBalance({ providerId }: { providerId: number }) {
   const balance = balanceData.balance_data;
   let displayValue = 'N/A';
 
-  if (typeof balance.balance === 'number') {
-    displayValue = `$${balance.balance.toFixed(2)}`;
-  } else if (typeof balance.balance === 'string') {
-    displayValue = balance.balance;
-  } else if (balance.amount !== undefined) {
-    displayValue = `$${Number(balance.amount).toFixed(2)}`;
+  if (typeof balance === 'number') {
+    displayValue = `$${balance.toFixed(2)}`;
+  } else if (balance && typeof balance === 'object') {
+    // Legacy support for object response
+    const b = balance as Record<string, unknown>;
+    if (typeof b.balance === 'number') {
+      displayValue = `$${b.balance.toFixed(2)}`;
+    } else if (typeof b.balance === 'string') {
+      displayValue = b.balance;
+    } else if (b.amount !== undefined) {
+      displayValue = `$${Number(b.amount).toFixed(2)}`;
+    }
   }
 
   return (
@@ -183,7 +226,7 @@ function ProviderBalance({ providerId }: { providerId: number }) {
       <Button
         variant='outline'
         size='sm'
-        onClick={() => setIsTopupDialogOpen(true)}
+        onClick={handleTopUpClick}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
         className='w-full font-mono sm:w-auto'
@@ -338,6 +381,17 @@ export default function ProvidersPage() {
   );
   const [viewingModels, setViewingModels] = useState<number | null>(null);
   const [isCreatingAccount, setIsCreatingAccount] = useState(false);
+  const [modelDialogState, setModelDialogState] = useState<{
+    isOpen: boolean;
+    providerId: number | null;
+    mode: 'create' | 'edit' | 'override';
+    initialData?: AdminModel | null;
+  }>({
+    isOpen: false,
+    providerId: null,
+    mode: 'create',
+    initialData: null,
+  });
 
   const [formData, setFormData] = useState<CreateUpstreamProvider>({
     provider_type: 'openrouter',
@@ -345,7 +399,12 @@ export default function ProvidersPage() {
     api_key: '',
     api_version: null,
     enabled: true,
+    provider_fee: 1.06,
   });
+
+  const getProviderFeePlaceholder = (type: string) => {
+    return type === 'openrouter' ? 'Default: 1.06 (6%)' : 'Default: 1.01 (1%)';
+  };
 
   const { data: providerTypes = [] } = useQuery({
     queryKey: ['provider-types'],
@@ -447,7 +506,11 @@ export default function ProvidersPage() {
   };
 
   const handleCreate = () => {
-    createMutation.mutate(formData);
+    const data = { ...formData };
+    if (data.provider_fee === undefined || data.provider_fee === null) {
+      data.provider_fee = data.provider_type === 'openrouter' ? 1.06 : 1.01;
+    }
+    createMutation.mutate(data);
   };
 
   const handleEdit = (provider: UpstreamProvider) => {
@@ -458,6 +521,7 @@ export default function ProvidersPage() {
       api_key: '',
       api_version: provider.api_version || null,
       enabled: provider.enabled,
+      provider_fee: provider.provider_fee,
     });
     setIsEditDialogOpen(true);
   };
@@ -469,6 +533,7 @@ export default function ProvidersPage() {
       base_url: formData.base_url,
       api_version: formData.api_version,
       enabled: formData.enabled,
+      provider_fee: formData.provider_fee,
     };
     if (formData.api_key) {
       updateData.api_key = formData.api_key;
@@ -522,6 +587,33 @@ export default function ProvidersPage() {
     }
   };
 
+  const handleAddModel = (providerId: number) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'create',
+      initialData: null,
+    });
+  };
+
+  const handleEditModel = (providerId: number, model: AdminModel) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'edit',
+      initialData: model,
+    });
+  };
+
+  const handleOverrideModel = (providerId: number, model: AdminModel) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'override',
+      initialData: model,
+    });
+  };
+
   return (
     <SidebarProvider>
       <AppSidebar variant='inset' />
@@ -561,11 +653,12 @@ export default function ProvidersPage() {
                       <Select
                         value={formData.provider_type}
                         onValueChange={(value) => {
-                          setFormData({
-                            ...formData,
+                          setFormData((prev) => ({
+                            ...prev,
                             provider_type: value,
                             base_url: getDefaultBaseUrl(value),
-                          });
+                            provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+                          }));
                         }}
                       >
                         <SelectTrigger>
@@ -662,6 +755,33 @@ export default function ProvidersPage() {
                       />
                       <Label htmlFor='enabled'>Enabled</Label>
                     </div>
+                    <div className='grid gap-2'>
+                      <Label htmlFor='provider_fee'>
+                        Provider Fee (Multiplier)
+                      </Label>
+                      <Input
+                        id='provider_fee'
+                        type='number'
+                        step='0.001'
+                        min='1.0'
+                        value={formData.provider_fee || ''}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            provider_fee: e.target.value
+                              ? parseFloat(e.target.value)
+                              : undefined,
+                          })
+                        }
+                        placeholder={getProviderFeePlaceholder(
+                          formData.provider_type
+                        )}
+                      />
+                      <p className='text-muted-foreground text-xs'>
+                        1.01 means +1% e.g. currency exchange, card
+                        fees, etc.
+                      </p>
+                    </div>
                   </div>
                   <DialogFooter>
                     <Button
@@ -736,7 +856,10 @@ export default function ProvidersPage() {
                         <div className='flex flex-wrap items-center gap-2'>
                           {canShowBalance(provider.provider_type) &&
                             provider.api_key && (
-                              <ProviderBalance providerId={provider.id} />
+                              <ProviderBalance 
+                                providerId={provider.id} 
+                                platformUrl={getPlatformUrl(provider.provider_type)}
+                              />
                             )}
                           <Button
                             variant='outline'
@@ -800,9 +923,14 @@ export default function ProvidersPage() {
                                 // No provided models - show custom models directly without tabs
                                 <div className='space-y-2'>
                                   {providerModels.db_models.length === 0 ? (
-                                    <div className='text-muted-foreground py-4 text-center text-sm'>
-                                      No models configured. Add custom models to
-                                      use this provider.
+                                    <div className='flex flex-col items-center justify-center gap-2 py-4'>
+                                      <div className='text-muted-foreground text-sm'>
+                                        No models configured. Add custom models to use this provider.
+                                      </div>
+                                      <Button variant='outline' size='sm' onClick={() => handleAddModel(provider.id)}>
+                                        <Plus className='mr-2 h-4 w-4' />
+                                        Add Custom Model
+                                      </Button>
                                     </div>
                                   ) : (
                                     <div className='space-y-2'>
@@ -833,9 +961,19 @@ export default function ProvidersPage() {
                                               {model.description || model.name}
                                             </div>
                                           </div>
-                                          <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                            {model.context_length?.toLocaleString()}{' '}
-                                            tokens
+                                          <div className='flex items-center gap-2'>
+                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                              {model.context_length?.toLocaleString()}{' '}
+                                              tokens
+                                            </div>
+                                            <Button
+                                              variant='ghost'
+                                              size='icon'
+                                              className='h-8 w-8'
+                                              onClick={() => handleEditModel(provider.id, model)}
+                                            >
+                                              <Pencil className='h-4 w-4' />
+                                            </Button>
                                           </div>
                                         </div>
                                       ))}
@@ -886,12 +1024,17 @@ export default function ProvidersPage() {
                                     value='custom'
                                     className='mt-4 space-y-2'
                                   >
-                                    {providerModels.db_models.length > 0 && (
-                                      <div className='text-muted-foreground mb-3 text-sm'>
-                                        Custom models override or extend the
-                                        provider&apos;s catalog.
-                                      </div>
-                                    )}
+                                    <div className='flex items-center justify-between'>
+                                      {providerModels.db_models.length > 0 && (
+                                        <div className='text-muted-foreground text-sm'>
+                                          Custom models override or extend the provider&apos;s catalog.
+                                        </div>
+                                      )}
+                                      <Button variant='outline' size='sm' onClick={() => handleAddModel(provider.id)}>
+                                        <Plus className='mr-2 h-4 w-4' />
+                                        Add
+                                      </Button>
+                                    </div>
                                     {providerModels.db_models.length === 0 ? (
                                       <div className='text-muted-foreground py-4 text-center text-sm'>
                                         No custom models configured
@@ -927,9 +1070,19 @@ export default function ProvidersPage() {
                                                     model.name}
                                                 </div>
                                               </div>
-                                              <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                                {model.context_length?.toLocaleString()}{' '}
-                                                tokens
+                                              <div className='flex items-center gap-2'>
+                                                <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                                  {model.context_length?.toLocaleString()}{' '}
+                                                  tokens
+                                                </div>
+                                                <Button
+                                                  variant='ghost'
+                                                  size='icon'
+                                                  className='h-8 w-8'
+                                                  onClick={() => handleEditModel(provider.id, model)}
+                                                >
+                                                  <Pencil className='h-4 w-4' />
+                                                </Button>
                                               </div>
                                             </div>
                                           )
@@ -964,9 +1117,20 @@ export default function ProvidersPage() {
                                                   model.name}
                                               </div>
                                             </div>
-                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                              {model.context_length?.toLocaleString()}{' '}
-                                              tokens
+                                            <div className='flex items-center gap-2'>
+                                              <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                                {model.context_length?.toLocaleString()}{' '}
+                                                tokens
+                                              </div>
+                                              <Button
+                                                variant='outline'
+                                                size='sm'
+                                                className='h-7 text-xs'
+                                                onClick={() => handleOverrideModel(provider.id, model)}
+                                              >
+                                                <Plus className='mr-1 h-3 w-3' />
+                                                Override
+                                              </Button>
                                             </div>
                                           </div>
                                         )
@@ -1001,11 +1165,12 @@ export default function ProvidersPage() {
                 <Select
                   value={formData.provider_type}
                   onValueChange={(value) => {
-                    setFormData({
-                      ...formData,
+                    setFormData((prev) => ({
+                      ...prev,
                       provider_type: value,
                       base_url: getDefaultBaseUrl(value),
-                    });
+                      provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+                    }));
                   }}
                 >
                   <SelectTrigger>
@@ -1080,7 +1245,7 @@ export default function ProvidersPage() {
                 </div>
               )}
               <div className='flex items-center space-x-2'>
-                <Switch
+                      <Switch
                   id='edit_enabled'
                   checked={formData.enabled}
                   onCheckedChange={(checked) =>
@@ -1088,6 +1253,33 @@ export default function ProvidersPage() {
                   }
                 />
                 <Label htmlFor='edit_enabled'>Enabled</Label>
+              </div>
+              <div className='grid gap-2'>
+                <Label htmlFor='edit_provider_fee'>
+                  Provider Fee (Multiplier)
+                </Label>
+                <Input
+                  id='edit_provider_fee'
+                  type='number'
+                  step='0.001'
+                  min='1.0'
+                  value={formData.provider_fee || ''}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      provider_fee: e.target.value
+                        ? parseFloat(e.target.value)
+                        : undefined,
+                    })
+                  }
+                  placeholder={getProviderFeePlaceholder(
+                    formData.provider_type
+                  )}
+                />
+                <p className='text-muted-foreground text-xs'>
+                  1.01 means +1% e.g. currency exchange, card
+                  fees, etc.
+                </p>
               </div>
             </div>
             <DialogFooter>
@@ -1106,6 +1298,21 @@ export default function ProvidersPage() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {modelDialogState.providerId && (
+          <AddProviderModelDialog
+            providerId={modelDialogState.providerId}
+            isOpen={modelDialogState.isOpen}
+            onClose={() => setModelDialogState((prev) => ({ ...prev, isOpen: false }))}
+            onSuccess={() => {
+              queryClient.invalidateQueries({
+                queryKey: ['provider-models', modelDialogState.providerId],
+              });
+            }}
+            initialData={modelDialogState.initialData}
+            mode={modelDialogState.mode}
+          />
+        )}
       </SidebarInset>
     </SidebarProvider>
   );

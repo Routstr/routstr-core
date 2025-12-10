@@ -1,6 +1,6 @@
 [project]
 name = "routstr"
-version = "0.2.0c"
+version = "0.2.1"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,7 @@ dependencies = [
     "nostr>=0.0.2",
     "mdurl==0.1.2",
     "pillow>=10",
+    "openai>=1.98.0",
 ]
 
 [dependency-groups]

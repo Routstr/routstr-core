@@ -67,7 +67,9 @@ export const AdminModelSchema = z.object({
   pricing: AdminModelPricingSchema.or(z.record(z.any())),
   per_request_limits: z.record(z.any()).nullable().optional(),
   top_provider: z.record(z.any()).nullable().optional(),
-  upstream_provider_id: z.number().nullable().optional(),
+  upstream_provider_id: z.union([z.string(), z.number()]).nullable().optional(),
+  canonical_slug: z.string().nullable().optional(),
+  alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
 });
 
@@ -800,9 +802,63 @@ export class AdminService {
     return await apiClient.post<{ ok: boolean }>('/admin/api/logout', {});
   }
 
+  static async getLogs(
+    date?: string,
+    level?: string,
+    requestId?: string,
+    search?: string,
+    limit: number = 100
+  ): Promise<LogResponse> {
+    const params = new URLSearchParams();
+    if (date) params.append('date', date);
+    if (level) params.append('level', level);
+    if (requestId) params.append('request_id', requestId);
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+
+    return await apiClient.get<LogResponse>(`/admin/api/logs?${params.toString()}`);
+  }
+
+  static async getLogDates(): Promise<{ dates: string[] }> {
+    return await apiClient.get<{ dates: string[] }>('/admin/api/logs/dates');
+  }
+
   static async getTemporaryBalances(): Promise<TemporaryBalance[]> {
     return await apiClient.get<TemporaryBalance[]>(
       '/admin/api/temporary-balances'
+    );
+  }
+
+  static async getUsageMetrics(
+    interval: number = 15,
+    hours: number = 24
+  ): Promise<UsageMetrics> {
+    return await apiClient.get<UsageMetrics>(
+      `/admin/api/usage/metrics?interval=${interval}&hours=${hours}`
+    );
+  }
+
+  static async getUsageSummary(hours: number = 24): Promise<UsageSummary> {
+    return await apiClient.get<UsageSummary>(
+      `/admin/api/usage/summary?hours=${hours}`
+    );
+  }
+
+  static async getErrorDetails(
+    hours: number = 24,
+    limit: number = 100
+  ): Promise<ErrorDetails> {
+    return await apiClient.get<ErrorDetails>(
+      `/admin/api/usage/error-details?hours=${hours}&limit=${limit}`
+    );
+  }
+
+  static async getRevenueByModel(
+    hours: number = 24,
+    limit: number = 20
+  ): Promise<RevenueByModel> {
+    return await apiClient.get<RevenueByModel>(
+      `/admin/api/usage/revenue-by-model?hours=${hours}&limit=${limit}`
     );
   }
 
@@ -847,10 +903,10 @@ export class AdminService {
 
   static async getProviderBalance(
     providerId: number
-  ): Promise<{ ok: boolean; balance_data: Record<string, unknown> }> {
+  ): Promise<{ ok: boolean; balance_data: number | null | Record<string, unknown> }> {
     return await apiClient.get<{
       ok: boolean;
-      balance_data: Record<string, unknown>;
+      balance_data: number | null | Record<string, unknown>;
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
 }
@@ -865,3 +921,99 @@ export const TemporaryBalanceSchema = z.object({
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
+
+export interface UsageMetricData {
+  timestamp: string;
+  total_requests: number;
+  successful_chat_completions: number;
+  failed_requests: number;
+  errors: number;
+  warnings: number;
+  payment_processed: number;
+  upstream_errors: number;
+  revenue_msats: number;
+  refunds_msats: number;
+  [key: string]: unknown;
+}
+
+export interface UsageMetrics {
+  metrics: UsageMetricData[];
+  interval_minutes: number;
+  hours_back: number;
+  total_buckets: number;
+}
+
+export interface UsageSummary {
+  total_entries: number;
+  total_requests: number;
+  successful_chat_completions: number;
+  failed_requests: number;
+  total_errors: number;
+  total_warnings: number;
+  payment_processed: number;
+  upstream_errors: number;
+  unique_models_count: number;
+  unique_models: string[];
+  error_types: Record<string, number>;
+  success_rate: number;
+  revenue_msats: number;
+  refunds_msats: number;
+  revenue_sats: number;
+  refunds_sats: number;
+  net_revenue_msats: number;
+  net_revenue_sats: number;
+  avg_revenue_per_request_msats: number;
+  refund_rate: number;
+}
+
+export interface ErrorDetail {
+  timestamp: string;
+  message: string;
+  error_type: string;
+  pathname: string;
+  lineno: number;
+  request_id: string;
+}
+
+export interface ErrorDetails {
+  errors: ErrorDetail[];
+  total_count: number;
+}
+
+export interface ModelRevenueData {
+  model: string;
+  revenue_sats: number;
+  refunds_sats: number;
+  net_revenue_sats: number;
+  requests: number;
+  successful: number;
+  failed: number;
+  avg_revenue_per_request: number;
+}
+
+export interface RevenueByModel {
+  models: ModelRevenueData[];
+  total_revenue_sats: number;
+  total_models: number;
+}
+
+export interface LogEntry {
+  asctime: string;
+  name: string;
+  levelname: string;
+  message: string;
+  pathname?: string;
+  lineno?: number;
+  request_id?: string;
+  [key: string]: unknown;
+}
+
+export interface LogResponse {
+  logs: LogEntry[];
+  total: number;
+  date: string | null;
+  level: string | null;
+  request_id: string | null;
+  search: string | null;
+  limit: number;
+}

@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
@@ -18,6 +18,7 @@ from ..wallet import (
     slow_filter_spend_proofs,
 )
 from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
+from .log_manager import log_manager
 from .logging import get_logger
 from .settings import SettingsService, settings
 
@@ -3045,3 +3046,122 @@ h1 { color: #333; }
 .no-logs { text-align: center; color: #666; padding: 40px; }
 .request-id-display { background-color: #e9ecef; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; }
 """
+
+
+@admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics(
+    request: Request,
+    interval: int = Query(
+        default=15, ge=1, le=1440, description="Time interval in minutes"
+    ),
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict:
+    """Get usage metrics aggregated by time interval."""
+    return log_manager.get_usage_metrics(interval=interval, hours=hours)
+
+
+@admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
+async def get_usage_summary(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict:
+    """Get summary statistics for the specified time period."""
+    return log_manager.get_usage_summary(hours=hours)
+
+
+@admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
+async def get_error_details(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=100, ge=1, le=1000, description="Maximum number of errors to return"
+    ),
+) -> dict:
+    """Get detailed error information."""
+    return log_manager.get_error_details(hours=hours, limit=limit)
+
+
+@admin_router.get(
+    "/api/usage/revenue-by-model", dependencies=[Depends(require_admin_api)]
+)
+async def get_revenue_by_model(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=20, ge=1, le=100, description="Maximum number of models to return"
+    ),
+) -> dict:
+    """
+    Get revenue breakdown by model.
+    """
+    return log_manager.get_revenue_by_model(hours=hours, limit=limit)
+
+
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """
+    Get filtered log entries.
+
+    Args:
+        date: Filter by specific date (YYYY-MM-DD)
+        level: Filter by log level
+        request_id: Filter by request ID
+        search: Search text in message and name fields (case-insensitive)
+        limit: Maximum number of entries to return
+
+    Returns:
+        Dict containing logs and filter metadata
+    """
+    log_entries = log_manager.search_logs(
+        date=date,
+        level=level,
+        request_id=request_id,
+        search_text=search,
+        limit=limit,
+    )
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
+    }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, object]:
+    logs_dir = Path("logs")
+    dates = []
+
+    if logs_dir.exists():
+        log_files = sorted(
+            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
+        )
+
+        for log_file in log_files[:30]:
+            try:
+                filename = log_file.name
+                date_str = filename.replace("app_", "").replace(".log", "")
+                dates.append(date_str)
+            except Exception:
+                continue
+
+    return {"dates": dates}

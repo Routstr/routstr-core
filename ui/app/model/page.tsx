@@ -34,7 +34,6 @@ export default function ModelsPage() {
   const { models = [], groups = [] } = modelsData || {};
 
   const groupedModels = useMemo(() => {
-    if (!models) return {};
     return groupAndSortModelsByProvider(models);
   }, [models]);
 
@@ -43,7 +42,14 @@ export default function ModelsPage() {
   }, [groups]);
 
   const providerInfo = useMemo(() => {
-    return Object.entries(groupedModels).map(([provider, providerModels]) => {
+    const allProviders = new Set([
+      ...Object.keys(groupedModels),
+      ...groups.map((g) => g.provider),
+    ]);
+    console.log(allProviders);
+
+    return Array.from(allProviders).map((provider) => {
+      const providerModels = groupedModels[provider] || [];
       const groupData = groupDataMap.get(provider);
       const activeModels = providerModels.filter(
         (m) => m.isEnabled && !m.soft_deleted
@@ -59,7 +65,7 @@ export default function ModelsPage() {
         hasGroupApiKey: !!groupData?.group_api_key,
       };
     });
-  }, [groupedModels, groupDataMap]);
+  }, [groupedModels, groupDataMap, groups]);
 
   return (
     <SidebarProvider>
@@ -158,9 +164,9 @@ export default function ModelsPage() {
                         </div>
                       </TabsContent>
 
-                      {Object.entries(groupedModels).map(
-                        ([provider, providerModels]) => {
-                          const groupData = groupDataMap.get(provider);
+                      {providerInfo.map(
+                        ({ provider, totalModels, groupData }) => {
+                          const providerModels = groupedModels[provider] || [];
 
                           return (
                             <TabsContent key={provider} value={provider}>
@@ -190,9 +196,48 @@ export default function ModelsPage() {
                                           {groupData.group_url}
                                         </span>
                                       )}
+                                      {totalModels === 0 && (
+                                        <span className='text-muted-foreground'>
+                                          No models configured
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
+                                {totalModels === 0 && (
+                                  <Alert className="mb-4">
+                                    <AlertCircle className='h-4 w-4' />
+                                    <AlertDescription>
+                                      <div className='space-y-2'>
+                                        <p className='font-medium'>
+                                          No models found for this provider
+                                        </p>
+                                        <div className='text-sm space-y-1'>
+                                          <p className='font-medium'>Common issues:</p>
+                                          <ul className='list-disc list-inside space-y-1 ml-2'>
+                                            <li>
+                                              <strong>API credentials:</strong> Check if the API key is correct and has the right permissions
+                                            </li>
+                                            <li>
+                                              <strong>Base URL:</strong> Verify the base URL is correct for your provider
+                                            </li>
+                                            <li>
+                                              <strong>Network access:</strong> Ensure the server can reach the provider&apos;s API endpoint
+                                            </li>
+                                            <li>
+                                              <strong>Provider status:</strong> The upstream provider might be temporarily unavailable
+                                            </li>
+                                          </ul>
+                                          {groupData?.group_url && (
+                                            <p className='mt-2 text-xs text-muted-foreground'>
+                                              Current endpoint: <code className='bg-muted px-1 rounded'>{groupData.group_url}</code>
+                                            </p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </AlertDescription>
+                                  </Alert>
+                                )}
                                 <ModelSelector
                                   filterProvider={provider}
                                   groupData={groupData}
