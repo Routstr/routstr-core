@@ -10,6 +10,7 @@ from .auth import validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
+from .lightning import lightning_router
 from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
 
 router = APIRouter()
@@ -238,6 +239,8 @@ async def wallet_catch_all(path: str) -> NoReturn:
     )
 
 
+balance_router.include_router(lightning_router)
 balance_router.include_router(router)
+
 deprecated_wallet_router = APIRouter(prefix="/v1/wallet", include_in_schema=False)
 deprecated_wallet_router.include_router(router)
