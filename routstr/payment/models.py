@@ -45,6 +45,8 @@ class Pricing(BaseModel):
     image: float = 0.0
     web_search: float = 0.0
     internal_reasoning: float = 0.0
+    input_cache_read: float = 0.0
+    input_cache_write: float = 0.0
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
@@ -76,26 +78,24 @@ class Model(BaseModel):
         return hash(self.id)
 
 
-def _has_complete_pricing(model: dict) -> bool:
-    """Check if model has complete pricing information."""
+def _has_valid_pricing(model: dict) -> bool:
+    """Check if model has valid pricing (not free, no negative values)."""
     pricing = model.get("pricing", {})
-    required_fields = [
-        "prompt",
-        "completion",
-        "request",
-        "image",
-        "web_search",
-        "internal_reasoning",
-    ]
+    if not pricing:
+        return False
 
-    for field in required_fields:
-        if field not in pricing:
-            return False
-        # Check if the value can be converted to float
-        try:
-            float(pricing[field])
-        except (ValueError, TypeError):
-            return False
+    try:
+        prompt = float(pricing.get("prompt", 0))
+        completion = float(pricing.get("completion", 0))
+    except (ValueError, TypeError):
+        return False
+
+    if prompt < 0 or completion < 0:
+        return False
+
+    if prompt == 0 and completion == 0:
+        return False
+
     return True
 
 
@@ -126,7 +126,7 @@ def fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
                 ):
                     continue
 
-                if not _has_complete_pricing(model):
+                if not _has_valid_pricing(model):
                     continue
 
                 models_data.append(model)
@@ -166,7 +166,7 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 ):
                     continue
 
-                if not _has_complete_pricing(model):
+                if not _has_valid_pricing(model):
                     continue
 
                 models_data.append(model)
