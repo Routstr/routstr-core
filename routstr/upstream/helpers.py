@@ -193,7 +193,7 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
             if provider:
                 await provider.refresh_models_cache()
                 upstreams.append(provider)
-                logger.info(
+                logger.debug(
                     f"Initialized {provider_row.provider_type} provider",
                     extra={
                         "base_url": provider_row.base_url,

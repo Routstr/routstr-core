@@ -54,9 +54,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
     try:
         # Run database migrations on startup
-        # This ensures the database schema is always up-to-date in production
-        # Migrations are idempotent - running them multiple times is safe
-        logger.info("Running database migrations")
         run_migrations()
 
         # Initialize database connection pools
@@ -104,6 +101,9 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         yield
 
+    except asyncio.CancelledError:
+        # Expected during shutdown
+        pass
     except Exception as e:
         logger.error(
             "Application startup failed",
