@@ -2,22 +2,18 @@
 
 import { type JSX, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import {
-  Bolt,
-  Copy,
-  KeyRound,
-  RefreshCcw,
-  ShieldCheck,
-  Terminal,
-} from 'lucide-react';
+import { Bolt, Copy, RefreshCcw, ShieldCheck, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Separator } from '@/components/ui/separator';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ConfigurationService } from '@/lib/api/services/configuration';
+import { CashuPaymentWorkflow } from './cashu-payment-workflow';
+import { LightningPaymentWorkflow } from './lightning-payment-workflow';
+import { ApiKeyManager } from './api-key-manager';
 
 type NodeInfo = {
   name: string;
@@ -62,36 +58,6 @@ async function fetchNodeInfo(baseUrl: string): Promise<NodeInfo> {
   };
 }
 
-async function fetchWalletInfo(
-  baseUrl: string,
-  apiKey: string
-): Promise<WalletSnapshot> {
-  const response = await fetch(`${baseUrl}/v1/balance/info`, {
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(errorText || 'Unable to load wallet info');
-  }
-
-  const payload = (await response.json()) as {
-    api_key: string;
-    balance: number;
-    reserved?: number;
-  };
-
-  return {
-    apiKey: payload.api_key || apiKey,
-    balanceMsats: payload.balance ?? 0,
-    reservedMsats: payload.reserved ?? 0,
-  };
-}
-
 function normalizeBaseUrl(url: string): string {
   const trimmed = url.trim();
   if (!trimmed) {
@@ -100,32 +66,15 @@ function normalizeBaseUrl(url: string): string {
   return trimmed.replace(/\/+$/, '');
 }
 
-function formatMsats(msats: number): string {
-  return new Intl.NumberFormat('en-US').format(msats);
-}
-
-function formatSats(msats: number): string {
-  return new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
-}
-
 export function CheatSheet(): JSX.Element {
   const [baseUrl, setBaseUrl] = useState(() =>
     typeof window === 'undefined' ? '' : ConfigurationService.getLocalBaseUrl()
   );
-  const [initialToken, setInitialToken] = useState('');
-  const [topupToken, setTopupToken] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [walletInfo, setWalletInfo] = useState<WalletSnapshot | null>(null);
   const [refundReceipt, setRefundReceipt] = useState<RefundReceipt | null>(
     null
   );
-  const [isCreatingKey, setIsCreatingKey] = useState(false);
-  const [isTopupLoading, setIsTopupLoading] = useState(false);
-  const [isRefunding, setIsRefunding] = useState(false);
-  const [isSyncingBalance, setIsSyncingBalance] = useState(false);
-  const [hasInteractedCreate, setHasInteractedCreate] = useState(false);
-  const [hasInteractedManage, setHasInteractedManage] = useState(false);
-  const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
 
   useEffect(() => {
     if (!baseUrl && typeof window !== 'undefined') {
@@ -137,8 +86,6 @@ export function CheatSheet(): JSX.Element {
     () => normalizeBaseUrl(baseUrl) || DEFAULT_BASE_URL,
     [baseUrl]
   );
-
-  const activeApiKey = apiKeyInput.trim();
 
   const {
     data: nodeInfo,
@@ -170,141 +117,28 @@ export function CheatSheet(): JSX.Element {
     }
   }, []);
 
-  const handleCreateKey = useCallback(async (): Promise<void> => {
-    if (!initialToken.trim()) {
-      toast.error('Cashu token required');
-      return;
-    }
-
-    setIsCreatingKey(true);
-    setRefundReceipt(null);
-
-    try {
-      const params = new URLSearchParams({
-        initial_balance_token: initialToken.trim(),
-      });
-      const response = await fetch(
-        `${normalizedBaseUrl}/v1/balance/create?${params.toString()}`,
-        {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Failed to create API key');
-      }
-      const payload = (await response.json()) as {
-        api_key: string;
-        balance: number;
-      };
-      const snapshot: WalletSnapshot = {
-        apiKey: payload.api_key,
-        balanceMsats: payload.balance ?? 0,
-        reservedMsats: 0,
-      };
-      setApiKeyInput(snapshot.apiKey);
+  const handleApiKeyCreated = useCallback(
+    (apiKey: string, snapshot: WalletSnapshot) => {
+      setApiKeyInput(apiKey);
       setWalletInfo(snapshot);
-      setInitialToken('');
-      toast.success('API key ready');
-    } catch (error) {
-      console.error(error);
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to create API key'
-      );
-    } finally {
-      setIsCreatingKey(false);
-    }
-  }, [initialToken, normalizedBaseUrl]);
+      setRefundReceipt(null);
+    },
+    []
+  );
 
-  const handleSyncBalance = useCallback(async (): Promise<void> => {
-    if (!activeApiKey) {
-      toast.error('Paste an API key first');
-      return;
-    }
+  const handleApiKeyChanged = useCallback((apiKey: string) => {
+    setApiKeyInput(apiKey);
+  }, []);
 
-    setIsSyncingBalance(true);
-    try {
-      const snapshot = await fetchWalletInfo(normalizedBaseUrl, activeApiKey);
-      setWalletInfo(snapshot);
-      toast.success('Balance synced');
-    } catch (error) {
-      console.error(error);
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to sync balance'
-      );
-    } finally {
-      setIsSyncingBalance(false);
-    }
-  }, [activeApiKey, normalizedBaseUrl]);
+  const handleWalletInfoUpdated = useCallback((info: WalletSnapshot | null) => {
+    setWalletInfo(info);
+  }, []);
 
-  const handleTopup = useCallback(async (): Promise<void> => {
-    if (!activeApiKey) {
-      toast.error('Paste an API key first');
-      return;
-    }
-    if (!topupToken.trim()) {
-      toast.error('Cashu token required for top-up');
-      return;
-    }
-
-    setIsTopupLoading(true);
-    setRefundReceipt(null);
-    try {
-      const response = await fetch(`${normalizedBaseUrl}/v1/balance/topup`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${activeApiKey}`,
-        },
-        body: JSON.stringify({ cashu_token: topupToken.trim() }),
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Failed to top up');
-      }
-      const payload = (await response.json()) as { msats: number };
-      toast.success(`Added ${formatSats(payload.msats)} sats`);
-      setTopupToken('');
-      const snapshot = await fetchWalletInfo(normalizedBaseUrl, activeApiKey);
-      setWalletInfo(snapshot);
-    } catch (error) {
-      console.error(error);
-      toast.error(error instanceof Error ? error.message : 'Top-up failed');
-    } finally {
-      setIsTopupLoading(false);
-    }
-  }, [activeApiKey, normalizedBaseUrl, topupToken]);
-
-  const handleRefund = useCallback(async (): Promise<void> => {
-    if (!activeApiKey) {
-      toast.error('Paste an API key first');
-      return;
-    }
-
-    setIsRefunding(true);
-    try {
-      const response = await fetch(`${normalizedBaseUrl}/v1/balance/refund`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${activeApiKey}`,
-        },
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Refund failed');
-      }
-      const payload = (await response.json()) as RefundReceipt;
-      setRefundReceipt(payload);
-      setWalletInfo(null);
-      toast.success('Refund requested');
-    } catch (error) {
-      console.error(error);
-      toast.error(error instanceof Error ? error.message : 'Refund failed');
-    } finally {
-      setIsRefunding(false);
-    }
-  }, [activeApiKey, normalizedBaseUrl]);
+  const handleRefundComplete = useCallback((receipt: RefundReceipt) => {
+    setRefundReceipt(receipt);
+    setWalletInfo(null);
+    setApiKeyInput('');
+  }, []);
 
   const handleRefreshInfo = useCallback(async (): Promise<void> => {
     const result = await refetchNodeInfo();
@@ -316,7 +150,7 @@ export function CheatSheet(): JSX.Element {
   }, [refetchNodeInfo]);
 
   const curlSnippet = useMemo(() => {
-    const keyPreview = activeApiKey || 'YOUR_API_KEY';
+    const keyPreview = apiKeyInput || 'YOUR_API_KEY';
     return [
       `curl -X POST "${normalizedBaseUrl}/v1/chat/completions"`,
       `  -H "Authorization: Bearer ${keyPreview}"`,
@@ -329,14 +163,9 @@ export function CheatSheet(): JSX.Element {
       '    ]',
       "  }'",
     ].join('\n');
-  }, [activeApiKey, normalizedBaseUrl]);
+  }, [apiKeyInput, normalizedBaseUrl]);
 
-  const showCreateDetails =
-    hasInteractedCreate || initialToken.trim().length > 0;
-  const showManageDetails = hasInteractedManage || Boolean(walletInfo);
-  const showTopupDetails = hasInteractedTopup || topupToken.trim().length > 0;
   const refundToken = refundReceipt?.token ?? null;
-  const canTopup = Boolean(activeApiKey);
 
   return (
     <div className='from-background via-background to-muted min-h-screen bg-gradient-to-b'>
@@ -532,218 +361,68 @@ export function CheatSheet(): JSX.Element {
           </Card>
         </section>
 
-        <Card>
-          <CardHeader className='space-y-1'>
-            <CardTitle className='flex items-center gap-2 text-xl'>
-              <KeyRound className='text-primary h-5 w-5' />
-              API key workflow
-            </CardTitle>
-            <p className='text-muted-foreground text-xs tracking-wide uppercase'>
-              Sections expand as soon as you interact
-            </p>
-          </CardHeader>
-          <CardContent className='space-y-6'>
-            <section className='space-y-2'>
-              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                <span>1 · Create key</span>
-                {showCreateDetails && (
-                  <span className='text-primary'>Cashu token detected</span>
-                )}
-              </header>
-              <Textarea
-                value={initialToken}
-                onChange={(event) => setInitialToken(event.target.value)}
-                placeholder='cashuA1...'
-                rows={showCreateDetails ? 4 : 2}
-                className='font-mono text-sm transition-all duration-200'
-                onFocus={() => setHasInteractedCreate(true)}
-              />
-              {showCreateDetails && (
-                <div className='flex flex-wrap gap-2'>
-                  <Button
-                    onClick={handleCreateKey}
-                    disabled={isCreatingKey}
-                    className='gap-2'
-                  >
-                    {isCreatingKey ? 'Creating…' : 'Create API key'}
-                  </Button>
-                  <span className='text-muted-foreground text-xs'>
-                    Redeems instantly and returns <code>sk-</code> key.
-                  </span>
-                </div>
-              )}
-            </section>
+        <Tabs defaultValue='cashu' className='w-full'>
+          <TabsList className='grid w-full grid-cols-3'>
+            <TabsTrigger value='cashu'>Cashu Payments</TabsTrigger>
+            <TabsTrigger value='lightning'>Lightning Payments</TabsTrigger>
+            <TabsTrigger value='manage'>Manage Keys</TabsTrigger>
+          </TabsList>
 
-            <Separator />
+          <TabsContent value='cashu' className='space-y-4'>
+            <CashuPaymentWorkflow
+              baseUrl={normalizedBaseUrl}
+              onApiKeyCreated={handleApiKeyCreated}
+            />
+          </TabsContent>
 
-            <section className='space-y-2'>
-              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                <span>2 · Manage key</span>
-                {walletInfo && (
-                  <span className='text-primary'>
-                    {formatSats(walletInfo.balanceMsats)} sats
-                  </span>
-                )}
-              </header>
-              <div className='flex flex-col gap-2 sm:flex-row'>
-                <Input
-                  value={apiKeyInput}
-                  onChange={(event) => {
-                    setApiKeyInput(event.target.value);
-                    setWalletInfo(null);
-                  }}
-                  placeholder='sk-...'
-                  className='font-mono text-sm'
-                  onFocus={() => setHasInteractedManage(true)}
-                />
-                <div className='flex gap-2'>
-                  <Button
-                    variant='outline'
-                    size='icon'
-                    className='h-10 w-10'
-                    onClick={() => handleCopy(activeApiKey)}
-                    disabled={!activeApiKey}
-                  >
-                    <Copy className='h-4 w-4' />
-                  </Button>
-                  <Button
-                    variant='secondary'
-                    size='sm'
-                    className='gap-1'
-                    onClick={handleSyncBalance}
-                    disabled={isSyncingBalance || !activeApiKey}
-                  >
-                    <RefreshCcw className='h-4 w-4' />
-                    Sync
-                  </Button>
-                </div>
-              </div>
-              {showManageDetails && (
-                <div className='grid gap-3 sm:grid-cols-2'>
-                  <div className='rounded-lg border p-3'>
-                    <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                      Spendable
-                    </p>
-                    <p className='text-xl font-semibold'>
-                      {walletInfo
-                        ? `${formatSats(walletInfo.balanceMsats)} sats`
-                        : '—'}
-                    </p>
-                    {walletInfo && (
-                      <p className='text-muted-foreground text-xs'>
-                        {formatMsats(walletInfo.balanceMsats)} msats
-                      </p>
-                    )}
+          <TabsContent value='lightning' className='space-y-4'>
+            <LightningPaymentWorkflow
+              baseUrl={normalizedBaseUrl}
+              onApiKeyCreated={handleApiKeyCreated}
+            />
+          </TabsContent>
+
+          <TabsContent value='manage' className='space-y-4'>
+            <ApiKeyManager
+              baseUrl={normalizedBaseUrl}
+              apiKey={apiKeyInput}
+              walletInfo={walletInfo}
+              onApiKeyChanged={handleApiKeyChanged}
+              onWalletInfoUpdated={handleWalletInfoUpdated}
+              onRefundComplete={handleRefundComplete}
+            />
+
+            {refundToken && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className='text-lg'>Refund Complete</CardTitle>
+                </CardHeader>
+                <CardContent className='space-y-2'>
+                  <div className='bg-muted/30 space-y-2 rounded-lg border p-4'>
+                    <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+                      <span>Cashu refund token</span>
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        className='gap-1 text-xs'
+                        onClick={() => handleCopy(refundToken)}
+                      >
+                        <Copy className='h-3 w-3' />
+                        Copy
+                      </Button>
+                    </div>
+                    <Textarea
+                      value={refundToken}
+                      readOnly
+                      rows={4}
+                      className='font-mono text-xs'
+                    />
                   </div>
-                  <div className='rounded-lg border p-3'>
-                    <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                      Reserved
-                    </p>
-                    <p className='text-xl font-semibold'>
-                      {walletInfo
-                        ? `${formatSats(walletInfo.reservedMsats)} sats`
-                        : '—'}
-                    </p>
-                    {walletInfo && (
-                      <p className='text-muted-foreground text-xs'>
-                        {formatMsats(walletInfo.reservedMsats)} msats
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </section>
-
-            <Separator />
-
-            <section className='space-y-2'>
-              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                <span>3 · Top up</span>
-                {showTopupDetails && (
-                  <span
-                    className={canTopup ? 'text-primary' : 'text-destructive'}
-                  >
-                    {canTopup ? 'Ready to redeem' : 'Paste API key first'}
-                  </span>
-                )}
-              </header>
-              <Textarea
-                value={topupToken}
-                onChange={(event) => setTopupToken(event.target.value)}
-                placeholder='cashuB1...'
-                rows={showTopupDetails ? 3 : 1}
-                className='font-mono text-sm transition-all duration-200'
-                onFocus={() => setHasInteractedTopup(true)}
-                disabled={!canTopup}
-              />
-              {showTopupDetails && (
-                <div className='flex flex-wrap gap-2'>
-                  <Button
-                    onClick={handleTopup}
-                    disabled={isTopupLoading || !canTopup}
-                    variant='outline'
-                    className='gap-2'
-                  >
-                    {isTopupLoading ? 'Topping up…' : 'Top up this key'}
-                  </Button>
-                  <span className='text-muted-foreground text-xs'>
-                    {canTopup ? (
-                      <>
-                        Adds balance to the same <code>sk-</code> token.
-                      </>
-                    ) : (
-                      'Enter your sk- key above to unlock top ups.'
-                    )}
-                  </span>
-                </div>
-              )}
-            </section>
-
-            <Separator />
-
-            <section className='space-y-2'>
-              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                <span>4 · Refund</span>
-                {refundReceipt && <span className='text-primary'>Done</span>}
-              </header>
-              <div className='flex flex-wrap gap-2'>
-                <Button
-                  onClick={handleRefund}
-                  disabled={isRefunding}
-                  variant='destructive'
-                  className='gap-2'
-                >
-                  {isRefunding ? 'Processing…' : 'Refund remaining balance'}
-                </Button>
-                <span className='text-muted-foreground text-xs'>
-                  Burns the key and returns a fresh Cashu token.
-                </span>
-              </div>
-              {refundToken && (
-                <div className='bg-muted/30 space-y-2 rounded-lg border p-4'>
-                  <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                    <span>Cashu refund token</span>
-                    <Button
-                      variant='outline'
-                      size='sm'
-                      className='gap-1 text-xs'
-                      onClick={() => handleCopy(refundToken)}
-                    >
-                      <Copy className='h-3 w-3' />
-                      Copy
-                    </Button>
-                  </div>
-                  <Textarea
-                    value={refundToken}
-                    readOnly
-                    rows={4}
-                    className='font-mono text-xs'
-                  />
-                </div>
-              )}
-            </section>
-          </CardContent>
-        </Card>
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+        </Tabs>
       </main>
     </div>
   );

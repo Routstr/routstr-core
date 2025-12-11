@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -69,6 +70,28 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     top_provider: str | None = Field(default=None)
     enabled: bool = Field(default=True, description="Whether this model is enabled")
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
+
+
+class LightningInvoice(SQLModel, table=True):  # type: ignore
+    __tablename__ = "lightning_invoices"
+
+    id: str = Field(primary_key=True, description="Unique invoice identifier")
+    bolt11: str = Field(description="BOLT11 invoice string", unique=True)
+    amount_sats: int = Field(description="Amount in satoshis")
+    description: str = Field(description="Invoice description")
+    payment_hash: str = Field(description="Payment hash for tracking", unique=True)
+    status: str = Field(
+        default="pending", description="pending, paid, expired, cancelled"
+    )
+    api_key_hash: str | None = Field(
+        default=None, description="Associated API key hash for topup operations"
+    )
+    purpose: str = Field(description="create or topup")
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), description="Unix timestamp"
+    )
+    expires_at: int = Field(description="Unix timestamp when invoice expires")
+    paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
