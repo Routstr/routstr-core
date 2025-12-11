@@ -1,6 +1,7 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
+import Image from 'next/image';
 import { Copy, Zap, CheckCircle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import QRCode from 'qrcode';
@@ -408,10 +409,13 @@ export function LightningPaymentWorkflow({
 
                   {createQRCode && (
                     <div className='flex justify-center'>
-                      <img
+                      <Image
                         src={createQRCode}
                         alt='QR Code'
                         className='h-48 w-48'
+                        width={192}
+                        height={192}
+                        unoptimized
                       />
                     </div>
                   )}
@@ -527,10 +531,13 @@ export function LightningPaymentWorkflow({
 
                   {topupQRCode && (
                     <div className='flex justify-center'>
-                      <img
+                      <Image
                         src={topupQRCode}
                         alt='QR Code'
                         className='h-48 w-48'
+                        width={192}
+                        height={192}
+                        unoptimized
                       />
                     </div>
                   )}
