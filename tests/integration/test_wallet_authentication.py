@@ -3,7 +3,6 @@ Integration tests for wallet authentication system including API key generation 
 Tests POST /v1/wallet/topup endpoint and authorization header validation.
 """
 
-import hashlib
 from datetime import datetime, timedelta
 from typing import Any
 
