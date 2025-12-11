@@ -2,15 +2,14 @@
 
 import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { type Model, type GroupSettings } from '@/lib/api/schemas/models';
 import {
-  type Model,
-  type ManualModel,
-  type GroupSettings,
-} from '@/lib/api/schemas/models';
-import { AdminService, type AdminModelGroup } from '@/lib/api/services/admin';
+  AdminService,
+  type AdminModelGroup,
+  type AdminModel,
+} from '@/lib/api/services/admin';
 type ModelGroup = AdminModelGroup;
-import { AddModelForm } from '@/components/AddModelForm';
-import { EditModelForm } from '@/components/EditModelForm';
+import { AddProviderModelDialog } from '@/components/AddProviderModelDialog';
 import { EditGroupForm } from '@/components/EditGroupForm';
 import { CollectModelsDialog } from '@/components/CollectModelsDialog';
 import { formatCost } from '@/lib/services/costValidation';
@@ -80,14 +79,23 @@ export function ModelSelector({
 }: ModelSelectorProps) {
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [, setHoveredModelId] = useState<string | null>(null);
-  const [isAddFormOpen, setIsAddFormOpen] = useState(false);
-  const [editingModel, setEditingModel] = useState<Model | null>(null);
   const [editingGroup, setEditingGroup] = useState<{
     provider: string;
     models: Model[];
     groupData: ModelGroup;
   } | null>(null);
   const [isCollectDialogOpen, setIsCollectDialogOpen] = useState(false);
+  const [modelDialogState, setModelDialogState] = useState<{
+    isOpen: boolean;
+    providerId: number | null;
+    mode: 'create' | 'edit' | 'override';
+    initialData?: AdminModel | null;
+  }>({
+    isOpen: false,
+    providerId: null,
+    mode: 'create',
+    initialData: null,
+  });
 
   // Bulk selection state
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
@@ -492,44 +500,104 @@ export function ModelSelector({
     return hasIndividualApiKey || hasIndividualUrl;
   };
 
-  // Handle manual model addition
-  const handleAddModel = async (newModel: ManualModel) => {
-    try {
-      // Find or create the provider group
-      let providerGroup = groups.find((g) => g.provider === newModel.provider);
+  const handleAddModelClick = (providerId: number) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'create',
+      initialData: null,
+    });
+  };
 
-      if (!providerGroup) {
-        providerGroup = await AdminService.createModelGroup({
-          provider: newModel.provider,
-          group_api_key: undefined,
-        });
-      }
-
-      const modelData = {
-        name: newModel.name,
-        full_name: newModel.name,
-        input_cost: newModel.input_cost,
-        output_cost: newModel.output_cost,
-        provider: newModel.provider,
-        modelType: newModel.modelType,
-        description: newModel.description || undefined,
-        contextLength: newModel.contextLength,
-      };
-
-      await AdminService.createModel(modelData);
-      await refetchModels();
-      toast.success(`Model "${newModel.name}" added successfully!`);
-    } catch (error) {
-      console.error('Error adding model:', error);
-      toast.error('Failed to add model. Please try again.');
-      throw error; // Re-throw to let the form handle the error
+  const handleEditModelClick = (model: Model) => {
+    if (!model.provider_id) {
+      toast.error('Provider ID missing for model');
+      return;
     }
+    const providerId = parseInt(model.provider_id);
+
+    // Construct AdminModel from Model
+    const adminModel: AdminModel = {
+      id: model.id,
+      name: model.name,
+      description: model.description || '',
+      created: new Date(model.createdAt).getTime() / 1000,
+      context_length: model.contextLength || 0,
+      architecture: {
+        modality: model.modelType,
+        input_modalities: [model.modelType],
+        output_modalities: [model.modelType],
+        tokenizer: '',
+        instruct_type: null,
+      },
+      pricing: {
+        prompt: model.input_cost,
+        completion: model.output_cost,
+        request: model.min_cost_per_request,
+        image: 0,
+        web_search: 0,
+        internal_reasoning: 0,
+      },
+      per_request_limits: null,
+      top_provider: null,
+      upstream_provider_id: providerId,
+      enabled: model.isEnabled,
+    };
+
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'edit',
+      initialData: adminModel,
+    });
+  };
+
+  const handleOverrideModelClick = (model: Model) => {
+    if (!model.provider_id) {
+      toast.error('Provider ID missing for model');
+      return;
+    }
+    const providerId = parseInt(model.provider_id);
+
+    // Construct AdminModel from Model
+    const adminModel: AdminModel = {
+      id: model.id,
+      name: model.name,
+      description: model.description || '',
+      created: new Date(model.createdAt).getTime() / 1000,
+      context_length: model.contextLength || 0,
+      architecture: {
+        modality: model.modelType,
+        input_modalities: [model.modelType],
+        output_modalities: [model.modelType],
+        tokenizer: '',
+        instruct_type: null,
+      },
+      pricing: {
+        prompt: model.input_cost,
+        completion: model.output_cost,
+        request: model.min_cost_per_request,
+        image: 0,
+        web_search: 0,
+        internal_reasoning: 0,
+      },
+      per_request_limits: null,
+      top_provider: null,
+      upstream_provider_id: providerId,
+      enabled: model.isEnabled,
+    };
+
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'override',
+      initialData: adminModel,
+    });
   };
 
   // Handle model update
   const handleModelUpdate = async () => {
     await refetchModels();
-    setEditingModel(null);
   };
 
   // Handle group update
@@ -832,11 +900,18 @@ export function ModelSelector({
             Delete All Overrides Permanently
           </Button>
         )}
-        {/* Model Management Actions
-        <Button onClick={() => setIsAddFormOpen(true)} className='gap-2'>
-          <Plus className='h-4 w-4' />
-          Add Model
-        </Button>
+        {/* Model Management Actions */}
+        {groupData && (
+          <Button
+            onClick={() => handleAddModelClick(parseInt(groupData.id))}
+            className='gap-2'
+            variant='outline'
+          >
+            <CheckSquare className='h-4 w-4' />
+            Add Custom Model
+          </Button>
+        )}
+        {/*
         <Button
           onClick={() => setIsCollectDialogOpen(true)}
           variant='outline'
@@ -1080,15 +1155,28 @@ export function ModelSelector({
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align='end'>
-                              <DropdownMenuItem
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setEditingModel(model);
-                                }}
-                              >
-                                <Edit3 className='mr-2 h-4 w-4' />
-                                Edit Model
-                              </DropdownMenuItem>
+                              {model.api_key_type !== 'remote' && (
+                                <DropdownMenuItem
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleEditModelClick(model);
+                                  }}
+                                >
+                                  <Edit3 className='mr-2 h-4 w-4' />
+                                  Edit Model
+                                </DropdownMenuItem>
+                              )}
+                              {model.api_key_type === 'remote' && (
+                                <DropdownMenuItem
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleOverrideModelClick(model);
+                                  }}
+                                >
+                                  <Edit3 className='mr-2 h-4 w-4' />
+                                  Override
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuSeparator />
                               {model.soft_deleted ? (
                                 <DropdownMenuItem
@@ -1215,23 +1303,16 @@ export function ModelSelector({
       })}
 
       {/* Forms and Dialogs */}
-      <AddModelForm
-        isOpen={isAddFormOpen}
-        onModelAdd={handleAddModel}
-        onCancel={() => setIsAddFormOpen(false)}
-      />
-
-      {editingModel && (
-        <EditModelForm
-          model={editingModel}
-          providerId={
-            editingModel.provider_id
-              ? parseInt(editingModel.provider_id)
-              : undefined
+      {modelDialogState.providerId && (
+        <AddProviderModelDialog
+          providerId={modelDialogState.providerId}
+          isOpen={modelDialogState.isOpen}
+          onClose={() =>
+            setModelDialogState((prev) => ({ ...prev, isOpen: false }))
           }
-          onModelUpdate={handleModelUpdate}
-          onCancel={() => setEditingModel(null)}
-          isOpen={!!editingModel}
+          onSuccess={handleModelUpdate}
+          initialData={modelDialogState.initialData}
+          mode={modelDialogState.mode}
         />
       )}
 

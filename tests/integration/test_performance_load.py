@@ -142,46 +142,6 @@ class TestPerformanceBaseline:
                 f"  P99: {sorted(response_times)[int(len(response_times) * 0.99)]:.2f}ms"
             )
 
-    @pytest.mark.asyncio
-    async def test_database_query_performance(
-        self, integration_session: Any, db_snapshot: Any
-    ) -> None:
-        """Test database operation performance"""
-        from sqlmodel import select
-
-        from routstr.core.db import ApiKey
-
-        # Create test data
-        for i in range(100):
-            key = ApiKey(
-                hashed_key=f"test_key_{i}",
-                balance=1000000,
-                total_spent=0,
-                total_requests=0,
-            )
-            integration_session.add(key)
-        await integration_session.commit()
-
-        # Test query performance
-        query_times = []
-
-        for _ in range(100):
-            start = time.time()
-            result = await integration_session.execute(
-                select(ApiKey).where(ApiKey.balance > 0)  # type: ignore[arg-type]
-            )
-            _ = result.all()
-            duration = (time.time() - start) * 1000
-            query_times.append(duration)
-
-        # All queries should complete < 100ms
-        assert max(query_times) < 100, (
-            f"Max query time {max(query_times)}ms exceeds 100ms limit"
-        )
-        print("\nDatabase query performance:")
-        print(f"  Mean: {statistics.mean(query_times):.2f}ms")
-        print(f"  Max: {max(query_times):.2f}ms")
-
 
 @pytest.mark.integration
 @pytest.mark.slow

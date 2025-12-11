@@ -62,7 +62,9 @@ async def query_nostr_relay_for_providers(
 
                     if data[0] == "EVENT" and data[1] == sub_id:
                         event = data[2]
-                        logger.debug(f"Found provider announcement: {event['id']}")
+                        logger.debug(
+                            f"Found provider announcement: {event['id'][:6]}...{event['id'][-6:]}"
+                        )
                         events.append(event)
                     elif data[0] == "EOSE" and data[1] == sub_id:
                         logger.debug("Received EOSE message")

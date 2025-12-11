@@ -62,13 +62,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: "18"
+          cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
       - name: Install UI dependencies
         working-directory: ./ui
         run: npm ci
+
+      - name: Run UI format check
+        working-directory: ./ui
+        run: npm run format-check
 
       - name: Run UI linting
         working-directory: ./ui
