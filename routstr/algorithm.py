@@ -150,18 +150,6 @@ def should_prefer_model(
     # Prefer lower adjusted cost
     should_replace = candidate_adjusted < current_adjusted
 
-    # Log provider changes when candidate wins
-    if should_replace:
-        candidate_provider_name = getattr(
-            candidate_provider, "provider_type", "unknown"
-        )
-        current_provider_name = getattr(current_provider, "provider_type", "unknown")
-        logger.debug(
-            f"Model selection for alias '{alias}': choosing {candidate_provider_name} "
-            f"(cost: ${candidate_adjusted:.6f}) over {current_provider_name} "
-            f"(cost: ${current_adjusted:.6f})"
-        )
-
     return should_replace
 
 

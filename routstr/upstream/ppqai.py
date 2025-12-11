@@ -102,11 +102,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         url = f"{self.base_url}/models"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        logger.debug(
-            "Fetching models from PPQ.AI",
-            extra={"url": url, "has_api_key": bool(self.api_key)},
-        )
-
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url, headers=headers)
@@ -114,10 +109,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 data = response.json()
 
                 models_data = data.get("data", [])
-                logger.info(
-                    "Fetched models from PPQ.AI",
-                    extra={"model_count": len(models_data)},
-                )
 
                 or_models = [
                     Model(**model)  # type: ignore
@@ -198,15 +189,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
                 return models
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "HTTP error fetching models from PPQ.AI",
-                extra={
-                    "status_code": e.response.status_code,
-                    "error": str(e),
-                },
-            )
-            return []
         except Exception as e:
             logger.error(
                 "Error fetching models from PPQ.AI",

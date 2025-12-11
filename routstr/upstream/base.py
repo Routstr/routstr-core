@@ -1726,7 +1726,6 @@ class BaseUpstreamProvider:
         Returns:
             List of Model objects with pricing
         """
-        logger.debug(f"Fetching models for {self.provider_type or self.base_url}")
 
         try:
             or_models, provider_models_response = await asyncio.gather(
@@ -1753,18 +1752,9 @@ class BaseUpstreamProvider:
                 else:
                     not_found_models.append(model_id)
 
-            logger.info(
-                "Fetched models for provider",
-                extra={
-                    "provider": self.provider_type or self.base_url,
-                    "found_count": len(found_models),
-                    "not_found_count": len(not_found_models),
-                },
-            )
-
             if not_found_models:
                 logger.debug(
-                    "Models not found in OpenRouter",
+                    f"({len(not_found_models)}/{len(provider_model_ids)}) unmatched models for {self.provider_type or self.base_url}",
                     extra={"not_found_models": not_found_models},
                 )
 
@@ -1832,10 +1822,7 @@ class BaseUpstreamProvider:
                 self._models_cache = models_with_fees
 
             self._models_by_id = {m.id: m for m in self._models_cache}
-            logger.info(
-                f"Refreshed models cache for {self.provider_type or self.base_url}",
-                extra={"model_count": len(models)},
-            )
+
         except Exception as e:
             logger.error(
                 f"Failed to refresh models cache for {self.provider_type or self.base_url}",
