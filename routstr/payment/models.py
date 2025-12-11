@@ -1,8 +1,6 @@
 import asyncio
 import json
 import random
-from pathlib import Path
-from urllib.request import urlopen
 
 import httpx
 from fastapi import APIRouter, Depends
