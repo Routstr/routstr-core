@@ -1,7 +1,8 @@
 import asyncio
 import json
 import random
-from typing import Final
+from pathlib import Path
+from urllib.request import urlopen
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -18,14 +19,6 @@ logger = get_logger(__name__)
 
 models_router = APIRouter()
 
-DEFAULT_EXCLUDED_MODEL_IDS: Final[set[str]] = {
-    "openrouter/auto",
-    "google/gemini-2.5-pro-exp-03-25",
-    "opengvlab/internvl3-78b",
-    "openrouter/sonoma-dusk-alpha",
-    "openrouter/sonoma-sky-alpha",
-}
-
 
 class Architecture(BaseModel):
     modality: str
@@ -38,10 +31,12 @@ class Architecture(BaseModel):
 class Pricing(BaseModel):
     prompt: float
     completion: float
-    request: float
-    image: float
-    web_search: float
-    internal_reasoning: float
+    request: float = 0.0
+    image: float = 0.0
+    web_search: float = 0.0
+    internal_reasoning: float = 0.0
+    input_cache_read: float = 0.0
+    input_cache_write: float = 0.0
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
@@ -65,12 +60,33 @@ class Model(BaseModel):
     per_request_limits: dict | None = None
     top_provider: TopProvider | None = None
     enabled: bool = True
-    upstream_provider_id: int | None = None
+    upstream_provider_id: int | str | None = None
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+
+def _has_valid_pricing(model: dict) -> bool:
+    """Check if model has valid pricing (not free, no negative values)."""
+    pricing = model.get("pricing", {})
+    if not pricing:
+        return False
+
+    try:
+        prompt = float(pricing.get("prompt", 0))
+        completion = float(pricing.get("completion", 0))
+    except (ValueError, TypeError):
+        return False
+
+    if prompt < 0 or completion < 0:
+        return False
+
+    if prompt == 0 and completion == 0:
+        return False
+
+    return True
 
 
 async def async_fetch_openrouter_models(source_filter: str | None = None) -> list[dict]:
@@ -96,10 +112,10 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                     model["id"] = model_id[len(source_prefix) :]
                     model_id = model["id"]
 
-                if (
-                    "(free)" in model.get("name", "")
-                    or model_id in DEFAULT_EXCLUDED_MODEL_IDS
-                ):
+                if "(free)" in model.get("name", ""):
+                    continue
+
+                if not _has_valid_pricing(model):
                     continue
 
                 models_data.append(model)

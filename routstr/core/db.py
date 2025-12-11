@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -71,6 +72,28 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
+class LightningInvoice(SQLModel, table=True):  # type: ignore
+    __tablename__ = "lightning_invoices"
+
+    id: str = Field(primary_key=True, description="Unique invoice identifier")
+    bolt11: str = Field(description="BOLT11 invoice string", unique=True)
+    amount_sats: int = Field(description="Amount in satoshis")
+    description: str = Field(description="Invoice description")
+    payment_hash: str = Field(description="Payment hash for tracking", unique=True)
+    status: str = Field(
+        default="pending", description="pending, paid, expired, cancelled"
+    )
+    api_key_hash: str | None = Field(
+        default=None, description="Associated API key hash for topup operations"
+    )
+    purpose: str = Field(description="create or topup")
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()), description="Unix timestamp"
+    )
+    expires_at: int = Field(description="Unix timestamp when invoice expires")
+    paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
+
+
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     id: int | None = Field(default=None, primary_key=True)
@@ -126,8 +149,6 @@ def run_migrations() -> None:
     import pathlib
 
     try:
-        logger.info("Starting database migrations")
-
         # Get the path to the alembic.ini file
         project_root = pathlib.Path(__file__).resolve().parents[2]
         alembic_ini_path = project_root / "alembic.ini"
@@ -144,7 +165,6 @@ def run_migrations() -> None:
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
 
         # Run migrations to the latest revision
-        logger.info("Running migrations to latest revision")
         command.upgrade(alembic_cfg, "head")
 
         logger.info("Database migrations completed successfully")

@@ -110,10 +110,6 @@ async def _update_prices() -> None:
         return
     BTC_USD_PRICE = btc_price
     SATS_USD_PRICE = btc_price / 100_000_000
-    logger.info(
-        "Updated BTC/USD price",
-        extra={"btc_usd": btc_price, "sats_usd": SATS_USD_PRICE},
-    )
 
 
 def btc_usd_price() -> float:
