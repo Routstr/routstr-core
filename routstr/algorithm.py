@@ -282,12 +282,8 @@ def create_model_mappings(
         provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
 
     logger.debug(
-        "Created model mappings",
-        extra={
-            "unique_model_count": len(unique_models),
-            "total_alias_count": len(model_instances),
-            "provider_distribution": provider_counts,
-        },
+        f"Updated model mappings with ({len(unique_models)} unique models and {len(model_instances)} aliases)",
+        extra={"provider_distribution": provider_counts},
     )
 
     return model_instances, provider_map, unique_models
