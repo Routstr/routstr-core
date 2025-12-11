@@ -51,8 +51,281 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
+
+function ProviderBalance({ providerId }: { providerId: number }) {
+  const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
+  const [topupAmount, setTopupAmount] = useState('');
+  const [topupError, setTopupError] = useState('');
+  const [isHovered, setIsHovered] = useState(false);
+  const [invoiceData, setInvoiceData] = useState<{
+    payment_request: string;
+    invoice_id: string;
+  } | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState<'pending' | 'paid' | null>(
+    null
+  );
+  const queryClient = useQueryClient();
+
+  const { data: balanceData, isLoading, error } = useQuery({
+    queryKey: ['provider-balance', providerId],
+    queryFn: () => AdminService.getProviderBalance(providerId),
+    refetchInterval: 30000,
+    refetchOnWindowFocus: true,
+    retry: 1,
+  });
+
+  const { data: statusData } = useQuery({
+    queryKey: ['topup-status', providerId, invoiceData?.invoice_id],
+    queryFn: () =>
+      AdminService.checkTopupStatus(providerId, invoiceData!.invoice_id),
+    enabled: !!invoiceData && paymentStatus === 'pending',
+    refetchInterval: 2000,
+  });
+
+  useEffect(() => {
+    if (statusData?.paid === true) {
+      setPaymentStatus('paid');
+      queryClient.invalidateQueries({
+        queryKey: ['provider-balance', providerId],
+      });
+      toast.success('Payment received!', {
+        description: 'Your balance has been updated.',
+      });
+    }
+  }, [statusData, queryClient, providerId]);
+
+  const topupMutation = useMutation({
+    mutationFn: async (amount: number) => {
+      console.log('Calling top-up API with:', { providerId, amount });
+      try {
+        const result = await AdminService.initiateProviderTopup(providerId, amount);
+        console.log('API returned:', result);
+        return result;
+      } catch (err) {
+        console.error('API call failed:', err);
+        throw err;
+      }
+    },
+    onSuccess: (data) => {
+      console.log('Top-up response:', data);
+      console.log('Type of data:', typeof data);
+      console.log('Keys in data:', Object.keys(data || {}));
+      
+      if (
+        data?.topup_data?.payment_request &&
+        data?.topup_data?.invoice_id
+      ) {
+        setInvoiceData({
+          payment_request: data.topup_data.payment_request as string,
+          invoice_id: data.topup_data.invoice_id as string,
+        });
+        setPaymentStatus('pending');
+      } else {
+        console.error('Missing invoice data:', data);
+        console.error('topup_data:', data?.topup_data);
+        toast.error('No invoice returned from provider');
+        setIsTopupDialogOpen(false);
+      }
+    },
+    onError: (error: Error) => {
+      console.error('Top-up mutation error:', error);
+      toast.error(`Failed to initiate top-up: ${error.message}`);
+    },
+  });
+
+  const handleTopup = () => {
+    const amount = parseFloat(topupAmount);
+
+    if (isNaN(amount)) {
+      setTopupError('Please enter a valid amount');
+      return;
+    }
+
+    if (amount < 1 || amount > 500) {
+      setTopupError('Amount must be between $1 and $500');
+      return;
+    }
+
+    topupMutation.mutate(amount);
+  };
+
+  const handleCloseDialog = () => {
+    setIsTopupDialogOpen(false);
+    setTopupAmount('');
+    setTopupError('');
+    setInvoiceData(null);
+    setPaymentStatus(null);
+  };
+
+  if (isLoading) {
+    return <Skeleton className='h-9 w-24' />;
+  }
+
+  if (error || !balanceData?.ok || !balanceData.balance_data) {
+    return null;
+  }
+
+  const balance = balanceData.balance_data;
+  let displayValue = 'N/A';
+
+  if (typeof balance.balance === 'number') {
+    displayValue = `$${balance.balance.toFixed(2)}`;
+  } else if (typeof balance.balance === 'string') {
+    displayValue = balance.balance;
+  } else if (balance.amount !== undefined) {
+    displayValue = `$${Number(balance.amount).toFixed(2)}`;
+  }
+
+  return (
+    <>
+      <Button
+        variant='outline'
+        size='sm'
+        onClick={() => setIsTopupDialogOpen(true)}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        className='w-full font-mono sm:w-auto'
+      >
+        {isHovered ? 'Top Up' : displayValue}
+      </Button>
+
+      <Dialog open={isTopupDialogOpen} onOpenChange={handleCloseDialog}>
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>
+              {paymentStatus === 'paid'
+                ? 'Payment Confirmed!'
+                : 'Top Up Balance'}
+            </DialogTitle>
+            <DialogDescription>
+              {paymentStatus === 'paid'
+                ? 'Your account balance has been updated.'
+                : invoiceData
+                  ? 'Scan the QR code or copy the Lightning invoice to pay.'
+                  : 'Enter the amount you want to add to your account balance.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {paymentStatus === 'paid' ? (
+            <div className='flex flex-col items-center gap-4 py-6'>
+              <div className='rounded-full bg-green-100 p-3 dark:bg-green-900'>
+                <svg
+                  className='h-12 w-12 text-green-600 dark:text-green-400'
+                  fill='none'
+                  strokeLinecap='round'
+                  strokeLinejoin='round'
+                  strokeWidth='2'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                >
+                  <path d='M5 13l4 4L19 7'></path>
+                </svg>
+              </div>
+              <p className='text-center font-semibold'>
+                Top-up successful!
+              </p>
+            </div>
+          ) : invoiceData ? (
+            <div className='flex flex-col items-center gap-4 py-4'>
+              <div className='rounded-lg border-2 border-gray-200 p-2 dark:border-gray-800'>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(invoiceData.payment_request)}`}
+                  alt='Lightning Invoice QR Code'
+                  className='h-64 w-64'
+                />
+              </div>
+              <div className='w-full space-y-2'>
+                <Label htmlFor='invoice'>Lightning Invoice</Label>
+                <div className='flex gap-2'>
+                  <Input
+                    id='invoice'
+                    value={invoiceData.payment_request}
+                    readOnly
+                    className='font-mono text-xs'
+                  />
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={() => {
+                      navigator.clipboard.writeText(
+                        invoiceData.payment_request
+                      );
+                      toast.success('Invoice copied to clipboard!');
+                    }}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              </div>
+              {paymentStatus === 'pending' && (
+                <p className='text-muted-foreground text-center text-sm'>
+                  Waiting for payment...
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className='grid gap-4 py-4'>
+              <div className='grid gap-2'>
+                <Label htmlFor='topup_amount'>Amount (USD)</Label>
+                <Input
+                  id='topup_amount'
+                  type='number'
+                  placeholder='Enter amount (1-500)'
+                  value={topupAmount}
+                  onChange={(e) => {
+                    setTopupAmount(e.target.value);
+                    setTopupError('');
+                  }}
+                  min='1'
+                  max='500'
+                  step='0.01'
+                />
+                {topupError && (
+                  <p className='text-sm text-red-600 dark:text-red-400'>
+                    {topupError}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            {paymentStatus === 'paid' ? (
+              <Button onClick={handleCloseDialog} className='w-full'>
+                Done
+              </Button>
+            ) : invoiceData ? (
+              <Button
+                variant='outline'
+                onClick={handleCloseDialog}
+                className='w-full'
+              >
+                Cancel
+              </Button>
+            ) : (
+              <>
+                <Button variant='outline' onClick={handleCloseDialog}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleTopup}
+                  disabled={topupMutation.isPending || !topupAmount}
+                >
+                  {topupMutation.isPending
+                    ? 'Processing...'
+                    : 'Generate Invoice'}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 export default function ProvidersPage() {
   const queryClient = useQueryClient();
@@ -64,6 +337,7 @@ export default function ProvidersPage() {
     new Set()
   );
   const [viewingModels, setViewingModels] = useState<number | null>(null);
+  const [isCreatingAccount, setIsCreatingAccount] = useState(false);
 
   const [formData, setFormData] = useState<CreateUpstreamProvider>({
     provider_type: 'openrouter',
@@ -138,6 +412,30 @@ export default function ProvidersPage() {
     },
   });
 
+  const handleCreateAccount = async () => {
+    setIsCreatingAccount(true);
+    try {
+      const response = await AdminService.createProviderAccountByType(
+        formData.provider_type
+      );
+      if (response.ok && response.account_data.api_key) {
+        setFormData({
+          ...formData,
+          api_key: String(response.account_data.api_key),
+        });
+        toast.success('Account created successfully! API key has been filled in.');
+      } else {
+        toast.success('Account created, but no API key returned.');
+      }
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      toast.error(`Failed to create account: ${errorMessage}`);
+    } finally {
+      setIsCreatingAccount(false);
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       provider_type: 'openrouter',
@@ -197,6 +495,16 @@ export default function ProvidersPage() {
   const getPlatformUrl = (type: string) => {
     const providerType = providerTypes.find((pt) => pt.id === type);
     return providerType?.platform_url || null;
+  };
+
+  const canCreateAccount = (type: string) => {
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.can_create_account || false;
+  };
+
+  const canShowBalance = (type: string) => {
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.can_show_balance || false;
   };
 
   const toggleProviderExpansion = (providerId: number) => {
@@ -292,15 +600,30 @@ export default function ProvidersPage() {
                     <div className='grid gap-2'>
                       <div className='flex items-center justify-between'>
                         <Label htmlFor='api_key'>API Key</Label>
-                        {getPlatformUrl(formData.provider_type) && (
-                          <a
-                            href={getPlatformUrl(formData.provider_type)!}
-                            target='_blank'
-                            rel='noopener noreferrer'
-                            className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                        {canCreateAccount(formData.provider_type) ? (
+                          <Button
+                            type='button'
+                            variant='outline'
+                            size='sm'
+                            onClick={handleCreateAccount}
+                            disabled={isCreatingAccount}
+                            className='h-6 text-xs'
                           >
-                            Get Your API Key Here →
-                          </a>
+                            {isCreatingAccount
+                              ? 'Creating...'
+                              : 'Create Account'}
+                          </Button>
+                        ) : (
+                          getPlatformUrl(formData.provider_type) && (
+                            <a
+                              href={getPlatformUrl(formData.provider_type)!}
+                              target='_blank'
+                              rel='noopener noreferrer'
+                              className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                            >
+                              Get Your API Key Here →
+                            </a>
+                          )
                         )}
                       </div>
                       <Input
@@ -410,7 +733,11 @@ export default function ProvidersPage() {
                             {provider.base_url}
                           </CardDescription>
                         </div>
-                        <div className='grid grid-cols-3 gap-2 sm:flex sm:flex-nowrap'>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          {canShowBalance(provider.provider_type) &&
+                            provider.api_key && (
+                              <ProviderBalance providerId={provider.id} />
+                            )}
                           <Button
                             variant='outline'
                             size='sm'
