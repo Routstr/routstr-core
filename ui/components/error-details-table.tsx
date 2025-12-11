@@ -24,7 +24,7 @@ export function ErrorDetailsTable({ errors }: ErrorDetailsTableProps) {
           <CardTitle>Recent Errors</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className='text-muted-foreground text-center py-8'>
+          <p className='text-muted-foreground py-8 text-center'>
             No errors found in the selected time period
           </p>
         </CardContent>

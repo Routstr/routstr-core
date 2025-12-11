@@ -90,7 +90,11 @@ export function UsageMetricsChart({
                 boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
               }}
               itemStyle={{ fontSize: '12px' }}
-              labelStyle={{ fontSize: '12px', color: 'hsl(var(--muted-foreground))', marginBottom: '8px' }}
+              labelStyle={{
+                fontSize: '12px',
+                color: 'hsl(var(--muted-foreground))',
+                marginBottom: '8px',
+              }}
             />
             <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '16px' }} />
             {dataKeys.map((dataKey) => (

@@ -76,7 +76,11 @@ function ProviderBalance({
   );
   const queryClient = useQueryClient();
 
-  const { data: balanceData, isLoading, error } = useQuery({
+  const {
+    data: balanceData,
+    isLoading,
+    error,
+  } = useQuery({
     queryKey: ['provider-balance', providerId],
     queryFn: () => AdminService.getProviderBalance(providerId),
     refetchInterval: 30000,
@@ -108,7 +112,10 @@ function ProviderBalance({
     mutationFn: async (amount: number) => {
       console.log('Calling top-up API with:', { providerId, amount });
       try {
-        const result = await AdminService.initiateProviderTopup(providerId, amount);
+        const result = await AdminService.initiateProviderTopup(
+          providerId,
+          amount
+        );
         console.log('API returned:', result);
         return result;
       } catch (err) {
@@ -120,11 +127,8 @@ function ProviderBalance({
       console.log('Top-up response:', data);
       console.log('Type of data:', typeof data);
       console.log('Keys in data:', Object.keys(data || {}));
-      
-      if (
-        data?.topup_data?.payment_request &&
-        data?.topup_data?.invoice_id
-      ) {
+
+      if (data?.topup_data?.payment_request && data?.topup_data?.invoice_id) {
         setInvoiceData({
           payment_request: data.topup_data.payment_request as string,
           invoice_id: data.topup_data.invoice_id as string,
@@ -172,19 +176,23 @@ function ProviderBalance({
     // The backend throws 500/400 if not implemented.
     // A better approach is to check if we have a platform URL and maybe redirect there
     // if we know it's not supported.
-    
+
     // BUT, we don't know for sure if it's supported without checking metadata or trying.
     // Let's rely on the "can_topup" metadata if available, but currently we only have "can_show_balance".
-    
+
     // Simple heuristic: If platformUrl exists and we suspect no direct topup, redirect?
     // Actually, let's try to open the dialog, but if it's OpenRouter/OpenAI, maybe we just redirect?
     // The user specifically mentioned "like in openrouter".
-    
-    if (platformUrl && (platformUrl.includes('openrouter.ai') || platformUrl.includes('openai.com'))) {
-        window.open(platformUrl, '_blank');
-        return;
+
+    if (
+      platformUrl &&
+      (platformUrl.includes('openrouter.ai') ||
+        platformUrl.includes('openai.com'))
+    ) {
+      window.open(platformUrl, '_blank');
+      return;
     }
-    
+
     setIsTopupDialogOpen(true);
   };
 
@@ -266,9 +274,7 @@ function ProviderBalance({
                   <path d='M5 13l4 4L19 7'></path>
                 </svg>
               </div>
-              <p className='text-center font-semibold'>
-                Top-up successful!
-              </p>
+              <p className='text-center font-semibold'>Top-up successful!</p>
             </div>
           ) : invoiceData ? (
             <div className='flex flex-col items-center gap-4 py-4'>
@@ -482,7 +488,9 @@ export default function ProvidersPage() {
           ...formData,
           api_key: String(response.account_data.api_key),
         });
-        toast.success('Account created successfully! API key has been filled in.');
+        toast.success(
+          'Account created successfully! API key has been filled in.'
+        );
       } else {
         toast.success('Account created, but no API key returned.');
       }
@@ -778,8 +786,7 @@ export default function ProvidersPage() {
                         )}
                       />
                       <p className='text-muted-foreground text-xs'>
-                        1.01 means +1% e.g. currency exchange, card
-                        fees, etc.
+                        1.01 means +1% e.g. currency exchange, card fees, etc.
                       </p>
                     </div>
                   </div>
@@ -856,9 +863,11 @@ export default function ProvidersPage() {
                         <div className='flex flex-wrap items-center gap-2'>
                           {canShowBalance(provider.provider_type) &&
                             provider.api_key && (
-                              <ProviderBalance 
-                                providerId={provider.id} 
-                                platformUrl={getPlatformUrl(provider.provider_type)}
+                              <ProviderBalance
+                                providerId={provider.id}
+                                platformUrl={getPlatformUrl(
+                                  provider.provider_type
+                                )}
                               />
                             )}
                           <Button
@@ -925,9 +934,16 @@ export default function ProvidersPage() {
                                   {providerModels.db_models.length === 0 ? (
                                     <div className='flex flex-col items-center justify-center gap-2 py-4'>
                                       <div className='text-muted-foreground text-sm'>
-                                        No models configured. Add custom models to use this provider.
+                                        No models configured. Add custom models
+                                        to use this provider.
                                       </div>
-                                      <Button variant='outline' size='sm' onClick={() => handleAddModel(provider.id)}>
+                                      <Button
+                                        variant='outline'
+                                        size='sm'
+                                        onClick={() =>
+                                          handleAddModel(provider.id)
+                                        }
+                                      >
                                         <Plus className='mr-2 h-4 w-4' />
                                         Add Custom Model
                                       </Button>
@@ -970,7 +986,12 @@ export default function ProvidersPage() {
                                               variant='ghost'
                                               size='icon'
                                               className='h-8 w-8'
-                                              onClick={() => handleEditModel(provider.id, model)}
+                                              onClick={() =>
+                                                handleEditModel(
+                                                  provider.id,
+                                                  model
+                                                )
+                                              }
                                             >
                                               <Pencil className='h-4 w-4' />
                                             </Button>
@@ -1027,10 +1048,17 @@ export default function ProvidersPage() {
                                     <div className='flex items-center justify-between'>
                                       {providerModels.db_models.length > 0 && (
                                         <div className='text-muted-foreground text-sm'>
-                                          Custom models override or extend the provider&apos;s catalog.
+                                          Custom models override or extend the
+                                          provider&apos;s catalog.
                                         </div>
                                       )}
-                                      <Button variant='outline' size='sm' onClick={() => handleAddModel(provider.id)}>
+                                      <Button
+                                        variant='outline'
+                                        size='sm'
+                                        onClick={() =>
+                                          handleAddModel(provider.id)
+                                        }
+                                      >
                                         <Plus className='mr-2 h-4 w-4' />
                                         Add
                                       </Button>
@@ -1079,7 +1107,12 @@ export default function ProvidersPage() {
                                                   variant='ghost'
                                                   size='icon'
                                                   className='h-8 w-8'
-                                                  onClick={() => handleEditModel(provider.id, model)}
+                                                  onClick={() =>
+                                                    handleEditModel(
+                                                      provider.id,
+                                                      model
+                                                    )
+                                                  }
                                                 >
                                                   <Pencil className='h-4 w-4' />
                                                 </Button>
@@ -1126,7 +1159,12 @@ export default function ProvidersPage() {
                                                 variant='outline'
                                                 size='sm'
                                                 className='h-7 text-xs'
-                                                onClick={() => handleOverrideModel(provider.id, model)}
+                                                onClick={() =>
+                                                  handleOverrideModel(
+                                                    provider.id,
+                                                    model
+                                                  )
+                                                }
                                               >
                                                 <Plus className='mr-1 h-3 w-3' />
                                                 Override
@@ -1245,7 +1283,7 @@ export default function ProvidersPage() {
                 </div>
               )}
               <div className='flex items-center space-x-2'>
-                      <Switch
+                <Switch
                   id='edit_enabled'
                   checked={formData.enabled}
                   onCheckedChange={(checked) =>
@@ -1277,8 +1315,7 @@ export default function ProvidersPage() {
                   )}
                 />
                 <p className='text-muted-foreground text-xs'>
-                  1.01 means +1% e.g. currency exchange, card
-                  fees, etc.
+                  1.01 means +1% e.g. currency exchange, card fees, etc.
                 </p>
               </div>
             </div>
@@ -1303,7 +1340,9 @@ export default function ProvidersPage() {
           <AddProviderModelDialog
             providerId={modelDialogState.providerId}
             isOpen={modelDialogState.isOpen}
-            onClose={() => setModelDialogState((prev) => ({ ...prev, isOpen: false }))}
+            onClose={() =>
+              setModelDialogState((prev) => ({ ...prev, isOpen: false }))
+            }
             onSuccess={() => {
               queryClient.invalidateQueries({
                 queryKey: ['provider-models', modelDialogState.providerId],

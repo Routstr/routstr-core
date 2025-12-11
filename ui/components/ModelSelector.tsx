@@ -2,11 +2,12 @@
 
 import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { type Model, type GroupSettings } from '@/lib/api/schemas/models';
 import {
-  type Model,
-  type GroupSettings,
-} from '@/lib/api/schemas/models';
-import { AdminService, type AdminModelGroup, type AdminModel } from '@/lib/api/services/admin';
+  AdminService,
+  type AdminModelGroup,
+  type AdminModel,
+} from '@/lib/api/services/admin';
 type ModelGroup = AdminModelGroup;
 import { AddProviderModelDialog } from '@/components/AddProviderModelDialog';
 import { EditGroupForm } from '@/components/EditGroupForm';
@@ -514,7 +515,7 @@ export function ModelSelector({
       return;
     }
     const providerId = parseInt(model.provider_id);
-    
+
     // Construct AdminModel from Model
     const adminModel: AdminModel = {
       id: model.id,
@@ -557,7 +558,7 @@ export function ModelSelector({
       return;
     }
     const providerId = parseInt(model.provider_id);
-    
+
     // Construct AdminModel from Model
     const adminModel: AdminModel = {
       id: model.id,
@@ -901,10 +902,10 @@ export function ModelSelector({
         )}
         {/* Model Management Actions */}
         {groupData && (
-          <Button 
-            onClick={() => handleAddModelClick(parseInt(groupData.id))} 
+          <Button
+            onClick={() => handleAddModelClick(parseInt(groupData.id))}
             className='gap-2'
-            variant="outline"
+            variant='outline'
           >
             <CheckSquare className='h-4 w-4' />
             Add Custom Model
@@ -1306,7 +1307,9 @@ export function ModelSelector({
         <AddProviderModelDialog
           providerId={modelDialogState.providerId}
           isOpen={modelDialogState.isOpen}
-          onClose={() => setModelDialogState((prev) => ({ ...prev, isOpen: false }))}
+          onClose={() =>
+            setModelDialogState((prev) => ({ ...prev, isOpen: false }))
+          }
           onSuccess={handleModelUpdate}
           initialData={modelDialogState.initialData}
           mode={modelDialogState.mode}

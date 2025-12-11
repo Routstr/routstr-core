@@ -116,7 +116,9 @@ export function CheatSheet(): JSX.Element {
   const [topupToken, setTopupToken] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [walletInfo, setWalletInfo] = useState<WalletSnapshot | null>(null);
-  const [refundReceipt, setRefundReceipt] = useState<RefundReceipt | null>(null);
+  const [refundReceipt, setRefundReceipt] = useState<RefundReceipt | null>(
+    null
+  );
   const [isCreatingKey, setIsCreatingKey] = useState(false);
   const [isTopupLoading, setIsTopupLoading] = useState(false);
   const [isRefunding, setIsRefunding] = useState(false);
@@ -332,22 +334,21 @@ export function CheatSheet(): JSX.Element {
   const showCreateDetails =
     hasInteractedCreate || initialToken.trim().length > 0;
   const showManageDetails = hasInteractedManage || Boolean(walletInfo);
-  const showTopupDetails =
-    hasInteractedTopup || topupToken.trim().length > 0;
+  const showTopupDetails = hasInteractedTopup || topupToken.trim().length > 0;
   const refundToken = refundReceipt?.token ?? null;
   const canTopup = Boolean(activeApiKey);
 
   return (
-    <div className='min-h-screen bg-gradient-to-b from-background via-background to-muted'>
+    <div className='from-background via-background to-muted min-h-screen bg-gradient-to-b'>
       <main className='mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6 lg:px-8'>
         <section className='relative space-y-3 text-center md:text-left'>
-          <div className='absolute right-0 top-0 hidden md:block'>
+          <div className='absolute top-0 right-0 hidden md:block'>
             <Button asChild size='sm' className='px-3 text-xs'>
               <a href='/login'>Admin</a>
             </Button>
           </div>
-          <div className='inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[0.65rem] uppercase tracking-wider text-muted-foreground'>
-            <Bolt className='h-4 w-4 text-primary' />
+          <div className='text-muted-foreground inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[0.65rem] tracking-wider uppercase'>
+            <Bolt className='text-primary h-4 w-4' />
             Routstr cheat sheet
           </div>
           <h1 className='text-3xl font-semibold tracking-tight sm:text-4xl'>
@@ -365,10 +366,10 @@ export function CheatSheet(): JSX.Element {
             <CardHeader className='flex flex-row items-start justify-between gap-4'>
               <div>
                 <CardTitle className='flex items-center gap-2 text-lg'>
-                  <ShieldCheck className='h-4 w-4 text-primary' />
+                  <ShieldCheck className='text-primary h-4 w-4' />
                   Node identity
                 </CardTitle>
-                <p className='text-xs uppercase tracking-wide text-muted-foreground'>
+                <p className='text-muted-foreground text-xs tracking-wide uppercase'>
                   /v1/info snapshot
                 </p>
               </div>
@@ -404,7 +405,7 @@ export function CheatSheet(): JSX.Element {
                   </div>
                   <dl className='grid gap-4 sm:grid-cols-2'>
                     <div>
-                      <dt className='text-muted-foreground text-xs uppercase tracking-wide'>
+                      <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
                         Version
                       </dt>
                       <dd className='text-base font-medium'>
@@ -412,7 +413,7 @@ export function CheatSheet(): JSX.Element {
                       </dd>
                     </div>
                     <div>
-                      <dt className='text-muted-foreground text-xs uppercase tracking-wide'>
+                      <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
                         HTTP
                       </dt>
                       <dd className='text-base font-medium break-all'>
@@ -421,7 +422,7 @@ export function CheatSheet(): JSX.Element {
                     </div>
                     {nodeInfo.onion_url && (
                       <div className='sm:col-span-2'>
-                        <dt className='text-muted-foreground text-xs uppercase tracking-wide'>
+                        <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
                           Onion
                         </dt>
                         <dd className='text-base font-medium break-all'>
@@ -431,10 +432,10 @@ export function CheatSheet(): JSX.Element {
                     )}
                     {nodeInfo.npub && (
                       <div className='sm:col-span-2'>
-                        <dt className='text-muted-foreground text-xs uppercase tracking-wide'>
+                        <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
                           npub
                         </dt>
-                        <dd className='flex items-center gap-2 break-all text-sm font-mono'>
+                        <dd className='flex items-center gap-2 font-mono text-sm break-all'>
                           {nodeInfo.npub}
                           <Button
                             variant='ghost'
@@ -449,7 +450,7 @@ export function CheatSheet(): JSX.Element {
                     )}
                   </dl>
                   <div className='space-y-2'>
-                    <p className='text-xs uppercase tracking-wide text-muted-foreground'>
+                    <p className='text-muted-foreground text-xs tracking-wide uppercase'>
                       Cashu mints
                     </p>
                     <div className='flex flex-wrap gap-2'>
@@ -478,10 +479,10 @@ export function CheatSheet(): JSX.Element {
           <Card>
             <CardHeader className='flex flex-row items-center justify-between'>
               <CardTitle className='flex items-center gap-2 text-lg'>
-                <Terminal className='h-4 w-4 text-primary' />
+                <Terminal className='text-primary h-4 w-4' />
                 Quick docs
               </CardTitle>
-              <span className='text-xs uppercase tracking-wide text-muted-foreground'>
+              <span className='text-muted-foreground text-xs tracking-wide uppercase'>
                 curl-ready
               </span>
             </CardHeader>
@@ -502,8 +503,10 @@ export function CheatSheet(): JSX.Element {
                   <Copy className='h-4 w-4' />
                 </Button>
               </div>
-              <div className='rounded-lg bg-muted p-4 font-mono text-sm leading-6'>
-                <pre className='whitespace-pre-wrap break-all'>{curlSnippet}</pre>
+              <div className='bg-muted rounded-lg p-4 font-mono text-sm leading-6'>
+                <pre className='break-all whitespace-pre-wrap'>
+                  {curlSnippet}
+                </pre>
               </div>
               <div className='flex gap-2'>
                 <Button
@@ -532,16 +535,16 @@ export function CheatSheet(): JSX.Element {
         <Card>
           <CardHeader className='space-y-1'>
             <CardTitle className='flex items-center gap-2 text-xl'>
-              <KeyRound className='h-5 w-5 text-primary' />
+              <KeyRound className='text-primary h-5 w-5' />
               API key workflow
             </CardTitle>
-            <p className='text-xs uppercase tracking-wide text-muted-foreground'>
+            <p className='text-muted-foreground text-xs tracking-wide uppercase'>
               Sections expand as soon as you interact
             </p>
           </CardHeader>
           <CardContent className='space-y-6'>
             <section className='space-y-2'>
-              <header className='flex items-center justify-between text-[0.7rem] uppercase tracking-wider text-muted-foreground'>
+              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
                 <span>1 · Create key</span>
                 {showCreateDetails && (
                   <span className='text-primary'>Cashu token detected</span>
@@ -564,7 +567,7 @@ export function CheatSheet(): JSX.Element {
                   >
                     {isCreatingKey ? 'Creating…' : 'Create API key'}
                   </Button>
-                  <span className='text-xs text-muted-foreground'>
+                  <span className='text-muted-foreground text-xs'>
                     Redeems instantly and returns <code>sk-</code> key.
                   </span>
                 </div>
@@ -574,7 +577,7 @@ export function CheatSheet(): JSX.Element {
             <Separator />
 
             <section className='space-y-2'>
-              <header className='flex items-center justify-between text-[0.7rem] uppercase tracking-wider text-muted-foreground'>
+              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
                 <span>2 · Manage key</span>
                 {walletInfo && (
                   <span className='text-primary'>
@@ -618,7 +621,7 @@ export function CheatSheet(): JSX.Element {
               {showManageDetails && (
                 <div className='grid gap-3 sm:grid-cols-2'>
                   <div className='rounded-lg border p-3'>
-                    <p className='text-[0.65rem] uppercase tracking-wide text-muted-foreground'>
+                    <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
                       Spendable
                     </p>
                     <p className='text-xl font-semibold'>
@@ -633,7 +636,7 @@ export function CheatSheet(): JSX.Element {
                     )}
                   </div>
                   <div className='rounded-lg border p-3'>
-                    <p className='text-[0.65rem] uppercase tracking-wide text-muted-foreground'>
+                    <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
                       Reserved
                     </p>
                     <p className='text-xl font-semibold'>
@@ -654,10 +657,12 @@ export function CheatSheet(): JSX.Element {
             <Separator />
 
             <section className='space-y-2'>
-              <header className='flex items-center justify-between text-[0.7rem] uppercase tracking-wider text-muted-foreground'>
+              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
                 <span>3 · Top up</span>
                 {showTopupDetails && (
-                  <span className={canTopup ? 'text-primary' : 'text-destructive'}>
+                  <span
+                    className={canTopup ? 'text-primary' : 'text-destructive'}
+                  >
                     {canTopup ? 'Ready to redeem' : 'Paste API key first'}
                   </span>
                 )}
@@ -681,14 +686,14 @@ export function CheatSheet(): JSX.Element {
                   >
                     {isTopupLoading ? 'Topping up…' : 'Top up this key'}
                   </Button>
-                  <span className='text-xs text-muted-foreground'>
-                    {canTopup
-                      ? (
-                          <>
-                            Adds balance to the same <code>sk-</code> token.
-                          </>
-                        )
-                      : 'Enter your sk- key above to unlock top ups.'}
+                  <span className='text-muted-foreground text-xs'>
+                    {canTopup ? (
+                      <>
+                        Adds balance to the same <code>sk-</code> token.
+                      </>
+                    ) : (
+                      'Enter your sk- key above to unlock top ups.'
+                    )}
                   </span>
                 </div>
               )}
@@ -697,7 +702,7 @@ export function CheatSheet(): JSX.Element {
             <Separator />
 
             <section className='space-y-2'>
-              <header className='flex items-center justify-between text-[0.7rem] uppercase tracking-wider text-muted-foreground'>
+              <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
                 <span>4 · Refund</span>
                 {refundReceipt && <span className='text-primary'>Done</span>}
               </header>
@@ -710,13 +715,13 @@ export function CheatSheet(): JSX.Element {
                 >
                   {isRefunding ? 'Processing…' : 'Refund remaining balance'}
                 </Button>
-                <span className='text-xs text-muted-foreground'>
+                <span className='text-muted-foreground text-xs'>
                   Burns the key and returns a fresh Cashu token.
                 </span>
               </div>
               {refundToken && (
-                <div className='space-y-2 rounded-lg border bg-muted/30 p-4'>
-                  <div className='flex items-center justify-between text-[0.7rem] uppercase tracking-wider text-muted-foreground'>
+                <div className='bg-muted/30 space-y-2 rounded-lg border p-4'>
+                  <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
                     <span>Cashu refund token</span>
                     <Button
                       variant='outline'
@@ -743,4 +748,3 @@ export function CheatSheet(): JSX.Element {
     </div>
   );
 }
-

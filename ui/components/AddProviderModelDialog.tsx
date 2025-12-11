@@ -102,7 +102,8 @@ export function AddProviderModelDialog({
 }: AddProviderModelDialogProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPresetOpen, setIsPresetOpen] = useState(false);
-  const [selectedPresetLabel, setSelectedPresetLabel] = useState('Select a preset');
+  const [selectedPresetLabel, setSelectedPresetLabel] =
+    useState('Select a preset');
 
   const form = useForm<FormData>({
     resolver: zodResolver(FormSchema) as never,
@@ -149,7 +150,10 @@ export function AddProviderModelDialog({
     if (initialData) {
       const architecture = initialData.architecture as Record<string, unknown>;
       const pricing = initialData.pricing as Record<string, number>;
-      const topProvider = initialData.top_provider as Record<string, unknown> | null;
+      const topProvider = initialData.top_provider as Record<
+        string,
+        unknown
+      > | null;
 
       form.reset({
         id: initialData.id,
@@ -250,7 +254,9 @@ export function AddProviderModelDialog({
     form.setValue('context_length', model.context_length);
     form.setValue(
       'modality',
-      typeof architecture?.modality === 'string' ? architecture.modality : 'text'
+      typeof architecture?.modality === 'string'
+        ? architecture.modality
+        : 'text'
     );
     form.setValue(
       'input_modalities_raw',
@@ -318,7 +324,10 @@ export function AddProviderModelDialog({
     setIsSubmitting(true);
     try {
       let perRequestLimits: Record<string, unknown> | null = null;
-      if (data.per_request_limits_raw && data.per_request_limits_raw.trim().length) {
+      if (
+        data.per_request_limits_raw &&
+        data.per_request_limits_raw.trim().length
+      ) {
         try {
           perRequestLimits = JSON.parse(data.per_request_limits_raw);
         } catch {
@@ -336,7 +345,9 @@ export function AddProviderModelDialog({
         context_length: data.context_length,
         architecture: {
           modality: data.modality,
-          input_modalities: listFromString(data.input_modalities_raw || data.modality),
+          input_modalities: listFromString(
+            data.input_modalities_raw || data.modality
+          ),
           output_modalities: listFromString(
             data.output_modalities_raw || data.modality
           ),
@@ -366,10 +377,9 @@ export function AddProviderModelDialog({
                 is_moderated: data.top_provider_is_moderated,
               }
             : null,
-        upstream_provider_id:
-          data.upstream_provider_id?.trim().length
-            ? data.upstream_provider_id.trim()
-            : providerId,
+        upstream_provider_id: data.upstream_provider_id?.trim().length
+          ? data.upstream_provider_id.trim()
+          : providerId,
         canonical_slug: data.canonical_slug?.trim() || null,
         alias_ids: listFromString(data.alias_ids_raw || ''),
         enabled: data.enabled,
@@ -416,7 +426,7 @@ export function AddProviderModelDialog({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         {!isEdit && !isOverride && (
-          <div className='rounded-md border bg-muted/30 p-3'>
+          <div className='bg-muted/30 rounded-md border p-3'>
             <div className='mb-2 text-sm font-medium'>Presets</div>
             <div className='grid gap-2 sm:grid-cols-3 sm:items-start'>
               <Popover open={isPresetOpen} onOpenChange={setIsPresetOpen}>
@@ -425,23 +435,25 @@ export function AddProviderModelDialog({
                     variant='outline'
                     role='combobox'
                     aria-expanded={isPresetOpen}
-                    className='w-full justify-between text-left text-sm overflow-hidden'
+                    className='w-full justify-between overflow-hidden text-left text-sm'
                   >
                     <span className='truncate'>
-                      {isLoadingPresets ? 'Loading presets...' : selectedPresetLabel}
+                      {isLoadingPresets
+                        ? 'Loading presets...'
+                        : selectedPresetLabel}
                     </span>
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent 
-                  className='w-80 max-w-sm p-0' 
-                  align='start' 
-                  sideOffset={4} 
+                <PopoverContent
+                  className='w-80 max-w-sm p-0'
+                  align='start'
+                  sideOffset={4}
                   collisionPadding={12}
                   onOpenAutoFocus={(e) => e.preventDefault()}
                 >
                   <Command shouldFilter={true}>
                     <CommandInput placeholder='Search presets...' />
-                    <CommandList 
+                    <CommandList
                       className='max-h-64 overflow-y-auto overscroll-contain'
                       onWheel={(e) => e.stopPropagation()}
                     >
@@ -475,8 +487,9 @@ export function AddProviderModelDialog({
                 </PopoverContent>
               </Popover>
             </div>
-            <div className='text-muted-foreground text-xs mt-1'>
-              Prefill fields from a preset model definition, then adjust as needed.
+            <div className='text-muted-foreground mt-1 text-xs'>
+              Prefill fields from a preset model definition, then adjust as
+              needed.
             </div>
           </div>
         )}
@@ -496,7 +509,9 @@ export function AddProviderModelDialog({
                         disabled={isOverride || isEdit}
                       />
                     </FormControl>
-                    <FormDescription>Unique identifier for the model</FormDescription>
+                    <FormDescription>
+                      Unique identifier for the model
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -524,7 +539,11 @@ export function AddProviderModelDialog({
                 <FormItem>
                   <FormLabel>Description</FormLabel>
                   <FormControl>
-                    <Textarea placeholder='Brief description...' {...field} rows={2} />
+                    <Textarea
+                      placeholder='Brief description...'
+                      {...field}
+                      rows={2}
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -575,10 +594,7 @@ export function AddProviderModelDialog({
                   <FormItem>
                     <FormLabel>Input Modalities</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder='text, image, file'
-                        {...field}
-                      />
+                      <Input placeholder='text, image, file' {...field} />
                     </FormControl>
                     <FormDescription>Comma-separated list</FormDescription>
                     <FormMessage />
@@ -593,10 +609,7 @@ export function AddProviderModelDialog({
                   <FormItem>
                     <FormLabel>Output Modalities</FormLabel>
                     <FormControl>
-                      <Input
-                        placeholder='text, image'
-                        {...field}
-                      />
+                      <Input placeholder='text, image' {...field} />
                     </FormControl>
                     <FormDescription>Comma-separated list</FormDescription>
                     <FormMessage />
@@ -643,7 +656,10 @@ export function AddProviderModelDialog({
                   <FormItem>
                     <FormLabel>Canonical Slug</FormLabel>
                     <FormControl>
-                      <Input placeholder='google/gemini-3-pro-preview-20251117' {...field} />
+                      <Input
+                        placeholder='google/gemini-3-pro-preview-20251117'
+                        {...field}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -697,15 +713,19 @@ export function AddProviderModelDialog({
                         rows={4}
                       />
                     </FormControl>
-                    <FormDescription>JSON object; leave empty for none</FormDescription>
+                    <FormDescription>
+                      JSON object; leave empty for none
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
               />
             </div>
 
-            <div className='space-y-4 rounded-md border bg-muted/20 p-4'>
-              <h4 className='text-sm font-medium'>Pricing (USD per 1M tokens)</h4>
+            <div className='bg-muted/20 space-y-4 rounded-md border p-4'>
+              <h4 className='text-sm font-medium'>
+                Pricing (USD per 1M tokens)
+              </h4>
               <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
                 <FormField
                   control={form.control}
@@ -827,7 +847,7 @@ export function AddProviderModelDialog({
               </div>
             </div>
 
-            <div className='space-y-4 rounded-md border bg-muted/20 p-4'>
+            <div className='bg-muted/20 space-y-4 rounded-md border p-4'>
               <h4 className='text-sm font-medium'>Top Provider (optional)</h4>
               <div className='grid grid-cols-1 gap-4 sm:grid-cols-3'>
                 <FormField
@@ -870,11 +890,18 @@ export function AddProviderModelDialog({
                   render={({ field }) => (
                     <FormItem className='flex flex-row items-center justify-between rounded-lg border p-4'>
                       <div className='space-y-0.5'>
-                        <FormLabel className='text-base'>Is Moderated</FormLabel>
-                        <FormDescription>Whether provider enforces moderation</FormDescription>
+                        <FormLabel className='text-base'>
+                          Is Moderated
+                        </FormLabel>
+                        <FormDescription>
+                          Whether provider enforces moderation
+                        </FormDescription>
                       </div>
                       <FormControl>
-                        <Switch checked={field.value} onCheckedChange={field.onChange} />
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
                       </FormControl>
                     </FormItem>
                   )}
@@ -892,7 +919,10 @@ export function AddProviderModelDialog({
                     <FormDescription>Enable this model for use</FormDescription>
                   </div>
                   <FormControl>
-                    <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
                   </FormControl>
                 </FormItem>
               )}
@@ -908,8 +938,14 @@ export function AddProviderModelDialog({
                 Cancel
               </Button>
               <Button type='submit' disabled={isSubmitting}>
-                {isSubmitting && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
-                {isEdit ? 'Save Changes' : isOverride ? 'Create Override' : 'Create Model'}
+                {isSubmitting && (
+                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                )}
+                {isEdit
+                  ? 'Save Changes'
+                  : isOverride
+                    ? 'Create Override'
+                    : 'Create Model'}
               </Button>
             </DialogFooter>
           </form>
@@ -918,4 +954,3 @@ export function AddProviderModelDialog({
     </Dialog>
   );
 }
-
