@@ -97,7 +97,7 @@ export function LogDetailsDialog({
             <div>
               <h4 className='mb-2 text-sm font-medium'>Message</h4>
               <div className='bg-muted max-h-48 overflow-auto rounded-md p-3'>
-                <pre className='font-mono text-sm whitespace-pre break-all'>
+                <pre className='font-mono text-sm break-all whitespace-pre'>
                   {log.message}
                 </pre>
               </div>
@@ -116,7 +116,12 @@ export function LogDetailsDialog({
                         <Button
                           variant='outline'
                           size='sm'
-                          onClick={() => copyToClipboard(String(log[field as keyof LogEntry] || ''), field)}
+                          onClick={() =>
+                            copyToClipboard(
+                              String(log[field as keyof LogEntry] || ''),
+                              field
+                            )
+                          }
                           className='h-6 flex-shrink-0 px-2'
                         >
                           {copiedField === field ? (
@@ -175,7 +180,9 @@ export function LogDetailsDialog({
                 <Button
                   variant='outline'
                   size='sm'
-                  onClick={() => copyToClipboard(JSON.stringify(log, null, 2), 'json')}
+                  onClick={() =>
+                    copyToClipboard(JSON.stringify(log, null, 2), 'json')
+                  }
                   className='h-6 px-2'
                 >
                   {copiedField === 'json' ? (

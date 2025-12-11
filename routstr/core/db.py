@@ -149,8 +149,6 @@ def run_migrations() -> None:
     import pathlib
 
     try:
-        logger.info("Starting database migrations")
-
         # Get the path to the alembic.ini file
         project_root = pathlib.Path(__file__).resolve().parents[2]
         alembic_ini_path = project_root / "alembic.ini"
@@ -167,7 +165,6 @@ def run_migrations() -> None:
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
 
         # Run migrations to the latest revision
-        logger.info("Running migrations to latest revision")
         command.upgrade(alembic_cfg, "head")
 
         logger.info("Database migrations completed successfully")
