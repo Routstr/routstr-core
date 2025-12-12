@@ -18,6 +18,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Save, RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { toast } from 'sonner';
+import { Switch } from '@/components/ui/switch';
 
 interface SettingsData {
   name?: string;
@@ -28,8 +29,31 @@ interface SettingsData {
   http_url?: string;
   onion_url?: string;
   cashu_mints?: string[];
+  relays?: string[];
   [key: string]: unknown;
 }
+
+const HANDLED_KEYS = [
+  'name',
+  'description',
+  'http_url',
+  'onion_url',
+  'npub',
+  'nsec',
+  'cashu_mints',
+  'relays',
+  'admin_password',
+  'id',
+  'updated_at',
+];
+
+const IGNORED_KEYS = [
+  'upstream_base_url',
+  'upstream_api_key',
+  'upstream_provider_fee',
+  'exchange_fee',
+  'models_path',
+];
 
 interface PasswordData {
   current_password: string;
@@ -44,6 +68,7 @@ export function AdminSettings() {
   const [error, setError] = useState<string>('');
   const [showSecrets, setShowSecrets] = useState(false);
   const [newMint, setNewMint] = useState('');
+  const [newRelay, setNewRelay] = useState('');
   const [passwordData, setPasswordData] = useState<PasswordData>({
     current_password: '',
     new_password: '',
@@ -129,7 +154,7 @@ export function AdminSettings() {
     }
   };
 
-  const handleInputChange = (field: string, value: string | boolean) => {
+  const handleInputChange = (field: string, value: unknown) => {
     setSettings((prev) => ({
       ...prev,
       [field]: value,
@@ -153,6 +178,23 @@ export function AdminSettings() {
     }));
   };
 
+  const addRelay = () => {
+    if (newRelay.trim()) {
+      setSettings((prev) => ({
+        ...prev,
+        relays: [...(prev.relays || []), newRelay.trim()],
+      }));
+      setNewRelay('');
+    }
+  };
+
+  const removeRelay = (index: number) => {
+    setSettings((prev) => ({
+      ...prev,
+      relays: prev.relays?.filter((_, i) => i !== index) || [],
+    }));
+  };
+
   const renderSecretField = (
     field: string,
     label: string,
@@ -162,7 +204,7 @@ export function AdminSettings() {
     const displayValue = showSecrets ? value : value ? '••••••••' : '';
 
     return (
-      <div className='space-y-2'>
+      <div key={field} className='space-y-2'>
         <Label htmlFor={field}>{label}</Label>
         <div className='flex gap-2'>
           <Input
@@ -186,6 +228,89 @@ export function AdminSettings() {
             )}
           </Button>
         </div>
+      </div>
+    );
+  };
+
+  const renderDynamicField = (key: string, value: unknown) => {
+    const label = key
+      .split('_')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+
+    if (typeof value === 'boolean') {
+      return (
+        <div
+          key={key}
+          className='flex items-center justify-between space-y-0 py-4'
+        >
+          <Label htmlFor={key}>{label}</Label>
+          <Switch
+            id={key}
+            checked={value}
+            onCheckedChange={(checked) => handleInputChange(key, checked)}
+          />
+        </div>
+      );
+    }
+
+    if (typeof value === 'number') {
+      return (
+        <div key={key} className='space-y-2'>
+          <Label htmlFor={key}>{label}</Label>
+          <Input
+            id={key}
+            type='number'
+            value={value}
+            onChange={(e) => {
+              const val = e.target.value === '' ? 0 : Number(e.target.value);
+              handleInputChange(key, val);
+            }}
+          />
+        </div>
+      );
+    }
+
+    if (Array.isArray(value)) {
+      const strValue = value.join(', ');
+      return (
+        <div key={key} className='space-y-2'>
+          <Label htmlFor={key}>{label}</Label>
+          <Textarea
+            id={key}
+            value={strValue}
+            onChange={(e) => {
+              const arr = e.target.value
+                .split(',')
+                .map((s) => s.trim())
+                .filter((s) => s !== '');
+              handleInputChange(key, arr);
+            }}
+            placeholder='Comma separated values'
+            rows={2}
+          />
+        </div>
+      );
+    }
+
+    const isSecret =
+      key.includes('key') ||
+      key.includes('password') ||
+      key.includes('secret') ||
+      key.includes('nsec');
+
+    if (isSecret) {
+      return renderSecretField(key, label);
+    }
+
+    return (
+      <div key={key} className='space-y-2'>
+        <Label htmlFor={key}>{label}</Label>
+        <Input
+          id={key}
+          value={(value as string) || ''}
+          onChange={(e) => handleInputChange(key, e.target.value)}
+        />
       </div>
     );
   };
@@ -334,6 +459,73 @@ export function AdminSettings() {
                 </div>
               </div>
             )}
+          </CardContent>
+        </Card>
+
+        {/* Relays */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Nostr Relays</CardTitle>
+            <CardDescription>
+              Configure Nostr relays for communication
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='space-y-4'>
+            <div className='space-y-2'>
+              <Label htmlFor='newRelay'>Add Relay URL</Label>
+              <div className='flex gap-2'>
+                <Input
+                  id='newRelay'
+                  value={newRelay}
+                  onChange={(e) => setNewRelay(e.target.value)}
+                  placeholder='wss://relay.example.com'
+                />
+                <Button onClick={addRelay} disabled={!newRelay.trim()}>
+                  Add Relay
+                </Button>
+              </div>
+            </div>
+
+            {settings.relays && settings.relays.length > 0 && (
+              <div className='space-y-2'>
+                <Label>Configured Relays</Label>
+                <div className='space-y-2'>
+                  {settings.relays.map((relay, index) => (
+                    <div
+                      key={index}
+                      className='flex items-center gap-2 rounded border p-2'
+                    >
+                      <span className='flex-1 text-sm'>{relay}</span>
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        onClick={() => removeRelay(index)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Other Settings */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Advanced Settings</CardTitle>
+            <CardDescription>
+              Configure additional node settings
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='space-y-4'>
+            {Object.keys(settings)
+              .filter(
+                (key) =>
+                  !HANDLED_KEYS.includes(key) && !IGNORED_KEYS.includes(key)
+              )
+              .map((key) => renderDynamicField(key, settings[key]))}
           </CardContent>
         </Card>
 
