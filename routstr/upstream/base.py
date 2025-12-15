@@ -218,7 +218,6 @@ class BaseUpstreamProvider:
         try:
             data = json.loads(body)
             if isinstance(data, dict):
-                # Handle model transformation in various locations
                 if "model" in data:
                     original_model = model_obj.id
                     transformed_model = self.transform_model_name(original_model)
@@ -233,14 +232,10 @@ class BaseUpstreamProvider:
                         },
                     )
 
-                # Handle model in input field (alternative format)
                 if "input" in data and isinstance(data["input"], dict) and "model" in data["input"]:
                     original_model = model_obj.id
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
-
-                # Ensure proper Responses API structure
-                # Add any Responses-specific transformations here
 
                 return json.dumps(data).encode()
         except Exception as e:
@@ -725,7 +720,6 @@ class BaseUpstreamProvider:
             stored_chunks: list[bytes] = []
             usage_finalized: bool = False
             last_model_seen: str | None = None
-            reasoning_tokens: int = 0
 
             async def finalize_without_usage() -> bytes | None:
                 nonlocal usage_finalized
@@ -776,11 +770,6 @@ class BaseUpstreamProvider:
                                 if isinstance(obj, dict):
                                     if obj.get("model"):
                                         last_model_seen = str(obj.get("model"))
-
-                                    # Track reasoning tokens for Responses API
-                                    if usage := obj.get("usage", {}):
-                                        if isinstance(usage, dict) and "reasoning_tokens" in usage:
-                                            reasoning_tokens += usage.get("reasoning_tokens", 0)
                             except json.JSONDecodeError:
                                 pass
                     except Exception:
@@ -793,7 +782,6 @@ class BaseUpstreamProvider:
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
                         "chunks_count": len(stored_chunks),
-                        "reasoning_tokens": reasoning_tokens,
                     },
                 )
 
@@ -814,7 +802,6 @@ class BaseUpstreamProvider:
                                 if isinstance(data, dict) and isinstance(
                                     data.get("usage"), dict
                                 ):
-                                    # Include reasoning tokens in usage calculation
                                     async with create_session() as new_session:
                                         fresh_key = await new_session.get(
                                             key.__class__, key.hashed_key
@@ -837,7 +824,6 @@ class BaseUpstreamProvider:
                                                         + "...",
                                                         "cost_data": cost_data,
                                                         "model": last_model_seen,
-                                                        "reasoning_tokens": reasoning_tokens,
                                                         "balance_after_adjustment": fresh_key.balance,
                                                     },
                                                 )
@@ -884,7 +870,6 @@ class BaseUpstreamProvider:
                 await finalize_without_usage()
                 raise
 
-        # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
@@ -913,15 +898,6 @@ class BaseUpstreamProvider:
         Returns:
             Response with cost data added to JSON body
         """
-        logger.info(
-            "Processing non-streaming Responses API completion",
-            extra={
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "response_status": response.status_code,
-            },
-        )
-
         try:
             content = await response.aread()
             response_json = json.loads(content)
@@ -932,9 +908,6 @@ class BaseUpstreamProvider:
                     "key_hash": key.hashed_key[:8] + "...",
                     "model": response_json.get("model", "unknown"),
                     "has_usage": "usage" in response_json,
-                    "has_reasoning_tokens": "usage" in response_json
-                        and isinstance(response_json.get("usage"), dict)
-                        and "reasoning_tokens" in response_json["usage"],
                 },
             )
 
@@ -1297,16 +1270,6 @@ class BaseUpstreamProvider:
                     ),
                     stream=True,
                 )
-
-            logger.info(
-                "Received upstream Responses API response",
-                extra={
-                    "status_code": response.status_code,
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "content_type": response.headers.get("content-type", "unknown"),
-                },
-            )
 
             if response.status_code != 200:
                 try:
