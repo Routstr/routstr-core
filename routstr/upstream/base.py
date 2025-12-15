@@ -1,9 +1,10 @@
+"""Refactored BaseUpstreamProvider with improved code organization and reusability."""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-import traceback
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Mapping
 
@@ -33,7 +34,13 @@ from ..payment.models import (
     _update_model_sats_pricing,
 )
 from ..payment.price import sats_usd_price
-from ..wallet import recieve_token, send_token
+
+# Import our new modular components
+from .handlers.cashu_payment_handler import (
+    ChatCompletionCashuHandler,
+    ResponsesApiCashuHandler,
+)
+from .processing.http_client import HttpForwarder, StreamingResponseWrapper
 
 logger = get_logger(__name__)
 
@@ -63,31 +70,24 @@ class BaseUpstreamProvider:
     _models_by_id: dict[str, Model] = {}
 
     def __init__(self, base_url: str, api_key: str, provider_fee: float = 1.01):
-        """Initialize the upstream provider.
-
-        Args:
-            base_url: Base URL of the upstream API endpoint
-            api_key: API key for authenticating with the upstream service
-            provider_fee: Provider fee multiplier (default 1.01 for 1% fee)
-        """
+        """Initialize the upstream provider."""
         self.base_url = base_url
         self.api_key = api_key
         self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
 
+        # Initialize modular components
+        self.http_forwarder = HttpForwarder(base_url)
+        self.chat_cashu_handler = ChatCompletionCashuHandler(base_url)
+        self.responses_cashu_handler = ResponsesApiCashuHandler(base_url)
+        self.streaming_wrapper = StreamingResponseWrapper()
+
     @classmethod
     def from_db_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "BaseUpstreamProvider | None":
-        """Factory method to instantiate provider from database row.
-
-        Args:
-            provider_row: Database row containing provider configuration
-
-        Returns:
-            Instantiated provider or None if instantiation fails
-        """
+        """Factory method to instantiate provider from database row."""
         return cls(
             base_url=provider_row.base_url,
             api_key=provider_row.api_key,
@@ -96,11 +96,7 @@ class BaseUpstreamProvider:
 
     @classmethod
     def get_provider_metadata(cls) -> dict[str, object]:
-        """Get metadata about this provider type for API responses.
-
-        Returns:
-            Dict with provider type metadata including id, name, default_base_url, fixed_base_url, platform_url, can_create_account, can_topup, can_show_balance
-        """
+        """Get metadata about this provider type for API responses."""
         return {
             "id": cls.provider_type,
             "name": cls.provider_type.title(),
@@ -113,14 +109,7 @@ class BaseUpstreamProvider:
         }
 
     def prepare_headers(self, request_headers: dict) -> dict:
-        """Prepare headers for upstream request by removing proxy-specific headers and adding authentication.
-
-        Args:
-            request_headers: Original request headers from the client
-
-        Returns:
-            Headers dict ready for upstream forwarding with authentication added
-        """
+        """Prepare headers for upstream request by removing proxy-specific headers and adding authentication."""
         logger.debug(
             "Preparing upstream headers",
             extra={
@@ -155,7 +144,6 @@ class BaseUpstreamProvider:
             if headers.pop(header, None) is not None:
                 removed_headers.append(f"{header} (replaced with routstr-safe version)")
 
-        # Explicitly define the list of supported compression encodings
         headers["accept-encoding"] = "gzip, deflate, br, identity"
 
         logger.debug(
@@ -172,46 +160,17 @@ class BaseUpstreamProvider:
     def prepare_params(
         self, path: str, query_params: Mapping[str, str] | None
     ) -> Mapping[str, str]:
-        """Prepare query parameters for upstream request.
-
-        Base implementation passes through query params unchanged. Override in subclasses for provider-specific params.
-
-        Args:
-            path: Request path
-            query_params: Original query parameters from the client
-
-        Returns:
-            Query parameters dict ready for upstream forwarding
-        """
+        """Prepare query parameters for upstream request."""
         return query_params or {}
 
     def transform_model_name(self, model_id: str) -> str:
-        """Transform model ID for this provider's API format.
-
-        Base implementation returns model_id unchanged. Override in subclasses for provider-specific transformations.
-
-        Args:
-            model_id: Model identifier (may include provider prefix)
-
-        Returns:
-            Transformed model ID for this provider
-        """
+        """Transform model ID for this provider's API format."""
         return model_id
 
     def prepare_responses_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
-        """Transform request body for Responses API specific requirements.
-
-        Handles Responses API specific transformations while maintaining model name transforms.
-
-        Args:
-            body: Original request body bytes
-            model_obj: Model object containing the original model information
-
-        Returns:
-            Transformed request body bytes
-        """
+        """Transform request body for Responses API specific requirements."""
         if not body:
             return body
 
@@ -252,16 +211,7 @@ class BaseUpstreamProvider:
     def prepare_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
-        """Transform request body for provider-specific requirements.
-
-        Automatically transforms model names in the request body.
-
-        Args:
-            body: Original request body bytes
-
-        Returns:
-            Transformed request body bytes
-        """
+        """Transform request body for provider-specific requirements."""
         if not body:
             return body
 
@@ -294,14 +244,7 @@ class BaseUpstreamProvider:
     def _extract_upstream_error_message(
         self, body_bytes: bytes
     ) -> tuple[str, str | None]:
-        """Extract error message and code from upstream error response body.
-
-        Args:
-            body_bytes: Raw response body bytes from upstream
-
-        Returns:
-            Tuple of (error_message, error_code), where error_code may be None
-        """
+        """Extract error message and code from upstream error response body."""
         message: str = "Upstream request failed"
         upstream_code: str | None = None
         if not body_bytes:
@@ -322,9 +265,9 @@ class BaseUpstreamProvider:
                 elif "message" in data and isinstance(
                     data["message"], (str, int, float)
                 ):
-                    message = str(data["message"])  # type: ignore[arg-type]
+                    message = str(data["message"])
                 elif "detail" in data and isinstance(data["detail"], (str, int, float)):
-                    message = str(data["detail"])  # type: ignore[arg-type]
+                    message = str(data["detail"])
         except Exception:
             preview = body_bytes.decode("utf-8", errors="ignore").strip()
             if preview:
@@ -334,16 +277,7 @@ class BaseUpstreamProvider:
     async def map_upstream_error_response(
         self, request: Request, path: str, upstream_response: httpx.Response
     ) -> Response:
-        """Map upstream error responses to appropriate proxy error responses.
-
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            upstream_response: Response from upstream service
-
-        Returns:
-            Mapped error response with appropriate status code and error type
-        """
+        """Map upstream error responses to appropriate proxy error responses."""
         status_code = upstream_response.status_code
         headers = dict(upstream_response.headers)
         content_type = headers.get("content-type", "")
@@ -405,16 +339,7 @@ class BaseUpstreamProvider:
     async def handle_streaming_chat_completion(
         self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
     ) -> StreamingResponse:
-        """Handle streaming chat completion responses with token usage tracking and cost adjustment.
-
-        Args:
-            response: Streaming response from upstream
-            key: API key for the authenticated user
-            max_cost_for_model: Maximum cost deducted upfront for the model
-
-        Returns:
-            StreamingResponse with cost data injected at the end
-        """
+        """Handle streaming chat completion responses with token usage tracking and cost adjustment."""
         logger.info(
             "Processing streaming chat completion",
             extra={
@@ -578,7 +503,6 @@ class BaseUpstreamProvider:
                 await finalize_without_usage()
                 raise
 
-        # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
@@ -596,17 +520,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
     ) -> Response:
-        """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
-
-        Args:
-            response: Response from upstream
-            key: API key for the authenticated user
-            session: Database session for updating balance
-            deducted_max_cost: Maximum cost deducted upfront
-
-        Returns:
-            Response with cost data added to JSON body
-        """
+        """Handle non-streaming chat completion responses with token usage tracking and cost adjustment."""
         logger.info(
             "Processing non-streaming chat completion",
             extra={
@@ -695,16 +609,7 @@ class BaseUpstreamProvider:
     async def handle_streaming_responses_completion(
         self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
     ) -> StreamingResponse:
-        """Handle streaming Responses API responses with token usage tracking and cost adjustment.
-
-        Args:
-            response: Streaming response from upstream
-            key: API key for the authenticated user
-            max_cost_for_model: Maximum cost deducted upfront for the model
-
-        Returns:
-            StreamingResponse with cost data injected at the end
-        """
+        """Handle streaming Responses API responses with token usage tracking and cost adjustment."""
         logger.info(
             "Processing streaming Responses API completion",
             extra={
@@ -746,7 +651,7 @@ class BaseUpstreamProvider:
                                 "balance_after_adjustment": fresh_key.balance,
                             },
                         )
-                        return f"data: {json.dumps({'cost': cost_data})}\\n\\n".encode()
+                        return f"data: {json.dumps({'cost': cost_data})}\n\n".encode()
                     except Exception as cost_error:
                         logger.error(
                             "Error finalizing Responses API payment without usage",
@@ -827,7 +732,7 @@ class BaseUpstreamProvider:
                                                         "balance_after_adjustment": fresh_key.balance,
                                                     },
                                                 )
-                                                yield f"data: {json.dumps({'cost': cost_data})}\\n\\n".encode()
+                                                yield f"data: {json.dumps({'cost': cost_data})}\n\n".encode()
                                             except Exception as cost_error:
                                                 logger.error(
                                                     "Error adjusting payment for Responses API streaming tokens",
@@ -887,17 +792,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
     ) -> Response:
-        """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
-
-        Args:
-            response: Response from upstream
-            key: API key for the authenticated user
-            session: Database session for updating balance
-            deducted_max_cost: Maximum cost deducted upfront
-
-        Returns:
-            Response with cost data added to JSON body
-        """
+        """Handle non-streaming Responses API responses with token usage tracking and cost adjustment."""
         try:
             content = await response.aread()
             response_json = json.loads(content)
@@ -985,76 +880,16 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         model_obj: Model,
     ) -> Response | StreamingResponse:
-        """Forward authenticated request to upstream service with cost tracking.
-
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            headers: Prepared headers for upstream
-            request_body: Request body bytes, if any
-            key: API key for authenticated user
-            max_cost_for_model: Maximum cost deducted upfront
-            session: Database session for balance updates
-
-        Returns:
-            Response or StreamingResponse from upstream with cost tracking
-        """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
-
-        transformed_body = self.prepare_request_body(request_body, model_obj)
-
-        logger.info(
-            "Forwarding request to upstream",
-            extra={
-                "url": url,
-                "method": request.method,
-                "path": path,
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "has_request_body": request_body is not None,
-            },
-        )
-
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
-
+        """Forward authenticated request to upstream service with cost tracking."""
         try:
-            if transformed_body is not None:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
-            else:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=request.stream(),
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
-
-            logger.info(
-                "Received upstream response",
-                extra={
-                    "status_code": response.status_code,
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "content_type": response.headers.get("content-type", "unknown"),
-                },
+            response = await self.http_forwarder.forward_request(
+                request=request,
+                path=path,
+                headers=headers,
+                request_body=request_body,
+                query_params=self.prepare_params(path, request.query_params),
+                transform_body_func=self.prepare_request_body,
+                model_obj=model_obj,
             )
 
             if response.status_code != 200:
@@ -1064,7 +899,6 @@ class BaseUpstreamProvider:
                     )
                 finally:
                     await response.aclose()
-                    await client.aclose()
                 return mapped_error
 
             if path.endswith("chat/completions"):
@@ -1073,14 +907,6 @@ class BaseUpstreamProvider:
                     try:
                         request_data = json.loads(request_body)
                         client_wants_streaming = request_data.get("stream", False)
-                        logger.debug(
-                            "Chat completion request analysis",
-                            extra={
-                                "client_wants_streaming": client_wants_streaming,
-                                "model": request_data.get("model", "unknown"),
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
-                        )
                     except json.JSONDecodeError:
                         logger.warning(
                             "Failed to parse request body JSON for streaming detection"
@@ -1090,27 +916,10 @@ class BaseUpstreamProvider:
                 upstream_is_streaming = "text/event-stream" in content_type
                 is_streaming = client_wants_streaming and upstream_is_streaming
 
-                logger.debug(
-                    "Response type analysis",
-                    extra={
-                        "is_streaming": is_streaming,
-                        "client_wants_streaming": client_wants_streaming,
-                        "upstream_is_streaming": upstream_is_streaming,
-                        "content_type": content_type,
-                        "key_hash": key.hashed_key[:8] + "...",
-                    },
-                )
-
                 if is_streaming and response.status_code == 200:
-                    result = await self.handle_streaming_chat_completion(
+                    return await self.handle_streaming_chat_completion(
                         response, key, max_cost_for_model
                     )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    background_tasks.add_task(client.aclose)
-                    result.background = background_tasks
-                    return result
-
                 elif response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_chat_completion(
@@ -1118,20 +927,9 @@ class BaseUpstreamProvider:
                         )
                     finally:
                         await response.aclose()
-                        await client.aclose()
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
-
-            logger.debug(
-                "Streaming non-chat response",
-                extra={
-                    "path": path,
-                    "status_code": response.status_code,
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
 
             return StreamingResponse(
                 response.aiter_bytes(),
@@ -1141,54 +939,17 @@ class BaseUpstreamProvider:
             )
 
         except httpx.RequestError as exc:
-            await client.aclose()
-            error_type = type(exc).__name__
-            error_details = str(exc)
-
-            logger.error(
-                "HTTP request error to upstream",
-                extra={
-                    "error_type": error_type,
-                    "error_details": error_details,
-                    "method": request.method,
-                    "url": url,
-                    "path": path,
-                    "query_params": dict(request.query_params),
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-
-            if isinstance(exc, httpx.ConnectError):
-                error_message = "Unable to connect to upstream service"
-            elif isinstance(exc, httpx.TimeoutException):
-                error_message = "Upstream service request timed out"
-            elif isinstance(exc, httpx.NetworkError):
-                error_message = "Network error while connecting to upstream service"
-            else:
-                error_message = f"Error connecting to upstream service: {error_type}"
-
             return create_error_response(
-                "upstream_error", error_message, 502, request=request
+                "upstream_error", str(exc), 502, request=request
             )
-
         except Exception as exc:
-            await client.aclose()
-            tb = traceback.format_exc()
-
             logger.error(
                 "Unexpected error in upstream forwarding",
                 extra={
                     "error": str(exc),
                     "error_type": type(exc).__name__,
-                    "method": request.method,
-                    "url": url,
-                    "path": path,
-                    "query_params": dict(request.query_params),
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "traceback": tb,
                 },
             )
-
             return create_error_response(
                 "internal_error",
                 "An unexpected server error occurred",
@@ -1207,69 +968,17 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         model_obj: Model,
     ) -> Response | StreamingResponse:
-        """Forward authenticated Responses API request to upstream service with cost tracking.
-
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            headers: Prepared headers for upstream
-            request_body: Request body bytes, if any
-            key: API key for authenticated user
-            max_cost_for_model: Maximum cost deducted upfront
-            session: Database session for balance updates
-            model_obj: Model object for the request
-
-        Returns:
-            Response or StreamingResponse from upstream with cost tracking
-        """
-        # Remove v1/ prefix if present for Responses API
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
-
-        transformed_body = self.prepare_responses_request_body(request_body, model_obj)
-
-        logger.info(
-            "Forwarding Responses API request to upstream",
-            extra={
-                "url": url,
-                "method": request.method,
-                "path": path,
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "has_request_body": request_body is not None,
-            },
-        )
-
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
-
+        """Forward authenticated Responses API request to upstream service with cost tracking."""
         try:
-            if transformed_body is not None:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
-            else:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=request.stream(),
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
+            response = await self.http_forwarder.forward_request(
+                request=request,
+                path=path,
+                headers=headers,
+                request_body=request_body,
+                query_params=self.prepare_params(path, request.query_params),
+                transform_body_func=self.prepare_responses_request_body,
+                model_obj=model_obj,
+            )
 
             if response.status_code != 200:
                 try:
@@ -1278,31 +987,16 @@ class BaseUpstreamProvider:
                     )
                 finally:
                     await response.aclose()
-                    await client.aclose()
                 return mapped_error
 
             if path.startswith("responses"):
                 content_type = response.headers.get("content-type", "")
                 is_streaming = "text/event-stream" in content_type
 
-                logger.debug(
-                    "Responses API response type analysis",
-                    extra={
-                        "is_streaming": is_streaming,
-                        "content_type": content_type,
-                        "key_hash": key.hashed_key[:8] + "...",
-                    },
-                )
-
                 if is_streaming and response.status_code == 200:
-                    result = await self.handle_streaming_responses_completion(
+                    return await self.handle_streaming_responses_completion(
                         response, key, max_cost_for_model
                     )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    background_tasks.add_task(client.aclose)
-                    result.background = background_tasks
-                    return result
 
                 if response.status_code == 200:
                     try:
@@ -1311,20 +1005,9 @@ class BaseUpstreamProvider:
                         )
                     finally:
                         await response.aclose()
-                        await client.aclose()
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
-
-            logger.debug(
-                "Streaming non-chat response",
-                extra={
-                    "path": path,
-                    "status_code": response.status_code,
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
 
             return StreamingResponse(
                 response.aiter_bytes(),
@@ -1334,54 +1017,17 @@ class BaseUpstreamProvider:
             )
 
         except httpx.RequestError as exc:
-            await client.aclose()
-            error_type = type(exc).__name__
-            error_details = str(exc)
-
-            logger.error(
-                "HTTP request error to upstream Responses API",
-                extra={
-                    "error_type": error_type,
-                    "error_details": error_details,
-                    "method": request.method,
-                    "url": url,
-                    "path": path,
-                    "query_params": dict(request.query_params),
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-
-            if isinstance(exc, httpx.ConnectError):
-                error_message = "Unable to connect to upstream service"
-            elif isinstance(exc, httpx.TimeoutException):
-                error_message = "Upstream service request timed out"
-            elif isinstance(exc, httpx.NetworkError):
-                error_message = "Network error while connecting to upstream service"
-            else:
-                error_message = f"Error connecting to upstream service: {error_type}"
-
             return create_error_response(
-                "upstream_error", error_message, 502, request=request
+                "upstream_error", str(exc), 502, request=request
             )
-
         except Exception as exc:
-            await client.aclose()
-            tb = traceback.format_exc()
-
             logger.error(
                 "Unexpected error in upstream Responses API forwarding",
                 extra={
                     "error": str(exc),
                     "error_type": type(exc).__name__,
-                    "method": request.method,
-                    "url": url,
-                    "path": path,
-                    "query_params": dict(request.query_params),
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "traceback": tb,
                 },
             )
-
             return create_error_response(
                 "internal_error",
                 "An unexpected server error occurred",
@@ -1395,92 +1041,51 @@ class BaseUpstreamProvider:
         path: str,
         headers: dict,
     ) -> Response | StreamingResponse:
-        """Forward unauthenticated GET request to upstream service.
+        """Forward unauthenticated GET request to upstream service."""
+        try:
+            response = await self.http_forwarder.forward_request(
+                request=request,
+                path=path,
+                headers=headers,
+                request_body=None,
+                query_params=self.prepare_params(path, request.query_params),
+            )
 
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            headers: Prepared headers for upstream
+            if response.status_code != 200:
+                try:
+                    mapped = await self.map_upstream_error_response(
+                        request, path, response
+                    )
+                finally:
+                    await response.aclose()
+                return mapped
 
-        Returns:
-            StreamingResponse from upstream
-        """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
+            background_tasks = BackgroundTasks()
+            background_tasks.add_task(response.aclose)
 
-        url = f"{self.base_url}/{path}"
+            return StreamingResponse(
+                response.aiter_bytes(),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                background=background_tasks,
+            )
 
-        logger.info(
-            "Forwarding GET request to upstream",
-            extra={"url": url, "method": request.method, "path": path},
-        )
-
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=request.stream(),
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                )
-
-                logger.info(
-                    "GET request forwarded successfully",
-                    extra={"path": path, "status_code": response.status_code},
-                )
-                if response.status_code != 200:
-                    try:
-                        mapped = await self.map_upstream_error_response(
-                            request, path, response
-                        )
-                    finally:
-                        await response.aclose()
-                    return mapped
-
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Error forwarding GET request",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
-                )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
-                )
+        except Exception as exc:
+            logger.error(
+                "Error forwarding GET request",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return create_error_response(
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
+            )
 
     async def get_x_cashu_cost(
         self, response_data: dict, max_cost_for_model: int
     ) -> MaxCostData | CostData | None:
-        """Calculate cost for X-Cashu payment based on response data.
-
-        Args:
-            response_data: Response data containing model and usage information
-            max_cost_for_model: Maximum cost for the model
-
-        Returns:
-            Cost data object (MaxCostData or CostData) or None if calculation fails
-        """
+        """Calculate cost for X-Cashu payment based on response data."""
         model = response_data.get("model", None)
         logger.debug(
             "Calculating cost for response",
@@ -1527,573 +1132,27 @@ class BaseUpstreamProvider:
                     )
         return None
 
-    async def send_refund(self, amount: int, unit: str, mint: str | None = None) -> str:
-        """Create and send a refund token to the user.
-
-        Args:
-            amount: Refund amount
-            unit: Unit of the refund (sat or msat)
-            mint: Optional mint URL for the refund token
-
-        Returns:
-            Refund token string
-        """
-        logger.debug(
-            "Creating refund token",
-            extra={"amount": amount, "unit": unit, "mint": mint},
-        )
-
-        max_retries = 3
-        last_exception = None
-
-        for attempt in range(max_retries):
-            try:
-                refund_token = await send_token(amount, unit=unit, mint_url=mint)
-
-                logger.info(
-                    "Refund token created successfully",
-                    extra={
-                        "amount": amount,
-                        "unit": unit,
-                        "mint": mint,
-                        "attempt": attempt + 1,
-                        "token_preview": refund_token[:20] + "..."
-                        if len(refund_token) > 20
-                        else refund_token,
-                    },
-                )
-
-                return refund_token
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "Refund token creation failed, retrying",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "amount": amount,
-                            "unit": unit,
-                            "mint": mint,
-                        },
-                    )
-                else:
-                    logger.error(
-                        "Failed to create refund token after all retries",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "amount": amount,
-                            "unit": unit,
-                            "mint": mint,
-                        },
-                    )
-
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "message": f"failed to create refund after {max_retries} attempts: {str(last_exception)}",
-                    "type": "invalid_request_error",
-                    "code": "send_token_failed",
-                }
-            },
-        )
-
-    async def handle_x_cashu_streaming_response(
-        self,
-        content_str: str,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None = None,
-    ) -> StreamingResponse:
-        """Handle streaming response for X-Cashu payment, calculating refund if needed.
-
-        Args:
-            content_str: Response content as string
-            response: Original httpx response
-            amount: Payment amount received
-            unit: Payment unit (sat or msat)
-            max_cost_for_model: Maximum cost for the model
-
-        Returns:
-            StreamingResponse with refund token in header if applicable
-        """
-        logger.debug(
-            "Processing streaming response",
-            extra={
-                "amount": amount,
-                "unit": unit,
-                "content_lines": len(content_str.strip().split("\n")),
-            },
-        )
-
-        response_headers = dict(response.headers)
-        if "transfer-encoding" in response_headers:
-            del response_headers["transfer-encoding"]
-        if "content-encoding" in response_headers:
-            del response_headers["content-encoding"]
-
-        usage_data = None
-        model = None
-
-        lines = content_str.strip().split("\n")
-        for line in lines:
-            if line.startswith("data: "):
-                try:
-                    data_json = json.loads(line[6:])
-                    if "usage" in data_json:
-                        usage_data = data_json["usage"]
-                        model = data_json.get("model")
-                    elif "model" in data_json and not model:
-                        model = data_json["model"]
-                except json.JSONDecodeError:
-                    continue
-
-        if usage_data and model:
-            logger.debug(
-                "Found usage data in streaming response",
-                extra={
-                    "model": model,
-                    "usage_data": usage_data,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-            response_data = {"usage": usage_data, "model": model}
-            try:
-                cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model
-                )
-                if cost_data:
-                    if unit == "msat":
-                        refund_amount = amount - cost_data.total_msats
-                    elif unit == "sat":
-                        refund_amount = amount - (cost_data.total_msats + 999) // 1000
-                    else:
-                        raise ValueError(f"Invalid unit: {unit}")
-
-                    if refund_amount > 0:
-                        logger.info(
-                            "Processing refund for streaming response",
-                            extra={
-                                "original_amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "model": model,
-                            },
-                        )
-
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
-                        response_headers["X-Cashu"] = refund_token
-
-                        logger.info(
-                            "Refund processed for streaming response",
-                            extra={
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "refund_token_preview": refund_token[:20] + "..."
-                                if len(refund_token) > 20
-                                else refund_token,
-                            },
-                        )
-                    else:
-                        logger.debug(
-                            "No refund needed for streaming response",
-                            extra={
-                                "amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "model": model,
-                            },
-                        )
-            except Exception as e:
-                logger.error(
-                    "Error calculating cost for streaming response",
-                    extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "model": model,
-                        "amount": amount,
-                        "unit": unit,
-                    },
-                )
-
-        async def generate() -> AsyncGenerator[bytes, None]:
-            for line in lines:
-                yield (line + "\n").encode("utf-8")
-
-        return StreamingResponse(
-            generate(),
-            status_code=response.status_code,
-            headers=response_headers,
-            media_type="text/plain",
-        )
-
-    async def handle_x_cashu_non_streaming_response(
-        self,
-        content_str: str,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None = None,
-    ) -> Response:
-        """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
-
-        Args:
-            content_str: Response content as string
-            response: Original httpx response
-            amount: Payment amount received
-            unit: Payment unit (sat or msat)
-            max_cost_for_model: Maximum cost for the model
-
-        Returns:
-            Response with refund token in header if applicable
-        """
-        logger.debug(
-            "Processing non-streaming response",
-            extra={"amount": amount, "unit": unit, "content_length": len(content_str)},
-        )
-
-        try:
-            response_json = json.loads(content_str)
-            cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
-
-            if not cost_data:
-                logger.error(
-                    "Failed to calculate cost for response",
-                    extra={
-                        "amount": amount,
-                        "unit": unit,
-                        "response_model": response_json.get("model", "unknown"),
-                    },
-                )
-                return Response(
-                    content=json.dumps(
-                        {
-                            "error": {
-                                "message": "Error forwarding request to upstream",
-                                "type": "upstream_error",
-                                "code": response.status_code,
-                            }
-                        }
-                    ),
-                    status_code=response.status_code,
-                    media_type="application/json",
-                )
-
-            response_headers = dict(response.headers)
-            if "transfer-encoding" in response_headers:
-                del response_headers["transfer-encoding"]
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
-            if unit == "msat":
-                refund_amount = amount - cost_data.total_msats
-            elif unit == "sat":
-                refund_amount = amount - (cost_data.total_msats + 999) // 1000
-            else:
-                raise ValueError(f"Invalid unit: {unit}")
-
-            logger.info(
-                "Processing non-streaming response cost calculation",
-                extra={
-                    "original_amount": amount,
-                    "cost_msats": cost_data.total_msats,
-                    "refund_amount": refund_amount,
-                    "unit": unit,
-                    "model": response_json.get("model", "unknown"),
-                },
-            )
-
-            if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit, mint)
-                response_headers["X-Cashu"] = refund_token
-
-                logger.info(
-                    "Refund processed for non-streaming response",
-                    extra={
-                        "refund_amount": refund_amount,
-                        "unit": unit,
-                        "refund_token_preview": refund_token[:20] + "..."
-                        if len(refund_token) > 20
-                        else refund_token,
-                    },
-                )
-
-            return Response(
-                content=content_str,
-                status_code=response.status_code,
-                headers=response_headers,
-                media_type="application/json",
-            )
-        except json.JSONDecodeError as e:
-            logger.error(
-                "Failed to parse JSON from upstream response",
-                extra={
-                    "error": str(e),
-                    "content_preview": content_str[:200] + "..."
-                    if len(content_str) > 200
-                    else content_str,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-            emergency_refund = amount
-            refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
-            response.headers["X-Cashu"] = refund_token
-
-            logger.warning(
-                "Emergency refund issued due to JSON parse error",
-                extra={
-                    "original_amount": amount,
-                    "refund_amount": emergency_refund,
-                    "deduction": 60,
-                },
-            )
-
-            return Response(
-                content=content_str,
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                media_type="application/json",
-            )
-
-    async def handle_x_cashu_chat_completion(
-        self,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None = None,
-    ) -> StreamingResponse | Response:
-        """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
-
-        Args:
-            response: Response from upstream
-            amount: Payment amount received
-            unit: Payment unit (sat or msat)
-            max_cost_for_model: Maximum cost for the model
-
-        Returns:
-            StreamingResponse or Response depending on response type
-        """
-        logger.debug(
-            "Handling chat completion response",
-            extra={"amount": amount, "unit": unit, "status_code": response.status_code},
-        )
-
-        try:
-            content = await response.aread()
-            content_str = (
-                content.decode("utf-8") if isinstance(content, bytes) else content
-            )
-            is_streaming = content_str.startswith("data:") or "data:" in content_str
-
-            logger.debug(
-                "Chat completion response analysis",
-                extra={
-                    "is_streaming": is_streaming,
-                    "content_length": len(content_str),
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-            if is_streaming:
-                return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
-                )
-            else:
-                return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
-                )
-
-        except Exception as e:
-            logger.error(
-                "Error processing chat completion response",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-            return StreamingResponse(
-                response.aiter_bytes(),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-            )
-
-    async def forward_x_cashu_request(
+    # X-Cashu handlers now use modular components
+    async def handle_x_cashu(
         self,
         request: Request,
+        x_cashu_token: str,
         path: str,
-        headers: dict,
-        amount: int,
-        unit: str,
         max_cost_for_model: int,
         model_obj: Model,
-        mint: str | None = None,
     ) -> Response | StreamingResponse:
-        """Forward request paid with X-Cashu token to upstream service.
-
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            headers: Prepared headers for upstream
-            amount: Payment amount from X-Cashu token
-            unit: Payment unit (sat or msat)
-            max_cost_for_model: Maximum cost for the model
-            model_obj: Model object for the request
-
-        Returns:
-            Response or StreamingResponse with refund if applicable
-        """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
-
-        request_body = await request.body()
-        transformed_body = self.prepare_request_body(request_body, model_obj)
-
-        logger.debug(
-            "Forwarding request to upstream",
-            extra={
-                "url": url,
-                "method": request.method,
-                "path": path,
-                "amount": amount,
-                "unit": unit,
-            },
+        """Handle request with X-Cashu token payment for chat completions."""
+        return await self.chat_cashu_handler.handle_request(
+            request=request,
+            x_cashu_token=x_cashu_token,
+            path=path,
+            headers=self.prepare_headers(dict(request.headers)),
+            max_cost_for_model=max_cost_for_model,
+            model_obj=model_obj,
+            prepare_request_body_func=self.prepare_request_body,
+            get_x_cashu_cost_func=self.get_x_cashu_cost,
+            query_params_func=self.prepare_params,
         )
-
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body if transformed_body else request_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
-
-                logger.debug(
-                    "Received upstream response",
-                    extra={
-                        "status_code": response.status_code,
-                        "path": path,
-                        "response_headers": dict(response.headers),
-                    },
-                )
-
-                if response.status_code != 200:
-                    logger.warning(
-                        "Upstream request failed, processing refund",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "amount": amount,
-                            "unit": unit,
-                        },
-                    )
-
-                    refund_token = await self.send_refund(amount - 60, unit, mint)
-
-                    logger.info(
-                        "Refund processed for failed upstream request",
-                        extra={
-                            "status_code": response.status_code,
-                            "refund_amount": amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-
-                    error_response = Response(
-                        content=json.dumps(
-                            {
-                                "error": {
-                                    "message": "Error forwarding request to upstream",
-                                    "type": "upstream_error",
-                                    "code": response.status_code,
-                                    "refund_token": refund_token,
-                                }
-                            }
-                        ),
-                        status_code=response.status_code,
-                        media_type="application/json",
-                    )
-                    error_response.headers["X-Cashu"] = refund_token
-                    return error_response
-
-                if path.endswith("chat/completions"):
-                    logger.debug(
-                        "Processing chat completion response",
-                        extra={"path": path, "amount": amount, "unit": unit},
-                    )
-
-                    result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model, mint
-                    )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    result.background = background_tasks
-                    return result
-
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(response.aclose)
-                background_tasks.add_task(client.aclose)
-
-                logger.debug(
-                    "Streaming non-chat response",
-                    extra={"path": path, "status_code": response.status_code},
-                )
-
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    background=background_tasks,
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Unexpected error in upstream forwarding",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
-                )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
-                )
 
     async def handle_x_cashu_responses(
         self,
@@ -2103,684 +1162,21 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
     ) -> Response | StreamingResponse:
-        """Handle X-Cashu payment for Responses API requests.
-
-        Args:
-            request: Original FastAPI request
-            x_cashu_token: X-Cashu token from request header
-            path: Request path
-            max_cost_for_model: Maximum cost for the model
-            model_obj: Model object for the request
-
-        Returns:
-            Response or StreamingResponse from upstream with refund if applicable
-        """
-        logger.info(
-            "Processing X-Cashu payment for Responses API",
-            extra={
-                "path": path,
-                "method": request.method,
-                "token_preview": x_cashu_token[:20] + "..."
-                if len(x_cashu_token) > 20
-                else x_cashu_token,
-            },
+        """Handle request with X-Cashu token payment for Responses API."""
+        return await self.responses_cashu_handler.handle_request(
+            request=request,
+            x_cashu_token=x_cashu_token,
+            path=path,
+            headers=self.prepare_headers(dict(request.headers)),
+            max_cost_for_model=max_cost_for_model,
+            model_obj=model_obj,
+            prepare_responses_request_body_func=self.prepare_responses_request_body,
+            get_x_cashu_cost_func=self.get_x_cashu_cost,
+            query_params_func=self.prepare_params,
         )
-
-        try:
-            headers = dict(request.headers)
-            amount, unit, mint = await recieve_token(x_cashu_token)
-            headers = self.prepare_headers(dict(request.headers))
-
-            logger.info(
-                "X-Cashu token redeemed for Responses API",
-                extra={"amount": amount, "unit": unit, "path": path, "mint": mint},
-            )
-
-            return await self.forward_x_cashu_responses_request(
-                request,
-                path,
-                headers,
-                amount,
-                unit,
-                max_cost_for_model,
-                model_obj,
-                mint,
-            )
-        except Exception as e:
-            error_message = str(e)
-            logger.error(
-                "X-Cashu payment for Responses API failed",
-                extra={
-                    "error": error_message,
-                    "error_type": type(e).__name__,
-                    "path": path,
-                    "method": request.method,
-                },
-            )
-
-            # Use same error handling as regular X-Cashu
-            if "already spent" in error_message.lower():
-                return create_error_response(
-                    "token_already_spent",
-                    "The provided CASHU token has already been spent",
-                    400,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
-            if "invalid token" in error_message.lower():
-                return create_error_response(
-                    "invalid_token",
-                    "The provided CASHU token is invalid",
-                    400,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
-            if "mint error" in error_message.lower():
-                return create_error_response(
-                    "mint_error",
-                    f"CASHU mint error: {error_message}",
-                    422,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
-            return create_error_response(
-                "cashu_error",
-                f"CASHU token processing failed: {error_message}",
-                400,
-                request=request,
-                token=x_cashu_token,
-            )
-
-    async def forward_x_cashu_responses_request(
-        self,
-        request: Request,
-        path: str,
-        headers: dict,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        model_obj: Model,
-        mint: str | None = None,
-    ) -> Response | StreamingResponse:
-        """Forward Responses API request paid with X-Cashu token to upstream service.
-
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            headers: Prepared headers for upstream
-            amount: Payment amount from X-Cashu token
-            unit: Payment unit (sat or msat)
-            max_cost_for_model: Maximum cost for the model
-            model_obj: Model object for the request
-            mint: Mint URL for refund tokens
-
-        Returns:
-            Response or StreamingResponse with refund if applicable
-        """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
-
-        request_body = await request.body()
-        transformed_body = self.prepare_responses_request_body(request_body, model_obj)
-
-        logger.debug(
-            "Forwarding Responses API request to upstream with X-Cashu payment",
-            extra={
-                "url": url,
-                "method": request.method,
-                "path": path,
-                "amount": amount,
-                "unit": unit,
-            },
-        )
-
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body if transformed_body else request_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
-
-                logger.debug(
-                    "Received upstream Responses API response",
-                    extra={
-                        "status_code": response.status_code,
-                        "path": path,
-                        "response_headers": dict(response.headers),
-                    },
-                )
-
-                if response.status_code != 200:
-                    logger.warning(
-                        "Upstream Responses API request failed, processing refund",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "amount": amount,
-                            "unit": unit,
-                        },
-                    )
-
-                    refund_token = await self.send_refund(amount - 60, unit, mint)
-
-                    logger.info(
-                        "Refund processed for failed upstream Responses API request",
-                        extra={
-                            "status_code": response.status_code,
-                            "refund_amount": amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-
-                    error_response = Response(
-                        content=json.dumps(
-                            {
-                                "error": {
-                                    "message": "Error forwarding Responses API request to upstream",
-                                    "type": "upstream_error",
-                                    "code": response.status_code,
-                                    "refund_token": refund_token,
-                                }
-                            }
-                        ),
-                        status_code=response.status_code,
-                        media_type="application/json",
-                    )
-                    error_response.headers["X-Cashu"] = refund_token
-                    return error_response
-
-                if path.startswith("responses"):
-                    logger.debug(
-                        "Processing Responses API response",
-                        extra={"path": path, "amount": amount, "unit": unit},
-                    )
-
-                    result = await self.handle_x_cashu_responses_completion(
-                        response, amount, unit, max_cost_for_model, mint
-                    )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    result.background = background_tasks
-                    return result
-
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(response.aclose)
-                background_tasks.add_task(client.aclose)
-
-                logger.debug(
-                    "Streaming non-responses response",
-                    extra={"path": path, "status_code": response.status_code},
-                )
-
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    background=background_tasks,
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Unexpected error in upstream Responses API forwarding",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
-                )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
-                )
-
-    async def handle_x_cashu_responses_completion(
-        self,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None = None,
-    ) -> StreamingResponse | Response:
-        """Handle Responses API completion response for X-Cashu payment.
-
-        Args:
-            response: Response from upstream
-            amount: Payment amount received
-            unit: Payment unit (sat or msat)
-            max_cost_for_model: Maximum cost for the model
-            mint: Mint URL for refund tokens
-
-        Returns:
-            StreamingResponse or Response depending on response type
-        """
-        logger.debug(
-            "Handling Responses API completion response",
-            extra={"amount": amount, "unit": unit, "status_code": response.status_code},
-        )
-
-        try:
-            content = await response.aread()
-            content_str = (
-                content.decode("utf-8") if isinstance(content, bytes) else content
-            )
-            is_streaming = content_str.startswith("data:") or "data:" in content_str
-
-            logger.debug(
-                "Responses API completion response analysis",
-                extra={
-                    "is_streaming": is_streaming,
-                    "content_length": len(content_str),
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-            if is_streaming:
-                return await self.handle_x_cashu_streaming_responses_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
-                )
-            else:
-                return await self.handle_x_cashu_non_streaming_responses_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
-                )
-
-        except Exception as e:
-            logger.error(
-                "Error processing Responses API completion response",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-            return StreamingResponse(
-                response.aiter_bytes(),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-            )
-
-    async def handle_x_cashu_streaming_responses_response(
-        self,
-        content_str: str,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None = None,
-    ) -> StreamingResponse:
-        """Handle streaming Responses API response for X-Cashu payment.
-
-        Similar to regular streaming but handles Responses API specific tokens like reasoning_tokens.
-        """
-        logger.debug(
-            "Processing streaming Responses API response",
-            extra={
-                "amount": amount,
-                "unit": unit,
-                "content_lines": len(content_str.strip().split("\\n")),
-            },
-        )
-
-        response_headers = dict(response.headers)
-        if "transfer-encoding" in response_headers:
-            del response_headers["transfer-encoding"]
-        if "content-encoding" in response_headers:
-            del response_headers["content-encoding"]
-
-        usage_data = None
-        model = None
-        reasoning_tokens = 0
-
-        lines = content_str.strip().split("\\n")
-        for line in lines:
-            if line.startswith("data: "):
-                try:
-                    data_json = json.loads(line[6:])
-                    if "usage" in data_json:
-                        usage_data = data_json["usage"]
-                        model = data_json.get("model")
-                        # Track reasoning tokens for Responses API
-                        if isinstance(usage_data, dict) and "reasoning_tokens" in usage_data:
-                            reasoning_tokens = usage_data.get("reasoning_tokens", 0)
-                    elif "model" in data_json and not model:
-                        model = data_json["model"]
-                except json.JSONDecodeError:
-                    continue
-
-        if usage_data and model:
-            logger.debug(
-                "Found usage data in streaming Responses API response",
-                extra={
-                    "model": model,
-                    "usage_data": usage_data,
-                    "reasoning_tokens": reasoning_tokens,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-            response_data = {"usage": usage_data, "model": model}
-            try:
-                cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model
-                )
-                if cost_data:
-                    if unit == "msat":
-                        refund_amount = amount - cost_data.total_msats
-                    elif unit == "sat":
-                        refund_amount = amount - (cost_data.total_msats + 999) // 1000
-                    else:
-                        raise ValueError(f"Invalid unit: {unit}")
-
-                    if refund_amount > 0:
-                        logger.info(
-                            "Processing refund for streaming Responses API response",
-                            extra={
-                                "original_amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "model": model,
-                                "reasoning_tokens": reasoning_tokens,
-                            },
-                        )
-
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
-                        response_headers["X-Cashu"] = refund_token
-
-                        logger.info(
-                            "Refund processed for streaming Responses API response",
-                            extra={
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "refund_token_preview": refund_token[:20] + "..."
-                                if len(refund_token) > 20
-                                else refund_token,
-                            },
-                        )
-                    else:
-                        logger.debug(
-                            "No refund needed for streaming Responses API response",
-                            extra={
-                                "amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "model": model,
-                            },
-                        )
-            except Exception as e:
-                logger.error(
-                    "Error calculating cost for streaming Responses API response",
-                    extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "model": model,
-                        "amount": amount,
-                        "unit": unit,
-                    },
-                )
-
-        async def generate() -> AsyncGenerator[bytes, None]:
-            for line in lines:
-                yield (line + "\\n").encode("utf-8")
-
-        return StreamingResponse(
-            generate(),
-            status_code=response.status_code,
-            headers=response_headers,
-            media_type="text/plain",
-        )
-
-    async def handle_x_cashu_non_streaming_responses_response(
-        self,
-        content_str: str,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None = None,
-    ) -> Response:
-        """Handle non-streaming Responses API response for X-Cashu payment."""
-        logger.debug(
-            "Processing non-streaming Responses API response",
-            extra={"amount": amount, "unit": unit, "content_length": len(content_str)},
-        )
-
-        try:
-            response_json = json.loads(content_str)
-            cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
-
-            if not cost_data:
-                logger.error(
-                    "Failed to calculate cost for Responses API response",
-                    extra={
-                        "amount": amount,
-                        "unit": unit,
-                        "response_model": response_json.get("model", "unknown"),
-                    },
-                )
-                return Response(
-                    content=json.dumps(
-                        {
-                            "error": {
-                                "message": "Error forwarding Responses API request to upstream",
-                                "type": "upstream_error",
-                                "code": response.status_code,
-                            }
-                        }
-                    ),
-                    status_code=response.status_code,
-                    media_type="application/json",
-                )
-
-            response_headers = dict(response.headers)
-            if "transfer-encoding" in response_headers:
-                del response_headers["transfer-encoding"]
-            if "content-encoding" in response_headers:
-                del response_headers["content-encoding"]
-
-            if unit == "msat":
-                refund_amount = amount - cost_data.total_msats
-            elif unit == "sat":
-                refund_amount = amount - (cost_data.total_msats + 999) // 1000
-            else:
-                raise ValueError(f"Invalid unit: {unit}")
-
-            logger.info(
-                "Processing non-streaming Responses API cost calculation",
-                extra={
-                    "original_amount": amount,
-                    "cost_msats": cost_data.total_msats,
-                    "refund_amount": refund_amount,
-                    "unit": unit,
-                    "model": response_json.get("model", "unknown"),
-                },
-            )
-
-            if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit, mint)
-                response_headers["X-Cashu"] = refund_token
-
-                logger.info(
-                    "Refund processed for non-streaming Responses API response",
-                    extra={
-                        "refund_amount": refund_amount,
-                        "unit": unit,
-                        "refund_token_preview": refund_token[:20] + "..."
-                        if len(refund_token) > 20
-                        else refund_token,
-                    },
-                )
-
-            return Response(
-                content=content_str,
-                status_code=response.status_code,
-                headers=response_headers,
-                media_type="application/json",
-            )
-        except json.JSONDecodeError as e:
-            logger.error(
-                "Failed to parse JSON from upstream Responses API response",
-                extra={
-                    "error": str(e),
-                    "content_preview": content_str[:200] + "..."
-                    if len(content_str) > 200
-                    else content_str,
-                    "amount": amount,
-                    "unit": unit,
-                },
-            )
-
-            emergency_refund = amount
-            refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
-            response.headers["X-Cashu"] = refund_token
-
-            logger.warning(
-                "Emergency refund issued for Responses API due to JSON parse error",
-                extra={
-                    "original_amount": amount,
-                    "refund_amount": emergency_refund,
-                    "deduction": 60,
-                },
-            )
-
-            return Response(
-                content=content_str,
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                media_type="application/json",
-            )
-
-    async def handle_x_cashu(
-        self,
-        request: Request,
-        x_cashu_token: str,
-        path: str,
-        max_cost_for_model: int,
-        model_obj: Model,
-    ) -> Response | StreamingResponse:
-        """Handle request with X-Cashu token payment, redeeming token and forwarding request.
-
-        Args:
-            request: Original FastAPI request
-            x_cashu_token: X-Cashu token from request header
-            path: Request path
-            max_cost_for_model: Maximum cost for the model
-            model_obj: Model object for the request
-
-        Returns:
-            Response or StreamingResponse from upstream with refund if applicable
-        """
-        logger.info(
-            "Processing X-Cashu payment request",
-            extra={
-                "path": path,
-                "method": request.method,
-                "token_preview": x_cashu_token[:20] + "..."
-                if len(x_cashu_token) > 20
-                else x_cashu_token,
-            },
-        )
-
-        try:
-            headers = dict(request.headers)
-            amount, unit, mint = await recieve_token(x_cashu_token)
-            headers = self.prepare_headers(dict(request.headers))
-
-            logger.info(
-                "X-Cashu token redeemed successfully",
-                extra={"amount": amount, "unit": unit, "path": path, "mint": mint},
-            )
-
-            return await self.forward_x_cashu_request(
-                request,
-                path,
-                headers,
-                amount,
-                unit,
-                max_cost_for_model,
-                model_obj,
-                mint,
-            )
-        except Exception as e:
-            error_message = str(e)
-            logger.error(
-                "X-Cashu payment request failed",
-                extra={
-                    "error": error_message,
-                    "error_type": type(e).__name__,
-                    "path": path,
-                    "method": request.method,
-                },
-            )
-
-            if "already spent" in error_message.lower():
-                return create_error_response(
-                    "token_already_spent",
-                    "The provided CASHU token has already been spent",
-                    400,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
-            if "invalid token" in error_message.lower():
-                return create_error_response(
-                    "invalid_token",
-                    "The provided CASHU token is invalid",
-                    400,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
-            if "mint error" in error_message.lower():
-                return create_error_response(
-                    "mint_error",
-                    f"CASHU mint error: {error_message}",
-                    422,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
-            return create_error_response(
-                "cashu_error",
-                f"CASHU token processing failed: {error_message}",
-                400,
-                request=request,
-                token=x_cashu_token,
-            )
 
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
-        """Apply provider fee to model's USD pricing and calculate max costs.
-
-        Args:
-            model: Model object to update
-
-        Returns:
-            Model with provider fee applied to pricing and max costs calculated
-        """
+        """Apply provider fee to model's USD pricing and calculate max costs."""
         adjusted_pricing = Pricing.parse_obj(
             {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
         )
@@ -2826,12 +1222,7 @@ class BaseUpstreamProvider:
         )
 
     async def fetch_models(self) -> list[Model]:
-        """Fetch available models from upstream API and update cache.
-
-        Returns:
-            List of Model objects with pricing
-        """
-
+        """Fetch available models from upstream API and update cache."""
         try:
             or_models, provider_models_response = await asyncio.gather(
                 self._fetch_openrouter_models(),
@@ -2935,77 +1326,34 @@ class BaseUpstreamProvider:
             )
 
     def get_cached_models(self) -> list[Model]:
-        """Get cached models for this provider.
-
-        Returns:
-            List of cached Model objects
-        """
+        """Get cached models for this provider."""
         return self._models_cache
 
     def get_cached_model_by_id(self, model_id: str) -> Model | None:
-        """Get a specific cached model by ID.
-
-        Args:
-            model_id: Model identifier
-
-        Returns:
-            Model object or None if not found
-        """
+        """Get a specific cached model by ID."""
         return self._models_by_id.get(model_id)
 
     @classmethod
     async def create_account_static(cls) -> dict[str, object]:
-        """Create a new account with the provider (class method, no instance needed).
-
-        Returns:
-            Dict with account creation details including api_key
-
-        Raises:
-            NotImplementedError: If provider does not support account creation
-        """
+        """Create a new account with the provider (class method, no instance needed)."""
         raise NotImplementedError(
             f"Provider {cls.provider_type} does not support account creation"
         )
 
     async def create_account(self) -> dict[str, object]:
-        """Create a new account with the provider.
-
-        Returns:
-            Dict with account creation details including api_key
-
-        Raises:
-            NotImplementedError: If provider does not support account creation
-        """
+        """Create a new account with the provider."""
         raise NotImplementedError(
             f"Provider {self.provider_type} does not support account creation"
         )
 
     async def initiate_topup(self, amount: int) -> TopupData:
-        """Initiate a Lightning Network top-up for the provider account.
-
-        Args:
-            amount: Amount in currency units to top up
-
-        Returns:
-            TopupData with standardized invoice information
-
-        Raises:
-            NotImplementedError: If provider does not support top-up
-        """
+        """Initiate a Lightning Network top-up for the provider account."""
         raise NotImplementedError(
             f"Provider {self.provider_type} does not support top-up"
         )
 
     async def get_balance(self) -> float | None:
-        """Get the current account balance from the provider.
-
-        Returns:
-            Float representing the balance amount, or None if not supported/available.
-            Typically in USD or the provider's credit unit.
-
-        Raises:
-            NotImplementedError: If provider does not support balance checking (default behavior)
-        """
+        """Get the current account balance from the provider."""
         raise NotImplementedError(
             f"Provider {self.provider_type} does not support balance checking"
         )
