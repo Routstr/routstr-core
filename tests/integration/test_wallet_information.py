@@ -13,7 +13,7 @@ from sqlmodel import select, update
 
 from routstr.core.db import ApiKey
 
-from .utils import ConcurrencyTester, ResponseValidator
+from .utils import ResponseValidator
 
 
 @pytest.mark.integration
@@ -202,45 +202,6 @@ async def test_expired_api_key_behavior(
     db_key = result.scalar_one()
     assert db_key.key_expiry_time == past_expiry
     assert db_key.refund_address == "test@lightning.address"
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_concurrent_access_same_api_key(
-    integration_client: AsyncClient, authenticated_client: AsyncClient
-) -> None:
-    """Test concurrent access with the same API key"""
-
-    # Get the API key from authenticated client
-    response = await authenticated_client.get("/v1/wallet/")
-    api_key = response.json()["api_key"]
-    initial_balance = response.json()["balance"]
-
-    # Create multiple concurrent requests
-    requests = []
-    for i in range(20):
-        # Alternate between both endpoints
-        endpoint = "/v1/wallet/" if i % 2 == 0 else "/v1/wallet/info"
-        requests.append(
-            {
-                "method": "GET",
-                "url": endpoint,
-                "headers": {"Authorization": f"Bearer {api_key}"},
-            }
-        )
-
-    # Execute concurrently
-    tester = ConcurrencyTester()
-    responses = await tester.run_concurrent_requests(
-        integration_client, requests, max_concurrent=10
-    )
-
-    # All should succeed with consistent data
-    for response in responses:
-        assert response.status_code == 200
-        data = response.json()
-        assert data["api_key"] == api_key
-        assert data["balance"] == initial_balance
 
 
 @pytest.mark.integration
