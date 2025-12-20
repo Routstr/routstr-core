@@ -313,6 +313,8 @@ async def periodic_payout() -> None:
         try:
             async with db.create_session() as session:
                 for mint_url in settings.cashu_mints:
+                    if mint_url == "https://testnut.cashu.space":
+                        continue
                     for unit in ["sat", "msat"]:
                         wallet = await get_wallet(mint_url, unit)
                         proofs = get_proofs_per_mint_and_unit(

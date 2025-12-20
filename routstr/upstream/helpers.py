@@ -200,6 +200,13 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
                         "models_cached": len(provider.get_cached_models()),
                     },
                 )
+        if "https://testnut.cashu.space" in settings.cashu_mints:
+            from .fake import MockUpstreamProvider
+
+            mock_provider = MockUpstreamProvider("mock", "mock")
+            await mock_provider.refresh_models_cache()
+            upstreams.append(mock_provider)
+            logger.info("Initialized MockUpstreamProvider for testnut mint")
 
         return upstreams
 
