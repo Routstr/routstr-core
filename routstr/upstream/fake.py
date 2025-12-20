@@ -43,7 +43,11 @@ class MockUpstreamProvider(BaseUpstreamProvider):
                     created = 1766138895
                     model = "mock/gpt-420-mock"
 
-                    def make_chunk(delta: dict, finish_reason=None, usage=None):
+                    def make_chunk(
+                        delta: dict,
+                        finish_reason: str | None = None,
+                        usage: dict | None = None,
+                    ) -> bytes:
                         chunk = {
                             "id": req_id,
                             "provider": "MockProvider",
@@ -254,7 +258,7 @@ class MockUpstreamProvider(BaseUpstreamProvider):
             ),
         ]
 
-    async def transform_model_name(self, model_id: str) -> str:
+    def transform_model_name(self, model_id: str) -> str:
         return "fake-model"
 
     async def get_balance(self) -> float | None:
