@@ -88,8 +88,7 @@ async def _fetch_btc_usd_price() -> float:
             if not valid_prices:
                 logger.error("No valid BTC prices obtained from any exchange")
                 raise ValueError("Unable to fetch BTC price from any exchange")
-            return 88492.13
-            # return min(valid_prices)
+            return min(valid_prices)
         except Exception as e:
             logger.error(
                 "Error in BTC price aggregation",
@@ -103,14 +102,26 @@ async def _update_prices() -> None:
     global BTC_USD_PRICE, SATS_USD_PRICE
     try:
         btc_price = await _fetch_btc_usd_price()
+        BTC_USD_PRICE = btc_price
+        SATS_USD_PRICE = btc_price / 100_000_000
+        logger.info(
+            "Updated BTC/SATS prices successfully",
+            extra={"btc_usd": btc_price, "sats_usd": SATS_USD_PRICE},
+        )
     except Exception as e:
         logger.warning(
-            "Skipping price update; unable to fetch BTC price",
+            "Failed to fetch live prices, using fallback if available",
             extra={"error": str(e), "error_type": type(e).__name__},
         )
-        return
-    BTC_USD_PRICE = btc_price
-    SATS_USD_PRICE = btc_price / 100_000_000
+        # Use fallback price if no price is set
+        if BTC_USD_PRICE is None or SATS_USD_PRICE is None:
+            fallback_btc_price = getattr(settings, "fallback_btc_usd_price", 50000.0)
+            BTC_USD_PRICE = fallback_btc_price
+            SATS_USD_PRICE = fallback_btc_price / 100_000_000
+            logger.info(
+                "Using fallback BTC price",
+                extra={"fallback_btc_usd": fallback_btc_price, "sats_usd": SATS_USD_PRICE},
+            )
 
 
 def btc_usd_price() -> float:
