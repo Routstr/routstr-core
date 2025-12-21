@@ -67,15 +67,29 @@ async def calculate_cost(  # todo: can be sync
 
     usage_data = response_data["usage"]
 
-    if "cost" in usage_data and usage_data["cost"] is not None:
+    usd_cost = 0.0
+
+    # Prioritize cost_details.upstream_inference_cost
+    if "cost_details" in usage_data:
+        usd_cost = float(
+            usage_data["cost_details"].get("upstream_inference_cost", 0) or 0
+        )
+
+    # Fallback to cost field if upstream_inference_cost is 0
+    if usd_cost == 0 and "cost" in usage_data:
         try:
-            usd_cost = float(usage_data["cost"])
+            usd_cost = float(usage_data.get("cost", 0) or 0)
+        except Exception:
+            pass
+
+    if usd_cost > 0:
+        try:
             sats_per_usd = 1.0 / sats_usd_price()
             cost_in_sats = usd_cost * sats_per_usd
             cost_in_msats = math.ceil(cost_in_sats * 1000)
 
             logger.info(
-                "Using cost field from usage data",
+                "Using cost from usage data/details",
                 extra={
                     "usd_cost": usd_cost,
                     "cost_in_sats": cost_in_sats,
@@ -85,17 +99,17 @@ async def calculate_cost(  # todo: can be sync
             )
 
             return CostData(
-                base_msats=0,
-                input_msats=0,  # Cost field doesn't break down by token type
-                output_msats=0,
+                base_msats=-1,
+                input_msats=-1,  # Cost field doesn't break down by token type
+                output_msats=-1,
                 total_msats=cost_in_msats,
             )
         except Exception as e:
             logger.warning(
-                "Error using cost field, falling back to token-based calculation",
+                "Error calculating cost from usage data",
                 extra={
                     "error": str(e),
-                    "cost_value": usage_data.get("cost"),
+                    "usd_cost": usd_cost,
                     "model": response_data.get("model", "unknown"),
                 },
             )
@@ -107,6 +121,7 @@ async def calculate_cost(  # todo: can be sync
     MSATS_PER_1K_OUTPUT_TOKENS: float = (
         float(settings.fixed_per_1k_output_tokens) * 1000.0
     )
+    MSATS_PER_1K_IMAGE_COMPLETION_TOKENS: float = 0.0
 
     if not settings.fixed_pricing:
         response_model = response_data.get("model", "")
@@ -141,11 +156,13 @@ async def calculate_cost(  # todo: can be sync
         try:
             mspp = float(model_obj.sats_pricing.prompt)
             mspc = float(model_obj.sats_pricing.completion)
+            mspci = float(getattr(model_obj.sats_pricing, "completion_image", 0.0))
         except Exception:
             return CostDataError(message="Invalid pricing data", code="pricing_invalid")
 
         MSATS_PER_1K_INPUT_TOKENS = mspp * 1_000_000.0
         MSATS_PER_1K_OUTPUT_TOKENS = mspc * 1_000_000.0
+        MSATS_PER_1K_IMAGE_COMPLETION_TOKENS = mspci * 1_000_000.0
 
         logger.info(
             "Applied model-specific pricing",
@@ -153,6 +170,7 @@ async def calculate_cost(  # todo: can be sync
                 "model": response_model,
                 "input_price_msats_per_1k": MSATS_PER_1K_INPUT_TOKENS,
                 "output_price_msats_per_1k": MSATS_PER_1K_OUTPUT_TOKENS,
+                "image_completion_price_msats_per_1k": MSATS_PER_1K_IMAGE_COMPLETION_TOKENS,
             },
         )
 
@@ -170,13 +188,39 @@ async def calculate_cost(  # todo: can be sync
     output_tokens = usage_data.get("completion_tokens", 0)
 
     # added for response api
-    input_tokens = input_tokens if input_tokens != 0 else usage_data.get("input_tokens", 0)
-    output_tokens = output_tokens if output_tokens != 0 else usage_data.get("output_tokens", 0)
+    input_tokens = (
+        input_tokens if input_tokens != 0 else usage_data.get("input_tokens", 0)
+    )
+    output_tokens = (
+        output_tokens if output_tokens != 0 else usage_data.get("output_tokens", 0)
+    )
+
+    # Calculate image completion cost
+    image_completion_msats = 0.0
+    if MSATS_PER_1K_IMAGE_COMPLETION_TOKENS > 0:
+        completion_details = usage_data.get("completion_tokens_details", {})
+        image_tokens = completion_details.get("image_tokens", 0)
+
+        if image_tokens > 0:
+            if output_tokens >= image_tokens:
+                output_tokens -= image_tokens
+
+            image_completion_msats = round(
+                image_tokens / 1000 * MSATS_PER_1K_IMAGE_COMPLETION_TOKENS, 3
+            )
+
+            logger.info(
+                "Calculated image completion cost",
+                extra={
+                    "image_tokens": image_tokens,
+                    "image_completion_msats": image_completion_msats,
+                },
+            )
 
     input_msats = round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 3)
 
     output_msats = round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 3)
-    token_based_cost = math.ceil(input_msats + output_msats)
+    token_based_cost = math.ceil(input_msats + output_msats + image_completion_msats)
 
     logger.info(
         "Calculated token-based cost",
@@ -185,6 +229,7 @@ async def calculate_cost(  # todo: can be sync
             "output_tokens": output_tokens,
             "input_cost_msats": input_msats,
             "output_cost_msats": output_msats,
+            "image_completion_msats": image_completion_msats,
             "total_cost_msats": token_based_cost,
             "model": response_data.get("model", "unknown"),
         },
