@@ -528,4 +528,5 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     from ..proxy import get_unique_models
 
     items = get_unique_models()
+    print(items)
     return {"data": items}
