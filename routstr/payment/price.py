@@ -85,6 +85,7 @@ async def _fetch_btc_usd_price() -> float:
                 _binance_btc_usdt(client),
             )
             valid_prices = [price for price in prices if price is not None]
+            print(valid_prices)
             if not valid_prices:
                 logger.error("No valid BTC prices obtained from any exchange")
                 raise ValueError("Unable to fetch BTC price from any exchange")
