@@ -31,6 +31,7 @@ class Pricing(BaseModel):
     completion: float
     request: float = 0.0
     image: float = 0.0
+    completion_image: float = 0.0
     web_search: float = 0.0
     internal_reasoning: float = 0.0
     input_cache_read: float = 0.0
@@ -38,6 +39,13 @@ class Pricing(BaseModel):
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
+
+
+PRICING_OVERRIDES = {
+    "gemini-3-pro-image-preview": {"completion_image": 0.00012},
+    "gemini-2.5-flash-image": {"completion_image": 0.00003},
+    "gemini-2.0-flash": {"completion_image": 0.00003},
+}
 
 
 class TopProvider(BaseModel):
@@ -116,6 +124,16 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 if not _has_valid_pricing(model):
                     continue
 
+                # Apply manual pricing overrides
+                if model_id in PRICING_OVERRIDES:
+                    pricing = model.get("pricing", {})
+                    if pricing:
+                        for k, v in PRICING_OVERRIDES[model_id].items():
+                            pricing[k] = str(
+                                v
+                            )  # OpenRouter API returns strings for pricing
+                        model["pricing"] = pricing
+
                 models_data.append(model)
 
             return models_data
@@ -147,6 +165,12 @@ def _row_to_model(
 
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
         pricing["request"] = max(pricing.get("request", 0.0), 0.0)
+
+    # Apply defaults for missing fields from manual overrides
+    if row.id in PRICING_OVERRIDES and isinstance(pricing, dict):
+        for k, v in PRICING_OVERRIDES[row.id].items():
+            if k not in pricing:
+                pricing[k] = v
 
     parsed_pricing = Pricing.parse_obj(pricing)
     model = Model(
@@ -507,6 +531,7 @@ def _pricing_matches(
         "completion",
         "request",
         "image",
+        "completion_image",
         "web_search",
         "internal_reasoning",
     ]
