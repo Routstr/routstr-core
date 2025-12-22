@@ -42,14 +42,11 @@ def load_manual_model_mappings() -> None:
     global _manual_model_mappings
     try:
         mappings_file = os.path.join(os.path.dirname(__file__), "model_mappings.json")
-        print(mappings_file)
         if os.path.exists(mappings_file):
             with open(mappings_file, "r") as f:
                 data = json.load(f)
                 _manual_model_mappings = data.get("manual_model_mappings", {}).get("mappings", {})
-                logger.info(f"Loaded {len(_manual_model_mappings)} manual model mappings")
         else:
-            logger.info("No manual model mappings file found, using empty mappings")
             _manual_model_mappings = {}
     except Exception as e:
         logger.error(f"Failed to load manual model mappings: {e}")
@@ -93,9 +90,7 @@ def get_model_instance(model_id: str) -> Model | None:
         return model
 
     mapped_model_id = _manual_model_mappings.get(model_id.lower())
-    print(model_id, mapped_model_id)
     if mapped_model_id:
-        logger.debug(f"Using manual mapping: {model_id} -> {mapped_model_id}")
         return _model_instances.get(mapped_model_id.lower())
 
     return None
