@@ -65,11 +65,7 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
 
 def get_model_instance(model_id: str) -> Model | None:
     """Get Model instance by ID from global cache."""
-    return next(
-        (model for alias, model in _model_instances.items()
-         if  alias.lower() in model_id.lower()),
-        None
-    )
+    return _model_instances.get(model_id.lower())
 
 
 def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
