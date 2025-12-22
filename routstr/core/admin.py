@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
@@ -3165,3 +3165,120 @@ async def get_log_dates_api(request: Request) -> dict[str, object]:
                 continue
 
     return {"dates": dates}
+
+
+class ModelMappingRequest(BaseModel):
+    from_model: str = Field(..., alias="from")
+    to: str
+
+
+class ModelMappingUpdateRequest(BaseModel):
+    to: str
+
+
+@admin_router.get("/api/model-mappings", dependencies=[Depends(require_admin_api)])
+async def get_model_mappings(request: Request) -> dict[str, str]:
+    from ..proxy import _manual_model_mappings
+    return _manual_model_mappings
+
+
+@admin_router.post("/api/model-mappings", dependencies=[Depends(require_admin_api)])
+async def create_model_mapping(request: Request, mapping: ModelMappingRequest) -> dict[str, str]:
+    import json
+    import os
+    from ..proxy import _manual_model_mappings, load_manual_model_mappings
+
+    mappings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_mappings.json")
+
+    try:
+        if os.path.exists(mappings_file):
+            with open(mappings_file, "r") as f:
+                data = json.load(f)
+        else:
+            data = {"manual_model_mappings": {"mappings": {}}}
+
+        data["manual_model_mappings"]["mappings"][mapping.from_model.lower()] = mapping.to.lower()
+
+        with open(mappings_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+        load_manual_model_mappings()
+
+        return _manual_model_mappings
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create mapping: {str(e)}")
+
+
+@admin_router.put("/api/model-mappings/{from_model}", dependencies=[Depends(require_admin_api)])
+async def update_model_mapping(request: Request, from_model: str, mapping: ModelMappingUpdateRequest) -> dict[str, str]:
+    import json
+    import os
+    from ..proxy import _manual_model_mappings, load_manual_model_mappings
+
+    mappings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_mappings.json")
+
+    try:
+        if os.path.exists(mappings_file):
+            with open(mappings_file, "r") as f:
+                data = json.load(f)
+        else:
+            data = {"manual_model_mappings": {"mappings": {}}}
+
+        if from_model.lower() not in data["manual_model_mappings"]["mappings"]:
+            raise HTTPException(status_code=404, detail="Mapping not found")
+
+        data["manual_model_mappings"]["mappings"][from_model.lower()] = mapping.to.lower()
+
+        with open(mappings_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+        load_manual_model_mappings()
+
+        return _manual_model_mappings
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update mapping: {str(e)}")
+
+
+@admin_router.delete("/api/model-mappings/{from_model}", dependencies=[Depends(require_admin_api)])
+async def delete_model_mapping(request: Request, from_model: str) -> dict[str, str]:
+    import json
+    import os
+    from ..proxy import _manual_model_mappings, load_manual_model_mappings
+
+    mappings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_mappings.json")
+
+    try:
+        if os.path.exists(mappings_file):
+            with open(mappings_file, "r") as f:
+                data = json.load(f)
+        else:
+            data = {"manual_model_mappings": {"mappings": {}}}
+
+        if from_model.lower() not in data["manual_model_mappings"]["mappings"]:
+            raise HTTPException(status_code=404, detail="Mapping not found")
+
+        del data["manual_model_mappings"]["mappings"][from_model.lower()]
+
+        with open(mappings_file, "w") as f:
+            json.dump(data, f, indent=2)
+
+        load_manual_model_mappings()
+
+        return _manual_model_mappings
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete mapping: {str(e)}")
+
+
+@admin_router.post("/api/model-mappings/reload", dependencies=[Depends(require_admin_api)])
+async def reload_model_mappings(request: Request) -> dict[str, object]:
+    from ..proxy import load_manual_model_mappings, _manual_model_mappings
+
+    try:
+        load_manual_model_mappings()
+        return {"ok": True, "mappings": _manual_model_mappings}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reload mappings: {str(e)}")

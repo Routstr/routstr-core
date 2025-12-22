@@ -10,16 +10,26 @@ import { SiteHeader } from '@/components/site-header';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useQuery } from '@tanstack/react-query';
 import { AdminService } from '@/lib/api/services/admin';
+import { ModelMappingService } from '@/lib/api/services/modelMappings';
 import { Skeleton } from '@/components/ui/skeleton';
 import { AlertCircle, Users, Globe } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import type { Model } from '@/lib/api/schemas/models';
 import { groupAndSortModelsByProvider } from '@/lib/utils/modelSort';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Trash2, Plus, Edit2, Save, X } from 'lucide-react';
 
 export default function ModelsPage() {
   const [filteredModels, setFilteredModels] = useState<Model[]>([]);
+  const [modelMappings, setModelMappings] = useState<Record<string, string>>(
+    {}
+  );
+  const [editingMapping, setEditingMapping] = useState<string | null>(null);
+  const [newMapping, setNewMapping] = useState({ from: '', to: '' });
 
   const {
     data: modelsData,
@@ -30,6 +40,23 @@ export default function ModelsPage() {
     queryFn: () => AdminService.getModelsWithProviders(),
     refetchOnWindowFocus: false,
   });
+
+  const {
+    data: mappingsData,
+    isLoading: isLoadingMappings,
+    error: mappingsError,
+    refetch: refetchMappings,
+  } = useQuery({
+    queryKey: ['model-mappings'],
+    queryFn: () => ModelMappingService.getModelMappings(),
+    refetchOnWindowFocus: false,
+  });
+
+  React.useEffect(() => {
+    if (mappingsData) {
+      setModelMappings(mappingsData);
+    }
+  }, [mappingsData]);
 
   const { models = [], groups = [] } = modelsData || {};
 
@@ -67,6 +94,40 @@ export default function ModelsPage() {
     });
   }, [groupedModels, groupDataMap, groups]);
 
+  const handleAddMapping = async () => {
+    if (!newMapping.from || !newMapping.to) return;
+
+    try {
+      await ModelMappingService.createModelMapping({
+        from: newMapping.from,
+        to: newMapping.to,
+      });
+      setNewMapping({ from: '', to: '' });
+      refetchMappings();
+    } catch (error) {
+      console.error('Failed to add mapping:', error);
+    }
+  };
+
+  const handleDeleteMapping = async (from: string) => {
+    try {
+      await ModelMappingService.deleteModelMapping(from);
+      refetchMappings();
+    } catch (error) {
+      console.error('Failed to delete mapping:', error);
+    }
+  };
+
+  const handleUpdateMapping = async (from: string, to: string) => {
+    try {
+      await ModelMappingService.updateModelMapping(from, { to });
+      setEditingMapping(null);
+      refetchMappings();
+    } catch (error) {
+      console.error('Failed to update mapping:', error);
+    }
+  };
+
   return (
     <SidebarProvider>
       <AppSidebar variant='inset' />
@@ -81,8 +142,9 @@ export default function ModelsPage() {
             </div>
 
             <Tabs defaultValue='manage' className='w-full'>
-              <TabsList className='grid w-full grid-cols-3'>
+              <TabsList className='grid w-full grid-cols-4'>
                 <TabsTrigger value='manage'>Manage Models</TabsTrigger>
+                <TabsTrigger value='mappings'>Model Mappings</TabsTrigger>
                 {/*<TabsTrigger value='test-basic'>Basic Testing</TabsTrigger>
                 <TabsTrigger value='test-api'>API Endpoints</TabsTrigger> */}
               </TabsList>
@@ -264,6 +326,164 @@ export default function ModelsPage() {
                       )}
                     </div>
                   </Tabs>
+                )}
+              </TabsContent>
+
+              <TabsContent value='mappings' className='space-y-4'>
+                <div className='text-muted-foreground text-sm'>
+                  Manage model ID mappings to redirect requests from one model
+                  to another. This is useful for maintaining compatibility with
+                  legacy model names or creating aliases.
+                </div>
+
+                {isLoadingMappings ? (
+                  <div className='space-y-4'>
+                    <Skeleton className='h-[200px] w-full' />
+                  </div>
+                ) : mappingsError ? (
+                  <Alert variant='destructive'>
+                    <AlertCircle className='h-4 w-4' />
+                    <AlertDescription>
+                      Failed to load model mappings. Please try refreshing the
+                      page.
+                    </AlertDescription>
+                  </Alert>
+                ) : (
+                  <div className='space-y-6'>
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className='flex items-center gap-2'>
+                          <Plus className='h-5 w-5' />
+                          Add New Model Mapping
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className='grid grid-cols-1 gap-4 md:grid-cols-3'>
+                          <Input
+                            placeholder='From model ID'
+                            value={newMapping.from}
+                            onChange={(e) =>
+                              setNewMapping({
+                                ...newMapping,
+                                from: e.target.value,
+                              })
+                            }
+                          />
+                          <Input
+                            placeholder='To model ID'
+                            value={newMapping.to}
+                            onChange={(e) =>
+                              setNewMapping({
+                                ...newMapping,
+                                to: e.target.value,
+                              })
+                            }
+                          />
+                          <Button
+                            onClick={handleAddMapping}
+                            disabled={!newMapping.from || !newMapping.to}
+                            className='w-full'
+                          >
+                            <Plus className='mr-2 h-4 w-4' />
+                            Add Mapping
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Current Model Mappings</CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        {Object.keys(modelMappings).length === 0 ? (
+                          <div className='text-muted-foreground py-8 text-center'>
+                            No model mappings configured
+                          </div>
+                        ) : (
+                          <div className='space-y-3'>
+                            {Object.entries(modelMappings).map(([from, to]) => (
+                              <div
+                                key={from}
+                                className='flex items-center justify-between gap-4 rounded-lg border p-4'
+                              >
+                                <div className='grid flex-1 grid-cols-1 gap-4 md:grid-cols-2'>
+                                  <div>
+                                    <label className='text-muted-foreground text-sm font-medium'>
+                                      From
+                                    </label>
+                                    <div className='font-mono text-sm'>
+                                      {from}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <label className='text-muted-foreground text-sm font-medium'>
+                                      To
+                                    </label>
+                                    {editingMapping === from ? (
+                                      <div className='flex items-center gap-2'>
+                                        <Input
+                                          defaultValue={to}
+                                          id={`edit-${from}`}
+                                          className='text-sm'
+                                        />
+                                        <Button
+                                          size='sm'
+                                          onClick={() => {
+                                            const input =
+                                              document.getElementById(
+                                                `edit-${from}`
+                                              ) as HTMLInputElement;
+                                            handleUpdateMapping(
+                                              from,
+                                              input.value
+                                            );
+                                          }}
+                                        >
+                                          <Save className='h-4 w-4' />
+                                        </Button>
+                                        <Button
+                                          size='sm'
+                                          variant='outline'
+                                          onClick={() =>
+                                            setEditingMapping(null)
+                                          }
+                                        >
+                                          <X className='h-4 w-4' />
+                                        </Button>
+                                      </div>
+                                    ) : (
+                                      <div className='font-mono text-sm'>
+                                        {to}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                {editingMapping !== from && (
+                                  <div className='flex items-center gap-2'>
+                                    <Button
+                                      size='sm'
+                                      variant='outline'
+                                      onClick={() => setEditingMapping(from)}
+                                    >
+                                      <Edit2 className='h-4 w-4' />
+                                    </Button>
+                                    <Button
+                                      size='sm'
+                                      variant='destructive'
+                                      onClick={() => handleDeleteMapping(from)}
+                                    >
+                                      <Trash2 className='h-4 w-4' />
+                                    </Button>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
                 )}
               </TabsContent>
 
