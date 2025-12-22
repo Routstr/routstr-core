@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -33,6 +34,26 @@ _upstreams: list[BaseUpstreamProvider] = []
 _model_instances: dict[str, Model] = {}  # All aliases -> Model
 _provider_map: dict[str, BaseUpstreamProvider] = {}  # All aliases -> Provider
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
+_manual_model_mappings: dict[str, str] = {}  # Manual model_id mappings loaded from JSON
+
+
+def load_manual_model_mappings() -> None:
+    """Load manual model mappings from JSON file."""
+    global _manual_model_mappings
+    try:
+        mappings_file = os.path.join(os.path.dirname(__file__), "model_mappings.json")
+        print(mappings_file)
+        if os.path.exists(mappings_file):
+            with open(mappings_file, "r") as f:
+                data = json.load(f)
+                _manual_model_mappings = data.get("manual_model_mappings", {}).get("mappings", {})
+                logger.info(f"Loaded {len(_manual_model_mappings)} manual model mappings")
+        else:
+            logger.info("No manual model mappings file found, using empty mappings")
+            _manual_model_mappings = {}
+    except Exception as e:
+        logger.error(f"Failed to load manual model mappings: {e}")
+        _manual_model_mappings = {}
 
 
 async def initialize_upstreams() -> None:
@@ -40,6 +61,7 @@ async def initialize_upstreams() -> None:
     global _upstreams
     _upstreams = await init_upstreams()
     logger.info(f"Initialized {len(_upstreams)} upstream providers")
+    load_manual_model_mappings()
     await refresh_model_maps()
 
 
@@ -51,6 +73,7 @@ async def reinitialize_upstreams() -> None:
         "Re-initialized upstream providers from admin action",
         extra={"provider_count": len(_upstreams)},
     )
+    load_manual_model_mappings()
     await refresh_model_maps()
 
 
@@ -64,13 +87,34 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
 
 
 def get_model_instance(model_id: str) -> Model | None:
-    """Get Model instance by ID from global cache."""
-    return _model_instances.get(model_id.lower())
+    """Get Model instance by ID from global cache, with manual mapping fallback."""
+    model = _model_instances.get(model_id)
+    if model is not None:
+        return model
+
+    mapped_model_id = _manual_model_mappings.get(model_id.lower())
+    print(model_id, mapped_model_id)
+    if mapped_model_id:
+        logger.debug(f"Using manual mapping: {model_id} -> {mapped_model_id}")
+        return _model_instances.get(mapped_model_id.lower())
+
+    return None
 
 
 def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
-    """Get UpstreamProvider for model ID from global cache."""
-    return _provider_map.get(model_id)
+    """Get UpstreamProvider for model ID from global cache, with manual mapping fallback."""
+    # First try direct lookup
+    provider = _provider_map.get(model_id)
+    if provider is not None:
+        return provider
+
+    # Try manual mapping as fallback
+    mapped_model_id = _manual_model_mappings.get(model_id)
+    if mapped_model_id:
+        logger.debug(f"Using manual mapping for provider: {model_id} -> {mapped_model_id}")
+        return _provider_map.get(mapped_model_id)
+
+    return None
 
 
 def get_unique_models() -> list[Model]:
