@@ -204,47 +204,59 @@ export default function ModelsPage() {
                                     </div>
                                   </div>
                                 </div>
-                                {totalModels === 0 ? (
-                                  <Alert>
+                                {totalModels === 0 && (
+                                  <Alert className='mb-4'>
                                     <AlertCircle className='h-4 w-4' />
                                     <AlertDescription>
                                       <div className='space-y-2'>
                                         <p className='font-medium'>
                                           No models found for this provider
                                         </p>
-                                        <div className='text-sm space-y-1'>
-                                          <p className='font-medium'>Common issues:</p>
-                                          <ul className='list-disc list-inside space-y-1 ml-2'>
+                                        <div className='space-y-1 text-sm'>
+                                          <p className='font-medium'>
+                                            Common issues:
+                                          </p>
+                                          <ul className='ml-2 list-inside list-disc space-y-1'>
                                             <li>
-                                              <strong>API credentials:</strong> Check if the API key is correct and has the right permissions
+                                              <strong>API credentials:</strong>{' '}
+                                              Check if the API key is correct
+                                              and has the right permissions
                                             </li>
                                             <li>
-                                              <strong>Base URL:</strong> Verify the base URL is correct for your provider
+                                              <strong>Base URL:</strong> Verify
+                                              the base URL is correct for your
+                                              provider
                                             </li>
                                             <li>
-                                              <strong>Network access:</strong> Ensure the server can reach the provider&apos;s API endpoint
+                                              <strong>Network access:</strong>{' '}
+                                              Ensure the server can reach the
+                                              provider&apos;s API endpoint
                                             </li>
                                             <li>
-                                              <strong>Provider status:</strong> The upstream provider might be temporarily unavailable
+                                              <strong>Provider status:</strong>{' '}
+                                              The upstream provider might be
+                                              temporarily unavailable
                                             </li>
                                           </ul>
                                           {groupData?.group_url && (
-                                            <p className='mt-2 text-xs text-muted-foreground'>
-                                              Current endpoint: <code className='bg-muted px-1 rounded'>{groupData.group_url}</code>
+                                            <p className='text-muted-foreground mt-2 text-xs'>
+                                              Current endpoint:{' '}
+                                              <code className='bg-muted rounded px-1'>
+                                                {groupData.group_url}
+                                              </code>
                                             </p>
                                           )}
                                         </div>
                                       </div>
                                     </AlertDescription>
                                   </Alert>
-                                ) : (
-                                  <ModelSelector
-                                    filterProvider={provider}
-                                    groupData={groupData}
-                                    showProviderActions={true}
-                                    showDeleteAllButton={false}
-                                  />
                                 )}
+                                <ModelSelector
+                                  filterProvider={provider}
+                                  groupData={groupData}
+                                  showProviderActions={true}
+                                  showDeleteAllButton={false}
+                                />
                               </div>
                             </TabsContent>
                           );

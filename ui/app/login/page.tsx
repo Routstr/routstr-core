@@ -78,8 +78,8 @@ export default function AdminLoginPage(): ReactElement {
   };
 
   return (
-    <div className='flex min-h-screen items-center justify-center bg-background px-4 py-12 text-foreground'>
-      <Card className='w-full max-w-md border border-border/60 bg-card/90 shadow-2xl shadow-black/30 backdrop-blur'>
+    <div className='bg-background text-foreground flex min-h-screen items-center justify-center px-4 py-12'>
+      <Card className='border-border/60 bg-card/90 w-full max-w-md border shadow-2xl shadow-black/30 backdrop-blur'>
         <CardHeader className='space-y-1'>
           <CardTitle className='text-center text-2xl font-bold'>
             Admin Login

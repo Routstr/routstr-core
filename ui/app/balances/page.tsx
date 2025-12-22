@@ -29,9 +29,7 @@ export default function BalancesPage() {
         <div className='container max-w-6xl px-4 py-8 md:px-6 lg:px-8'>
           <div className='mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between'>
             <div>
-              <h1 className='text-3xl font-bold tracking-tight'>
-                Balances
-              </h1>
+              <h1 className='text-3xl font-bold tracking-tight'>Balances</h1>
               <p className='text-muted-foreground mt-2'>
                 Monitor and manage wallet balances
               </p>

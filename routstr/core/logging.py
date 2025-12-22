@@ -338,6 +338,11 @@ def setup_logging() -> None:
                 "handlers": ["console"] if console_enabled else [],
                 "propagate": False,
             },
+            "openai": {
+                "level": "WARNING",
+                "handlers": ["console"] if console_enabled else [],
+                "propagate": False,
+            },
             "httpcore": {
                 "level": "WARNING",
                 "handlers": ["console"] if console_enabled else [],
@@ -360,6 +365,11 @@ def setup_logging() -> None:
             },
             "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},
             "aiosqlite": {"level": "ERROR", "handlers": [], "propagate": False},
+            "alembic": {
+                "level": "WARNING",
+                "handlers": ["console"] if console_enabled else [],
+                "propagate": False,
+            },
         },
         "root": {
             "level": log_level,

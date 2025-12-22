@@ -67,7 +67,9 @@ export const AdminModelSchema = z.object({
   pricing: AdminModelPricingSchema.or(z.record(z.any())),
   per_request_limits: z.record(z.any()).nullable().optional(),
   top_provider: z.record(z.any()).nullable().optional(),
-  upstream_provider_id: z.number().nullable().optional(),
+  upstream_provider_id: z.union([z.string(), z.number()]).nullable().optional(),
+  canonical_slug: z.string().nullable().optional(),
+  alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
 });
 
@@ -814,7 +816,9 @@ export class AdminService {
     if (search) params.append('search', search);
     params.append('limit', limit.toString());
 
-    return await apiClient.get<LogResponse>(`/admin/api/logs?${params.toString()}`);
+    return await apiClient.get<LogResponse>(
+      `/admin/api/logs?${params.toString()}`
+    );
   }
 
   static async getLogDates(): Promise<{ dates: string[] }> {
@@ -860,9 +864,7 @@ export class AdminService {
     );
   }
 
-  static async createProviderAccountByType(
-    providerType: string
-  ): Promise<{
+  static async createProviderAccountByType(providerType: string): Promise<{
     ok: boolean;
     account_data: Record<string, unknown>;
     message: string;
@@ -879,7 +881,11 @@ export class AdminService {
   static async initiateProviderTopup(
     providerId: number,
     amount: number
-  ): Promise<{ ok: boolean; topup_data: Record<string, unknown>; message: string }> {
+  ): Promise<{
+    ok: boolean;
+    topup_data: Record<string, unknown>;
+    message: string;
+  }> {
     return await apiClient.post<{
       ok: boolean;
       topup_data: Record<string, unknown>;
@@ -899,12 +905,13 @@ export class AdminService {
     }>(`/admin/api/upstream-providers/${providerId}/topup/${invoiceId}/status`);
   }
 
-  static async getProviderBalance(
-    providerId: number
-  ): Promise<{ ok: boolean; balance_data: Record<string, unknown> }> {
+  static async getProviderBalance(providerId: number): Promise<{
+    ok: boolean;
+    balance_data: number | null | Record<string, unknown>;
+  }> {
     return await apiClient.get<{
       ok: boolean;
-      balance_data: Record<string, unknown>;
+      balance_data: number | null | Record<string, unknown>;
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
 }
