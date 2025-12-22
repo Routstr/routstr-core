@@ -3186,6 +3186,7 @@ async def get_model_mappings(request: Request) -> dict[str, str]:
 async def create_model_mapping(request: Request, mapping: ModelMappingRequest) -> dict[str, str]:
     import json
     import os
+
     from ..proxy import _manual_model_mappings, load_manual_model_mappings
 
     mappings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_mappings.json")
@@ -3213,6 +3214,7 @@ async def create_model_mapping(request: Request, mapping: ModelMappingRequest) -
 async def update_model_mapping(request: Request, from_model: str, mapping: ModelMappingUpdateRequest) -> dict[str, str]:
     import json
     import os
+
     from ..proxy import _manual_model_mappings, load_manual_model_mappings
 
     mappings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_mappings.json")
@@ -3245,6 +3247,7 @@ async def update_model_mapping(request: Request, from_model: str, mapping: Model
 async def delete_model_mapping(request: Request, from_model: str) -> dict[str, str]:
     import json
     import os
+
     from ..proxy import _manual_model_mappings, load_manual_model_mappings
 
     mappings_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model_mappings.json")
@@ -3275,7 +3278,7 @@ async def delete_model_mapping(request: Request, from_model: str) -> dict[str, s
 
 @admin_router.post("/api/model-mappings/reload", dependencies=[Depends(require_admin_api)])
 async def reload_model_mappings(request: Request) -> dict[str, object]:
-    from ..proxy import load_manual_model_mappings, _manual_model_mappings
+    from ..proxy import _manual_model_mappings, load_manual_model_mappings
 
     try:
         load_manual_model_mappings()
