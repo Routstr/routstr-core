@@ -167,7 +167,7 @@ class BaseUpstreamProvider:
         """Transform model ID for this provider's API format."""
         return model_id
 
-    def prepare_responses_request_body(
+    def prepare_responses_api_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
         """Transform request body for Responses API specific requirements."""
@@ -191,7 +191,11 @@ class BaseUpstreamProvider:
                         },
                     )
 
-                if "input" in data and isinstance(data["input"], dict) and "model" in data["input"]:
+                if (
+                    "input" in data
+                    and isinstance(data["input"], dict)
+                    and "model" in data["input"]
+                ):
                     original_model = model_obj.id
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
@@ -606,7 +610,7 @@ class BaseUpstreamProvider:
             )
             raise
 
-    async def handle_streaming_responses_completion(
+    async def handle_streaming_responses_api_completion(
         self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment."""
@@ -619,7 +623,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        async def stream_with_responses_cost(
+        async def stream_with_responses_api_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
             stored_chunks: list[bytes] = []
@@ -780,12 +784,12 @@ class BaseUpstreamProvider:
         response_headers.pop("content-length", None)
 
         return StreamingResponse(
-            stream_with_responses_cost(max_cost_for_model),
+            stream_with_responses_api_cost(max_cost_for_model),
             status_code=response.status_code,
             headers=response_headers,
         )
 
-    async def handle_non_streaming_responses_completion(
+    async def handle_non_streaming_responses_api_completion(
         self,
         response: httpx.Response,
         key: ApiKey,
@@ -957,7 +961,7 @@ class BaseUpstreamProvider:
                 request=request,
             )
 
-    async def forward_responses_request(
+    async def forward_responses_api_request(
         self,
         request: Request,
         path: str,
@@ -976,7 +980,7 @@ class BaseUpstreamProvider:
                 headers=headers,
                 request_body=request_body,
                 query_params=self.prepare_params(path, request.query_params),
-                transform_body_func=self.prepare_responses_request_body,
+                transform_body_func=self.prepare_responses_api_request_body,
                 model_obj=model_obj,
             )
 
@@ -994,13 +998,13 @@ class BaseUpstreamProvider:
                 is_streaming = "text/event-stream" in content_type
 
                 if is_streaming and response.status_code == 200:
-                    return await self.handle_streaming_responses_completion(
+                    return await self.handle_streaming_responses_api_completion(
                         response, key, max_cost_for_model
                     )
 
                 if response.status_code == 200:
                     try:
-                        return await self.handle_non_streaming_responses_completion(
+                        return await self.handle_non_streaming_responses_api_completion(
                             response, key, session, max_cost_for_model
                         )
                     finally:
@@ -1154,7 +1158,7 @@ class BaseUpstreamProvider:
             query_params_func=self.prepare_params,
         )
 
-    async def handle_x_cashu_responses(
+    async def handle_x_cashu_responses_api(
         self,
         request: Request,
         x_cashu_token: str,
@@ -1170,7 +1174,7 @@ class BaseUpstreamProvider:
             headers=self.prepare_headers(dict(request.headers)),
             max_cost_for_model=max_cost_for_model,
             model_obj=model_obj,
-            prepare_responses_request_body_func=self.prepare_responses_request_body,
+            prepare_responses_api_request_body_func=self.prepare_responses_api_request_body,
             get_x_cashu_cost_func=self.get_x_cashu_cost,
             query_params_func=self.prepare_params,
         )

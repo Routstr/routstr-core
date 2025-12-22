@@ -343,7 +343,7 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         headers: dict,
         max_cost_for_model: int,
         model_obj: Model,
-        prepare_responses_request_body_func: Callable,
+        prepare_responses_api_request_body_func: Callable,
         get_x_cashu_cost_func: Callable,
         query_params_func: Callable,
     ) -> Response | StreamingResponse:
@@ -359,7 +359,7 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
                 headers=headers,
                 request_body=request_body,
                 query_params=query_params_func(path, request.query_params),
-                transform_body_func=prepare_responses_request_body_func,
+                transform_body_func=prepare_responses_api_request_body_func,
                 model_obj=model_obj,
             )
 
@@ -369,7 +369,7 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
 
             # Process Responses API response
             if path.startswith("responses"):
-                result = await self._handle_responses_completion(
+                result = await self._handle_responses_api_completion(
                     response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
                 )
                 background_tasks = BackgroundTasks()
@@ -383,7 +383,7 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         except CashuTokenError as e:
             return create_cashu_error_response(e, request, x_cashu_token)
 
-    async def _handle_responses_completion(
+    async def _handle_responses_api_completion(
         self,
         response: httpx.Response,
         amount: int,
@@ -399,15 +399,15 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         is_streaming = ResponsesApiProcessor.is_streaming_response(content_str)
 
         if is_streaming:
-            return await self._handle_streaming_responses_response(
+            return await self._handle_streaming_responses_api_response(
                 content_str, response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
             )
         else:
-            return await self._handle_non_streaming_responses_response(
+            return await self._handle_non_streaming_responses_api_response(
                 content_str, response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
             )
 
-    async def _handle_streaming_responses_response(
+    async def _handle_streaming_responses_api_response(
         self,
         content_str: str,
         response: httpx.Response,
@@ -449,7 +449,7 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
             media_type="text/plain",
         )
 
-    async def _handle_non_streaming_responses_response(
+    async def _handle_non_streaming_responses_api_response(
         self,
         content_str: str,
         response: httpx.Response,

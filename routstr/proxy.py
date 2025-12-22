@@ -146,7 +146,7 @@ async def proxy(
     request_body_dict = parse_request_body_json(request_body, path)
 
     if is_responses_api:
-        model_id = extract_model_from_responses_request(request_body_dict)
+        model_id = extract_model_from_responses_api_request(request_body_dict)
     else:
         model_id = request_body_dict.get("model", "unknown")
 
@@ -175,7 +175,7 @@ async def proxy(
 
     if x_cashu := headers.get("x-cashu", None):
         if is_responses_api:
-            return await upstream.handle_x_cashu_responses(
+            return await upstream.handle_x_cashu_responses_api(
                 request, x_cashu, path, max_cost_for_model, model_obj
             )
         else:
@@ -205,7 +205,7 @@ async def proxy(
     headers = upstream.prepare_headers(dict(request.headers))
 
     if is_responses_api:
-        response = await upstream.forward_responses_request(
+        response = await upstream.forward_responses_api_request(
             request,
             path,
             headers,
@@ -328,7 +328,7 @@ async def get_bearer_token_key(
         raise
 
 
-def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> str:
+def extract_model_from_responses_api_request(request_body_dict: dict[str, Any]) -> str:
     if model := request_body_dict.get("model"):
         return model
 
