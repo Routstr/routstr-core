@@ -341,7 +341,7 @@ def extract_model_from_responses_api_request(request_body_dict: dict[str, Any]) 
 
     logger.warning(
         "No model found in Responses API request",
-        extra={"body_keys": list(request_body_dict.keys())}
+        extra={"body_keys": list(request_body_dict.keys())},
     )
     return "unknown"
 

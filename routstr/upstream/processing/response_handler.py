@@ -31,7 +31,9 @@ class ResponseProcessor:
         return content_str.startswith("data:") or "data:" in content_str
 
     @staticmethod
-    def extract_usage_from_streaming(content_str: str) -> tuple[dict | None, str | None]:
+    def extract_usage_from_streaming(
+        content_str: str,
+    ) -> tuple[dict | None, str | None]:
         """Extract usage data and model from streaming response content.
 
         Args:
@@ -77,7 +79,9 @@ class ResponseProcessor:
         return cleaned_headers
 
     @staticmethod
-    async def create_streaming_generator(lines: list[str]) -> AsyncGenerator[bytes, None]:
+    async def create_streaming_generator(
+        lines: list[str],
+    ) -> AsyncGenerator[bytes, None]:
         """Create async generator for streaming response lines.
 
         Args:
@@ -133,7 +137,9 @@ class ResponsesApiProcessor(ResponseProcessor):
     """Processor specifically for Responses API responses."""
 
     @staticmethod
-    def extract_usage_with_reasoning_tokens(content_str: str) -> tuple[dict | None, str | None]:
+    def extract_usage_with_reasoning_tokens(
+        content_str: str,
+    ) -> tuple[dict | None, str | None]:
         """Extract usage data including reasoning tokens from Responses API content.
 
         Args:

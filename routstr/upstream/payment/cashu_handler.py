@@ -27,7 +27,9 @@ class CashuTokenError(Exception):
         super().__init__(message)
 
 
-async def validate_and_redeem_token(x_cashu_token: str, request: Request) -> tuple[int, str, str | None]:
+async def validate_and_redeem_token(
+    x_cashu_token: str, request: Request
+) -> tuple[int, str, str | None]:
     """Validate and redeem X-Cashu token.
 
     Args:
@@ -71,32 +73,24 @@ async def validate_and_redeem_token(x_cashu_token: str, request: Request) -> tup
             raise CashuTokenError(
                 "token_already_spent",
                 "The provided CASHU token has already been spent",
-                400
+                400,
             )
         elif "invalid token" in error_message.lower():
             raise CashuTokenError(
-                "invalid_token",
-                "The provided CASHU token is invalid",
-                400
+                "invalid_token", "The provided CASHU token is invalid", 400
             )
         elif "mint error" in error_message.lower():
             raise CashuTokenError(
-                "mint_error",
-                f"CASHU mint error: {error_message}",
-                422
+                "mint_error", f"CASHU mint error: {error_message}", 422
             )
         else:
             raise CashuTokenError(
-                "cashu_error",
-                f"CASHU token processing failed: {error_message}",
-                400
+                "cashu_error", f"CASHU token processing failed: {error_message}", 400
             )
 
 
 def create_cashu_error_response(
-    error: CashuTokenError,
-    request: Request,
-    x_cashu_token: str
+    error: CashuTokenError, request: Request, x_cashu_token: str
 ) -> Response:
     """Create error response for X-Cashu token errors.
 

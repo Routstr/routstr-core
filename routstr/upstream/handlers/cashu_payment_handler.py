@@ -89,7 +89,9 @@ class BaseCashuHandler:
                         },
                     )
 
-        raise Exception(f"failed to create refund after {max_retries} attempts: {str(last_exception)}")
+        raise Exception(
+            f"failed to create refund after {max_retries} attempts: {str(last_exception)}"
+        )
 
     def _calculate_refund_amount(self, amount: int, unit: str, cost_msats: int) -> int:
         """Calculate refund amount based on unit and cost."""
@@ -106,7 +108,7 @@ class BaseCashuHandler:
         amount: int,
         unit: str,
         mint: str | None,
-        api_type: str = "API"
+        api_type: str = "API",
     ) -> Response:
         """Handle upstream service errors with refund."""
         logger.warning(
@@ -183,12 +185,19 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
 
             # Handle upstream errors
             if response.status_code != 200:
-                return await self._handle_upstream_error(response, amount, unit, mint, "chat completion")
+                return await self._handle_upstream_error(
+                    response, amount, unit, mint, "chat completion"
+                )
 
             # Process chat completion response
             if path.endswith("chat/completions"):
                 result = await self._handle_chat_completion_response(
-                    response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    get_x_cashu_cost_func,
                 )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
@@ -218,11 +227,23 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
 
         if is_streaming:
             return await self._handle_streaming_response(
-                content_str, response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
+                content_str,
+                response,
+                amount,
+                unit,
+                max_cost_for_model,
+                mint,
+                get_x_cashu_cost_func,
             )
         else:
             return await self._handle_non_streaming_response(
-                content_str, response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
+                content_str,
+                response,
+                amount,
+                unit,
+                max_cost_for_model,
+                mint,
+                get_x_cashu_cost_func,
             )
 
     async def _handle_streaming_response(
@@ -236,17 +257,25 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
         get_x_cashu_cost_func: Callable,
     ) -> StreamingResponse:
         """Handle streaming chat completion response with refund calculation."""
-        response_headers = ChatCompletionProcessor.clean_response_headers(dict(response.headers))
+        response_headers = ChatCompletionProcessor.clean_response_headers(
+            dict(response.headers)
+        )
 
-        usage_data, model = ChatCompletionProcessor.extract_usage_from_streaming(content_str)
+        usage_data, model = ChatCompletionProcessor.extract_usage_from_streaming(
+            content_str
+        )
 
         if usage_data and model:
             try:
                 response_data = {"usage": usage_data, "model": model}
-                cost_data = await get_x_cashu_cost_func(response_data, max_cost_for_model)
+                cost_data = await get_x_cashu_cost_func(
+                    response_data, max_cost_for_model
+                )
 
                 if cost_data:
-                    refund_amount = self._calculate_refund_amount(amount, unit, cost_data.total_msats)
+                    refund_amount = self._calculate_refund_amount(
+                        amount, unit, cost_data.total_msats
+                    )
 
                     if refund_amount > 0:
                         refund_token = await self.send_refund(refund_amount, unit, mint)
@@ -277,14 +306,18 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
         get_x_cashu_cost_func: Callable,
     ) -> Response:
         """Handle non-streaming chat completion response with refund calculation."""
-        response_headers = ChatCompletionProcessor.clean_response_headers(dict(response.headers))
+        response_headers = ChatCompletionProcessor.clean_response_headers(
+            dict(response.headers)
+        )
 
         try:
             response_json = json.loads(content_str)
             cost_data = await get_x_cashu_cost_func(response_json, max_cost_for_model)
 
             if cost_data:
-                refund_amount = self._calculate_refund_amount(amount, unit, cost_data.total_msats)
+                refund_amount = self._calculate_refund_amount(
+                    amount, unit, cost_data.total_msats
+                )
 
                 if refund_amount > 0:
                     refund_token = await self.send_refund(refund_amount, unit, mint)
@@ -319,7 +352,9 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
                 media_type="application/json",
             )
 
-    def _create_default_streaming_response(self, response: httpx.Response) -> StreamingResponse:
+    def _create_default_streaming_response(
+        self, response: httpx.Response
+    ) -> StreamingResponse:
         """Create default streaming response for non-chat endpoints."""
         background_tasks = BackgroundTasks()
         background_tasks.add_task(response.aclose)
@@ -365,12 +400,19 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
 
             # Handle upstream errors
             if response.status_code != 200:
-                return await self._handle_upstream_error(response, amount, unit, mint, "Responses API")
+                return await self._handle_upstream_error(
+                    response, amount, unit, mint, "Responses API"
+                )
 
             # Process Responses API response
             if path.startswith("responses"):
                 result = await self._handle_responses_api_completion(
-                    response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    get_x_cashu_cost_func,
                 )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
@@ -400,11 +442,23 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
 
         if is_streaming:
             return await self._handle_streaming_responses_api_response(
-                content_str, response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
+                content_str,
+                response,
+                amount,
+                unit,
+                max_cost_for_model,
+                mint,
+                get_x_cashu_cost_func,
             )
         else:
             return await self._handle_non_streaming_responses_api_response(
-                content_str, response, amount, unit, max_cost_for_model, mint, get_x_cashu_cost_func
+                content_str,
+                response,
+                amount,
+                unit,
+                max_cost_for_model,
+                mint,
+                get_x_cashu_cost_func,
             )
 
     async def _handle_streaming_responses_api_response(
@@ -418,18 +472,26 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         get_x_cashu_cost_func: Callable,
     ) -> StreamingResponse:
         """Handle streaming Responses API response with refund calculation."""
-        response_headers = ResponsesApiProcessor.clean_response_headers(dict(response.headers))
+        response_headers = ResponsesApiProcessor.clean_response_headers(
+            dict(response.headers)
+        )
 
         # Extract usage data (ignoring reasoning tokens as per requirement)
-        usage_data, model = ResponsesApiProcessor.extract_usage_with_reasoning_tokens(content_str)
+        usage_data, model = ResponsesApiProcessor.extract_usage_with_reasoning_tokens(
+            content_str
+        )
 
         if usage_data and model:
             try:
                 response_data = {"usage": usage_data, "model": model}
-                cost_data = await get_x_cashu_cost_func(response_data, max_cost_for_model)
+                cost_data = await get_x_cashu_cost_func(
+                    response_data, max_cost_for_model
+                )
 
                 if cost_data:
-                    refund_amount = self._calculate_refund_amount(amount, unit, cost_data.total_msats)
+                    refund_amount = self._calculate_refund_amount(
+                        amount, unit, cost_data.total_msats
+                    )
 
                     if refund_amount > 0:
                         refund_token = await self.send_refund(refund_amount, unit, mint)
@@ -460,14 +522,18 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         get_x_cashu_cost_func: Callable,
     ) -> Response:
         """Handle non-streaming Responses API response with refund calculation."""
-        response_headers = ResponsesApiProcessor.clean_response_headers(dict(response.headers))
+        response_headers = ResponsesApiProcessor.clean_response_headers(
+            dict(response.headers)
+        )
 
         try:
             response_json = json.loads(content_str)
             cost_data = await get_x_cashu_cost_func(response_json, max_cost_for_model)
 
             if cost_data:
-                refund_amount = self._calculate_refund_amount(amount, unit, cost_data.total_msats)
+                refund_amount = self._calculate_refund_amount(
+                    amount, unit, cost_data.total_msats
+                )
 
                 if refund_amount > 0:
                     refund_token = await self.send_refund(refund_amount, unit, mint)
@@ -502,7 +568,9 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
                 media_type="application/json",
             )
 
-    def _create_default_streaming_response(self, response: httpx.Response) -> StreamingResponse:
+    def _create_default_streaming_response(
+        self, response: httpx.Response
+    ) -> StreamingResponse:
         """Create default streaming response for non-responses endpoints."""
         background_tasks = BackgroundTasks()
         background_tasks.add_task(response.aclose)
