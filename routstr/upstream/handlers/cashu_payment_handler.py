@@ -220,20 +220,67 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
         get_x_cashu_cost_func: Callable,
     ) -> Response | StreamingResponse:
         """Handle chat completion response processing."""
+        # For X-Cashu requests, we force non-streaming response even if upstream is streaming,
+        # because we need to calculate the refund and include it in the headers.
+        # Refund token must be in the headers, which are sent before the body.
+
         content = await response.aread()
         content_str = content.decode("utf-8") if isinstance(content, bytes) else content
 
-        is_streaming = ChatCompletionProcessor.is_streaming_response(content_str)
+        # Check if it was streaming content to process usage correctly
+        is_streaming_content = ChatCompletionProcessor.is_streaming_response(
+            content_str
+        )
 
-        if is_streaming:
-            return await self._handle_streaming_response(
-                content_str,
-                response,
-                amount,
-                unit,
-                max_cost_for_model,
-                mint,
-                get_x_cashu_cost_func,
+        if is_streaming_content:
+            # Buffer streaming content to calculate refund before sending headers.
+            # Headers (containing refund token) must be sent before body, preventing
+            # true streaming while supporting dynamic refunds.
+
+            # Extract usage data from buffered content
+            usage_data, model = ChatCompletionProcessor.extract_usage_from_streaming(
+                content_str
+            )
+
+            if usage_data and model:
+                try:
+                    response_data = {"usage": usage_data, "model": model}
+                    cost_data = await get_x_cashu_cost_func(
+                        response_data, max_cost_for_model
+                    )
+
+                    if cost_data:
+                        refund_amount = self._calculate_refund_amount(
+                            amount, unit, cost_data.total_msats
+                        )
+
+                        if refund_amount > 0:
+                            refund_token = await self.send_refund(
+                                refund_amount, unit, mint
+                            )
+                            # Refund token will be added to new response headers below
+                except Exception as e:
+                    logger.error(
+                        "Error calculating refund for buffered streaming response",
+                        extra={"error": str(e)},
+                    )
+
+            # We return a StreamingResponse that yields the buffered content
+            # This satisfies the client expecting a stream, while allowing us to set headers.
+
+            response_headers = ChatCompletionProcessor.clean_response_headers(
+                dict(response.headers)
+            )
+
+            if "refund_token" in locals() and refund_token:
+                response_headers["X-Cashu"] = refund_token
+
+            lines = content_str.strip().split("\n")
+            return StreamingResponse(
+                ChatCompletionProcessor.create_streaming_generator(lines),
+                status_code=response.status_code,
+                headers=response_headers,
+                media_type="text/event-stream",  # Keep original media type if possible, or text/event-stream
             )
         else:
             return await self._handle_non_streaming_response(
@@ -245,55 +292,6 @@ class ChatCompletionCashuHandler(BaseCashuHandler):
                 mint,
                 get_x_cashu_cost_func,
             )
-
-    async def _handle_streaming_response(
-        self,
-        content_str: str,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None,
-        get_x_cashu_cost_func: Callable,
-    ) -> StreamingResponse:
-        """Handle streaming chat completion response with refund calculation."""
-        response_headers = ChatCompletionProcessor.clean_response_headers(
-            dict(response.headers)
-        )
-
-        usage_data, model = ChatCompletionProcessor.extract_usage_from_streaming(
-            content_str
-        )
-
-        if usage_data and model:
-            try:
-                response_data = {"usage": usage_data, "model": model}
-                cost_data = await get_x_cashu_cost_func(
-                    response_data, max_cost_for_model
-                )
-
-                if cost_data:
-                    refund_amount = self._calculate_refund_amount(
-                        amount, unit, cost_data.total_msats
-                    )
-
-                    if refund_amount > 0:
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
-                        response_headers["X-Cashu"] = refund_token
-
-            except Exception as e:
-                logger.error(
-                    "Error calculating cost for streaming response",
-                    extra={"error": str(e), "error_type": type(e).__name__},
-                )
-
-        lines = content_str.strip().split("\n")
-        return StreamingResponse(
-            ChatCompletionProcessor.create_streaming_generator(lines),
-            status_code=response.status_code,
-            headers=response_headers,
-            media_type="text/plain",
-        )
 
     async def _handle_non_streaming_response(
         self,
@@ -435,20 +433,53 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         get_x_cashu_cost_func: Callable,
     ) -> Response | StreamingResponse:
         """Handle Responses API completion response processing."""
+        # Force non-streaming for X-Cashu to handle refunds in headers
         content = await response.aread()
         content_str = content.decode("utf-8") if isinstance(content, bytes) else content
 
-        is_streaming = ResponsesApiProcessor.is_streaming_response(content_str)
+        is_streaming_content = ResponsesApiProcessor.is_streaming_response(content_str)
 
-        if is_streaming:
-            return await self._handle_streaming_responses_api_response(
-                content_str,
-                response,
-                amount,
-                unit,
-                max_cost_for_model,
-                mint,
-                get_x_cashu_cost_func,
+        if is_streaming_content:
+            usage_data, model = (
+                ResponsesApiProcessor.extract_usage_with_reasoning_tokens(content_str)
+            )
+
+            refund_token = None
+            if usage_data and model:
+                try:
+                    response_data = {"usage": usage_data, "model": model}
+                    cost_data = await get_x_cashu_cost_func(
+                        response_data, max_cost_for_model
+                    )
+
+                    if cost_data:
+                        refund_amount = self._calculate_refund_amount(
+                            amount, unit, cost_data.total_msats
+                        )
+
+                        if refund_amount > 0:
+                            refund_token = await self.send_refund(
+                                refund_amount, unit, mint
+                            )
+                except Exception as e:
+                    logger.error(
+                        "Error calculating refund for buffered Responses API response",
+                        extra={"error": str(e)},
+                    )
+
+            response_headers = ResponsesApiProcessor.clean_response_headers(
+                dict(response.headers)
+            )
+
+            if refund_token:
+                response_headers["X-Cashu"] = refund_token
+
+            lines = content_str.strip().split("\n")
+            return StreamingResponse(
+                ResponsesApiProcessor.create_streaming_generator(lines),
+                status_code=response.status_code,
+                headers=response_headers,
+                media_type="text/event-stream",
             )
         else:
             return await self._handle_non_streaming_responses_api_response(
@@ -460,56 +491,6 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
                 mint,
                 get_x_cashu_cost_func,
             )
-
-    async def _handle_streaming_responses_api_response(
-        self,
-        content_str: str,
-        response: httpx.Response,
-        amount: int,
-        unit: str,
-        max_cost_for_model: int,
-        mint: str | None,
-        get_x_cashu_cost_func: Callable,
-    ) -> StreamingResponse:
-        """Handle streaming Responses API response with refund calculation."""
-        response_headers = ResponsesApiProcessor.clean_response_headers(
-            dict(response.headers)
-        )
-
-        # Extract usage data (ignoring reasoning tokens as per requirement)
-        usage_data, model = ResponsesApiProcessor.extract_usage_with_reasoning_tokens(
-            content_str
-        )
-
-        if usage_data and model:
-            try:
-                response_data = {"usage": usage_data, "model": model}
-                cost_data = await get_x_cashu_cost_func(
-                    response_data, max_cost_for_model
-                )
-
-                if cost_data:
-                    refund_amount = self._calculate_refund_amount(
-                        amount, unit, cost_data.total_msats
-                    )
-
-                    if refund_amount > 0:
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
-                        response_headers["X-Cashu"] = refund_token
-
-            except Exception as e:
-                logger.error(
-                    "Error calculating cost for streaming Responses API response",
-                    extra={"error": str(e), "error_type": type(e).__name__},
-                )
-
-        lines = content_str.strip().split("\n")
-        return StreamingResponse(
-            ResponsesApiProcessor.create_streaming_generator(lines),
-            status_code=response.status_code,
-            headers=response_headers,
-            media_type="text/plain",
-        )
 
     async def _handle_non_streaming_responses_api_response(
         self,
@@ -549,11 +530,13 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
         except json.JSONDecodeError:
             # Emergency refund on parse error
             emergency_refund = amount
-            refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
+            refund_token = await self.send_refund(
+                emergency_refund, unit=unit, mint=mint
+            )
             response_headers["X-Cashu"] = refund_token
 
             logger.warning(
-                "Emergency refund issued for Responses API due to JSON parse error",
+                "Emergency refund issued due to JSON parse error in Responses API",
                 extra={
                     "original_amount": amount,
                     "refund_amount": emergency_refund,
@@ -571,7 +554,7 @@ class ResponsesApiCashuHandler(BaseCashuHandler):
     def _create_default_streaming_response(
         self, response: httpx.Response
     ) -> StreamingResponse:
-        """Create default streaming response for non-responses endpoints."""
+        """Create default streaming response for non-chat endpoints."""
         background_tasks = BackgroundTasks()
         background_tasks.add_task(response.aclose)
 
