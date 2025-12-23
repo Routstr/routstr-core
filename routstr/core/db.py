@@ -68,6 +68,8 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     sats_pricing: str | None = Field(default=None)
     per_request_limits: str | None = Field(default=None)
     top_provider: str | None = Field(default=None)
+    canonical_slug: str | None = Field(default=None, description="Canonical model slug")
+    alias_ids: str | None = Field(default=None, description="JSON array of model alias IDs")
     enabled: bool = Field(default=True, description="Whether this model is enabled")
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 

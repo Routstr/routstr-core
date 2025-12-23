@@ -185,6 +185,7 @@ def _row_to_model(
         enabled=row.enabled,
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
+        alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
     )
 
     if apply_provider_fee:

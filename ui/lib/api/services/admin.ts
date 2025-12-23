@@ -354,8 +354,9 @@ export class AdminService {
       original: data.pricing,
       converted: payload.pricing,
     });
-    const model = await apiClient.patch<AdminModel>(
-      `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`,
+    // Use the same POST endpoint for both create and update (upsert)
+    const model = await apiClient.post<AdminModel>(
+      `/admin/api/upstream-providers/${providerId}/models`,
       payload
     );
     return {

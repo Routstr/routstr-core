@@ -206,19 +206,20 @@ def create_model_mappings(
         alias: str, model: "Model", provider: "BaseUpstreamProvider"
     ) -> None:
         """Set alias to model/provider if not set or if new model is preferred."""
-        existing_model = model_instances.get(alias)
+        alias_lower = alias.lower()
+        existing_model = model_instances.get(alias_lower)
         if not existing_model:
             # No existing mapping, set it
-            model_instances[alias] = model
-            provider_map[alias] = provider
+            model_instances[alias_lower] = model
+            provider_map[alias_lower] = provider
         else:
             # Check if candidate should replace existing
-            existing_provider = provider_map[alias]
+            existing_provider = provider_map[alias_lower]
             if should_prefer_model(
                 model, provider, existing_model, existing_provider, alias
             ):
-                model_instances[alias] = model
-                provider_map[alias] = provider
+                model_instances[alias_lower] = model
+                provider_map[alias_lower] = provider
 
     def process_provider_models(
         upstream: "BaseUpstreamProvider", is_openrouter: bool = False
