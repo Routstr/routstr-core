@@ -734,51 +734,53 @@ class BaseUpstreamProvider:
                     await client.aclose()
                 return mapped_error
 
-            if path.endswith("chat/completions"):
-                client_wants_streaming = False
-                if request_body:
-                    try:
-                        request_data = json.loads(request_body)
-                        client_wants_streaming = request_data.get("stream", False)
-                        logger.debug(
-                            "Chat completion request analysis",
-                            extra={
-                                "client_wants_streaming": client_wants_streaming,
-                                "model": request_data.get("model", "unknown"),
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
-                        )
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Failed to parse request body JSON for streaming detection"
-                        )
+            if path.endswith("chat/completions") or path.endswith("embeddings"):
+                if path.endswith("chat/completions"):
+                    client_wants_streaming = False
+                    if request_body:
+                        try:
+                            request_data = json.loads(request_body)
+                            client_wants_streaming = request_data.get("stream", False)
+                            logger.debug(
+                                "Chat completion request analysis",
+                                extra={
+                                    "client_wants_streaming": client_wants_streaming,
+                                    "model": request_data.get("model", "unknown"),
+                                    "key_hash": key.hashed_key[:8] + "...",
+                                },
+                            )
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Failed to parse request body JSON for streaming detection"
+                            )
 
-                content_type = response.headers.get("content-type", "")
-                upstream_is_streaming = "text/event-stream" in content_type
-                is_streaming = client_wants_streaming and upstream_is_streaming
+                    content_type = response.headers.get("content-type", "")
+                    upstream_is_streaming = "text/event-stream" in content_type
+                    is_streaming = client_wants_streaming and upstream_is_streaming
 
-                logger.debug(
-                    "Response type analysis",
-                    extra={
-                        "is_streaming": is_streaming,
-                        "client_wants_streaming": client_wants_streaming,
-                        "upstream_is_streaming": upstream_is_streaming,
-                        "content_type": content_type,
-                        "key_hash": key.hashed_key[:8] + "...",
-                    },
-                )
-
-                if is_streaming and response.status_code == 200:
-                    result = await self.handle_streaming_chat_completion(
-                        response, key, max_cost_for_model
+                    logger.debug(
+                        "Response type analysis",
+                        extra={
+                            "is_streaming": is_streaming,
+                            "client_wants_streaming": client_wants_streaming,
+                            "upstream_is_streaming": upstream_is_streaming,
+                            "content_type": content_type,
+                            "key_hash": key.hashed_key[:8] + "...",
+                        },
                     )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    background_tasks.add_task(client.aclose)
-                    result.background = background_tasks
-                    return result
 
-                elif response.status_code == 200:
+                    if is_streaming and response.status_code == 200:
+                        result = await self.handle_streaming_chat_completion(
+                            response, key, max_cost_for_model
+                        )
+                        background_tasks = BackgroundTasks()
+                        background_tasks.add_task(response.aclose)
+                        background_tasks.add_task(client.aclose)
+                        result.background = background_tasks
+                        return result
+
+                # Handle both non-streaming chat completions and embeddings
+                if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_chat_completion(
                             response, key, session, max_cost_for_model
@@ -1519,9 +1521,9 @@ class BaseUpstreamProvider:
                     error_response.headers["X-Cashu"] = refund_token
                     return error_response
 
-                if path.endswith("chat/completions"):
+                if path.endswith("chat/completions") or path.endswith("embeddings"):
                     logger.debug(
-                        "Processing chat completion response",
+                        "Processing completion/embeddings response",
                         extra={"path": path, "amount": amount, "unit": unit},
                     )
 
@@ -1770,15 +1772,32 @@ class BaseUpstreamProvider:
     async def _fetch_openrouter_models(self) -> list[dict]:
         """Fetch models from OpenRouter API."""
         url = "https://openrouter.ai/api/v1/models"
+        embeddings_url = "https://openrouter.ai/api/v1/embeddings/models"
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            models = response.json()
-            return [
-                model
-                for model in models.get("data", [])
-                if ":free" not in model.get("id", "").lower()
-            ]
+            models_response, embeddings_response = await asyncio.gather(
+                client.get(url), client.get(embeddings_url), return_exceptions=True
+            )
+
+            all_models = []
+
+            def process_models_response(
+                response: httpx.Response | BaseException,
+            ) -> list[dict]:
+                if not isinstance(response, BaseException):
+                    response.raise_for_status()
+                    data = response.json()
+                    return [
+                        model
+                        for model in data.get("data", [])
+                        if ":free" not in model.get("id", "").lower()
+                    ]
+                return []
+
+            all_models.extend(process_models_response(models_response))
+            all_models.extend(process_models_response(embeddings_response))
+
+            return all_models
 
     async def _fetch_provider_models(self) -> dict:
         """Fetch models from provider's API."""

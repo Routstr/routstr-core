@@ -93,12 +93,32 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{base_url}/models", timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            models_response, embeddings_response = await asyncio.gather(
+                client.get(f"{base_url}/models", timeout=30),
+                client.get(f"{base_url}/embeddings/models", timeout=30),
+                return_exceptions=True,
+            )
+
+            def process_models_response(
+                response: httpx.Response | BaseException,
+            ) -> list[dict]:
+                if not isinstance(response, BaseException):
+                    response.raise_for_status()
+                    data = response.json()
+                    return [
+                        model
+                        for model in data.get("data", [])
+                        if ":free" not in model.get("id", "").lower()
+                    ]
+                return []
 
             models_data: list[dict] = []
-            for model in data.get("data", []):
+            models_data.extend(process_models_response(models_response))
+            models_data.extend(process_models_response(embeddings_response))
+
+            # Apply source filter and exclusions
+            filtered_models = []
+            for model in models_data:
                 model_id = model.get("id", "")
 
                 if source_filter:
@@ -116,9 +136,9 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 if not _has_valid_pricing(model):
                     continue
 
-                models_data.append(model)
+                filtered_models.append(model)
 
-            return models_data
+            return filtered_models
     except Exception as e:
         logger.error(f"Error (async) fetching models from OpenRouter API: {e}")
         return []
