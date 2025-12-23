@@ -734,7 +734,6 @@ class BaseUpstreamProvider:
                     await client.aclose()
                 return mapped_error
 
-            # Handle endpoints that require cost calculation and payment adjustment
             if path.endswith("chat/completions") or path.endswith("embeddings"):
                 if path.endswith("chat/completions"):
                     client_wants_streaming = False

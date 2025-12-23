@@ -50,7 +50,13 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch all OpenRouter models."""
         models_data = await async_fetch_openrouter_models()
-        return [Model(**model) for model in models_data]  # type: ignore
+        models = [Model(**model) for model in models_data]  # type: ignore
+        # manual alias for openai/text-embedding-ada-002 due to openrouter api bug
+        for model in models:
+            if model.id == "openai/text-embedding-ada-002":
+                model.alias_ids = ["text-embedding-ada-002-v2"]
+                break
+        return models
 
     async def get_balance(self) -> float | None:
         """Get the current account balance from OpenRouter.
