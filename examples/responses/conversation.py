@@ -7,7 +7,7 @@ client = OpenAI(
     base_url=os.environ.get("API_URL", "https://api.routstr.com/v1"),
 )
 
-conversation = []
+conversation = []  # type: ignore
 
 # First turn
 response1 = client.responses.create(  # type: ignore
