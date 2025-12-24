@@ -73,6 +73,7 @@ packages = ["routstr"]
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
+exclude = ["examples"]
 
 [tool.mypy]
 python_version = "3.11"
