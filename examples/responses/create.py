@@ -1,4 +1,5 @@
 import os
+
 from openai import OpenAI
 
 # The OpenAI SDK handles the 'responses' endpoint if it's updated to the latest version

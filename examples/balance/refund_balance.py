@@ -1,4 +1,5 @@
 import os
+
 import httpx
 
 # Use your Cashu token or API key as the Bearer token

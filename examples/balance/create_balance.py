@@ -1,4 +1,5 @@
 import os
+
 import httpx
 
 # Send a Cashu token to the /create endpoint to get a persistent API key
