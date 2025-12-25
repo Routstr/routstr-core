@@ -2441,7 +2441,6 @@ async def upsert_provider_model(
             existing_row.alias_ids = (
                 json.dumps(payload.alias_ids) if payload.alias_ids else None
             )
-            was_disabled = not existing_row.enabled
             existing_row.enabled = payload.enabled
 
             session.add(existing_row)
@@ -2449,16 +2448,6 @@ async def upsert_provider_model(
             await session.refresh(existing_row)
             row = existing_row
 
-            if was_disabled and payload.enabled:
-                from ..payment.models import _cleanup_enabled_models_once
-
-                try:
-                    await _cleanup_enabled_models_once()
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to run model cleanup after enabling: {e}",
-                        extra={"model_id": payload.id, "error": str(e)},
-                    )
         else:
             # Create new model
             logger.info(f"Creating new model: {payload.id}")
