@@ -121,6 +121,7 @@ export interface AdminModelAsModel {
   soft_deleted?: boolean;
   has_own_api_key: boolean;
   api_key_type: string;
+  alias_ids?: string[] | null;
 }
 
 export interface AdminModelGroup {
@@ -207,6 +208,7 @@ export class AdminService {
       soft_deleted: !adminModel.enabled,
       has_own_api_key: false,
       api_key_type: 'group',
+      alias_ids: adminModel.alias_ids,
     };
   }
 
