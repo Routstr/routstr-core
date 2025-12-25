@@ -1498,8 +1498,6 @@ class ModelCreate(BaseModel):
     enabled: bool = True
 
 
-
-
 @admin_router.get("/models", response_class=HTMLResponse)
 async def admin_models(request: Request) -> str:
     if is_admin_authenticated(request):
@@ -2410,7 +2408,9 @@ async def upsert_provider_model(
     provider_id: int, payload: ModelCreate
 ) -> dict[str, object]:
     print(payload)
-    logger.info(f"UPSERT_PROVIDER_MODEL called: provider_id={provider_id}, model_id={payload.id}")
+    logger.info(
+        f"UPSERT_PROVIDER_MODEL called: provider_id={provider_id}, model_id={payload.id}"
+    )
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, provider_id)
         if not provider:
@@ -2451,6 +2451,7 @@ async def upsert_provider_model(
 
             if was_disabled and payload.enabled:
                 from ..payment.models import _cleanup_enabled_models_once
+
                 try:
                     await _cleanup_enabled_models_once()
                 except Exception as e:
@@ -2503,7 +2504,9 @@ async def update_provider_model_legacy(
     provider_id: int, model_id: str, payload: ModelCreate
 ) -> dict[str, object]:
     """Legacy PATCH endpoint - redirects to upsert POST endpoint for backward compatibility."""
-    logger.info(f"LEGACY_PATCH_UPDATE called: provider_id={provider_id}, model_id={model_id}")
+    logger.info(
+        f"LEGACY_PATCH_UPDATE called: provider_id={provider_id}, model_id={model_id}"
+    )
     return await upsert_provider_model(provider_id, payload)
 
 
@@ -2525,8 +2528,6 @@ async def get_provider_model(provider_id: int, model_id: str) -> dict[str, objec
         return _row_to_model(
             row, apply_provider_fee=True, provider_fee=provider.provider_fee
         ).dict()  # type: ignore
-
-
 
 
 @admin_router.delete(
