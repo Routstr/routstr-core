@@ -8,8 +8,7 @@ if TYPE_CHECKING:
     from ..core.settings import Settings
 
 from ..core import get_logger
-from ..core.db import (AsyncSession, ModelRow, UpstreamProviderRow,
-                       create_session)
+from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
 from ..payment.models import Model
 from .base import BaseUpstreamProvider
 
