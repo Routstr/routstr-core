@@ -1,0 +1,8 @@
+{
+    "error": {
+        "message": "Input required: specify \"prompt\" or \"messages\"",
+        "type": "invalid_request_error",
+        "code": 400
+    },
+    "request_id": "586e0aec-351f-413a-8641-ddda4a0cbadf"
+}

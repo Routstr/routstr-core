@@ -1,0 +1,8 @@
+{
+    "error": {
+        "message": "Model 'claude-4.5-sonnet-thinking' not found",
+        "type": "invalid_model",
+        "code": 400
+    },
+    "request_id": "d410f512-3221-4047-a4ee-9be6e3fabe38"
+}
