@@ -41,6 +41,10 @@ export function ModelSearchFilter({
           model.name.toLowerCase().includes(query) ||
           model.full_name.toLowerCase().includes(query) ||
           model.provider.toLowerCase().includes(query) ||
+          (model.alias_ids &&
+            model.alias_ids.some((alias) =>
+              alias.toLowerCase().includes(query)
+            )) ||
           (model.description &&
             model.description.toLowerCase().includes(query)) ||
           model.modelType.toLowerCase().includes(query)

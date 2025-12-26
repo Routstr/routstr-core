@@ -70,7 +70,7 @@ def get_model_instance(model_id: str) -> Model | None:
 
 def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
     """Get UpstreamProvider for model ID from global cache."""
-    return _provider_map.get(model_id)
+    return _provider_map.get(model_id.lower())
 
 
 def get_unique_models() -> list[Model]:
