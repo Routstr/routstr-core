@@ -382,7 +382,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
 
 async def _update_sats_pricing_once() -> None:
     """Update sats pricing once for all provider models (in-memory only)."""
-    from ..proxy import get_upstreams
+    from ..proxy import get_upstreams, refresh_model_maps
 
     upstreams = get_upstreams()
     sats_to_usd = sats_usd_price()
@@ -399,6 +399,7 @@ async def _update_sats_pricing_once() -> None:
 
     if updated_count > 0:
         logger.info("Updated sats pricing", extra={"models_updated": updated_count})
+        await refresh_model_maps()
 
 
 async def update_sats_pricing() -> None:
@@ -409,7 +410,13 @@ async def update_sats_pricing() -> None:
     except Exception:
         pass
 
-    await _update_sats_pricing_once()
+    try:
+        await _update_sats_pricing_once()
+    except Exception as e:
+        logger.warning(
+            "Initial sats pricing update failed (will retry in loop)",
+            extra={"error": str(e)},
+        )
 
     while True:
         try:

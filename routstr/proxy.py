@@ -80,31 +80,27 @@ def get_unique_models() -> list[Model]:
 
 async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
+    from sqlalchemy.orm import selectinload
+
     global _model_instances, _provider_map, _unique_models
 
-    # Gather database overrides and disabled models
     async with create_session() as session:
-        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
-        override_rows = result.all()
-
-        provider_result = await session.exec(select(UpstreamProviderRow))
-        providers_by_id = {p.id: p for p in provider_result.all()}
-
-        overrides_by_id: dict[str, tuple[ModelRow, float]] = {
-            row.id: (
-                row,
-                providers_by_id[row.upstream_provider_id].provider_fee
-                if row.upstream_provider_id in providers_by_id
-                else 1.01,
-            )
-            for row in override_rows
-            if row.upstream_provider_id is not None
-        }
-
-        disabled_result = await session.exec(
-            select(ModelRow.id).where(ModelRow.enabled == False)  # noqa: E712
+        # Fetch all providers with their models in a single logical operation
+        query = select(UpstreamProviderRow).options(
+            selectinload(UpstreamProviderRow.models)  # type: ignore
         )
-        disabled_model_ids = {row for row in disabled_result.all()}
+        result = await session.exec(query)
+        provider_rows = result.all()
+
+    overrides_by_id: dict[str, tuple[ModelRow, float]] = {}
+    disabled_model_ids: set[str] = set()
+
+    for provider in provider_rows:
+        for model in provider.models:
+            if model.enabled:
+                overrides_by_id[model.id] = (model, provider.provider_fee)
+            else:
+                disabled_model_ids.add(model.id)
 
     _model_instances, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,

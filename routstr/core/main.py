@@ -78,6 +78,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         _update_prices_task = asyncio.create_task(_update_prices())
         _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
 
+        # ensure both setup tasks complete
+        await asyncio.gather(
+            _update_prices_task, _initialize_upstreams_task, return_exceptions=True
+        )
+
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
         if global_settings.models_refresh_interval_seconds > 0:
@@ -90,11 +95,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             nip91_task = asyncio.create_task(announce_provider())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
-
-        # ensure both setup tasks complete
-        await asyncio.gather(
-            _update_prices_task, _initialize_upstreams_task, return_exceptions=True
-        )
 
         yield
 
