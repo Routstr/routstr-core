@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..core.settings import Settings
 
-
 from ..core import get_logger
-from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
+from ..core.db import (AsyncSession, ModelRow, UpstreamProviderRow,
+                       create_session)
 from ..payment.models import Model
 from .base import BaseUpstreamProvider
 
@@ -145,6 +145,17 @@ async def refresh_upstreams_models_periodically(
                         f"Error refreshing models for {upstream.base_url}",
                         extra={"error": str(e), "error_type": type(e).__name__},
                     )
+
+            try:
+                from ..payment.models import _update_sats_pricing_once
+
+                await _update_sats_pricing_once()
+            except Exception as e:
+                logger.warning(f"Failed to update pricing after model refresh: {e}")
+                from ..proxy import refresh_model_maps
+
+                await refresh_model_maps()
+
         except asyncio.CancelledError:
             break
         except Exception as e:
