@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..core.settings import Settings
+
+from sqlmodel import select
 
 from ..core import get_logger
 from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
@@ -176,8 +179,6 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
     Seeds database with providers from settings if empty, then loads and instantiates
     provider instances from database records, and refreshes their models cache.
     """
-    from sqlmodel import select
-
     from ..core.settings import settings
 
     async with create_session() as session:
@@ -193,16 +194,16 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
             result = await session.exec(select(UpstreamProviderRow))
             existing_providers = result.all()
 
-        upstreams: list[BaseUpstreamProvider] = []
-        for provider_row in existing_providers:
+        async def _init_single_provider(
+            provider_row: UpstreamProviderRow,
+        ) -> BaseUpstreamProvider | None:
             if not provider_row.enabled:
                 logger.debug(f"Skipping disabled provider: {provider_row.base_url}")
-                continue
+                return None
 
             provider = _instantiate_provider(provider_row)
             if provider:
                 await provider.refresh_models_cache()
-                upstreams.append(provider)
                 logger.debug(
                     f"Initialized {provider_row.provider_type} provider",
                     extra={
@@ -210,6 +211,12 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
                         "models_cached": len(provider.get_cached_models()),
                     },
                 )
+                return provider
+            return None
+
+        tasks = [_init_single_provider(row) for row in existing_providers]
+        results = await asyncio.gather(*tasks)
+        upstreams = [p for p in results if p is not None]
 
         return upstreams
 
