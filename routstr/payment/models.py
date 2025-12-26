@@ -5,10 +5,9 @@ import random
 import httpx
 from fastapi import APIRouter, Depends
 from pydantic.v1 import BaseModel
-from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..core.db import ModelRow, create_session, get_session
+from ..core.db import ModelRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
@@ -93,12 +92,32 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{base_url}/models", timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            models_response, embeddings_response = await asyncio.gather(
+                client.get(f"{base_url}/models", timeout=30),
+                client.get(f"{base_url}/embeddings/models", timeout=30),
+                return_exceptions=True,
+            )
+
+            def process_models_response(
+                response: httpx.Response | BaseException,
+            ) -> list[dict]:
+                if not isinstance(response, BaseException):
+                    response.raise_for_status()
+                    data = response.json()
+                    return [
+                        model
+                        for model in data.get("data", [])
+                        if ":free" not in model.get("id", "").lower()
+                    ]
+                return []
 
             models_data: list[dict] = []
-            for model in data.get("data", []):
+            models_data.extend(process_models_response(models_response))
+            models_data.extend(process_models_response(embeddings_response))
+
+            # Apply source filter and exclusions
+            filtered_models = []
+            for model in models_data:
                 model_id = model.get("id", "")
 
                 if source_filter:
@@ -116,9 +135,9 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 if not _has_valid_pricing(model):
                     continue
 
-                models_data.append(model)
+                filtered_models.append(model)
 
-            return models_data
+            return filtered_models
     except Exception as e:
         logger.error(f"Error (async) fetching models from OpenRouter API: {e}")
         return []
@@ -165,6 +184,7 @@ def _row_to_model(
         enabled=row.enabled,
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
+        alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
     )
 
     if apply_provider_fee:
@@ -362,7 +382,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
 
 async def _update_sats_pricing_once() -> None:
     """Update sats pricing once for all provider models (in-memory only)."""
-    from ..proxy import get_upstreams
+    from ..proxy import get_upstreams, refresh_model_maps
 
     upstreams = get_upstreams()
     sats_to_usd = sats_usd_price()
@@ -379,6 +399,7 @@ async def _update_sats_pricing_once() -> None:
 
     if updated_count > 0:
         logger.info("Updated sats pricing", extra={"models_updated": updated_count})
+        await refresh_model_maps()
 
 
 async def update_sats_pricing() -> None:
@@ -389,7 +410,13 @@ async def update_sats_pricing() -> None:
     except Exception:
         pass
 
-    await _update_sats_pricing_once()
+    try:
+        await _update_sats_pricing_once()
+    except Exception as e:
+        logger.warning(
+            "Initial sats pricing update failed (will retry in loop)",
+            extra={"error": str(e)},
+        )
 
     while True:
         try:
@@ -411,114 +438,6 @@ async def update_sats_pricing() -> None:
             break
         except Exception as e:
             logger.error(f"Error updating sats pricing: {e}")
-
-
-async def cleanup_enabled_models_periodically() -> None:
-    """Background task to clean up enabled models that match upstream pricing.
-
-    When model is enabled (enabled=True), remove it from DB if it matches upstream pricing.
-    Keep it in DB only if pricing differs from upstream or if it's disabled.
-    """
-    interval = getattr(
-        settings, "models_cleanup_interval_seconds", 300
-    )  # 5 minutes default
-    if not interval or interval <= 0:
-        return
-
-    while True:
-        try:
-            await _cleanup_enabled_models_once()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(
-                "Error during enabled models cleanup",
-                extra={"error": str(e), "error_type": type(e).__name__},
-            )
-
-        try:
-            jitter = max(0.0, float(interval) * 0.1)
-            await asyncio.sleep(interval + random.uniform(0, jitter))
-        except asyncio.CancelledError:
-            break
-
-
-async def _cleanup_enabled_models_once() -> None:
-    """Clean up enabled models that match upstream pricing."""
-    from ..proxy import get_upstreams
-
-    async with create_session() as session:
-        # Get all enabled models from DB
-        result = await session.exec(
-            select(ModelRow).where(
-                ModelRow.enabled,  # Only enabled models
-            )
-        )
-        db_models = result.all()
-
-        if not db_models:
-            return
-
-        upstreams = get_upstreams()
-        models_to_remove = []
-
-        for db_model in db_models:
-            # Find corresponding upstream model
-            upstream_model = None
-            for upstream in upstreams:
-                upstream_model = upstream.get_cached_model_by_id(db_model.id)
-                if upstream_model:
-                    break
-
-            if not upstream_model:
-                continue
-
-            # Compare pricing to see if they match
-            db_pricing = json.loads(db_model.pricing)
-            upstream_pricing = upstream_model.pricing.dict()
-
-            # Check if pricing matches (with small tolerance for float comparison)
-            pricing_matches = _pricing_matches(db_pricing, upstream_pricing)
-
-            if pricing_matches:
-                models_to_remove.append(db_model)
-                logger.info(
-                    f"Removing enabled model {db_model.id} - matches upstream pricing",
-                    extra={"model_id": db_model.id},
-                )
-
-        # Remove models that match upstream pricing
-        for model in models_to_remove:
-            await session.delete(model)
-
-        if models_to_remove:
-            await session.commit()
-            logger.info(
-                f"Cleaned up {len(models_to_remove)} enabled models that match upstream pricing"
-            )
-
-
-def _pricing_matches(
-    db_pricing: dict, upstream_pricing: dict, tolerance: float = 0.0
-) -> bool:
-    """Check if pricing dictionaries match within tolerance."""
-    keys_to_compare = [
-        "prompt",
-        "completion",
-        "request",
-        "image",
-        "web_search",
-        "internal_reasoning",
-    ]
-
-    for key in keys_to_compare:
-        db_val = int(float(db_pricing.get(key, 0.0)) * 1000000)
-        upstream_val = int(float(upstream_pricing.get(key, 0.0)) * 1000000)
-
-        if abs(db_val - upstream_val) > tolerance:
-            return False
-
-    return True
 
 
 @models_router.get("/v1/models")

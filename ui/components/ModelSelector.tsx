@@ -542,6 +542,7 @@ export function ModelSelector({
       top_provider: null,
       upstream_provider_id: providerId,
       enabled: model.isEnabled,
+      alias_ids: model.alias_ids || null,
     };
 
     setModelDialogState({
@@ -585,6 +586,7 @@ export function ModelSelector({
       top_provider: null,
       upstream_provider_id: providerId,
       enabled: model.isEnabled,
+      alias_ids: model.alias_ids || null,
     };
 
     setModelDialogState({

@@ -31,6 +31,7 @@ export const ModelSchema = z.object({
   // API key type indicators
   has_own_api_key: z.boolean(),
   api_key_type: z.string(), // "individual" or "group"
+  alias_ids: z.array(z.string()).nullable().optional(),
 });
 
 // Schema for a model with additional provider-specific settings
