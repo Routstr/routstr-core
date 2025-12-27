@@ -137,20 +137,14 @@ async def proxy(
             "unauthorized", "Unauthorized", 401, request=request
         )
 
-    logger.info(  # TODO: move to middleware, async
-        "Received proxy request",
-        extra={
-            "method": request.method,
-            "path": path,
-            "client_host": request.client.host if request.client else "unknown",
-            "user_agent": request.headers.get("user-agent", "unknown")[:100],
-        },
-    )
-
+    is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
     request_body_dict = parse_request_body_json(request_body, path)
 
-    model_id = request_body_dict.get("model", "unknown")
+    if is_responses_api:
+        model_id = extract_model_from_responses_request(request_body_dict)
+    else:
+        model_id = request_body_dict.get("model", "unknown")
 
     model_obj = get_model_instance(model_id)
     if not model_obj:
@@ -176,9 +170,14 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        return await upstream.handle_x_cashu(
-            request, x_cashu, path, max_cost_for_model, model_obj
-        )
+        if is_responses_api:
+            return await upstream.handle_x_cashu_responses(
+                request, x_cashu, path, max_cost_for_model, model_obj
+            )
+        else:
+            return await upstream.handle_x_cashu(
+                request, x_cashu, path, max_cost_for_model, model_obj
+            )
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
@@ -193,28 +192,36 @@ async def proxy(
             )
 
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
-        # TODO: why is this needed? can we remove it?
         headers = upstream.prepare_headers(dict(request.headers))
         return await upstream.forward_get_request(request, path, headers)
 
-    # Only pay for request if we have request body data (for completions endpoints)
     if request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
-    # Prepare headers for upstream
     headers = upstream.prepare_headers(dict(request.headers))
 
-    # Forward to upstream and handle response
-    response = await upstream.forward_request(
-        request,
-        path,
-        headers,
-        request_body,
-        key,
-        max_cost_for_model,
-        session,
-        model_obj,
-    )
+    if is_responses_api:
+        response = await upstream.forward_responses_request(
+            request,
+            path,
+            headers,
+            request_body,
+            key,
+            max_cost_for_model,
+            session,
+            model_obj,
+        )
+    else:
+        response = await upstream.forward_request(
+            request,
+            path,
+            headers,
+            request_body,
+            key,
+            max_cost_for_model,
+            session,
+            model_obj,
+        )
 
     if response.status_code != 200:
         await revert_pay_for_request(key, session, max_cost_for_model)
@@ -315,6 +322,24 @@ async def get_bearer_token_key(
             },
         )
         raise
+
+
+def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> str:
+    if model := request_body_dict.get("model"):
+        return model
+
+    if input_data := request_body_dict.get("input"):
+        if isinstance(input_data, dict) and (model := input_data.get("model")):
+            return model
+
+    if request_body_dict.get("messages"):
+        return "unknown"
+
+    logger.warning(
+        "No model found in Responses API request",
+        extra={"body_keys": list(request_body_dict.keys())}
+    )
+    return "unknown"
 
 
 def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:

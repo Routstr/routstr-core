@@ -191,6 +191,10 @@ async def calculate_cost(  # todo: can be sync
         output_tokens if output_tokens != 0 else usage_data.get("output_tokens", 0)
     )
 
+    # added for response api
+    input_tokens = input_tokens if input_tokens != 0 else  response_data.get("usage", {}).get("input_tokens", 0)
+    output_tokens = output_tokens if output_tokens != 0 else  response_data.get("usage", {}).get("output_tokens", 0)
+
     input_msats = round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 3)
 
     output_msats = round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 3)
