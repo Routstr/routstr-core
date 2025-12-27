@@ -55,7 +55,16 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "headers": {
                     k: v
                     for k, v in request.headers.items()
-                    if k.lower() not in ["authorization", "x-cashu", "cookie"]
+                    if k.lower()
+                    not in [
+                        "authorization",
+                        "x-cashu",
+                        "cookie",
+                        "cf-connecting-ip",
+                        "cf-ipcountry",
+                        "x-forwarded-for",
+                        "x-real-ip",
+                    ]
                 },
                 "body_size": len(request_body) if request_body else 0,
             },

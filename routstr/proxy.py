@@ -65,12 +65,12 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
 
 def get_model_instance(model_id: str) -> Model | None:
     """Get Model instance by ID from global cache."""
-    return _model_instances.get(model_id)
+    return _model_instances.get(model_id.lower())
 
 
 def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
     """Get UpstreamProvider for model ID from global cache."""
-    return _provider_map.get(model_id)
+    return _provider_map.get(model_id.lower())
 
 
 def get_unique_models() -> list[Model]:
@@ -80,31 +80,27 @@ def get_unique_models() -> list[Model]:
 
 async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
+    from sqlalchemy.orm import selectinload
+
     global _model_instances, _provider_map, _unique_models
 
-    # Gather database overrides and disabled models
     async with create_session() as session:
-        result = await session.exec(select(ModelRow).where(ModelRow.enabled))
-        override_rows = result.all()
-
-        provider_result = await session.exec(select(UpstreamProviderRow))
-        providers_by_id = {p.id: p for p in provider_result.all()}
-
-        overrides_by_id: dict[str, tuple[ModelRow, float]] = {
-            row.id: (
-                row,
-                providers_by_id[row.upstream_provider_id].provider_fee
-                if row.upstream_provider_id in providers_by_id
-                else 1.01,
-            )
-            for row in override_rows
-            if row.upstream_provider_id is not None
-        }
-
-        disabled_result = await session.exec(
-            select(ModelRow.id).where(ModelRow.enabled == False)  # noqa: E712
+        # Fetch all providers with their models in a single logical operation
+        query = select(UpstreamProviderRow).options(
+            selectinload(UpstreamProviderRow.models)  # type: ignore
         )
-        disabled_model_ids = {row for row in disabled_result.all()}
+        result = await session.exec(query)
+        provider_rows = result.all()
+
+    overrides_by_id: dict[str, tuple[ModelRow, float]] = {}
+    disabled_model_ids: set[str] = set()
+
+    for provider in provider_rows:
+        for model in provider.models:
+            if model.enabled:
+                overrides_by_id[model.id] = (model, provider.provider_fee)
+            else:
+                disabled_model_ids.add(model.id)
 
     _model_instances, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,
@@ -141,20 +137,14 @@ async def proxy(
             "unauthorized", "Unauthorized", 401, request=request
         )
 
-    logger.info(  # TODO: move to middleware, async
-        "Received proxy request",
-        extra={
-            "method": request.method,
-            "path": path,
-            "client_host": request.client.host if request.client else "unknown",
-            "user_agent": request.headers.get("user-agent", "unknown")[:100],
-        },
-    )
-
+    is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
     request_body_dict = parse_request_body_json(request_body, path)
 
-    model_id = request_body_dict.get("model", "unknown")
+    if is_responses_api:
+        model_id = extract_model_from_responses_request(request_body_dict)
+    else:
+        model_id = request_body_dict.get("model", "unknown")
 
     model_obj = get_model_instance(model_id)
     if not model_obj:
@@ -180,9 +170,14 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        return await upstream.handle_x_cashu(
-            request, x_cashu, path, max_cost_for_model, model_obj
-        )
+        if is_responses_api:
+            return await upstream.handle_x_cashu_responses(
+                request, x_cashu, path, max_cost_for_model, model_obj
+            )
+        else:
+            return await upstream.handle_x_cashu(
+                request, x_cashu, path, max_cost_for_model, model_obj
+            )
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
@@ -197,28 +192,36 @@ async def proxy(
             )
 
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
-        # TODO: why is this needed? can we remove it?
         headers = upstream.prepare_headers(dict(request.headers))
         return await upstream.forward_get_request(request, path, headers)
 
-    # Only pay for request if we have request body data (for completions endpoints)
     if request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
-    # Prepare headers for upstream
     headers = upstream.prepare_headers(dict(request.headers))
 
-    # Forward to upstream and handle response
-    response = await upstream.forward_request(
-        request,
-        path,
-        headers,
-        request_body,
-        key,
-        max_cost_for_model,
-        session,
-        model_obj,
-    )
+    if is_responses_api:
+        response = await upstream.forward_responses_request(
+            request,
+            path,
+            headers,
+            request_body,
+            key,
+            max_cost_for_model,
+            session,
+            model_obj,
+        )
+    else:
+        response = await upstream.forward_request(
+            request,
+            path,
+            headers,
+            request_body,
+            key,
+            max_cost_for_model,
+            session,
+            model_obj,
+        )
 
     if response.status_code != 200:
         await revert_pay_for_request(key, session, max_cost_for_model)
@@ -319,6 +322,24 @@ async def get_bearer_token_key(
             },
         )
         raise
+
+
+def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> str:
+    if model := request_body_dict.get("model"):
+        return model
+
+    if input_data := request_body_dict.get("input"):
+        if isinstance(input_data, dict) and (model := input_data.get("model")):
+            return model
+
+    if request_body_dict.get("messages"):
+        return "unknown"
+
+    logger.warning(
+        "No model found in Responses API request",
+        extra={"body_keys": list(request_body_dict.keys())}
+    )
+    return "unknown"
 
 
 def parse_request_body_json(request_body: bytes, path: str) -> dict[str, Any]:

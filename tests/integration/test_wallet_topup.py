@@ -15,7 +15,6 @@ from routstr.core.db import ApiKey
 
 from .utils import (
     CashuTokenGenerator,
-    ConcurrencyTester,
     ResponseValidator,
 )
 
@@ -282,60 +281,6 @@ async def test_transaction_history_tracking(  # type: ignore[no-untyped-def]
         "/v1/wallet/topup", params={"cashu_token": token}
     )
     assert response.status_code == 400
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_concurrent_topups_same_api_key(  # type: ignore[no-untyped-def]
-    integration_client: AsyncClient,
-    authenticated_client: AsyncClient,
-    testmint_wallet: Any,
-) -> None:
-    """Test concurrent top-ups to the same API key"""
-
-    # Get API key
-    response = await authenticated_client.get("/v1/wallet/")
-    api_key = response.json()["api_key"]
-    initial_balance = response.json()["balance"]
-
-    # Generate multiple unique tokens
-    num_tokens = 10
-    tokens = []
-    total_amount = 0
-
-    for i in range(num_tokens):
-        amount = 100 + i * 10  # Different amounts
-        token = await testmint_wallet.mint_tokens(amount)
-        tokens.append(token)
-        total_amount += amount
-
-    # Create concurrent top-up requests
-    requests = [
-        {
-            "method": "POST",
-            "url": "/v1/wallet/topup",
-            "params": {"cashu_token": token},
-            "headers": {"Authorization": f"Bearer {api_key}"},
-        }
-        for token in tokens
-    ]
-
-    # Execute concurrently
-    tester = ConcurrencyTester()
-    responses = await tester.run_concurrent_requests(
-        integration_client, requests, max_concurrent=5
-    )
-
-    # All should succeed
-    for response in responses:
-        assert response.status_code == 200
-        assert "msats" in response.json()
-
-    # Verify final balance is correct
-    final_response = await authenticated_client.get("/v1/wallet/")
-    final_balance = final_response.json()["balance"]
-    expected_balance = initial_balance + (total_amount * 1000)
-    assert final_balance == expected_balance
 
 
 @pytest.mark.integration

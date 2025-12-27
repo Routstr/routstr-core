@@ -215,7 +215,7 @@ async def query_nip91_events(
                             continue
                     events_out.append(ev_dict)
                     logger.debug(
-                        f"Found existing NIP-91 event: {ev_dict.get('id', '')}"
+                        f"Found listing event: {ev_dict.get('id', '')[:6]}...{ev_dict.get('id', '')[-6:]}"
                     )
                 if drained:
                     last_event_ts = time.time()

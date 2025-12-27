@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlmodel import select
@@ -18,6 +18,7 @@ from ..wallet import (
     slow_filter_spend_proofs,
 )
 from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
+from .log_manager import log_manager
 from .logging import get_logger
 from .settings import SettingsService, settings
 
@@ -1492,20 +1493,8 @@ class ModelCreate(BaseModel):
     per_request_limits: dict[str, object] | None = None
     top_provider: dict[str, object] | None = None
     upstream_provider_id: int | None = None
-    enabled: bool = True
-
-
-class ModelUpdate(BaseModel):
-    id: str
-    name: str
-    description: str
-    created: int
-    context_length: int
-    architecture: dict[str, object]
-    pricing: dict[str, object]
-    per_request_limits: dict[str, object] | None = None
-    top_provider: dict[str, object] | None = None
-    upstream_provider_id: int | None = None
+    canonical_slug: str | None = None
+    alias_ids: list[str] | None = None
     enabled: bool = True
 
 
@@ -2415,49 +2404,99 @@ async def admin_upstream_providers(request: Request) -> str:
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
 )
-async def create_provider_model(
+async def upsert_provider_model(
     provider_id: int, payload: ModelCreate
 ) -> dict[str, object]:
+    print(payload)
+    logger.info(
+        f"UPSERT_PROVIDER_MODEL called: provider_id={provider_id}, model_id={payload.id}"
+    )
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
 
-        exists = await session.get(ModelRow, (payload.id, provider_id))
-        if exists:
-            raise HTTPException(
-                status_code=409,
-                detail="Model with this ID already exists for this provider",
-            )
+        # Try to get existing model
+        existing_row = await session.get(ModelRow, (payload.id, provider_id))
 
-        row = ModelRow(
-            id=payload.id,
-            name=payload.name,
-            description=payload.description,
-            created=int(payload.created),
-            context_length=int(payload.context_length),
-            architecture=json.dumps(payload.architecture),
-            pricing=json.dumps(payload.pricing),
-            sats_pricing=None,
-            per_request_limits=(
+        if existing_row:
+            # Update existing model
+            logger.info(f"Updating existing model: {payload.id}")
+            existing_row.name = payload.name
+            existing_row.description = payload.description
+            existing_row.created = int(payload.created)
+            existing_row.context_length = int(payload.context_length)
+            existing_row.architecture = json.dumps(payload.architecture)
+            existing_row.pricing = json.dumps(payload.pricing)
+            existing_row.sats_pricing = None
+            existing_row.per_request_limits = (
                 json.dumps(payload.per_request_limits)
                 if payload.per_request_limits is not None
                 else None
-            ),
-            top_provider=(
+            )
+            existing_row.top_provider = (
                 json.dumps(payload.top_provider) if payload.top_provider else None
-            ),
-            upstream_provider_id=provider_id,
-            enabled=payload.enabled,
-        )
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
+            )
+            existing_row.canonical_slug = payload.canonical_slug
+            existing_row.alias_ids = (
+                json.dumps(payload.alias_ids) if payload.alias_ids else None
+            )
+            existing_row.enabled = payload.enabled
+
+            session.add(existing_row)
+            await session.commit()
+            await session.refresh(existing_row)
+            row = existing_row
+
+        else:
+            # Create new model
+            logger.info(f"Creating new model: {payload.id}")
+            row = ModelRow(
+                id=payload.id,
+                name=payload.name,
+                description=payload.description,
+                created=int(payload.created),
+                context_length=int(payload.context_length),
+                architecture=json.dumps(payload.architecture),
+                pricing=json.dumps(payload.pricing),
+                sats_pricing=None,
+                per_request_limits=(
+                    json.dumps(payload.per_request_limits)
+                    if payload.per_request_limits is not None
+                    else None
+                ),
+                top_provider=(
+                    json.dumps(payload.top_provider) if payload.top_provider else None
+                ),
+                canonical_slug=payload.canonical_slug,
+                alias_ids=(
+                    json.dumps(payload.alias_ids) if payload.alias_ids else None
+                ),
+                upstream_provider_id=provider_id,
+                enabled=payload.enabled,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
 
     await refresh_model_maps()
     return _row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
+
+
+@admin_router.patch(
+    "/api/upstream-providers/{provider_id}/models/{model_id:path}",
+    dependencies=[Depends(require_admin_api)],
+)
+async def update_provider_model_legacy(
+    provider_id: int, model_id: str, payload: ModelCreate
+) -> dict[str, object]:
+    """Legacy PATCH endpoint - redirects to upsert POST endpoint for backward compatibility."""
+    logger.info(
+        f"LEGACY_PATCH_UPDATE called: provider_id={provider_id}, model_id={model_id}"
+    )
+    return await upsert_provider_model(provider_id, payload)
 
 
 @admin_router.get(
@@ -2478,76 +2517,6 @@ async def get_provider_model(provider_id: int, model_id: str) -> dict[str, objec
         return _row_to_model(
             row, apply_provider_fee=True, provider_fee=provider.provider_fee
         ).dict()  # type: ignore
-
-
-@admin_router.patch(
-    "/api/upstream-providers/{provider_id}/models/{model_id:path}",
-    dependencies=[Depends(require_admin_api)],
-)
-async def update_provider_model(
-    provider_id: int, model_id: str, payload: ModelUpdate
-) -> dict[str, object]:
-    if payload.id != model_id:
-        raise HTTPException(status_code=400, detail="Path id does not match payload id")
-
-    async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
-
-        row = await session.get(ModelRow, (model_id, provider_id))
-        if not row:
-            raise HTTPException(
-                status_code=404, detail="Model not found for this provider"
-            )
-
-        row.name = payload.name
-        row.description = payload.description
-        row.created = int(payload.created)
-        row.context_length = int(payload.context_length)
-        row.architecture = json.dumps(payload.architecture)
-        row.pricing = json.dumps(payload.pricing)
-        row.sats_pricing = None
-        row.per_request_limits = (
-            json.dumps(payload.per_request_limits)
-            if payload.per_request_limits is not None
-            else None
-        )
-        row.top_provider = (
-            json.dumps(payload.top_provider) if payload.top_provider else None
-        )
-        was_disabled = not row.enabled
-        row.enabled = payload.enabled
-
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
-
-    if was_disabled and payload.enabled:
-        from ..payment.models import _cleanup_enabled_models_once
-
-        try:
-            await _cleanup_enabled_models_once()
-        except Exception as e:
-            logger.warning(
-                f"Failed to run model cleanup after enabling: {e}",
-                extra={"model_id": model_id, "error": str(e)},
-            )
-
-    await refresh_model_maps()
-    return _row_to_model(
-        row, apply_provider_fee=True, provider_fee=provider.provider_fee
-    ).dict()  # type: ignore
-
-
-@admin_router.put(
-    "/api/upstream-providers/{provider_id}/models/{model_id:path}",
-    dependencies=[Depends(require_admin_api)],
-)
-async def update_provider_model_put(
-    provider_id: int, model_id: str, payload: ModelUpdate
-) -> dict[str, object]:
-    return await update_provider_model(provider_id, model_id, payload)
 
 
 @admin_router.delete(
@@ -2790,6 +2759,186 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
         }
 
 
+class CreateAccountRequest(BaseModel):
+    provider_type: str
+
+
+@admin_router.post(
+    "/api/upstream-providers/create-account",
+    dependencies=[Depends(require_admin_api)],
+)
+async def create_provider_account_by_type(
+    payload: CreateAccountRequest,
+) -> dict[str, object]:
+    """Create a new account with a provider by provider type (before provider exists in DB)."""
+    from ..upstream import upstream_provider_classes
+
+    provider_class = next(
+        (
+            cls
+            for cls in upstream_provider_classes
+            if cls.provider_type == payload.provider_type
+        ),
+        None,
+    )
+    if not provider_class:
+        raise HTTPException(status_code=404, detail="Provider type not found")
+
+    try:
+        account_data = await provider_class.create_account_static()
+
+        return {
+            "ok": True,
+            "account_data": account_data,
+            "message": "Account created successfully",
+        }
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider does not support account creation: {str(e)}",
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to create account for provider type {payload.provider_type}: {e}"
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class TopupRequest(BaseModel):
+    amount: int
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/topup",
+    dependencies=[Depends(require_admin_api)],
+)
+async def initiate_provider_topup(
+    provider_id: int, payload: TopupRequest
+) -> dict[str, object]:
+    """Initiate a Lightning Network top-up for the upstream provider account."""
+    from ..upstream.helpers import _instantiate_provider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        try:
+            logger.info(
+                f"Initiating top-up for provider {provider_id}",
+                extra={"amount": payload.amount},
+            )
+            topup_data = await upstream_instance.initiate_topup(payload.amount)
+            logger.info(
+                "Top-up initiated successfully",
+                extra={
+                    "provider_id": provider_id,
+                    "invoice_id": topup_data.invoice_id,
+                    "amount": topup_data.amount,
+                },
+            )
+
+            response_data = {
+                "ok": True,
+                "topup_data": {
+                    "invoice_id": topup_data.invoice_id,
+                    "payment_request": topup_data.payment_request,
+                    "amount": topup_data.amount,
+                    "currency": topup_data.currency,
+                    "expires_at": topup_data.expires_at,
+                    "checkout_url": topup_data.checkout_url,
+                },
+                "message": "Top-up initiated successfully",
+            }
+            logger.info("Returning response", extra={"response": response_data})
+            return response_data
+        except NotImplementedError as e:
+            logger.error(f"Provider does not support top-up: {e}")
+            raise HTTPException(
+                status_code=400, detail=f"Provider does not support top-up: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to initiate top-up for provider {provider_id}: {e}",
+                extra={"error_type": type(e).__name__, "error": str(e)},
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/topup/{invoice_id}/status",
+    dependencies=[Depends(require_admin_api)],
+)
+async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, object]:
+    """Check the status of a Lightning Network top-up invoice."""
+    from ..upstream.helpers import _instantiate_provider
+    from ..upstream.ppqai import PPQAIUpstreamProvider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        if not isinstance(upstream_instance, PPQAIUpstreamProvider):
+            raise HTTPException(
+                status_code=400,
+                detail="Provider does not support top-up status checking",
+            )
+
+        try:
+            paid = await upstream_instance.check_topup_status(invoice_id)
+            return {"ok": True, "paid": paid}
+        except Exception as e:
+            logger.error(
+                f"Failed to check top-up status for provider {provider_id}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/balance",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_provider_balance(provider_id: int) -> dict[str, object]:
+    """Get the current account balance for the upstream provider."""
+    from ..upstream.helpers import _instantiate_provider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        try:
+            balance_data = await upstream_instance.get_balance()
+            return {"ok": True, "balance_data": balance_data}
+        except NotImplementedError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provider does not support balance checking: {str(e)}",
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch balance for provider {provider_id}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
 @admin_router.get(
     "/api/openrouter-presets",
     dependencies=[Depends(require_admin_api)],
@@ -2865,3 +3014,122 @@ h1 { color: #333; }
 .no-logs { text-align: center; color: #666; padding: 40px; }
 .request-id-display { background-color: #e9ecef; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-family: monospace; }
 """
+
+
+@admin_router.get("/api/usage/metrics", dependencies=[Depends(require_admin_api)])
+async def get_usage_metrics(
+    request: Request,
+    interval: int = Query(
+        default=15, ge=1, le=1440, description="Time interval in minutes"
+    ),
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict:
+    """Get usage metrics aggregated by time interval."""
+    return log_manager.get_usage_metrics(interval=interval, hours=hours)
+
+
+@admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
+async def get_usage_summary(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+) -> dict:
+    """Get summary statistics for the specified time period."""
+    return log_manager.get_usage_summary(hours=hours)
+
+
+@admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
+async def get_error_details(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=100, ge=1, le=1000, description="Maximum number of errors to return"
+    ),
+) -> dict:
+    """Get detailed error information."""
+    return log_manager.get_error_details(hours=hours, limit=limit)
+
+
+@admin_router.get(
+    "/api/usage/revenue-by-model", dependencies=[Depends(require_admin_api)]
+)
+async def get_revenue_by_model(
+    request: Request,
+    hours: int = Query(
+        default=24, ge=1, le=168, description="Hours of history to analyze"
+    ),
+    limit: int = Query(
+        default=20, ge=1, le=100, description="Maximum number of models to return"
+    ),
+) -> dict:
+    """
+    Get revenue breakdown by model.
+    """
+    return log_manager.get_revenue_by_model(hours=hours, limit=limit)
+
+
+@admin_router.get("/api/logs", dependencies=[Depends(require_admin_api)])
+async def get_logs_api(
+    request: Request,
+    date: str | None = None,
+    level: str | None = None,
+    request_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    """
+    Get filtered log entries.
+
+    Args:
+        date: Filter by specific date (YYYY-MM-DD)
+        level: Filter by log level
+        request_id: Filter by request ID
+        search: Search text in message and name fields (case-insensitive)
+        limit: Maximum number of entries to return
+
+    Returns:
+        Dict containing logs and filter metadata
+    """
+    log_entries = log_manager.search_logs(
+        date=date,
+        level=level,
+        request_id=request_id,
+        search_text=search,
+        limit=limit,
+    )
+
+    return {
+        "logs": log_entries,
+        "total": len(log_entries),
+        "date": date,
+        "level": level,
+        "request_id": request_id,
+        "search": search,
+        "limit": limit,
+    }
+
+
+@admin_router.get("/api/logs/dates", dependencies=[Depends(require_admin_api)])
+async def get_log_dates_api(request: Request) -> dict[str, object]:
+    logs_dir = Path("logs")
+    dates = []
+
+    if logs_dir.exists():
+        log_files = sorted(
+            logs_dir.glob("app_*.log"), key=lambda x: x.stat().st_mtime, reverse=True
+        )
+
+        for log_file in log_files[:30]:
+            try:
+                filename = log_file.name
+                date_str = filename.replace("app_", "").replace(".log", "")
+                dates.append(date_str)
+            except Exception:
+                continue
+
+    return {"dates": dates}

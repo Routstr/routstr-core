@@ -18,7 +18,9 @@ import {
   UpstreamProvider,
   CreateUpstreamProvider,
   UpdateUpstreamProvider,
+  AdminModel,
 } from '@/lib/api/services/admin';
+import { AddProviderModelDialog } from '@/components/AddProviderModelDialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   AlertCircle,
@@ -51,8 +53,328 @@ import {
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { toast } from 'sonner';
+
+function ProviderBalance({
+  providerId,
+  platformUrl,
+}: {
+  providerId: number;
+  platformUrl?: string | null;
+}) {
+  const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
+  const [topupAmount, setTopupAmount] = useState('');
+  const [topupError, setTopupError] = useState('');
+  const [isHovered, setIsHovered] = useState(false);
+  const [invoiceData, setInvoiceData] = useState<{
+    payment_request: string;
+    invoice_id: string;
+  } | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState<'pending' | 'paid' | null>(
+    null
+  );
+  const queryClient = useQueryClient();
+
+  const {
+    data: balanceData,
+    isLoading,
+    error,
+  } = useQuery({
+    queryKey: ['provider-balance', providerId],
+    queryFn: () => AdminService.getProviderBalance(providerId),
+    refetchInterval: 30000,
+    refetchOnWindowFocus: true,
+    retry: 1,
+  });
+
+  const { data: statusData } = useQuery({
+    queryKey: ['topup-status', providerId, invoiceData?.invoice_id],
+    queryFn: () =>
+      AdminService.checkTopupStatus(providerId, invoiceData!.invoice_id),
+    enabled: !!invoiceData && paymentStatus === 'pending',
+    refetchInterval: 2000,
+  });
+
+  useEffect(() => {
+    if (statusData?.paid === true) {
+      setPaymentStatus('paid');
+      queryClient.invalidateQueries({
+        queryKey: ['provider-balance', providerId],
+      });
+      toast.success('Payment received!', {
+        description: 'Your balance has been updated.',
+      });
+    }
+  }, [statusData, queryClient, providerId]);
+
+  const topupMutation = useMutation({
+    mutationFn: async (amount: number) => {
+      console.log('Calling top-up API with:', { providerId, amount });
+      try {
+        const result = await AdminService.initiateProviderTopup(
+          providerId,
+          amount
+        );
+        console.log('API returned:', result);
+        return result;
+      } catch (err) {
+        console.error('API call failed:', err);
+        throw err;
+      }
+    },
+    onSuccess: (data) => {
+      console.log('Top-up response:', data);
+      console.log('Type of data:', typeof data);
+      console.log('Keys in data:', Object.keys(data || {}));
+
+      if (data?.topup_data?.payment_request && data?.topup_data?.invoice_id) {
+        setInvoiceData({
+          payment_request: data.topup_data.payment_request as string,
+          invoice_id: data.topup_data.invoice_id as string,
+        });
+        setPaymentStatus('pending');
+      } else {
+        console.error('Missing invoice data:', data);
+        console.error('topup_data:', data?.topup_data);
+        toast.error('No invoice returned from provider');
+        setIsTopupDialogOpen(false);
+      }
+    },
+    onError: (error: Error) => {
+      console.error('Top-up mutation error:', error);
+      toast.error(`Failed to initiate top-up: ${error.message}`);
+    },
+  });
+
+  const handleTopup = () => {
+    // If no dialog open logic (which depends on API implementation),
+    // we check if we should redirect or open dialog based on available info
+    // But since this function is called inside the dialog, we might want to change
+    // how the "Top Up" button behaves instead.
+    const amount = parseFloat(topupAmount);
+
+    if (isNaN(amount)) {
+      setTopupError('Please enter a valid amount');
+      return;
+    }
+
+    if (amount < 1 || amount > 500) {
+      setTopupError('Amount must be between $1 and $500');
+      return;
+    }
+
+    topupMutation.mutate(amount);
+  };
+
+  const handleTopUpClick = () => {
+    // Check if the provider supports direct topup (currently only PPQ.AI effectively)
+    // We can infer this if it's NOT OpenRouter or OpenAI, or strictly checking provider capability
+    // For now, we'll try to initiate topup for anyone, but if we know it fails (or isn't implemented),
+    // we should redirect.
+    // However, the prompt asks to redirect if topup is not implemented.
+    // The backend throws 500/400 if not implemented.
+    // A better approach is to check if we have a platform URL and maybe redirect there
+    // if we know it's not supported.
+
+    // BUT, we don't know for sure if it's supported without checking metadata or trying.
+    // Let's rely on the "can_topup" metadata if available, but currently we only have "can_show_balance".
+
+    // Simple heuristic: If platformUrl exists and we suspect no direct topup, redirect?
+    // Actually, let's try to open the dialog, but if it's OpenRouter/OpenAI, maybe we just redirect?
+    // The user specifically mentioned "like in openrouter".
+
+    if (
+      platformUrl &&
+      (platformUrl.includes('openrouter.ai') ||
+        platformUrl.includes('openai.com'))
+    ) {
+      window.open(platformUrl, '_blank');
+      return;
+    }
+
+    setIsTopupDialogOpen(true);
+  };
+
+  const handleCloseDialog = () => {
+    setIsTopupDialogOpen(false);
+    setTopupAmount('');
+    setTopupError('');
+    setInvoiceData(null);
+    setPaymentStatus(null);
+  };
+
+  if (isLoading) {
+    return <Skeleton className='h-9 w-24' />;
+  }
+
+  if (error || !balanceData?.ok || !balanceData.balance_data) {
+    return null;
+  }
+
+  const balance = balanceData.balance_data;
+  let displayValue = 'N/A';
+
+  if (typeof balance === 'number') {
+    displayValue = `$${balance.toFixed(2)}`;
+  } else if (balance && typeof balance === 'object') {
+    // Legacy support for object response
+    const b = balance as Record<string, unknown>;
+    if (typeof b.balance === 'number') {
+      displayValue = `$${b.balance.toFixed(2)}`;
+    } else if (typeof b.balance === 'string') {
+      displayValue = b.balance;
+    } else if (b.amount !== undefined) {
+      displayValue = `$${Number(b.amount).toFixed(2)}`;
+    }
+  }
+
+  return (
+    <>
+      <Button
+        variant='outline'
+        size='sm'
+        onClick={handleTopUpClick}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        className='w-full font-mono sm:w-auto'
+      >
+        {isHovered ? 'Top Up' : displayValue}
+      </Button>
+
+      <Dialog open={isTopupDialogOpen} onOpenChange={handleCloseDialog}>
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>
+              {paymentStatus === 'paid'
+                ? 'Payment Confirmed!'
+                : 'Top Up Balance'}
+            </DialogTitle>
+            <DialogDescription>
+              {paymentStatus === 'paid'
+                ? 'Your account balance has been updated.'
+                : invoiceData
+                  ? 'Scan the QR code or copy the Lightning invoice to pay.'
+                  : 'Enter the amount you want to add to your account balance.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {paymentStatus === 'paid' ? (
+            <div className='flex flex-col items-center gap-4 py-6'>
+              <div className='rounded-full bg-green-100 p-3 dark:bg-green-900'>
+                <svg
+                  className='h-12 w-12 text-green-600 dark:text-green-400'
+                  fill='none'
+                  strokeLinecap='round'
+                  strokeLinejoin='round'
+                  strokeWidth='2'
+                  viewBox='0 0 24 24'
+                  stroke='currentColor'
+                >
+                  <path d='M5 13l4 4L19 7'></path>
+                </svg>
+              </div>
+              <p className='text-center font-semibold'>Top-up successful!</p>
+            </div>
+          ) : invoiceData ? (
+            <div className='flex flex-col items-center gap-4 py-4'>
+              <div className='rounded-lg border-2 border-gray-200 p-2 dark:border-gray-800'>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(invoiceData.payment_request)}`}
+                  alt='Lightning Invoice QR Code'
+                  className='h-64 w-64'
+                />
+              </div>
+              <div className='w-full space-y-2'>
+                <Label htmlFor='invoice'>Lightning Invoice</Label>
+                <div className='flex gap-2'>
+                  <Input
+                    id='invoice'
+                    value={invoiceData.payment_request}
+                    readOnly
+                    className='font-mono text-xs'
+                  />
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    onClick={() => {
+                      navigator.clipboard.writeText(
+                        invoiceData.payment_request
+                      );
+                      toast.success('Invoice copied to clipboard!');
+                    }}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              </div>
+              {paymentStatus === 'pending' && (
+                <p className='text-muted-foreground text-center text-sm'>
+                  Waiting for payment...
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className='grid gap-4 py-4'>
+              <div className='grid gap-2'>
+                <Label htmlFor='topup_amount'>Amount (USD)</Label>
+                <Input
+                  id='topup_amount'
+                  type='number'
+                  placeholder='Enter amount (1-500)'
+                  value={topupAmount}
+                  onChange={(e) => {
+                    setTopupAmount(e.target.value);
+                    setTopupError('');
+                  }}
+                  min='1'
+                  max='500'
+                  step='0.01'
+                />
+                {topupError && (
+                  <p className='text-sm text-red-600 dark:text-red-400'>
+                    {topupError}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            {paymentStatus === 'paid' ? (
+              <Button onClick={handleCloseDialog} className='w-full'>
+                Done
+              </Button>
+            ) : invoiceData ? (
+              <Button
+                variant='outline'
+                onClick={handleCloseDialog}
+                className='w-full'
+              >
+                Cancel
+              </Button>
+            ) : (
+              <>
+                <Button variant='outline' onClick={handleCloseDialog}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleTopup}
+                  disabled={topupMutation.isPending || !topupAmount}
+                >
+                  {topupMutation.isPending
+                    ? 'Processing...'
+                    : 'Generate Invoice'}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
 
 export default function ProvidersPage() {
   const queryClient = useQueryClient();
@@ -64,6 +386,18 @@ export default function ProvidersPage() {
     new Set()
   );
   const [viewingModels, setViewingModels] = useState<number | null>(null);
+  const [isCreatingAccount, setIsCreatingAccount] = useState(false);
+  const [modelDialogState, setModelDialogState] = useState<{
+    isOpen: boolean;
+    providerId: number | null;
+    mode: 'create' | 'edit' | 'override';
+    initialData?: AdminModel | null;
+  }>({
+    isOpen: false,
+    providerId: null,
+    mode: 'create',
+    initialData: null,
+  });
 
   const [formData, setFormData] = useState<CreateUpstreamProvider>({
     provider_type: 'openrouter',
@@ -71,7 +405,12 @@ export default function ProvidersPage() {
     api_key: '',
     api_version: null,
     enabled: true,
+    provider_fee: 1.06,
   });
+
+  const getProviderFeePlaceholder = (type: string) => {
+    return type === 'openrouter' ? 'Default: 1.06 (6%)' : 'Default: 1.01 (1%)';
+  };
 
   const { data: providerTypes = [] } = useQuery({
     queryKey: ['provider-types'],
@@ -138,6 +477,32 @@ export default function ProvidersPage() {
     },
   });
 
+  const handleCreateAccount = async () => {
+    setIsCreatingAccount(true);
+    try {
+      const response = await AdminService.createProviderAccountByType(
+        formData.provider_type
+      );
+      if (response.ok && response.account_data.api_key) {
+        setFormData({
+          ...formData,
+          api_key: String(response.account_data.api_key),
+        });
+        toast.success(
+          'Account created successfully! API key has been filled in.'
+        );
+      } else {
+        toast.success('Account created, but no API key returned.');
+      }
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown error';
+      toast.error(`Failed to create account: ${errorMessage}`);
+    } finally {
+      setIsCreatingAccount(false);
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       provider_type: 'openrouter',
@@ -149,7 +514,11 @@ export default function ProvidersPage() {
   };
 
   const handleCreate = () => {
-    createMutation.mutate(formData);
+    const data = { ...formData };
+    if (data.provider_fee === undefined || data.provider_fee === null) {
+      data.provider_fee = data.provider_type === 'openrouter' ? 1.06 : 1.01;
+    }
+    createMutation.mutate(data);
   };
 
   const handleEdit = (provider: UpstreamProvider) => {
@@ -160,6 +529,7 @@ export default function ProvidersPage() {
       api_key: '',
       api_version: provider.api_version || null,
       enabled: provider.enabled,
+      provider_fee: provider.provider_fee,
     });
     setIsEditDialogOpen(true);
   };
@@ -171,6 +541,7 @@ export default function ProvidersPage() {
       base_url: formData.base_url,
       api_version: formData.api_version,
       enabled: formData.enabled,
+      provider_fee: formData.provider_fee,
     };
     if (formData.api_key) {
       updateData.api_key = formData.api_key;
@@ -199,6 +570,16 @@ export default function ProvidersPage() {
     return providerType?.platform_url || null;
   };
 
+  const canCreateAccount = (type: string) => {
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.can_create_account || false;
+  };
+
+  const canShowBalance = (type: string) => {
+    const providerType = providerTypes.find((pt) => pt.id === type);
+    return providerType?.can_show_balance || false;
+  };
+
   const toggleProviderExpansion = (providerId: number) => {
     const newExpanded = new Set(expandedProviders);
     if (newExpanded.has(providerId)) {
@@ -212,6 +593,33 @@ export default function ProvidersPage() {
     } else {
       setViewingModels(providerId);
     }
+  };
+
+  const handleAddModel = (providerId: number) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'create',
+      initialData: null,
+    });
+  };
+
+  const handleEditModel = (providerId: number, model: AdminModel) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'edit',
+      initialData: model,
+    });
+  };
+
+  const handleOverrideModel = (providerId: number, model: AdminModel) => {
+    setModelDialogState({
+      isOpen: true,
+      providerId,
+      mode: 'override',
+      initialData: model,
+    });
   };
 
   return (
@@ -253,11 +661,12 @@ export default function ProvidersPage() {
                       <Select
                         value={formData.provider_type}
                         onValueChange={(value) => {
-                          setFormData({
-                            ...formData,
+                          setFormData((prev) => ({
+                            ...prev,
                             provider_type: value,
                             base_url: getDefaultBaseUrl(value),
-                          });
+                            provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+                          }));
                         }}
                       >
                         <SelectTrigger>
@@ -292,15 +701,30 @@ export default function ProvidersPage() {
                     <div className='grid gap-2'>
                       <div className='flex items-center justify-between'>
                         <Label htmlFor='api_key'>API Key</Label>
-                        {getPlatformUrl(formData.provider_type) && (
-                          <a
-                            href={getPlatformUrl(formData.provider_type)!}
-                            target='_blank'
-                            rel='noopener noreferrer'
-                            className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                        {canCreateAccount(formData.provider_type) ? (
+                          <Button
+                            type='button'
+                            variant='outline'
+                            size='sm'
+                            onClick={handleCreateAccount}
+                            disabled={isCreatingAccount}
+                            className='h-6 text-xs'
                           >
-                            Get Your API Key Here →
-                          </a>
+                            {isCreatingAccount
+                              ? 'Creating...'
+                              : 'Create Account'}
+                          </Button>
+                        ) : (
+                          getPlatformUrl(formData.provider_type) && (
+                            <a
+                              href={getPlatformUrl(formData.provider_type)!}
+                              target='_blank'
+                              rel='noopener noreferrer'
+                              className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                            >
+                              Get Your API Key Here →
+                            </a>
+                          )
                         )}
                       </div>
                       <Input
@@ -338,6 +762,32 @@ export default function ProvidersPage() {
                         }
                       />
                       <Label htmlFor='enabled'>Enabled</Label>
+                    </div>
+                    <div className='grid gap-2'>
+                      <Label htmlFor='provider_fee'>
+                        Provider Fee (Multiplier)
+                      </Label>
+                      <Input
+                        id='provider_fee'
+                        type='number'
+                        step='0.001'
+                        min='1.0'
+                        value={formData.provider_fee || ''}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            provider_fee: e.target.value
+                              ? parseFloat(e.target.value)
+                              : undefined,
+                          })
+                        }
+                        placeholder={getProviderFeePlaceholder(
+                          formData.provider_type
+                        )}
+                      />
+                      <p className='text-muted-foreground text-xs'>
+                        1.01 means +1% e.g. currency exchange, card fees, etc.
+                      </p>
                     </div>
                   </div>
                   <DialogFooter>
@@ -410,7 +860,16 @@ export default function ProvidersPage() {
                             {provider.base_url}
                           </CardDescription>
                         </div>
-                        <div className='grid grid-cols-3 gap-2 sm:flex sm:flex-nowrap'>
+                        <div className='flex flex-wrap items-center gap-2'>
+                          {canShowBalance(provider.provider_type) &&
+                            provider.api_key && (
+                              <ProviderBalance
+                                providerId={provider.id}
+                                platformUrl={getPlatformUrl(
+                                  provider.provider_type
+                                )}
+                              />
+                            )}
                           <Button
                             variant='outline'
                             size='sm'
@@ -473,9 +932,21 @@ export default function ProvidersPage() {
                                 // No provided models - show custom models directly without tabs
                                 <div className='space-y-2'>
                                   {providerModels.db_models.length === 0 ? (
-                                    <div className='text-muted-foreground py-4 text-center text-sm'>
-                                      No models configured. Add custom models to
-                                      use this provider.
+                                    <div className='flex flex-col items-center justify-center gap-2 py-4'>
+                                      <div className='text-muted-foreground text-sm'>
+                                        No models configured. Add custom models
+                                        to use this provider.
+                                      </div>
+                                      <Button
+                                        variant='outline'
+                                        size='sm'
+                                        onClick={() =>
+                                          handleAddModel(provider.id)
+                                        }
+                                      >
+                                        <Plus className='mr-2 h-4 w-4' />
+                                        Add Custom Model
+                                      </Button>
                                     </div>
                                   ) : (
                                     <div className='space-y-2'>
@@ -506,9 +977,24 @@ export default function ProvidersPage() {
                                               {model.description || model.name}
                                             </div>
                                           </div>
-                                          <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                            {model.context_length?.toLocaleString()}{' '}
-                                            tokens
+                                          <div className='flex items-center gap-2'>
+                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                              {model.context_length?.toLocaleString()}{' '}
+                                              tokens
+                                            </div>
+                                            <Button
+                                              variant='ghost'
+                                              size='icon'
+                                              className='h-8 w-8'
+                                              onClick={() =>
+                                                handleEditModel(
+                                                  provider.id,
+                                                  model
+                                                )
+                                              }
+                                            >
+                                              <Pencil className='h-4 w-4' />
+                                            </Button>
                                           </div>
                                         </div>
                                       ))}
@@ -559,12 +1045,24 @@ export default function ProvidersPage() {
                                     value='custom'
                                     className='mt-4 space-y-2'
                                   >
-                                    {providerModels.db_models.length > 0 && (
-                                      <div className='text-muted-foreground mb-3 text-sm'>
-                                        Custom models override or extend the
-                                        provider&apos;s catalog.
-                                      </div>
-                                    )}
+                                    <div className='flex items-center justify-between'>
+                                      {providerModels.db_models.length > 0 && (
+                                        <div className='text-muted-foreground text-sm'>
+                                          Custom models override or extend the
+                                          provider&apos;s catalog.
+                                        </div>
+                                      )}
+                                      <Button
+                                        variant='outline'
+                                        size='sm'
+                                        onClick={() =>
+                                          handleAddModel(provider.id)
+                                        }
+                                      >
+                                        <Plus className='mr-2 h-4 w-4' />
+                                        Add
+                                      </Button>
+                                    </div>
                                     {providerModels.db_models.length === 0 ? (
                                       <div className='text-muted-foreground py-4 text-center text-sm'>
                                         No custom models configured
@@ -600,9 +1098,24 @@ export default function ProvidersPage() {
                                                     model.name}
                                                 </div>
                                               </div>
-                                              <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                                {model.context_length?.toLocaleString()}{' '}
-                                                tokens
+                                              <div className='flex items-center gap-2'>
+                                                <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                                  {model.context_length?.toLocaleString()}{' '}
+                                                  tokens
+                                                </div>
+                                                <Button
+                                                  variant='ghost'
+                                                  size='icon'
+                                                  className='h-8 w-8'
+                                                  onClick={() =>
+                                                    handleEditModel(
+                                                      provider.id,
+                                                      model
+                                                    )
+                                                  }
+                                                >
+                                                  <Pencil className='h-4 w-4' />
+                                                </Button>
                                               </div>
                                             </div>
                                           )
@@ -637,9 +1150,25 @@ export default function ProvidersPage() {
                                                   model.name}
                                               </div>
                                             </div>
-                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                              {model.context_length?.toLocaleString()}{' '}
-                                              tokens
+                                            <div className='flex items-center gap-2'>
+                                              <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                                {model.context_length?.toLocaleString()}{' '}
+                                                tokens
+                                              </div>
+                                              <Button
+                                                variant='outline'
+                                                size='sm'
+                                                className='h-7 text-xs'
+                                                onClick={() =>
+                                                  handleOverrideModel(
+                                                    provider.id,
+                                                    model
+                                                  )
+                                                }
+                                              >
+                                                <Plus className='mr-1 h-3 w-3' />
+                                                Override
+                                              </Button>
                                             </div>
                                           </div>
                                         )
@@ -674,11 +1203,12 @@ export default function ProvidersPage() {
                 <Select
                   value={formData.provider_type}
                   onValueChange={(value) => {
-                    setFormData({
-                      ...formData,
+                    setFormData((prev) => ({
+                      ...prev,
                       provider_type: value,
                       base_url: getDefaultBaseUrl(value),
-                    });
+                      provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+                    }));
                   }}
                 >
                   <SelectTrigger>
@@ -762,6 +1292,32 @@ export default function ProvidersPage() {
                 />
                 <Label htmlFor='edit_enabled'>Enabled</Label>
               </div>
+              <div className='grid gap-2'>
+                <Label htmlFor='edit_provider_fee'>
+                  Provider Fee (Multiplier)
+                </Label>
+                <Input
+                  id='edit_provider_fee'
+                  type='number'
+                  step='0.001'
+                  min='1.0'
+                  value={formData.provider_fee || ''}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      provider_fee: e.target.value
+                        ? parseFloat(e.target.value)
+                        : undefined,
+                    })
+                  }
+                  placeholder={getProviderFeePlaceholder(
+                    formData.provider_type
+                  )}
+                />
+                <p className='text-muted-foreground text-xs'>
+                  1.01 means +1% e.g. currency exchange, card fees, etc.
+                </p>
+              </div>
             </div>
             <DialogFooter>
               <Button
@@ -779,6 +1335,23 @@ export default function ProvidersPage() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {modelDialogState.providerId && (
+          <AddProviderModelDialog
+            providerId={modelDialogState.providerId}
+            isOpen={modelDialogState.isOpen}
+            onClose={() =>
+              setModelDialogState((prev) => ({ ...prev, isOpen: false }))
+            }
+            onSuccess={() => {
+              queryClient.invalidateQueries({
+                queryKey: ['provider-models', modelDialogState.providerId],
+              });
+            }}
+            initialData={modelDialogState.initialData}
+            mode={modelDialogState.mode}
+          />
+        )}
       </SidebarInset>
     </SidebarProvider>
   );

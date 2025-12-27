@@ -9,8 +9,10 @@ export function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
 
   useEffect(() => {
-    const publicPaths = ['/login', '/_register', '/unauthorized'];
-    const isPublicPath = publicPaths.some((path) => pathname.startsWith(path));
+    const publicPaths = ['/', '/login', '/unauthorized'];
+    const isPublicPath = publicPaths.some((path) =>
+      path === '/' ? pathname === '/' : pathname.startsWith(path)
+    );
 
     if (!isPublicPath && !ConfigurationService.isTokenValid()) {
       router.push('/login');
