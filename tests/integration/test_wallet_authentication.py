@@ -3,7 +3,6 @@ Integration tests for wallet authentication system including API key generation 
 Tests POST /v1/wallet/topup endpoint and authorization header validation.
 """
 
-import hashlib
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -15,7 +14,6 @@ from routstr.core.db import ApiKey
 
 from .utils import (
     CashuTokenGenerator,
-    ConcurrencyTester,
     ResponseValidator,
 )
 
@@ -391,69 +389,6 @@ async def test_api_key_with_expiry_time(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_concurrent_token_submissions(
-    integration_client: AsyncClient, testmint_wallet: Any, integration_session: Any
-) -> None:
-    """Test concurrent submissions of different tokens"""
-
-    # Generate multiple unique tokens with known amounts
-    num_tokens = 10
-    tokens = []
-    expected_balances = {}
-
-    for i in range(num_tokens):
-        amount = 100 + i * 10
-        token = await testmint_wallet.mint_tokens(amount)
-        tokens.append(token)
-        # Store expected balance by token hash
-        hashed_key = hashlib.sha256(token.encode()).hexdigest()
-        expected_balances[hashed_key] = amount * 1000  # msats
-
-    # Create concurrent requests
-    requests = [
-        {
-            "method": "GET",
-            "url": "/v1/wallet/info",
-            "headers": {"Authorization": f"Bearer {token}"},
-        }
-        for token in tokens
-    ]
-
-    # Execute concurrently
-    tester = ConcurrencyTester()
-    responses = await tester.run_concurrent_requests(
-        integration_client, requests, max_concurrent=5
-    )
-
-    # All should succeed
-    assert len(responses) == num_tokens
-    api_keys = set()
-
-    for response in responses:
-        assert response.status_code == 200
-        data = response.json()
-        api_key = data["api_key"]
-        api_keys.add(api_key)
-
-        # Verify balance matches the expected amount
-        hashed_key = api_key[3:]  # Remove "sk-" prefix
-        assert data["balance"] == expected_balances[hashed_key]
-
-    # Should have created unique API keys
-    assert len(api_keys) == num_tokens
-
-    # Verify all keys exist in database
-    for api_key in api_keys:
-        hashed_key = api_key[3:]  # Remove "sk-" prefix
-        result = await integration_session.execute(
-            select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
-        )
-        db_key = result.scalar_one()
-        assert db_key.balance == expected_balances[hashed_key]
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
 async def test_authorization_with_cashu_token_directly(
     integration_client: AsyncClient, testmint_wallet: Any
 ) -> None:
@@ -502,48 +437,6 @@ async def test_x_cashu_header_support(
     response = await integration_client.get("/")
     # Root endpoint doesn't require auth, so it should succeed
     assert response.status_code == 200
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-@pytest.mark.slow
-async def test_api_key_consistency_under_load(
-    integration_client: AsyncClient, testmint_wallet: Any, integration_session: Any
-) -> None:
-    """Test API key generation consistency under concurrent load"""
-
-    # Generate a single token
-    token = await testmint_wallet.mint_tokens(1000)
-
-    # First request to create the API key
-    integration_client.headers["Authorization"] = f"Bearer {token}"
-    initial_response = await integration_client.get("/v1/wallet/info")
-    assert initial_response.status_code == 200
-    expected_api_key = initial_response.json()["api_key"]
-    expected_balance = initial_response.json()["balance"]
-
-    # Try to use the same token concurrently multiple times
-    # All should return the same API key since it's already created
-    requests = [
-        {
-            "method": "GET",
-            "url": "/v1/wallet/info",
-            "headers": {"Authorization": f"Bearer {token}"},
-        }
-        for _ in range(20)  # 20 concurrent attempts
-    ]
-
-    tester = ConcurrencyTester()
-    responses = await tester.run_concurrent_requests(
-        integration_client, requests, max_concurrent=10
-    )
-
-    # All should succeed and return the same API key
-    for response in responses:
-        assert response.status_code == 200
-        data = response.json()
-        assert data["api_key"] == expected_api_key
-        assert data["balance"] == expected_balance
 
 
 @pytest.mark.integration

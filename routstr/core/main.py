@@ -14,7 +14,6 @@ from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
 from ..payment.models import (
-    cleanup_enabled_models_periodically,
     models_router,
     update_sats_pricing,
 )
@@ -34,9 +33,9 @@ setup_logging()
 logger = get_logger(__name__)
 
 if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.2.0c-{os.getenv('VERSION_SUFFIX')}"
+    __version__ = f"0.2.1-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.2.0c"
+    __version__ = "0.2.1"
 
 
 @asynccontextmanager
@@ -49,14 +48,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     nip91_task = None
     providers_task = None
     models_refresh_task = None
-    models_cleanup_task = None
     model_maps_refresh_task = None
 
     try:
         # Run database migrations on startup
-        # This ensures the database schema is always up-to-date in production
-        # Migrations are idempotent - running them multiple times is safe
-        logger.info("Running database migrations")
         run_migrations()
 
         # Initialize database connection pools
@@ -80,8 +75,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         from ..proxy import get_upstreams
         from ..upstream.helpers import refresh_upstreams_models_periodically
 
-        await _update_prices()
-        await initialize_upstreams()
+        _update_prices_task = asyncio.create_task(_update_prices())
+        _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
+
+        # ensure both setup tasks complete
+        await asyncio.gather(
+            _update_prices_task, _initialize_upstreams_task, return_exceptions=True
+        )
 
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
@@ -89,14 +89,18 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task = asyncio.create_task(
                 refresh_upstreams_models_periodically(get_upstreams())
             )
-        models_cleanup_task = asyncio.create_task(cleanup_enabled_models_periodically())
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
-        nip91_task = asyncio.create_task(announce_provider())
-        providers_task = asyncio.create_task(providers_cache_refresher())
+        if global_settings.nsec:
+            nip91_task = asyncio.create_task(announce_provider())
+        if global_settings.providers_refresh_interval_seconds > 0:
+            providers_task = asyncio.create_task(providers_cache_refresher())
 
         yield
 
+    except asyncio.CancelledError:
+        # Expected during shutdown
+        pass
     except Exception as e:
         logger.error(
             "Application startup failed",
@@ -118,8 +122,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             providers_task.cancel()
         if models_refresh_task is not None:
             models_refresh_task.cancel()
-        if models_cleanup_task is not None:
-            models_cleanup_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
 
@@ -137,8 +139,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:
                 tasks_to_wait.append(models_refresh_task)
-            if models_cleanup_task is not None:
-                tasks_to_wait.append(models_cleanup_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
 
@@ -182,7 +182,6 @@ async def info() -> dict:
         "mints": global_settings.cashu_mints,
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
-        "models": [],  # kept for back-compat; prefer /v1/models
     }
 
 
@@ -263,6 +262,33 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     @app.get("/transactions/index.txt", include_in_schema=False)
     async def redirect_transactions_index_txt() -> RedirectResponse:
         return RedirectResponse("/transactions")
+
+    @app.get("/balances", include_in_schema=False)
+    async def serve_balances_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "balances" / "index.html")
+
+    # Add explicit route for /balances/index.txt to redirect to /balances
+    @app.get("/balances/index.txt", include_in_schema=False)
+    async def redirect_balances_index_txt() -> RedirectResponse:
+        return RedirectResponse("/balances")
+
+    @app.get("/logs", include_in_schema=False)
+    async def serve_logs_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "logs" / "index.html")
+
+    # Add explicit route for /logs/index.txt to redirect to /logs
+    @app.get("/logs/index.txt", include_in_schema=False)
+    async def redirect_logs_index_txt() -> RedirectResponse:
+        return RedirectResponse("/logs")
+
+    @app.get("/usage", include_in_schema=False)
+    async def serve_usage_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "usage" / "index.html")
+
+    # Add explicit route for /usage/index.txt to redirect to /usage
+    @app.get("/usage/index.txt", include_in_schema=False)
+    async def redirect_usage_index_txt() -> RedirectResponse:
+        return RedirectResponse("/usage")
 
     @app.get("/unauthorized", include_in_schema=False)
     async def serve_unauthorized_ui() -> FileResponse:

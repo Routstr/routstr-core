@@ -36,6 +36,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "ppqai"
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
+    IGNORED_MODEL_IDS: list[str] = ["auto"]
 
     def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(
@@ -101,11 +102,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         url = f"{self.base_url}/models"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        logger.debug(
-            "Fetching models from PPQ.AI",
-            extra={"url": url, "has_api_key": bool(self.api_key)},
-        )
-
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(url, headers=headers)
@@ -113,10 +109,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 data = response.json()
 
                 models_data = data.get("data", [])
-                logger.info(
-                    "Fetched models from PPQ.AI",
-                    extra={"model_count": len(models_data)},
-                )
 
                 or_models = [
                     Model(**model)  # type: ignore
@@ -127,11 +119,16 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 for model_data in models_data:
                     try:
                         ppqai_model = PPQAIModel.parse_obj(model_data)
+                        if ppqai_model.id in self.IGNORED_MODEL_IDS:
+                            continue
+
                         or_model = next(
                             (
                                 model
                                 for model in or_models
-                                if model.id == ppqai_model.id
+                                if (model.id == ppqai_model.id)
+                                or (model.id.split("/")[-1] == ppqai_model.id)
+                                or (model.id == ppqai_model.id.split("/")[-1])
                             ),
                             None,
                         )
@@ -192,15 +189,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
                 return models
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "HTTP error fetching models from PPQ.AI",
-                extra={
-                    "status_code": e.response.status_code,
-                    "error": str(e),
-                },
-            )
-            return []
         except Exception as e:
             logger.error(
                 "Error fetching models from PPQ.AI",
@@ -371,16 +359,20 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
         return topup_data
 
-    async def get_balance(self) -> dict[str, object]:
+    async def get_balance(self) -> float | None:
         """Get the current account balance from PPQ.AI.
 
         Returns:
-            Dict with balance information
+            Float representing the balance amount (in USD), or None if unavailable.
 
         Raises:
             httpx.HTTPStatusError: If the API request fails
         """
-        return await self.check_balance()
+        data = await self.check_balance()
+        balance = data.get("balance")
+        if isinstance(balance, (int, float)):
+            return float(balance)
+        return None
 
     async def check_balance(self) -> dict[str, object]:
         """Check the account balance for this PPQ.AI account.

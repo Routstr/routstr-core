@@ -1,3 +1,40 @@
+"""
+Logging configuration for Routstr.
+
+CRITICAL LOG MESSAGES FOR USAGE STATISTICS:
+===========================================
+The following log messages are parsed by the usage tracking system (routstr/core/admin.py).
+DO NOT modify or remove these messages without updating the usage tracking logic:
+
+1. "Received proxy request" (INFO) - routstr/proxy.py
+   - Used to count total incoming requests
+   - Includes model information in context
+
+    2. "Payment adjustment completed for streaming" (INFO) - routstr/upstream/base.py
+       "Payment adjustment completed for non-streaming" (INFO) - routstr/upstream/base.py
+   - Used to track successful completions and revenue
+   - The 'cost_data.total_msats' field is extracted for revenue calculation
+   - Must include 'cost_data' in extra dict
+
+3. "Payment processed successfully" (INFO) - routstr/auth.py
+   - Used to count successful payment processing events
+   - Tracks payment-related metrics
+
+4. "Upstream request failed, revert payment" (WARNING) - routstr/proxy.py
+   - Used to track failed requests and refunds
+   - The 'max_cost_for_model' field is extracted for refund calculation
+   - Must include 'max_cost_for_model' in extra dict
+
+5. Any ERROR level logs with "upstream" in the message
+   - Used to count upstream provider errors
+   - Helps identify service reliability issues
+
+If you need to modify these messages, ensure you also update the parsing logic in:
+- routstr/core/admin.py:_aggregate_metrics_by_time()
+- routstr/core/admin.py:_get_summary_stats()
+- routstr/core/admin.py:get_revenue_by_model()
+"""
+
 import logging.config
 import logging.handlers
 import os
@@ -155,21 +192,24 @@ class SecurityFilter(logging.Filter):
         """Filter out sensitive information from log records."""
         try:
             message = record.getMessage()
+            standalone_patterns = [
+                r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
+                r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+                r"nsec[a-z0-9]+",  # Nostr Public / Private Key
+            ]
+            for pattern in standalone_patterns:
+                message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
 
             for key in self.SENSITIVE_KEYS:
                 if key in message.lower():
-                    patterns = [
-                        rf"{key}[:\s=]+([a-zA-Z0-9_\-\.]+)",  # key: value or key=value
-                        rf'{key}[:\s=]+["\']([^"\']+)["\']',  # key: "value" or key='value'
-                        r"Bearer\s+([a-zA-Z0-9_\-\.]+)",  # Bearer token
-                        r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+                    key_patterns = [
+                        rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
+                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
                     ]
-
-                    for pattern in patterns:
+                    for pattern in key_patterns:
                         message = re.sub(
                             pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
                         )
-
             record.msg = message
             record.args = ()
 
@@ -298,6 +338,11 @@ def setup_logging() -> None:
                 "handlers": ["console"] if console_enabled else [],
                 "propagate": False,
             },
+            "openai": {
+                "level": "WARNING",
+                "handlers": ["console"] if console_enabled else [],
+                "propagate": False,
+            },
             "httpcore": {
                 "level": "WARNING",
                 "handlers": ["console"] if console_enabled else [],
@@ -320,6 +365,11 @@ def setup_logging() -> None:
             },
             "watchfiles.main": {"level": "WARNING", "handlers": [], "propagate": False},
             "aiosqlite": {"level": "ERROR", "handlers": [], "propagate": False},
+            "alembic": {
+                "level": "WARNING",
+                "handlers": ["console"] if console_enabled else [],
+                "propagate": False,
+            },
         },
         "root": {
             "level": log_level,

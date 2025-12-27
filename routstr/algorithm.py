@@ -150,18 +150,6 @@ def should_prefer_model(
     # Prefer lower adjusted cost
     should_replace = candidate_adjusted < current_adjusted
 
-    # Log provider changes when candidate wins
-    if should_replace:
-        candidate_provider_name = getattr(
-            candidate_provider, "upstream_name", "unknown"
-        )
-        current_provider_name = getattr(current_provider, "upstream_name", "unknown")
-        logger.debug(
-            f"Model selection for alias '{alias}': choosing {candidate_provider_name} "
-            f"(cost: ${candidate_adjusted:.6f}) over {current_provider_name} "
-            f"(cost: ${current_adjusted:.6f})"
-        )
-
     return should_replace
 
 
@@ -218,19 +206,20 @@ def create_model_mappings(
         alias: str, model: "Model", provider: "BaseUpstreamProvider"
     ) -> None:
         """Set alias to model/provider if not set or if new model is preferred."""
-        existing_model = model_instances.get(alias)
+        alias_lower = alias.lower()
+        existing_model = model_instances.get(alias_lower)
         if not existing_model:
             # No existing mapping, set it
-            model_instances[alias] = model
-            provider_map[alias] = provider
+            model_instances[alias_lower] = model
+            provider_map[alias_lower] = provider
         else:
             # Check if candidate should replace existing
-            existing_provider = provider_map[alias]
+            existing_provider = provider_map[alias_lower]
             if should_prefer_model(
                 model, provider, existing_model, existing_provider, alias
             ):
-                model_instances[alias] = model
-                provider_map[alias] = provider
+                model_instances[alias_lower] = model
+                provider_map[alias_lower] = provider
 
     def process_provider_models(
         upstream: "BaseUpstreamProvider", is_openrouter: bool = False
@@ -254,7 +243,12 @@ def create_model_mappings(
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
             if not is_openrouter or base_id not in unique_models:
-                unique_model = model_to_use.copy(update={"id": base_id})
+                unique_model = model_to_use.copy(
+                    update={
+                        "id": base_id,
+                        "upstream_provider_id": upstream.provider_type,
+                    }
+                )
                 unique_models[base_id] = unique_model
 
             # Get all aliases for this model
@@ -289,12 +283,8 @@ def create_model_mappings(
         provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
 
     logger.debug(
-        "Created model mappings",
-        extra={
-            "unique_model_count": len(unique_models),
-            "total_alias_count": len(model_instances),
-            "provider_distribution": provider_counts,
-        },
+        f"Updated model mappings with ({len(unique_models)} unique models and {len(model_instances)} aliases)",
+        extra={"provider_distribution": provider_counts},
     )
 
     return model_instances, provider_map, unique_models
