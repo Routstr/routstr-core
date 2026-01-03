@@ -305,9 +305,6 @@ async def fetch_all_balances(
 
 
 async def periodic_payout() -> None:
-    if not settings.receive_ln_address:
-        logger.error("RECEIVE_LN_ADDRESS is not set, skipping payout")
-        return
     while True:
         await asyncio.sleep(60 * 15)
         try:
@@ -328,6 +325,12 @@ async def periodic_payout() -> None:
                         available_balance = proofs_balance - user_balance
                         min_amount = 210 if unit == "sat" else 210000
                         if available_balance > min_amount:
+                            if not settings.receive_ln_address:
+                                logger.error(
+                                    "RECEIVE_LN_ADDRESS is not set, skipping payout"
+                                )
+                                continue
+
                             amount_received = await raw_send_to_lnurl(
                                 wallet,
                                 proofs,
