@@ -234,7 +234,11 @@ class BaseUpstreamProvider:
                     )
 
                 # Handle model in input field (alternative format)
-                if "input" in data and isinstance(data["input"], dict) and "model" in data["input"]:
+                if (
+                    "input" in data
+                    and isinstance(data["input"], dict)
+                    and "model" in data["input"]
+                ):
                     original_model = model_obj.id
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
@@ -779,8 +783,13 @@ class BaseUpstreamProvider:
 
                                     # Track reasoning tokens for Responses API
                                     if usage := obj.get("usage", {}):
-                                        if isinstance(usage, dict) and "reasoning_tokens" in usage:
-                                            reasoning_tokens += usage.get("reasoning_tokens", 0)
+                                        if (
+                                            isinstance(usage, dict)
+                                            and "reasoning_tokens" in usage
+                                        ):
+                                            reasoning_tokens += usage.get(
+                                                "reasoning_tokens", 0
+                                            )
                             except json.JSONDecodeError:
                                 pass
                     except Exception:
@@ -933,8 +942,8 @@ class BaseUpstreamProvider:
                     "model": response_json.get("model", "unknown"),
                     "has_usage": "usage" in response_json,
                     "has_reasoning_tokens": "usage" in response_json
-                        and isinstance(response_json.get("usage"), dict)
-                        and "reasoning_tokens" in response_json["usage"],
+                    and isinstance(response_json.get("usage"), dict)
+                    and "reasoning_tokens" in response_json["usage"],
                 },
             )
 
@@ -2503,7 +2512,10 @@ class BaseUpstreamProvider:
                         usage_data = data_json["usage"]
                         model = data_json.get("model")
                         # Track reasoning tokens for Responses API
-                        if isinstance(usage_data, dict) and "reasoning_tokens" in usage_data:
+                        if (
+                            isinstance(usage_data, dict)
+                            and "reasoning_tokens" in usage_data
+                        ):
                             reasoning_tokens = usage_data.get("reasoning_tokens", 0)
                     elif "model" in data_json and not model:
                         model = data_json["model"]

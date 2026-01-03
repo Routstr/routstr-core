@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AppSidebar } from '@/components/app-sidebar';
 import { SiteHeader } from '@/components/site-header';
@@ -22,14 +22,65 @@ import { LogFilters } from './log-filters';
 import { LogEntryCard } from './log-entry-card';
 import { LogDetailsDialog } from './log-details-dialog';
 
+const STORAGE_KEY = 'routstr-log-filters';
+
 export default function LogsPage() {
   const [selectedDate, setSelectedDate] = useState<string>('all');
   const [selectedLevel, setSelectedLevel] = useState<string>('all');
   const [requestId, setRequestId] = useState<string>('');
   const [searchText, setSearchText] = useState<string>('');
+  const [selectedStatusCodes, setSelectedStatusCodes] = useState<string[]>([]);
+  const [selectedMethods, setSelectedMethods] = useState<string[]>([]);
+  const [selectedEndpoints, setSelectedEndpoints] = useState<string[]>([]);
   const [limit, setLimit] = useState<number>(100);
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState<boolean>(false);
+
+  // Load filters from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.selectedDate) setSelectedDate(parsed.selectedDate);
+        if (parsed.selectedLevel) setSelectedLevel(parsed.selectedLevel);
+        if (parsed.requestId) setRequestId(parsed.requestId);
+        if (parsed.searchText) setSearchText(parsed.searchText);
+        if (parsed.selectedStatusCodes)
+          setSelectedStatusCodes(parsed.selectedStatusCodes);
+        if (parsed.selectedMethods) setSelectedMethods(parsed.selectedMethods);
+        if (parsed.selectedEndpoints)
+          setSelectedEndpoints(parsed.selectedEndpoints);
+        if (parsed.limit) setLimit(parsed.limit);
+      } catch (e) {
+        console.error('Failed to load filters from localStorage', e);
+      }
+    }
+  }, []);
+
+  // Save filters to localStorage whenever they change
+  useEffect(() => {
+    const filters = {
+      selectedDate,
+      selectedLevel,
+      requestId,
+      searchText,
+      selectedStatusCodes,
+      selectedMethods,
+      selectedEndpoints,
+      limit,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(filters));
+  }, [
+    selectedDate,
+    selectedLevel,
+    requestId,
+    searchText,
+    selectedStatusCodes,
+    selectedMethods,
+    selectedEndpoints,
+    limit,
+  ]);
 
   const {
     data: logsData,
@@ -42,6 +93,9 @@ export default function LogsPage() {
       selectedLevel,
       requestId,
       searchText,
+      selectedStatusCodes,
+      selectedMethods,
+      selectedEndpoints,
       limit,
     ],
     queryFn: () =>
@@ -50,6 +104,16 @@ export default function LogsPage() {
         level: selectedLevel === 'all' ? undefined : selectedLevel,
         request_id: requestId || undefined,
         search: searchText || undefined,
+        status_codes:
+          selectedStatusCodes.length > 0
+            ? selectedStatusCodes.join(',')
+            : undefined,
+        methods:
+          selectedMethods.length > 0 ? selectedMethods.join(',') : undefined,
+        endpoints:
+          selectedEndpoints.length > 0
+            ? selectedEndpoints.join(',')
+            : undefined,
         limit: limit,
       }),
     refetchInterval: 30000,
@@ -60,6 +124,9 @@ export default function LogsPage() {
     setSelectedLevel('all');
     setRequestId('');
     setSearchText('');
+    setSelectedStatusCodes([]);
+    setSelectedMethods([]);
+    setSelectedEndpoints([]);
     setLimit(100);
   };
 
@@ -100,11 +167,17 @@ export default function LogsPage() {
             selectedLevel={selectedLevel}
             requestId={requestId}
             searchText={searchText}
+            selectedStatusCodes={selectedStatusCodes}
+            selectedMethods={selectedMethods}
+            selectedEndpoints={selectedEndpoints}
             limit={limit}
             onDateChange={setSelectedDate}
             onLevelChange={setSelectedLevel}
             onRequestIdChange={setRequestId}
             onSearchTextChange={setSearchText}
+            onStatusCodesChange={setSelectedStatusCodes}
+            onMethodsChange={setSelectedMethods}
+            onEndpointsChange={setSelectedEndpoints}
             onLimitChange={setLimit}
             onClearFilters={handleClearFilters}
           />
@@ -122,13 +195,22 @@ export default function LogsPage() {
               {(selectedDate !== 'all' ||
                 selectedLevel !== 'all' ||
                 requestId ||
-                searchText) && (
+                searchText ||
+                selectedStatusCodes.length > 0 ||
+                selectedMethods.length > 0 ||
+                selectedEndpoints.length > 0) && (
                 <CardDescription className='text-xs sm:text-sm'>
                   Showing logs
                   {selectedDate !== 'all' && ` for ${selectedDate}`}
                   {selectedLevel !== 'all' && ` with level ${selectedLevel}`}
                   {requestId && ` with request ID ${requestId}`}
                   {searchText && ` matching "${searchText}"`}
+                  {selectedStatusCodes.length > 0 &&
+                    ` with status ${selectedStatusCodes.join(', ')}`}
+                  {selectedMethods.length > 0 &&
+                    ` with method ${selectedMethods.join(', ')}`}
+                  {selectedEndpoints.length > 0 &&
+                    ` with endpoint ${selectedEndpoints.join(', ')}`}
                 </CardDescription>
               )}
             </CardHeader>
