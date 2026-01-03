@@ -37,6 +37,8 @@ from ..wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
 
+DEFAULT_PROXY_TIMEOUT = 600.0
+
 
 class TopupData(BaseModel):
     """Universal top-up data schema for Lightning Network invoices."""
@@ -1047,7 +1049,7 @@ class BaseUpstreamProvider:
 
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         )
 
         try:
@@ -1273,7 +1275,7 @@ class BaseUpstreamProvider:
 
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         )
 
         try:
@@ -1456,7 +1458,7 @@ class BaseUpstreamProvider:
 
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         ) as client:
             try:
                 response = await client.send(
@@ -2019,7 +2021,7 @@ class BaseUpstreamProvider:
 
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         ) as client:
             try:
                 response = await client.send(
@@ -2280,7 +2282,7 @@ class BaseUpstreamProvider:
 
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         ) as client:
             try:
                 response = await client.send(
