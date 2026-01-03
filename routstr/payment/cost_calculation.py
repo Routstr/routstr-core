@@ -48,13 +48,6 @@ async def calculate_cost(  # todo: can be sync
         },
     )
 
-    cost_data = MaxCostData(
-        base_msats=max_cost,
-        input_msats=0,
-        output_msats=0,
-        total_msats=max_cost,
-    )
-
     if "usage" not in response_data or response_data["usage"] is None:
         logger.warning(
             "No usage data in response, using base cost only",
@@ -63,7 +56,12 @@ async def calculate_cost(  # todo: can be sync
                 "model": response_data.get("model", "unknown"),
             },
         )
-        return cost_data
+        return MaxCostData(
+            base_msats=0,
+            input_msats=0,
+            output_msats=0,
+            total_msats=0,
+        )
 
     usage_data = response_data["usage"]
 
@@ -178,7 +176,12 @@ async def calculate_cost(  # todo: can be sync
                 "model": response_data.get("model", "unknown"),
             },
         )
-        return cost_data
+        return MaxCostData(
+            base_msats=max_cost,
+            input_msats=0,
+            output_msats=0,
+            total_msats=max_cost,
+        )
 
     input_tokens = usage_data.get("prompt_tokens", 0)
     output_tokens = usage_data.get("completion_tokens", 0)
