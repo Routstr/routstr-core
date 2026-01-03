@@ -17,6 +17,9 @@ export interface LogsResponse {
   level: string | null;
   request_id: string | null;
   search: string | null;
+  status_codes: string | null;
+  methods: string | null;
+  endpoints: string | null;
   limit: number;
 }
 

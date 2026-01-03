@@ -3080,6 +3080,9 @@ async def get_logs_api(
     level: str | None = None,
     request_id: str | None = None,
     search: str | None = None,
+    status_codes: str | None = Query(None, description="Comma-separated status codes"),
+    methods: str | None = Query(None, description="Comma-separated HTTP methods"),
+    endpoints: str | None = Query(None, description="Comma-separated endpoints"),
     limit: int = 100,
 ) -> dict[str, object]:
     """
@@ -3090,16 +3093,32 @@ async def get_logs_api(
         level: Filter by log level
         request_id: Filter by request ID
         search: Search text in message and name fields (case-insensitive)
+        status_codes: Comma-separated list of HTTP status codes
+        methods: Comma-separated list of HTTP methods
+        endpoints: Comma-separated list of endpoints
         limit: Maximum number of entries to return
 
     Returns:
         Dict containing logs and filter metadata
     """
+    status_code_list = None
+    if status_codes:
+        try:
+            status_code_list = [int(s.strip()) for s in status_codes.split(",")]
+        except ValueError:
+            pass
+
+    method_list = [m.strip() for m in methods.split(",")] if methods else None
+    endpoint_list = [e.strip() for e in endpoints.split(",")] if endpoints else None
+
     log_entries = log_manager.search_logs(
         date=date,
         level=level,
         request_id=request_id,
         search_text=search,
+        status_codes=status_code_list,
+        methods=method_list,
+        endpoints=endpoint_list,
         limit=limit,
     )
 
@@ -3110,6 +3129,9 @@ async def get_logs_api(
         "level": level,
         "request_id": request_id,
         "search": search,
+        "status_codes": status_codes,
+        "methods": methods,
+        "endpoints": endpoints,
         "limit": limit,
     }
 
