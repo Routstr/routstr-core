@@ -19,6 +19,13 @@ def _clear_providers_cache() -> None:
     _PROVIDERS_CACHE.clear()
 
 
+@pytest.fixture(autouse=True)
+def _enable_provider_discovery() -> None:
+    """Enable provider discovery for all tests in this module"""
+    with patch("routstr.core.settings.settings.providers_refresh_interval_seconds", 300):
+        yield
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_providers_endpoint_default_response(
