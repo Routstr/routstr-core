@@ -584,8 +584,10 @@ class BaseUpstreamProvider:
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
-                await finalize_without_usage()
                 raise
+            finally:
+                if not usage_finalized:
+                    await finalize_without_usage()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
