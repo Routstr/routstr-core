@@ -37,7 +37,7 @@ from ..wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
 
-DEFAULT_PROXY_TIMEOUT = 600.0
+DEFAULT_PROXY_TIMEOUT = 30.0
 
 
 class TopupData(BaseModel):
@@ -236,7 +236,11 @@ class BaseUpstreamProvider:
                     )
 
                 # Handle model in input field (alternative format)
-                if "input" in data and isinstance(data["input"], dict) and "model" in data["input"]:
+                if (
+                    "input" in data
+                    and isinstance(data["input"], dict)
+                    and "model" in data["input"]
+                ):
                     original_model = model_obj.id
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
@@ -688,6 +692,7 @@ class BaseUpstreamProvider:
                 },
             )
             raise
+
         except Exception as e:
             logger.error(
                 "Error processing non-streaming chat completion",
@@ -781,8 +786,13 @@ class BaseUpstreamProvider:
 
                                     # Track reasoning tokens for Responses API
                                     if usage := obj.get("usage", {}):
-                                        if isinstance(usage, dict) and "reasoning_tokens" in usage:
-                                            reasoning_tokens += usage.get("reasoning_tokens", 0)
+                                        if (
+                                            isinstance(usage, dict)
+                                            and "reasoning_tokens" in usage
+                                        ):
+                                            reasoning_tokens += usage.get(
+                                                "reasoning_tokens", 0
+                                            )
                             except json.JSONDecodeError:
                                 pass
                     except Exception:
@@ -935,8 +945,8 @@ class BaseUpstreamProvider:
                     "model": response_json.get("model", "unknown"),
                     "has_usage": "usage" in response_json,
                     "has_reasoning_tokens": "usage" in response_json
-                        and isinstance(response_json.get("usage"), dict)
-                        and "reasoning_tokens" in response_json["usage"],
+                    and isinstance(response_json.get("usage"), dict)
+                    and "reasoning_tokens" in response_json["usage"],
                 },
             )
 
@@ -1192,7 +1202,8 @@ class BaseUpstreamProvider:
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
-                error_message = "Upstream service request timed out"
+                # Re-raise timeout exception to allow fallback handling in proxy layer
+                raise
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
             else:
@@ -1395,7 +1406,8 @@ class BaseUpstreamProvider:
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
-                error_message = "Upstream service request timed out"
+                # Re-raise timeout exception to allow fallback handling in proxy layer
+                raise
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
             else:
@@ -1489,6 +1501,9 @@ class BaseUpstreamProvider:
                     status_code=response.status_code,
                     headers=dict(response.headers),
                 )
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # Re-raise to allow fallback handling in proxy layer
+                raise
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(
@@ -2115,6 +2130,9 @@ class BaseUpstreamProvider:
                     headers=dict(response.headers),
                     background=background_tasks,
                 )
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # Re-raise to allow fallback handling in proxy layer
+                raise
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(
@@ -2376,6 +2394,9 @@ class BaseUpstreamProvider:
                     headers=dict(response.headers),
                     background=background_tasks,
                 )
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # Re-raise to allow fallback handling in proxy layer
+                raise
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(
@@ -2505,7 +2526,10 @@ class BaseUpstreamProvider:
                         usage_data = data_json["usage"]
                         model = data_json.get("model")
                         # Track reasoning tokens for Responses API
-                        if isinstance(usage_data, dict) and "reasoning_tokens" in usage_data:
+                        if (
+                            isinstance(usage_data, dict)
+                            and "reasoning_tokens" in usage_data
+                        ):
                             reasoning_tokens = usage_data.get("reasoning_tokens", 0)
                     elif "model" in data_json and not model:
                         model = data_json["model"]
