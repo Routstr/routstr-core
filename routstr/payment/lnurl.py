@@ -283,7 +283,7 @@ async def raw_send_to_lnurl(
             f"({min_sendable_sat} - {max_sendable_sat} {unit})"
         )
 
-    estimated_fees_sat = int(max(math.ceil((amount_msat / 1000) * 0.01), 2))
+    estimated_fees_sat = int(max(math.ceil((amount_msat / 1000) * 0.01), 2)) + 1
     estimated_fees_msat = estimated_fees_sat * 1000
     final_amount = amount_msat - estimated_fees_msat
 

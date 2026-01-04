@@ -81,7 +81,7 @@ async def swap_to_primary_mint(
         amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
-    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2))
+    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2)) + 1
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
     primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
 
