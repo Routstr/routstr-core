@@ -71,7 +71,7 @@ async def reproduce() -> None:
         print("\nChecking final balance...")
         try:
             final_reserved = await get_balance(client)
-        except Exception as e:
+        except Exception:
             # Retry once if connection was closed
             async with httpx.AsyncClient(
                 base_url=BASE_URL, headers=headers, timeout=30.0
