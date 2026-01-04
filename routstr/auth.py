@@ -441,6 +441,29 @@ async def adjust_payment_for_tokens(
         },
     )
 
+    async def release_reservation_only() -> None:
+        """Fallback to release reservation without charging when main update fails."""
+        try:
+            release_stmt = (
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == key.hashed_key)
+                .values(reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost)
+            )
+            await session.exec(release_stmt)  # type: ignore[call-overload]
+            await session.commit()
+            logger.warning(
+                "Released reservation without charging (fallback)",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "deducted_max_cost": deducted_max_cost,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to release reservation in fallback",
+                extra={"error": str(e), "key_hash": key.hashed_key[:8] + "..."},
+            )
+
     match await calculate_cost(response_data, deducted_max_cost, session):
         case MaxCostData() as cost:
             logger.debug(
@@ -465,7 +488,7 @@ async def adjust_payment_for_tokens(
             await session.commit()
             if result.rowcount == 0:
                 logger.error(
-                    "Failed to finalize max-cost payment - insufficient reserved balance",
+                    "Failed to finalize max-cost payment - retrying reservation release",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
                         "deducted_max_cost": deducted_max_cost,
@@ -474,6 +497,7 @@ async def adjust_payment_for_tokens(
                         "model": model,
                     },
                 )
+                await release_reservation_only()
             else:
                 await session.refresh(key)
                 logger.info(
@@ -568,13 +592,14 @@ async def adjust_payment_for_tokens(
                     )
                 else:
                     logger.warning(
-                        "Failed to finalize additional charge (concurrent operation)",
+                        "Failed to finalize additional charge - releasing reservation",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
                             "attempted_charge": total_cost_msats,
                             "model": model,
                         },
                     )
+                    await release_reservation_only()
             else:
                 # Refund some of the base cost
                 refund = abs(cost_difference)
@@ -603,7 +628,7 @@ async def adjust_payment_for_tokens(
 
                 if result.rowcount == 0:
                     logger.error(
-                        "Failed to finalize payment - insufficient reserved balance",
+                        "Failed to finalize payment - releasing reservation",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
                             "deducted_max_cost": deducted_max_cost,
@@ -612,28 +637,27 @@ async def adjust_payment_for_tokens(
                             "model": model,
                         },
                     )
-                    # Still return the cost data even if we couldn't properly finalize
-                    # The reservation was already made, so the user has paid
+                    await release_reservation_only()
+                else:
+                    cost.total_msats = total_cost_msats
+                    await session.refresh(key)
 
-                cost.total_msats = total_cost_msats
-                await session.refresh(key)
-
-                logger.info(
-                    "Refund processed successfully",
-                    extra={
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "refunded_amount": refund,
-                        "new_balance": key.balance,
-                        "final_cost": cost.total_msats,
-                        "model": model,
-                    },
-                )
+                    logger.info(
+                        "Refund processed successfully",
+                        extra={
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "refunded_amount": refund,
+                            "new_balance": key.balance,
+                            "final_cost": cost.total_msats,
+                            "model": model,
+                        },
+                    )
 
             return cost.dict()
 
         case CostDataError() as error:
             logger.error(
-                "Cost calculation error during payment adjustment",
+                "Cost calculation error during payment adjustment - releasing reservation",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
                     "model": model,
@@ -641,6 +665,7 @@ async def adjust_payment_for_tokens(
                     "error_code": error.code,
                 },
             )
+            await release_reservation_only()
 
             raise HTTPException(
                 status_code=400,
@@ -652,7 +677,12 @@ async def adjust_payment_for_tokens(
                     }
                 },
             )
-    # Fallback return to satisfy type checker; execution should not reach here
+    # Fallback: should not reach here, but release reservation just in case
+    logger.error(
+        "Unexpected fallback in adjust_payment_for_tokens - releasing reservation",
+        extra={"key_hash": key.hashed_key[:8] + "...", "model": model},
+    )
+    await release_reservation_only()
     return {
         "base_msats": deducted_max_cost,
         "input_msats": 0,
