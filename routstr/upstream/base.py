@@ -1027,11 +1027,11 @@ class BaseUpstreamProvider:
             raise
 
     async def _finalize_generic_streaming_payment(
-        self, key_hash: str, key_class: type, max_cost: int, path: str
+        self, key_hash: str, max_cost: int, path: str
     ) -> None:
         """Background task to finalize payment for generic streaming requests."""
         async with create_session() as session:
-            key = await session.get(key_class, key_hash)
+            key = await session.get(ApiKey, key_hash)
             if not key:
                 logger.warning(
                     "Key not found during background payment finalization",
@@ -1218,7 +1218,6 @@ class BaseUpstreamProvider:
             background_tasks.add_task(
                 self._finalize_generic_streaming_payment,
                 key.hashed_key,
-                key.__class__,
                 max_cost_for_model,
                 path,
             )
@@ -1428,7 +1427,6 @@ class BaseUpstreamProvider:
             background_tasks.add_task(
                 self._finalize_generic_streaming_payment,
                 key.hashed_key,
-                key.__class__,
                 max_cost_for_model,
                 path,
             )
