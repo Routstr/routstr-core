@@ -71,7 +71,7 @@ async def reproduce() -> None:
 
         # Wait a bit for the server to realize we disconnected (though with asyncio it might be immediate or depend on keepalive)
         print("\nWaiting for server to process disconnect...")
-        await asyncio.sleep(5)
+        await asyncio.sleep(21)
 
         print("\nChecking final balance...")
         try:
