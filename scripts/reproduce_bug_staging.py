@@ -49,7 +49,12 @@ async def reproduce() -> None:
             ) as response:
                 print(f"Stream status: {response.status_code}")
                 if response.status_code != 200:
-                    print(f"Error: {await response.aread()}")
+                    err_bytes = await response.aread()
+                    try:
+                        err_str = err_bytes.decode()
+                    except Exception:
+                        err_str = repr(err_bytes)
+                    print(f"Error: {err_str}")
                     return
 
                 print("Stream started. Reading a few chunks...")
@@ -71,7 +76,7 @@ async def reproduce() -> None:
         print("\nChecking final balance...")
         try:
             final_reserved = await get_balance(client)
-        except Exception:
+        except Exception as e:
             # Retry once if connection was closed
             async with httpx.AsyncClient(
                 base_url=BASE_URL, headers=headers, timeout=30.0
