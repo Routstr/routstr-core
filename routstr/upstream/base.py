@@ -447,6 +447,11 @@ class BaseUpstreamProvider:
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
+                        logger.warning(
+                            "Key not found when finalizing streaming payment",
+                            extra={"key_hash": key.hashed_key[:8] + "..."},
+                        )
+                        usage_finalized = True
                         return None
                     try:
                         fallback: dict = {
@@ -475,6 +480,7 @@ class BaseUpstreamProvider:
                                 "key_hash": key.hashed_key[:8] + "...",
                             },
                         )
+                        usage_finalized = True
                         return None
 
             try:
@@ -584,8 +590,10 @@ class BaseUpstreamProvider:
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
-                await finalize_without_usage()
                 raise
+            finally:
+                if not usage_finalized:
+                    await finalize_without_usage()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -738,6 +746,11 @@ class BaseUpstreamProvider:
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
+                        logger.warning(
+                            "Key not found when finalizing Responses API streaming payment",
+                            extra={"key_hash": key.hashed_key[:8] + "..."},
+                        )
+                        usage_finalized = True
                         return None
                     try:
                         fallback: dict = {
@@ -766,6 +779,7 @@ class BaseUpstreamProvider:
                                 "key_hash": key.hashed_key[:8] + "...",
                             },
                         )
+                        usage_finalized = True
                         return None
 
             try:
@@ -890,8 +904,10 @@ class BaseUpstreamProvider:
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
-                await finalize_without_usage()
                 raise
+            finally:
+                if not usage_finalized:
+                    await finalize_without_usage()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -1009,6 +1025,44 @@ class BaseUpstreamProvider:
                 },
             )
             raise
+
+    async def _finalize_generic_streaming_payment(
+        self, key_hash: str, max_cost: int, path: str
+    ) -> None:
+        """Background task to finalize payment for generic streaming requests."""
+        async with create_session() as session:
+            key = await session.get(ApiKey, key_hash)
+            if not key:
+                logger.warning(
+                    "Key not found during background payment finalization",
+                    extra={"key_hash": key_hash[:8] + "..."},
+                )
+                return
+
+            try:
+                # Finalize with "unknown" model and no usage to release reservation/charge max cost
+                await adjust_payment_for_tokens(
+                    key,
+                    {"model": "unknown", "usage": None},
+                    session,
+                    max_cost,
+                )
+                logger.info(
+                    "Finalized generic streaming payment in background",
+                    extra={
+                        "path": path,
+                        "key_hash": key_hash[:8] + "...",
+                    },
+                )
+            except Exception as e:
+                logger.error(
+                    "Error finalizing generic streaming payment in background",
+                    extra={
+                        "error": str(e),
+                        "key_hash": key_hash[:8] + "...",
+                        "path": path,
+                    },
+                )
 
     async def forward_request(
         self,
@@ -1161,6 +1215,12 @@ class BaseUpstreamProvider:
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
             background_tasks.add_task(client.aclose)
+            background_tasks.add_task(
+                self._finalize_generic_streaming_payment,
+                key.hashed_key,
+                max_cost_for_model,
+                path,
+            )
 
             logger.debug(
                 "Streaming non-chat response",
@@ -1364,9 +1424,15 @@ class BaseUpstreamProvider:
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
             background_tasks.add_task(client.aclose)
+            background_tasks.add_task(
+                self._finalize_generic_streaming_payment,
+                key.hashed_key,
+                max_cost_for_model,
+                path,
+            )
 
             logger.debug(
-                "Streaming non-chat response",
+                "Streaming non-Responses API response",
                 extra={
                     "path": path,
                     "status_code": response.status_code,
