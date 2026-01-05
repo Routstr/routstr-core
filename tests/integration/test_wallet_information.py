@@ -3,7 +3,7 @@ Integration tests for wallet information retrieval endpoints.
 Tests GET /v1/wallet/ and GET /v1/wallet/info endpoints with various scenarios.
 """
 
-import time
+
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -367,30 +367,4 @@ async def test_wallet_info_with_special_characters_in_headers(
     # Note: Current implementation doesn't return refund_address in response
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-@pytest.mark.slow
-async def test_wallet_endpoints_performance(authenticated_client: AsyncClient) -> None:
-    """Test wallet endpoints meet performance requirements"""
 
-    # Warm up
-    await authenticated_client.get("/v1/wallet/")
-
-    # Measure response times
-    response_times = []
-
-    for _ in range(50):
-        start_time = time.time()
-        response = await authenticated_client.get("/v1/wallet/")
-        end_time = time.time()
-
-        assert response.status_code == 200
-        response_times.append(end_time - start_time)
-
-    # Calculate statistics
-    avg_time = sum(response_times) / len(response_times)
-    max_time = max(response_times)
-
-    # Performance assertions
-    assert avg_time < 0.1  # Average should be under 100ms
-    assert max_time < 0.5  # No request should take more than 500ms

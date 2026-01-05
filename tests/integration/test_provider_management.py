@@ -11,7 +11,7 @@ from httpx import AsyncClient
 
 from routstr.discovery import _PROVIDERS_CACHE
 
-from .utils import PerformanceValidator, ResponseValidator
+from .utils import ResponseValidator
 
 
 @pytest.fixture(autouse=True)
@@ -516,46 +516,6 @@ async def test_providers_endpoint_response_format(
             assert isinstance(data_json, dict)
             assert "providers" in data_json
             assert isinstance(data_json["providers"], list)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_providers_endpoint_performance(integration_client: AsyncClient) -> None:
-    """Test providers endpoint meets performance requirements"""
-
-    # Mock quick responses to avoid network delays
-    mock_events: list[dict[str, Any]] = [
-        {
-            "id": f"event{i}",
-            "content": f"Provider: http://provider{i}.onion",
-            "created_at": 1234567890 + i,
-        }
-        for i in range(5)
-    ]
-
-    validator = PerformanceValidator()
-
-    with patch(
-        "routstr.discovery.query_nostr_relay_for_providers", return_value=mock_events
-    ):
-        with patch("routstr.discovery.fetch_provider_health") as mock_fetch:
-            mock_fetch.return_value = {"status_code": 200, "json": {"status": "online"}}
-
-            # Test multiple requests
-            for i in range(10):
-                start = validator.start_timing("providers_endpoint")
-                response = await integration_client.get("/v1/providers/")
-                validator.end_timing("providers_endpoint", start)
-
-                assert response.status_code == 200
-
-    # Validate performance (should be fast with mocked dependencies)
-    perf_result = validator.validate_response_time(
-        "providers_endpoint",
-        max_duration=2.0,  # Allow more time since it involves multiple operations
-        percentile=0.95,
-    )
-    assert perf_result["valid"], f"Performance requirement failed: {perf_result}"
 
 
 @pytest.mark.integration

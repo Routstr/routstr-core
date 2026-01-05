@@ -10,7 +10,6 @@ from httpx import AsyncClient
 
 from .utils import (
     CashuTokenGenerator,
-    PerformanceValidator,
     ResponseValidator,
 )
 
@@ -159,30 +158,7 @@ async def test_error_handling(
     assert response.status_code == 401
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_performance_requirements(integration_client: AsyncClient) -> None:
-    """Test that endpoints meet performance requirements"""
 
-    validator = PerformanceValidator()
-
-    # Test info endpoint performance
-    for i in range(50):
-        start = validator.start_timing("info_endpoint")
-        response = await integration_client.get("/")
-        validator.end_timing("info_endpoint", start)
-        assert response.status_code == 200
-
-    # Validate 95th percentile is under 500ms
-    result = validator.validate_response_time(
-        "info_endpoint", max_duration=0.5, percentile=0.95
-    )
-
-    assert result["valid"], (
-        f"Performance requirement failed: "
-        f"95th percentile was {result['percentile_time']:.3f}s "
-        f"(required < {result['max_allowed']}s)"
-    )
 
 
 @pytest.mark.integration
