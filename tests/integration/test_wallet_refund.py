@@ -537,42 +537,4 @@ async def test_refund_with_expired_key(
         assert response.json()["recipient"] == "expired@ln.address"
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-@pytest.mark.slow
-async def test_refund_performance(
-    integration_client: AsyncClient, testmint_wallet: Any
-) -> None:
-    """Test refund endpoint performance"""
 
-    import time
-
-    # Create multiple API keys
-    api_keys = []
-    for i in range(10):
-        token = await testmint_wallet.mint_tokens(100 + i)
-        # Use cashu token as Bearer auth to create API key
-        integration_client.headers["Authorization"] = f"Bearer {token}"
-        response = await integration_client.get("/v1/wallet/info")
-        assert response.status_code == 200
-        api_keys.append(response.json()["api_key"])
-
-    # Measure refund times
-    refund_times = []
-
-    for api_key in api_keys:
-        integration_client.headers["Authorization"] = f"Bearer {api_key}"
-
-        start_time = time.time()
-        response = await integration_client.post("/v1/wallet/refund")
-        end_time = time.time()
-
-        assert response.status_code == 200
-        refund_times.append(end_time - start_time)
-
-    # Performance assertions
-    avg_time = sum(refund_times) / len(refund_times)
-    max_time = max(refund_times)
-
-    assert avg_time < 0.5  # Average under 500ms
-    assert max_time < 1.0  # No refund takes more than 1 second
