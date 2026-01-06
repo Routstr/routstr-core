@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
 
+    # Cloud UI
+    fallback_ui_url: str = Field(default="https://api.routstr.com", env="FALLBACK_UI_URL")
+
 
 def _compute_primary_mint(cashu_mints: list[str]) -> str:
     return cashu_mints[0] if cashu_mints else "https://mint.minibits.cash/Bitcoin"
