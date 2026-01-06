@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
+    disable_testnut_mock_upstream: bool = Field(
+        default=False, env="DISABLE_TESTNUT_MOCK_UPSTREAM"
+    )
 
     # Pricing
     # Default behavior: derive pricing from MODELS

@@ -148,7 +148,10 @@ async def proxy(
     else:
         model_id = request_body_dict.get("model", "unknown")
 
-    if "https://testnut.cashu.space" in settings.cashu_mints:
+    if (
+        "https://testnut.cashu.space" in settings.cashu_mints
+        and not settings.disable_testnut_mock_upstream
+    ):
         try:
             token_str = None
             if x_cashu_header := headers.get("x-cashu"):
