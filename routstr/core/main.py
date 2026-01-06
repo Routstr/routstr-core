@@ -63,7 +63,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             s = await SettingsService.initialize(session)
 
         if not s.admin_password:
-            logger.info(
+            logger.warning(
                 f"Admin password is not set. Visit {s.http_url or 'http://localhost:8000'}/admin to set the password."
             )
 
