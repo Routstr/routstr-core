@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
-        default=300, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
+        default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
     )
     pricing_refresh_interval_seconds: int = Field(
         default=120, env="PRICING_REFRESH_INTERVAL_SECONDS"

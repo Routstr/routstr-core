@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 import websockets
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from .core.logging import get_logger
 from .core.settings import settings
@@ -389,6 +389,9 @@ async def get_providers(
     Return cached providers. If include_json, return provider+health; otherwise provider only.
     Optional filter by pubkey.
     """
+    if settings.providers_refresh_interval_seconds == 0:
+        raise HTTPException(status_code=404, detail="Provider discovery is disabled")
+
     cache = await get_cache()
     if not cache:
         await refresh_providers_cache(pubkey=pubkey)

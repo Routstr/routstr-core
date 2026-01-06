@@ -3,7 +3,7 @@ Integration tests for provider management functionality.
 Tests GET /v1/providers/ endpoint for listing and managing providers.
 """
 
-from typing import Any
+from typing import Any, Generator
 from unittest.mock import patch
 
 import pytest
@@ -17,6 +17,15 @@ from .utils import ResponseValidator
 @pytest.fixture(autouse=True)
 def _clear_providers_cache() -> None:
     _PROVIDERS_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _enable_provider_discovery() -> Generator[None, Any, Any]:
+    """Enable provider discovery for all tests in this module"""
+    with patch(
+        "routstr.core.settings.settings.providers_refresh_interval_seconds", 300
+    ):
+        yield
 
 
 @pytest.mark.integration
