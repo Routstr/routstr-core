@@ -59,25 +59,30 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
-          cache: "npm"
-          cache-dependency-path: ui/package-lock.json
+          cache: "pnpm"
+          cache-dependency-path: ui/pnpm-lock.yaml
 
       - name: Install UI dependencies
         working-directory: ./ui
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Run UI format check
         working-directory: ./ui
-        run: npm run format-check
+        run: pnpm run format-check
 
       - name: Run UI linting
         working-directory: ./ui
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Run UI build
         working-directory: ./ui
-        run: npm run build
+        run: pnpm run build
