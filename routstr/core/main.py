@@ -62,6 +62,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         async with create_session() as session:
             s = await SettingsService.initialize(session)
 
+        if not s.admin_password:
+            logger.warning(
+                f"Admin password is not set. Visit {s.http_url or 'http://localhost:8000'}/admin to set the password."
+            )
+
         # Apply app metadata from settings
         try:
             app.title = s.name
