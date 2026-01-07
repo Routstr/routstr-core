@@ -16,7 +16,11 @@ from .core.db import (
     create_session,
     get_session,
 )
+<<<<<<< Current (Your changes)
 from .core.settings import settings
+=======
+from .core.exceptions import UpstreamError
+>>>>>>> Incoming (Background Agent changes)
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -33,7 +37,7 @@ proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
 _model_instances: dict[str, Model] = {}  # All aliases -> Model
-_provider_map: dict[str, BaseUpstreamProvider] = {}  # All aliases -> Provider
+_provider_map: dict[str, list[BaseUpstreamProvider]] = {}  # All aliases -> List[Provider]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
@@ -70,8 +74,8 @@ def get_model_instance(model_id: str) -> Model | None:
     return _model_instances.get(model_id.lower())
 
 
-def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
-    """Get UpstreamProvider for model ID from global cache."""
+def get_provider_for_model(model_id: str) -> list[BaseUpstreamProvider] | None:
+    """Get UpstreamProvider list for model ID from global cache."""
     return _provider_map.get(model_id.lower())
 
 
@@ -172,14 +176,17 @@ async def proxy(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
 
-    upstream = get_provider_for_model(model_id)
-    if not upstream:
+    upstreams = get_provider_for_model(model_id)
+    if not upstreams:
         return create_error_response(
             "invalid_model",
             f"No provider found for model '{model_id}'",
             400,
             request=request,
         )
+
+    # Use first provider for initial checks/cost calculation
+    primary_upstream = upstreams[0]
 
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
@@ -190,14 +197,31 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        if is_responses_api:
-            return await upstream.handle_x_cashu_responses(
-                request, x_cashu, path, max_cost_for_model, model_obj
-            )
-        else:
-            return await upstream.handle_x_cashu(
-                request, x_cashu, path, max_cost_for_model, model_obj
-            )
+        last_error = None
+        for i, upstream in enumerate(upstreams):
+            try:
+                if is_responses_api:
+                    return await upstream.handle_x_cashu_responses(
+                        request, x_cashu, path, max_cost_for_model, model_obj
+                    )
+                else:
+                    return await upstream.handle_x_cashu(
+                        request, x_cashu, path, max_cost_for_model, model_obj
+                    )
+            except UpstreamError as e:
+                logger.warning(
+                    f"Upstream {upstream.provider_type} failed (x-cashu): {e}"
+                )
+                if i == len(upstreams) - 1:
+                    last_error = e
+                continue
+
+        return create_error_response(
+            "upstream_error",
+            str(last_error) if last_error else "All upstreams failed",
+            502,
+            request=request,
+        )
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
@@ -212,56 +236,93 @@ async def proxy(
             )
 
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
-        headers = upstream.prepare_headers(dict(request.headers))
-        return await upstream.forward_get_request(request, path, headers)
+
+        last_error_response = None
+        for i, upstream in enumerate(upstreams):
+            try:
+                headers = upstream.prepare_headers(dict(request.headers))
+                return await upstream.forward_get_request(request, path, headers)
+            except UpstreamError as e:
+                logger.warning(f"Upstream {upstream.provider_type} failed (GET): {e}")
+                if i == len(upstreams) - 1:
+                    last_error_response = create_error_response(
+                        "upstream_error", str(e), 502, request=request
+                    )
+                continue
+        return last_error_response or create_error_response(
+            "upstream_error", "All upstreams failed", 502, request=request
+        )
 
     if request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
-    headers = upstream.prepare_headers(dict(request.headers))
+    for i, upstream in enumerate(upstreams):
+        headers = upstream.prepare_headers(dict(request.headers))
 
-    if is_responses_api:
-        response = await upstream.forward_responses_request(
-            request,
-            path,
-            headers,
-            request_body,
-            key,
-            max_cost_for_model,
-            session,
-            model_obj,
-        )
-    else:
-        response = await upstream.forward_request(
-            request,
-            path,
-            headers,
-            request_body,
-            key,
-            max_cost_for_model,
-            session,
-            model_obj,
-        )
+        try:
+            if is_responses_api:
+                response = await upstream.forward_responses_request(
+                    request,
+                    path,
+                    headers,
+                    request_body,
+                    key,
+                    max_cost_for_model,
+                    session,
+                    model_obj,
+                )
+            else:
+                response = await upstream.forward_request(
+                    request,
+                    path,
+                    headers,
+                    request_body,
+                    key,
+                    max_cost_for_model,
+                    session,
+                    model_obj,
+                )
 
-    if response.status_code != 200:
-        await revert_pay_for_request(key, session, max_cost_for_model)
-        logger.warning(
-            "Upstream request failed, revert payment",
-            extra={
-                "status_code": response.status_code,
-                "path": path,
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "max_cost_for_model": max_cost_for_model,
-                "upstream_headers": response.headers
-                if hasattr(response, "headers")
-                else None,
-            },
-        )
-        # Return the mapped error response generated earlier rather than masking with 502
-        return response
+            if response.status_code != 200:
+                # 4xx error (user error), or other non-retryable error
+                await revert_pay_for_request(key, session, max_cost_for_model)
+                logger.warning(
+                    "Upstream request failed, revert payment",
+                    extra={
+                        "status_code": response.status_code,
+                        "path": path,
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "key_balance": key.balance,
+                        "max_cost_for_model": max_cost_for_model,
+                        "upstream_headers": response.headers
+                        if hasattr(response, "headers")
+                        else None,
+                    },
+                )
+                return response
 
-    return response
+            return response
+
+        except UpstreamError as e:
+            logger.warning(
+                f"Upstream {upstream.provider_type} failed: {e}",
+                extra={"retry": i < len(upstreams) - 1},
+            )
+
+            # If this was the last provider
+            if i == len(upstreams) - 1:
+                await revert_pay_for_request(key, session, max_cost_for_model)
+                return create_error_response(
+                    "upstream_error", str(e), 502, request=request
+                )
+
+            # Otherwise loop continues to next provider
+            continue
+
+    # Should not be reached given logic above
+    return create_error_response(
+        "upstream_error", "All upstreams failed", 502, request=request
+    )
 
 
 async def get_bearer_token_key(
