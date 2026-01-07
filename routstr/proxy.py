@@ -16,11 +16,8 @@ from .core.db import (
     create_session,
     get_session,
 )
-<<<<<<< Current (Your changes)
-from .core.settings import settings
-=======
 from .core.exceptions import UpstreamError
->>>>>>> Incoming (Background Agent changes)
+from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -37,7 +34,9 @@ proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
 _model_instances: dict[str, Model] = {}  # All aliases -> Model
-_provider_map: dict[str, list[BaseUpstreamProvider]] = {}  # All aliases -> List[Provider]
+_provider_map: dict[
+    str, list[BaseUpstreamProvider]
+] = {}  # All aliases -> List[Provider]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
