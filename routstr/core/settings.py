@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
+    reset_reserved_balance_on_startup: bool = Field(
+        default=True, env="RESET_RESERVED_BALANCE_ON_STARTUP"
+    )  # deactivate in horizontal scaling setups
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
