@@ -99,4 +99,3 @@ def test_get_provider_penalty_openrouter() -> None:
     provider = create_test_provider("openrouter", "https://openrouter.ai/api/v1")
     penalty = get_provider_penalty(provider)
     assert penalty == 1.001
-
