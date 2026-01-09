@@ -243,6 +243,24 @@ async def proxy(
                 response = await upstream.forward_get_request(request, path, headers)
 
                 if response.status_code in [502, 429] and i < len(upstreams) - 1:
+                    error_message = ""
+                    try:
+                        if hasattr(response, "body"):
+                            body_bytes = response.body
+                            data = json.loads(body_bytes)
+                            if "error" in data:
+                                error_data = data["error"]
+                                if isinstance(error_data, dict):
+                                    error_message = error_data.get("message", "")
+                                elif isinstance(error_data, str):
+                                    error_message = error_data
+                    except Exception:
+                        pass
+
+                    await upstream.on_upstream_error_redirect(
+                        response.status_code, error_message
+                    )
+
                     logger.warning(
                         f"Upstream {upstream.provider_type} returned {response.status_code} (GET), trying next provider",
                         extra={
@@ -297,6 +315,24 @@ async def proxy(
                 # Check if we should retry (502 Upstream Error or 429 Rate Limit)
                 should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
                 if should_retry and i < len(upstreams) - 1:
+                    error_message = ""
+                    try:
+                        if hasattr(response, "body"):
+                            body_bytes = response.body
+                            data = json.loads(body_bytes)
+                            if "error" in data:
+                                error_data = data["error"]
+                                if isinstance(error_data, dict):
+                                    error_message = error_data.get("message", "")
+                                elif isinstance(error_data, str):
+                                    error_message = error_data
+                    except Exception:
+                        pass
+
+                    await upstream.on_upstream_error_redirect(
+                        response.status_code, error_message
+                    )
+
                     logger.warning(
                         f"Upstream {upstream.provider_type} returned {response.status_code}, trying next provider",
                         extra={
