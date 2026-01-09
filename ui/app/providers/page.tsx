@@ -208,7 +208,11 @@ function ProviderBalance({
     return <Skeleton className='h-9 w-24' />;
   }
 
-  if (error || !balanceData?.ok || !balanceData.balance_data) {
+  if (
+    error ||
+    !balanceData?.ok ||
+    (balanceData.balance_data === undefined || balanceData.balance_data === null)
+  ) {
     return null;
   }
 
