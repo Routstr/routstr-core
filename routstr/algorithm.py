@@ -84,93 +84,26 @@ def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
     return penalty
 
 
-def should_prefer_model(
-    candidate_model: "Model",
-    candidate_provider: "BaseUpstreamProvider",
-    current_model: "Model",
-    current_provider: "BaseUpstreamProvider",
-    alias: str,
-) -> bool:
-    """Determine if candidate model should replace current model for an alias.
-
-    This is the core decision function for model prioritization. It considers:
-    1. Alias matching quality (exact match vs. canonical slug match)
-    2. Model cost (lower is better)
-    3. Provider penalties (e.g., slight preference against OpenRouter)
-
-    Args:
-        candidate_model: The new model being considered
-        candidate_provider: Provider offering the candidate model
-        current_model: The currently selected model for this alias
-        current_provider: Provider offering the current model
-        alias: The model alias being mapped
-
-    Returns:
-        True if candidate should replace current, False otherwise
-    """
-
-    def get_base_model_id(model_id: str) -> str:
-        """Get base model ID by removing provider prefix."""
-        return model_id.split("/", 1)[1] if "/" in model_id else model_id
-
-    def alias_priority(model: "Model") -> int:
-        """Rank how strong the mapping of alias->model is.
-
-        Highest priority when alias exactly equals the model ID without provider prefix.
-        Next when alias equals canonical slug without prefix. Otherwise lowest.
-        """
-        model_base = get_base_model_id(model.id)
-        if model_base == alias:
-            return 3
-        if model.canonical_slug:
-            canonical_base = get_base_model_id(model.canonical_slug)
-            if canonical_base == alias:
-                return 2
-        return 1
-
-    candidate_alias_priority = alias_priority(candidate_model)
-    current_alias_priority = alias_priority(current_model)
-
-    # If candidate has better alias match, prefer it regardless of cost
-    if candidate_alias_priority > current_alias_priority:
-        return True
-
-    # If current has better alias match, keep it regardless of cost
-    if current_alias_priority > candidate_alias_priority:
-        return False
-
-    # Same alias priority - compare costs
-    candidate_cost = calculate_model_cost_score(candidate_model)
-    current_cost = calculate_model_cost_score(current_model)
-
-    # Apply provider penalties
-    candidate_adjusted = candidate_cost * get_provider_penalty(candidate_provider)
-    current_adjusted = current_cost * get_provider_penalty(current_provider)
-
-    # Prefer lower adjusted cost
-    should_replace = candidate_adjusted < current_adjusted
-
-    return should_replace
-
-
 def create_model_mappings(
     upstreams: list["BaseUpstreamProvider"],
     overrides_by_id: dict[str, tuple],
     disabled_model_ids: set[str],
-) -> tuple[dict[str, "Model"], dict[str, "BaseUpstreamProvider"], dict[str, "Model"]]:
+) -> tuple[
+    dict[str, "Model"], dict[str, list["BaseUpstreamProvider"]], dict[str, "Model"]
+]:
     """Create optimal model mappings based on cost and provider preferences.
 
     This is the main entry point for the algorithm. It processes all upstream providers
     and creates three mappings based on cost optimization:
 
     1. model_instances: alias -> Model (all model aliases mapped to their Model objects)
-    2. provider_map: alias -> UpstreamProvider (which provider to use for each alias)
+    2. provider_map: alias -> List[UpstreamProvider] (sorted list of providers for each alias)
     3. unique_models: base_id -> Model (unique models without provider prefixes)
 
     The algorithm:
     - Processes non-OpenRouter providers first (they're typically cheaper)
     - Then processes OpenRouter models (they can still win if cheaper)
-    - For each model alias, uses should_prefer_model() to select the best provider
+    - For each model alias, collects all candidates and sorts them by priority and cost.
 
     Args:
         upstreams: List of all upstream provider instances
@@ -183,8 +116,7 @@ def create_model_mappings(
     from .payment.models import _row_to_model
     from .upstream.helpers import resolve_model_alias
 
-    model_instances: dict[str, "Model"] = {}
-    provider_map: dict[str, "BaseUpstreamProvider"] = {}
+    candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
 
     # Separate OpenRouter from other providers
@@ -202,24 +134,14 @@ def create_model_mappings(
         """Get base model ID by removing provider prefix."""
         return model_id.split("/", 1)[1] if "/" in model_id else model_id
 
-    def _maybe_set_alias(
+    def _add_candidate(
         alias: str, model: "Model", provider: "BaseUpstreamProvider"
     ) -> None:
-        """Set alias to model/provider if not set or if new model is preferred."""
+        """Add candidate model/provider for an alias."""
         alias_lower = alias.lower()
-        existing_model = model_instances.get(alias_lower)
-        if not existing_model:
-            # No existing mapping, set it
-            model_instances[alias_lower] = model
-            provider_map[alias_lower] = provider
-        else:
-            # Check if candidate should replace existing
-            existing_provider = provider_map[alias_lower]
-            if should_prefer_model(
-                model, provider, existing_model, existing_provider, alias
-            ):
-                model_instances[alias_lower] = model
-                provider_map[alias_lower] = provider
+        if alias_lower not in candidates:
+            candidates[alias_lower] = []
+        candidates[alias_lower].append((model, provider))
 
     def process_provider_models(
         upstream: "BaseUpstreamProvider", is_openrouter: bool = False
@@ -266,21 +188,55 @@ def create_model_mappings(
 
             # Try to set each alias
             for alias in aliases:
-                _maybe_set_alias(alias, model_to_use, upstream)
+                _add_candidate(alias, model_to_use, upstream)
 
-    # Process non-OpenRouter providers first (they're typically cheaper)
+    # Process non-OpenRouter providers first
     for upstream in other_upstreams:
         process_provider_models(upstream, is_openrouter=False)
 
-    # Process OpenRouter last - models only win if they're cheaper or better matched
+    # Process OpenRouter last
     if openrouter:
         process_provider_models(openrouter, is_openrouter=True)
 
-    # Log provider distribution
+    # Sort candidates and build final maps
+    model_instances: dict[str, "Model"] = {}
+    provider_map: dict[str, list["BaseUpstreamProvider"]] = {}
+
+    def alias_priority(model: "Model", alias: str) -> int:
+        """Rank how strong the mapping of alias->model is."""
+        model_base = get_base_model_id(model.id)
+        if model_base == alias:
+            return 3
+        if model.canonical_slug:
+            canonical_base = get_base_model_id(model.canonical_slug)
+            if canonical_base == alias:
+                return 2
+        return 1
+
+    for alias, items in candidates.items():
+        # Sort key: (priority DESC, cost ASC)
+        # Using negative cost for DESC sort overall to keep high priority first
+        def sort_key(item: tuple["Model", "BaseUpstreamProvider"]) -> tuple[int, float]:
+            model, provider = item
+            priority = alias_priority(model, alias)
+            cost = calculate_model_cost_score(model)
+            penalty = get_provider_penalty(provider)
+            adjusted_cost = cost * penalty
+            return (priority, -adjusted_cost)
+
+        items.sort(key=sort_key, reverse=True)
+
+        best_model, best_provider = items[0]
+        model_instances[alias] = best_model
+        provider_map[alias] = [p for _, p in items]
+
+    # Log provider distribution (using top provider for stats)
     provider_counts: dict[str, int] = {}
-    for provider in provider_map.values():
-        provider_name = getattr(provider, "upstream_name", "unknown")
-        provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
+    for providers in provider_map.values():
+        if providers:
+            provider = providers[0]
+            provider_name = getattr(provider, "upstream_name", "unknown")
+            provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
 
     logger.debug(
         f"Updated model mappings with ({len(unique_models)} unique models and {len(model_instances)} aliases)",

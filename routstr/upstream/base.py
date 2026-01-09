@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, create_session
+from ..core.exceptions import UpstreamError
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -339,6 +340,20 @@ class BaseUpstreamProvider:
             if preview:
                 message = preview[:500]
         return message, upstream_code
+
+    async def on_upstream_error_redirect(
+        self, status_code: int, error_message: str
+    ) -> None:
+        """Hook called when the proxy redirects to another provider due to an error.
+
+        Subclasses can implement this to perform actions like disabling the provider
+        if it's out of balance.
+
+        Args:
+            status_code: The HTTP status code returned by the upstream
+            error_message: The error message extracted from the upstream response
+        """
+        pass
 
     async def map_upstream_error_response(
         self, request: Request, path: str, upstream_response: httpx.Response
@@ -1148,6 +1163,14 @@ class BaseUpstreamProvider:
             )
 
             if response.status_code != 200:
+                if response.status_code >= 500:
+                    await response.aclose()
+                    await client.aclose()
+                    raise UpstreamError(
+                        f"Upstream returned status {response.status_code}",
+                        status_code=response.status_code,
+                    )
+
                 try:
                     mapped_error = await self.map_upstream_error_response(
                         request, path, response
@@ -1238,6 +1261,9 @@ class BaseUpstreamProvider:
                 background=background_tasks,
             )
 
+        except UpstreamError:
+            raise
+
         except httpx.RequestError as exc:
             await client.aclose()
             error_type = type(exc).__name__
@@ -1265,9 +1291,7 @@ class BaseUpstreamProvider:
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
 
-            return create_error_response(
-                "upstream_error", error_message, 502, request=request
-            )
+            raise UpstreamError(error_message, status_code=502)
 
         except Exception as exc:
             await client.aclose()
@@ -1380,6 +1404,14 @@ class BaseUpstreamProvider:
             )
 
             if response.status_code != 200:
+                if response.status_code >= 500:
+                    await response.aclose()
+                    await client.aclose()
+                    raise UpstreamError(
+                        f"Upstream returned status {response.status_code}",
+                        status_code=response.status_code,
+                    )
+
                 try:
                     mapped_error = await self.map_upstream_error_response(
                         request, path, response
@@ -1447,6 +1479,9 @@ class BaseUpstreamProvider:
                 background=background_tasks,
             )
 
+        except UpstreamError:
+            raise
+
         except httpx.RequestError as exc:
             await client.aclose()
             error_type = type(exc).__name__
@@ -1474,9 +1509,7 @@ class BaseUpstreamProvider:
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
 
-            return create_error_response(
-                "upstream_error", error_message, 502, request=request
-            )
+            raise UpstreamError(error_message, status_code=502)
 
         except Exception as exc:
             await client.aclose()

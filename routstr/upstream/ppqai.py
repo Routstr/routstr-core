@@ -196,6 +196,37 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
             )
             return []
 
+    async def on_upstream_error_redirect(
+        self, status_code: int, error_message: str
+    ) -> None:
+        if "insufficient balance" in error_message.lower():
+            logger.warning(
+                f"Disabling PPQ.AI provider ({self.base_url}) due to insufficient balance",
+                extra={"error": error_message},
+            )
+            from sqlmodel import select
+
+            from ..core.db import UpstreamProviderRow, create_session
+
+            async with create_session() as session:
+                statement = select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == self.base_url
+                    and UpstreamProviderRow.api_key == self.api_key
+                )
+                result = await session.exec(statement)
+                provider = result.first()
+
+                if provider:
+                    provider.enabled = False
+                    session.add(provider)
+                    await session.commit()
+
+                    # Trigger re-initialization of providers
+                    # Import here to avoid circular dependency
+                    from ..proxy import reinitialize_upstreams
+
+                    await reinitialize_upstreams()
+
     async def create_account(self) -> dict[str, object]:
         """Create a new PPQ.AI account.
 
