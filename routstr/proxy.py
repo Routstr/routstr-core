@@ -240,7 +240,18 @@ async def proxy(
         for i, upstream in enumerate(upstreams):
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
-                return await upstream.forward_get_request(request, path, headers)
+                response = await upstream.forward_get_request(request, path, headers)
+
+                if response.status_code in [502, 429] and i < len(upstreams) - 1:
+                    logger.warning(
+                        f"Upstream {upstream.provider_type} returned {response.status_code} (GET), trying next provider",
+                        extra={
+                            "status_code": response.status_code,
+                            "upstream": upstream.provider_type,
+                        },
+                    )
+                    continue
+                return response
             except UpstreamError as e:
                 logger.warning(f"Upstream {upstream.provider_type} failed (GET): {e}")
                 if i == len(upstreams) - 1:
@@ -283,7 +294,19 @@ async def proxy(
                 )
 
             if response.status_code != 200:
-                # 4xx error (user error), or other non-retryable error
+                # Check if we should retry (502 Upstream Error or 429 Rate Limit)
+                should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
+                if should_retry and i < len(upstreams) - 1:
+                    logger.warning(
+                        f"Upstream {upstream.provider_type} returned {response.status_code}, trying next provider",
+                        extra={
+                            "status_code": response.status_code,
+                            "upstream": upstream.provider_type,
+                        },
+                    )
+                    continue
+
+                # 4xx error (user error), or other non-retryable error, or last provider failed
                 await revert_pay_for_request(key, session, max_cost_for_model)
                 logger.warning(
                     "Upstream request failed, revert payment",
