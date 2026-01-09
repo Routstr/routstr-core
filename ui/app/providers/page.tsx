@@ -211,7 +211,8 @@ function ProviderBalance({
   if (
     error ||
     !balanceData?.ok ||
-    (balanceData.balance_data === undefined || balanceData.balance_data === null)
+    balanceData.balance_data === undefined ||
+    balanceData.balance_data === null
   ) {
     return null;
   }
