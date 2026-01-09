@@ -184,8 +184,9 @@ async def proxy(
             request=request,
         )
 
+    # todo figure out cost calculation since fallback provider is usually not the same price
     # Use first provider for initial checks/cost calculation
-    primary_upstream = upstreams[0]
+    # primary_upstream = upstreams[0]
 
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
