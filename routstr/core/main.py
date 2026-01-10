@@ -13,10 +13,7 @@ from starlette.exceptions import HTTPException
 from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
-from ..payment.models import (
-    models_router,
-    update_sats_pricing,
-)
+from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..wallet import periodic_payout

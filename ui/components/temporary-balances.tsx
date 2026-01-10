@@ -60,7 +60,11 @@ export function TemporaryBalances({
     let totalRequests = 0;
 
     balances.forEach((balance) => {
-      totalBalance += balance.balance || 0;
+      // Only count parents for total balance to avoid double counting
+      // since child keys use parent balance
+      if (!balance.parent_key_hash) {
+        totalBalance += balance.balance || 0;
+      }
       totalSpent += balance.total_spent || 0;
       totalRequests += balance.total_requests || 0;
     });
@@ -71,6 +75,34 @@ export function TemporaryBalances({
   const totals = data
     ? calculateTotals(data)
     : { totalBalance: 0, totalSpent: 0, totalRequests: 0 };
+
+  // Group parents and children
+  const hierarchicalData = (() => {
+    if (!data) return [];
+
+    const parents = filteredData.filter((item) => !item.parent_key_hash);
+    const result: (TemporaryBalance & { isChild?: boolean })[] = [];
+
+    parents.forEach((parent) => {
+      result.push(parent);
+      const children = data.filter(
+        (item) => item.parent_key_hash === parent.hashed_key
+      );
+      children.forEach((child) => {
+        result.push({ ...child, isChild: true });
+      });
+    });
+
+    // Add children whose parents didn't match the search or aren't in the list
+    const orphans = filteredData.filter(
+      (item) =>
+        item.parent_key_hash &&
+        !result.some((r) => r.hashed_key === item.hashed_key)
+    );
+    result.push(...orphans.map((o) => ({ ...o, isChild: true })));
+
+    return result;
+  })();
 
   return (
     <>
@@ -182,22 +214,37 @@ export function TemporaryBalances({
                   <div className='text-right'>Expiry Time</div>
                 </div>
 
-                {filteredData.length > 0 ? (
-                  filteredData.map((balance, index) => (
+                {hierarchicalData.length > 0 ? (
+                  hierarchicalData.map((balance, index) => (
                     <div
                       key={index}
                       className={cn(
                         'hover:bg-muted/50 border-t p-3 text-sm transition-colors',
-                        balance.balance === 0 && 'opacity-60'
+                        balance.balance === 0 &&
+                          !balance.isChild &&
+                          'opacity-60',
+                        balance.isChild &&
+                          'ml-4 border-l-2 border-l-blue-200 bg-blue-50/30'
                       )}
                     >
                       {/* Desktop Layout */}
                       <div className='hidden grid-cols-6 gap-2 md:grid'>
-                        <div className='max-w-32 truncate font-mono text-xs break-all'>
+                        <div className='flex max-w-48 items-center gap-2 truncate font-mono text-xs break-all'>
+                          {balance.isChild && (
+                            <span className='rounded bg-blue-100 px-1 py-0.5 text-[10px] font-bold text-blue-700 uppercase'>
+                              Child
+                            </span>
+                          )}
                           {balance.hashed_key}
                         </div>
                         <div className='text-right font-mono'>
-                          {formatBalance(balance.balance)}
+                          {balance.isChild ? (
+                            <span className='text-muted-foreground italic'>
+                              (Parent)
+                            </span>
+                          ) : (
+                            formatBalance(balance.balance)
+                          )}
                         </div>
                         <div className='text-right font-mono'>
                           {formatBalance(balance.total_spent)}
@@ -226,13 +273,20 @@ export function TemporaryBalances({
 
                       {/* Mobile Layout */}
                       <div className='space-y-3 md:hidden'>
-                        <div className='space-y-1'>
-                          <span className='text-muted-foreground text-xs font-medium'>
-                            Key
-                          </span>
-                          <div className='font-mono text-xs break-all'>
-                            {balance.hashed_key}
+                        <div className='flex items-center justify-between'>
+                          <div className='space-y-1'>
+                            <span className='text-muted-foreground text-xs font-medium'>
+                              {balance.isChild ? 'Child Key' : 'Key'}
+                            </span>
+                            <div className='font-mono text-xs break-all'>
+                              {balance.hashed_key}
+                            </div>
                           </div>
+                          {balance.isChild && (
+                            <span className='rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-700 uppercase'>
+                              Child
+                            </span>
+                          )}
                         </div>
 
                         <div className='grid grid-cols-2 gap-3'>
@@ -241,7 +295,13 @@ export function TemporaryBalances({
                               Balance
                             </div>
                             <div className='truncate font-mono text-sm'>
-                              {formatBalance(balance.balance)}
+                              {balance.isChild ? (
+                                <span className='text-muted-foreground text-xs italic'>
+                                  (Uses Parent)
+                                </span>
+                              ) : (
+                                formatBalance(balance.balance)
+                              )}
                             </div>
                           </div>
                           <div className='space-y-1'>
