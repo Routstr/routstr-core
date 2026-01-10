@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
@@ -26,7 +27,7 @@ from .payment.helpers import (
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.helpers import init_upstreams
-from .wallet import deserialize_token_from_string
+from .wallet import deserialize_token_from_string, recieve_token
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
@@ -34,6 +35,9 @@ proxy_router = APIRouter()
 _upstreams: list[BaseUpstreamProvider] = []
 _model_instances: dict[str, Model] = {}  # All aliases -> Model
 _provider_map: dict[str, BaseUpstreamProvider] = {}  # All aliases -> Provider
+_provider_candidates_map: dict[
+    str, list[BaseUpstreamProvider]
+] = {}  # All aliases -> [Providers]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
@@ -75,6 +79,21 @@ def get_provider_for_model(model_id: str) -> BaseUpstreamProvider | None:
     return _provider_map.get(model_id.lower())
 
 
+def get_providers_for_model(model_id: str) -> list[BaseUpstreamProvider]:
+    """Get list of prioritized UpstreamProviders for model ID from global cache.
+
+    If multiple providers are available, returns the sorted list.
+    Otherwise, returns a list containing only the single best provider.
+    """
+    candidates = _provider_candidates_map.get(model_id.lower(), [])
+    if candidates:
+        return candidates
+
+    # Fallback to the single best provider if no multi-provider candidates exist
+    best = get_provider_for_model(model_id)
+    return [best] if best else []
+
+
 def get_unique_models() -> list[Model]:
     """Get list of unique models (no duplicates from aliases)."""
     return list(_unique_models.values())
@@ -84,7 +103,7 @@ async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
 
-    global _model_instances, _provider_map, _unique_models
+    global _model_instances, _provider_map, _unique_models, _provider_candidates_map
 
     async with create_session() as session:
         # Fetch all providers with their models in a single logical operation
@@ -104,10 +123,12 @@ async def refresh_model_maps() -> None:
             else:
                 disabled_model_ids.add(model.id)
 
-    _model_instances, _provider_map, _unique_models = create_model_mappings(
-        upstreams=_upstreams,
-        overrides_by_id=overrides_by_id,
-        disabled_model_ids=disabled_model_ids,
+    _model_instances, _provider_map, _unique_models, _provider_candidates_map = (
+        create_model_mappings(
+            upstreams=_upstreams,
+            overrides_by_id=overrides_by_id,
+            disabled_model_ids=disabled_model_ids,
+        )
     )
 
 
@@ -172,8 +193,8 @@ async def proxy(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
 
-    upstream = get_provider_for_model(model_id)
-    if not upstream:
+    upstreams = get_providers_for_model(model_id)
+    if not upstreams:
         return create_error_response(
             "invalid_model",
             f"No provider found for model '{model_id}'",
@@ -190,14 +211,80 @@ async def proxy(
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
-        if is_responses_api:
-            return await upstream.handle_x_cashu_responses(
-                request, x_cashu, path, max_cost_for_model, model_obj
-            )
-        else:
-            return await upstream.handle_x_cashu(
-                request, x_cashu, path, max_cost_for_model, model_obj
-            )
+        # Redeem token once before trying any providers
+        amount, unit, mint = await recieve_token(x_cashu)
+
+        # Fallback for X-Cashu payments
+        last_exception = None
+        for i, upstream in enumerate(upstreams):
+            try:
+                # Prepare headers for this specific upstream
+                upstream_headers = upstream.prepare_headers(dict(request.headers))
+
+                if is_responses_api:
+                    return await upstream.forward_x_cashu_responses_request(
+                        request,
+                        path,
+                        upstream_headers,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        model_obj,
+                        mint,
+                    )
+                else:
+                    return await upstream.forward_x_cashu_request(
+                        request,
+                        path,
+                        upstream_headers,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        model_obj,
+                        mint,
+                    )
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                logger.warning(
+                    f"Upstream provider {i + 1}/{len(upstreams)} ({upstream.provider_type}) timed out, trying fallback",
+                    extra={
+                        "model": model_id,
+                        "error": str(e),
+                        "attempt": i + 1,
+                    },
+                )
+                last_exception = e
+                continue
+
+        # If we get here, all providers failed
+        # Since the token was already redeemed, we must issue a refund
+        logger.error(
+            "All providers failed for X-Cashu request, issuing emergency refund",
+            extra={"amount": amount, "unit": unit, "mint": mint},
+        )
+
+        # Try to use the first provider's refund mechanism
+        refund_token = await upstreams[0].send_refund(amount - 60, unit, mint)
+
+        error_message = "All upstream providers timed out"
+        if isinstance(last_exception, httpx.ConnectError):
+            error_message = "Unable to connect to any upstream service"
+
+        error_response = Response(
+            content=json.dumps(
+                {
+                    "error": {
+                        "message": error_message,
+                        "type": "upstream_error",
+                        "code": 504,
+                        "refund_token": refund_token,
+                    }
+                }
+            ),
+            status_code=504,
+            media_type="application/json",
+        )
+        error_response.headers["X-Cashu"] = refund_token
+        return error_response
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(headers, path, session, auth)
@@ -212,56 +299,102 @@ async def proxy(
             )
 
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
-        headers = upstream.prepare_headers(dict(request.headers))
-        return await upstream.forward_get_request(request, path, headers)
+
+        # Try fallback for GET requests too
+        last_exception = None
+        for i, upstream in enumerate(upstreams):
+            try:
+                headers = upstream.prepare_headers(dict(request.headers))
+                return await upstream.forward_get_request(request, path, headers)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                logger.warning(
+                    f"Upstream GET provider {i + 1}/{len(upstreams)} ({upstream.provider_type}) timed out, trying fallback",
+                    extra={"path": path, "error": str(e)},
+                )
+                last_exception = e
+                continue
+
+        error_message = "Upstream service request timed out"
+        if isinstance(last_exception, httpx.ConnectError):
+            error_message = "Unable to connect to upstream service"
+
+        return create_error_response(
+            "upstream_error", error_message, 502, request=request
+        )
 
     if request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
-    headers = upstream.prepare_headers(dict(request.headers))
+    # Fallback for API Key payments
+    last_exception = None
+    for i, upstream in enumerate(upstreams):
+        try:
+            headers = upstream.prepare_headers(dict(request.headers))
+            if is_responses_api:
+                response = await upstream.forward_responses_request(
+                    request,
+                    path,
+                    headers,
+                    request_body,
+                    key,
+                    max_cost_for_model,
+                    session,
+                    model_obj,
+                )
+            else:
+                response = await upstream.forward_request(
+                    request,
+                    path,
+                    headers,
+                    request_body,
+                    key,
+                    max_cost_for_model,
+                    session,
+                    model_obj,
+                )
 
-    if is_responses_api:
-        response = await upstream.forward_responses_request(
-            request,
-            path,
-            headers,
-            request_body,
-            key,
-            max_cost_for_model,
-            session,
-            model_obj,
-        )
-    else:
-        response = await upstream.forward_request(
-            request,
-            path,
-            headers,
-            request_body,
-            key,
-            max_cost_for_model,
-            session,
-            model_obj,
-        )
+            if response.status_code != 200:
+                # If it's a 429 (rate limit) or 503 (service unavailable), we might also want to fallback
+                if response.status_code in (429, 503, 502) and i < len(upstreams) - 1:
+                    logger.warning(
+                        f"Upstream provider {i + 1}/{len(upstreams)} returned {response.status_code}, trying fallback",
+                        extra={"model": model_id, "status": response.status_code},
+                    )
+                    continue
 
-    if response.status_code != 200:
-        await revert_pay_for_request(key, session, max_cost_for_model)
-        logger.warning(
-            "Upstream request failed, revert payment",
-            extra={
-                "status_code": response.status_code,
-                "path": path,
-                "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "max_cost_for_model": max_cost_for_model,
-                "upstream_headers": response.headers
-                if hasattr(response, "headers")
-                else None,
-            },
-        )
-        # Return the mapped error response generated earlier rather than masking with 502
-        return response
+                await revert_pay_for_request(key, session, max_cost_for_model)
+                logger.warning(
+                    "Upstream request failed, revert payment",
+                    extra={
+                        "status_code": response.status_code,
+                        "path": path,
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "key_balance": key.balance,
+                        "max_cost_for_model": max_cost_for_model,
+                        "upstream_headers": response.headers
+                        if hasattr(response, "headers")
+                        else None,
+                    },
+                )
+                return response
 
-    return response
+            return response
+
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            logger.warning(
+                f"Upstream provider {i + 1}/{len(upstreams)} ({upstream.provider_type}) timed out, trying fallback",
+                extra={"model": model_id, "error": str(e)},
+            )
+            last_exception = e
+            continue
+
+    # All providers failed with timeout/connect error
+    await revert_pay_for_request(key, session, max_cost_for_model)
+    error_message = "Upstream service request timed out"
+    if isinstance(last_exception, httpx.ConnectError):
+        error_message = "Unable to connect to upstream service"
+
+    return create_error_response("upstream_error", error_message, 502, request=request)
 
 
 async def get_bearer_token_key(

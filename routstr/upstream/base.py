@@ -37,6 +37,8 @@ from ..wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
 
+DEFAULT_PROXY_TIMEOUT = 30.0
+
 
 class TopupData(BaseModel):
     """Universal top-up data schema for Lightning Network invoices."""
@@ -698,6 +700,7 @@ class BaseUpstreamProvider:
                 },
             )
             raise
+
         except Exception as e:
             logger.error(
                 "Error processing non-streaming chat completion",
@@ -1110,7 +1113,7 @@ class BaseUpstreamProvider:
 
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         )
 
         try:
@@ -1259,7 +1262,8 @@ class BaseUpstreamProvider:
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
-                error_message = "Upstream service request timed out"
+                # Re-raise timeout exception to allow fallback handling in proxy layer
+                raise
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
             else:
@@ -1342,7 +1346,7 @@ class BaseUpstreamProvider:
 
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         )
 
         try:
@@ -1468,7 +1472,8 @@ class BaseUpstreamProvider:
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
-                error_message = "Upstream service request timed out"
+                # Re-raise timeout exception to allow fallback handling in proxy layer
+                raise
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
             else:
@@ -1531,7 +1536,7 @@ class BaseUpstreamProvider:
 
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         ) as client:
             try:
                 response = await client.send(
@@ -1562,6 +1567,9 @@ class BaseUpstreamProvider:
                     status_code=response.status_code,
                     headers=dict(response.headers),
                 )
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # Re-raise to allow fallback handling in proxy layer
+                raise
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(
@@ -2094,7 +2102,7 @@ class BaseUpstreamProvider:
 
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         ) as client:
             try:
                 response = await client.send(
@@ -2188,6 +2196,9 @@ class BaseUpstreamProvider:
                     headers=dict(response.headers),
                     background=background_tasks,
                 )
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # Re-raise to allow fallback handling in proxy layer
+                raise
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(
@@ -2355,7 +2366,7 @@ class BaseUpstreamProvider:
 
         async with httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
+            timeout=DEFAULT_PROXY_TIMEOUT,
         ) as client:
             try:
                 response = await client.send(
@@ -2449,6 +2460,9 @@ class BaseUpstreamProvider:
                     headers=dict(response.headers),
                     background=background_tasks,
                 )
+            except (httpx.TimeoutException, httpx.ConnectError):
+                # Re-raise to allow fallback handling in proxy layer
+                raise
             except Exception as exc:
                 tb = traceback.format_exc()
                 logger.error(

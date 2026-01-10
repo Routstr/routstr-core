@@ -1,5 +1,7 @@
 """Model prioritization algorithm for selecting cheapest upstream providers."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from .core.logging import get_logger
@@ -157,15 +159,21 @@ def create_model_mappings(
     upstreams: list["BaseUpstreamProvider"],
     overrides_by_id: dict[str, tuple],
     disabled_model_ids: set[str],
-) -> tuple[dict[str, "Model"], dict[str, "BaseUpstreamProvider"], dict[str, "Model"]]:
+) -> tuple[
+    dict[str, "Model"],
+    dict[str, "BaseUpstreamProvider"],
+    dict[str, "Model"],
+    dict[str, list["BaseUpstreamProvider"]],
+]:
     """Create optimal model mappings based on cost and provider preferences.
 
     This is the main entry point for the algorithm. It processes all upstream providers
     and creates three mappings based on cost optimization:
 
     1. model_instances: alias -> Model (all model aliases mapped to their Model objects)
-    2. provider_map: alias -> UpstreamProvider (which provider to use for each alias)
+    2. provider_map: alias -> UpstreamProvider (the BEST provider to use for each alias)
     3. unique_models: base_id -> Model (unique models without provider prefixes)
+    4. provider_candidates_map: alias -> list[UpstreamProvider] (all providers offering the model, sorted by preference)
 
     The algorithm:
     - Processes non-OpenRouter providers first (they're typically cheaper)
@@ -178,7 +186,7 @@ def create_model_mappings(
         disabled_model_ids: Set of model IDs that should be excluded
 
     Returns:
-        Tuple of (model_instances, provider_map, unique_models)
+        Tuple of (model_instances, provider_map, unique_models, provider_candidates_map)
     """
     from .payment.models import _row_to_model
     from .upstream.helpers import resolve_model_alias
@@ -186,9 +194,10 @@ def create_model_mappings(
     model_instances: dict[str, "Model"] = {}
     provider_map: dict[str, "BaseUpstreamProvider"] = {}
     unique_models: dict[str, "Model"] = {}
+    provider_candidates_map: dict[str, list["BaseUpstreamProvider"]] = {}
 
     # Separate OpenRouter from other providers
-    openrouter: "BaseUpstreamProvider" | None = None
+    openrouter: BaseUpstreamProvider | None = None
     other_upstreams: list["BaseUpstreamProvider"] = []
 
     for upstream in upstreams:
@@ -207,6 +216,13 @@ def create_model_mappings(
     ) -> None:
         """Set alias to model/provider if not set or if new model is preferred."""
         alias_lower = alias.lower()
+
+        # Add to candidates list, to be used later as fallback
+        if alias_lower not in provider_candidates_map:
+            provider_candidates_map[alias_lower] = [provider]
+        else:
+            provider_candidates_map[alias_lower].append(provider)
+
         existing_model = model_instances.get(alias_lower)
         if not existing_model:
             # No existing mapping, set it
@@ -276,6 +292,26 @@ def create_model_mappings(
     if openrouter:
         process_provider_models(openrouter, is_openrouter=True)
 
+    # Sort and filter provider candidates for each alias using provider_map as reference
+    # We only keep entries that have more than one provider.
+    final_candidates_map: dict[str, list["BaseUpstreamProvider"]] = {}
+    for alias_lower, best_provider in provider_map.items():
+        candidates = provider_candidates_map.get(alias_lower, [])
+        # Remove duplicates
+        unique_candidates = []
+        seen = set()
+        for c in candidates:
+            if c not in seen:
+                unique_candidates.append(c)
+                seen.add(c)
+
+        if len(unique_candidates) > 1:
+            # Keep the best one at the front, others follow.
+            if best_provider in unique_candidates:
+                unique_candidates.remove(best_provider)
+            unique_candidates.insert(0, best_provider)
+            final_candidates_map[alias_lower] = unique_candidates
+
     # Log provider distribution
     provider_counts: dict[str, int] = {}
     for provider in provider_map.values():
@@ -287,4 +323,4 @@ def create_model_mappings(
         extra={"provider_distribution": provider_counts},
     )
 
-    return model_instances, provider_map, unique_models
+    return model_instances, provider_map, unique_models, provider_candidates_map
