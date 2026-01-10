@@ -926,6 +926,7 @@ export const TemporaryBalanceSchema = z.object({
   total_requests: z.number(),
   refund_address: z.string().nullable(),
   key_expiry_time: z.number().nullable(),
+  parent_key_hash: z.string().nullable().optional(),
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
