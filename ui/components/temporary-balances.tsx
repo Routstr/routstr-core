@@ -220,15 +220,18 @@ export function TemporaryBalances({
                       key={index}
                       className={cn(
                         'hover:bg-muted/50 border-t p-3 text-sm transition-colors',
-                        balance.balance === 0 && !balance.isChild && 'opacity-60',
-                        balance.isChild && 'bg-blue-50/30 ml-4 border-l-2 border-l-blue-200'
+                        balance.balance === 0 &&
+                          !balance.isChild &&
+                          'opacity-60',
+                        balance.isChild &&
+                          'ml-4 border-l-2 border-l-blue-200 bg-blue-50/30'
                       )}
                     >
                       {/* Desktop Layout */}
                       <div className='hidden grid-cols-6 gap-2 md:grid'>
                         <div className='flex max-w-48 items-center gap-2 truncate font-mono text-xs break-all'>
                           {balance.isChild && (
-                            <span className='bg-blue-100 text-blue-700 rounded px-1 py-0.5 text-[10px] font-bold uppercase'>
+                            <span className='rounded bg-blue-100 px-1 py-0.5 text-[10px] font-bold text-blue-700 uppercase'>
                               Child
                             </span>
                           )}
@@ -236,7 +239,9 @@ export function TemporaryBalances({
                         </div>
                         <div className='text-right font-mono'>
                           {balance.isChild ? (
-                            <span className='text-muted-foreground italic'>(Parent)</span>
+                            <span className='text-muted-foreground italic'>
+                              (Parent)
+                            </span>
                           ) : (
                             formatBalance(balance.balance)
                           )}
@@ -278,7 +283,7 @@ export function TemporaryBalances({
                             </div>
                           </div>
                           {balance.isChild && (
-                            <span className='bg-blue-100 text-blue-700 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase'>
+                            <span className='rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-700 uppercase'>
                               Child
                             </span>
                           )}
@@ -291,7 +296,9 @@ export function TemporaryBalances({
                             </div>
                             <div className='truncate font-mono text-sm'>
                               {balance.isChild ? (
-                                <span className='text-muted-foreground italic text-xs'>(Uses Parent)</span>
+                                <span className='text-muted-foreground text-xs italic'>
+                                  (Uses Parent)
+                                </span>
                               ) : (
                                 formatBalance(balance.balance)
                               )}
