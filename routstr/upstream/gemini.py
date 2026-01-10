@@ -187,11 +187,44 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                 )
 
                 async def stream_with_cost() -> AsyncGenerator[bytes, None]:
+                    payment_finalized = False
+
+                    async def finalize_payment() -> None:
+                        nonlocal payment_finalized
+                        if payment_finalized:
+                            return
+                        from ..auth import adjust_payment_for_tokens
+                        from ..core.db import create_session
+
+                        async with create_session() as new_session:
+                            fresh_key = await new_session.get(
+                                key.__class__, key.hashed_key
+                            )
+                            if fresh_key:
+                                try:
+                                    await adjust_payment_for_tokens(
+                                        fresh_key,
+                                        {
+                                            "model": model_obj.id,
+                                            "usage": final_usage_data,
+                                        },
+                                        new_session,
+                                        max_cost_for_model,
+                                    )
+                                    payment_finalized = True
+                                except Exception as cost_error:
+                                    logger.error(
+                                        "Error finalizing Gemini streaming payment in fallback",
+                                        extra={
+                                            "error": str(cost_error),
+                                            "key_hash": key.hashed_key[:8] + "...",
+                                        },
+                                    )
+
                     try:
                         async for chunk in response_generator:
                             sse_data = f"data: {json.dumps(chunk)}\n\n"
                             yield sse_data.encode()
-
                     except Exception as e:
                         logger.error(
                             "Error in Gemini streaming response",
@@ -202,6 +235,9 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                             },
                         )
                         raise
+                    finally:
+                        if not payment_finalized:
+                            await finalize_payment()
 
                 return StreamingResponse(
                     stream_with_cost(),

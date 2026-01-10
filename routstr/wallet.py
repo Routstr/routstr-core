@@ -81,7 +81,7 @@ async def swap_to_primary_mint(
         amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
-    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2))
+    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2)) + 1
     amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
     primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
 
@@ -313,6 +313,8 @@ async def periodic_payout() -> None:
         try:
             async with db.create_session() as session:
                 for mint_url in settings.cashu_mints:
+                    if mint_url == "https://testnut.cashu.space":
+                        continue
                     for unit in ["sat", "msat"]:
                         wallet = await get_wallet(mint_url, unit)
                         proofs = get_proofs_per_mint_and_unit(

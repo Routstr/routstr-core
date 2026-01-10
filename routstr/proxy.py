@@ -16,6 +16,7 @@ from .core.db import (
     create_session,
     get_session,
 )
+from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -25,6 +26,7 @@ from .payment.helpers import (
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.helpers import init_upstreams
+from .wallet import deserialize_token_from_string
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
@@ -145,6 +147,24 @@ async def proxy(
         model_id = extract_model_from_responses_request(request_body_dict)
     else:
         model_id = request_body_dict.get("model", "unknown")
+
+    if "https://testnut.cashu.space" in settings.cashu_mints:
+        try:
+            token_str = None
+            if x_cashu_header := headers.get("x-cashu"):
+                token_str = x_cashu_header
+            elif auth_header := headers.get("authorization"):
+                parts = auth_header.split(" ")
+                if len(parts) > 1 and not parts[1].startswith("sk-"):
+                    token_str = parts[1]
+
+            if token_str:
+                token_obj = deserialize_token_from_string(token_str)
+                if token_obj.mint == "https://testnut.cashu.space":
+                    model_id = "mock/gpt-420-mock"
+                    request_body_dict["model"] = model_id
+        except Exception:
+            pass
 
     model_obj = get_model_instance(model_id)
     if not model_obj:
@@ -337,7 +357,7 @@ def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> s
 
     logger.warning(
         "No model found in Responses API request",
-        extra={"body_keys": list(request_body_dict.keys())}
+        extra={"body_keys": list(request_body_dict.keys())},
     )
     return "unknown"
 
