@@ -1,6 +1,7 @@
-import httpx
-import sys
 import json
+import sys
+
+import httpx
 
 
 def create_child_keys(base_url, api_key, count=3):
@@ -42,3 +43,4 @@ if __name__ == "__main__":
         print(json.dumps(keys, indent=2))
     else:
         print("\nNo child keys were created.")
+
