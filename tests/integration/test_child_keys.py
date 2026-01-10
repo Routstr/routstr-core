@@ -1,7 +1,9 @@
 import secrets
+from typing import Any
 
 import pytest
 from fastapi import HTTPException
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import adjust_payment_for_tokens, pay_for_request
 from routstr.balance import create_child_key
@@ -10,7 +12,7 @@ from routstr.core.settings import settings
 
 
 @pytest.mark.asyncio
-async def test_child_key_flow(integration_session):
+async def test_child_key_flow(integration_session: AsyncSession) -> None:
     # 1. Create a parent key with balance
     parent_raw = "parent_test_key_" + secrets.token_hex(4)
     parent_key = ApiKey(
@@ -61,7 +63,7 @@ async def test_child_key_flow(integration_session):
     import routstr.auth
     from routstr.payment.cost_calculation import CostData
 
-    async def mock_calculate_cost(*args, **kwargs):
+    async def mock_calculate_cost(*args: Any, **kwargs: Any) -> CostData:
         return CostData(
             base_msats=0, input_msats=200, output_msats=200, total_msats=400
         )
@@ -95,7 +97,9 @@ async def test_child_key_flow(integration_session):
 
 
 @pytest.mark.asyncio
-async def test_child_key_insufficient_balance(integration_session):
+async def test_child_key_insufficient_balance(
+    integration_session: AsyncSession,
+) -> None:
     parent_key = ApiKey(
         hashed_key="poor_parent_" + secrets.token_hex(4),
         balance=500,
@@ -112,7 +116,7 @@ async def test_child_key_insufficient_balance(integration_session):
 
 
 @pytest.mark.asyncio
-async def test_child_key_cannot_create_child(integration_session):
+async def test_child_key_cannot_create_child(integration_session: AsyncSession) -> None:
     parent_key = ApiKey(
         hashed_key="parent_" + secrets.token_hex(4),
         balance=10000,

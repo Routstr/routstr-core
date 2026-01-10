@@ -4,7 +4,7 @@ import sys
 import httpx
 
 
-def create_child_keys(base_url, api_key, count=3):
+def create_child_keys(base_url: str, api_key: str, count: int = 3) -> list[str]:
     headers = {"Authorization": f"Bearer {api_key}"}
 
     print(f"Requesting {count} child keys from {base_url}...")
@@ -43,4 +43,3 @@ if __name__ == "__main__":
         print(json.dumps(keys, indent=2))
     else:
         print("\nNo child keys were created.")
-
