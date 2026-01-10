@@ -251,18 +251,6 @@ async def donate(token: str, ref: str | None = None) -> str:
         return "Invalid token."
 
 
-@router.api_route(
-    "/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE"],
-    include_in_schema=False,
-    response_model=None,
-)
-async def wallet_catch_all(path: str) -> NoReturn:
-    raise HTTPException(
-        status_code=404, detail="Not found check /docs for available endpoints"
-    )
-
-
 @router.post("/child-key")
 async def create_child_key(
     key: ApiKey = Depends(get_key_from_header),
@@ -308,6 +296,18 @@ async def create_child_key(
         "cost_msats": cost,
         "parent_balance": key.balance,
     }
+
+
+@router.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+    response_model=None,
+)
+async def wallet_catch_all(path: str) -> NoReturn:
+    raise HTTPException(
+        status_code=404, detail="Not found check /docs for available endpoints"
+    )
 
 
 balance_router.include_router(lightning_router)
