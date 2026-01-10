@@ -102,6 +102,8 @@ async def get_all_models_with_overrides(
             )
             for row in override_rows
             if row.upstream_provider_id is not None
+            and row.upstream_provider_id in providers_by_id
+            and providers_by_id[row.upstream_provider_id].enabled
         }
 
     all_models: dict[str, Model] = {}

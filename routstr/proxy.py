@@ -98,6 +98,8 @@ async def refresh_model_maps() -> None:
     disabled_model_ids: set[str] = set()
 
     for provider in provider_rows:
+        if not provider.enabled:
+            continue
         for model in provider.models:
             if model.enabled:
                 overrides_by_id[model.id] = (model, provider.provider_fee)
