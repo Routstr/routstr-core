@@ -1,0 +1,8 @@
+{
+    "error": {
+        "message": "Internal Server Error",
+        "type": "upstream_error",
+        "code": 502
+    },
+    "request_id": "4a04e4f8-4a31-45f1-8189-455c86fc4e89"
+}

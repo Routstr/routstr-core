@@ -1,0 +1,8 @@
+{
+    "error": {
+        "message": "Upstream request failed",
+        "type": "rate_limit_exceeded",
+        "code": 429
+    },
+    "request_id": "80657fc6-4bca-4cb1-945d-ea65ec8a53c4"
+}
