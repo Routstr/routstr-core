@@ -32,14 +32,28 @@ async def get_key_from_header(
     )
 
 
-# TODO: remove this endpoint when frontend is updated
-@router.get("/", include_in_schema=False)
-async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
+async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
+    from .auth import get_billing_key
+
+    billing_key = await get_billing_key(key, session)
     return {
         "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-        "reserved": key.reserved_balance,
+        "balance": billing_key.balance,
+        "reserved": billing_key.reserved_balance,
+        "is_child": key.parent_key_hash is not None,
+        "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
+        "total_requests": key.total_requests,
+        "total_spent": key.total_spent,
     }
+
+
+# TODO: remove this endpoint when frontend is updated
+@router.get("/", include_in_schema=False)
+async def account_info(
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await get_balance_info(key, session)
 
 
 # TODO: Implement POST /v1/wallet/create endpoint
@@ -66,12 +80,11 @@ async def create_balance(
 
 
 @router.get("/info")
-async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
-    return {
-        "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-        "reserved": key.reserved_balance,
-    }
+async def wallet_info(
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await get_balance_info(key, session)
 
 
 class TopupRequest(BaseModel):
@@ -85,6 +98,10 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
+    from .auth import get_billing_key
+
+    billing_key = await get_billing_key(key, session)
+
     if topup_request is not None:
         cashu_token = topup_request.cashu_token
     if cashu_token is None:
@@ -94,7 +111,7 @@ async def topup_wallet_endpoint(
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        amount_msats = await credit_balance(cashu_token, billing_key, session)
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
@@ -154,6 +171,12 @@ async def refund_wallet_endpoint(
         return cached
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
+
+    if key.parent_key_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot refund child key. Please refund the parent key instead.",
+        )
 
     remaining_balance_msats: int = key.total_balance
 
@@ -238,6 +261,53 @@ async def wallet_catch_all(path: str) -> NoReturn:
     raise HTTPException(
         status_code=404, detail="Not found check /docs for available endpoints"
     )
+
+
+@router.post("/child-key")
+async def create_child_key(
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Creates a child API key that uses the parent's balance."""
+    # Check if this is already a child key
+    if key.parent_key_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot create a child key for another child key.",
+        )
+
+    cost = settings.child_key_cost
+
+    if key.total_balance < cost:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient balance to create child key. {cost} mSats required.",
+        )
+
+    # Deduct cost from parent
+    key.balance -= cost
+    key.total_spent += cost
+    session.add(key)
+
+    # Generate new key
+    import secrets
+
+    new_key_raw = secrets.token_hex(32)
+    new_key_hash = new_key_raw  # We use the raw key as the hash for sk- keys
+
+    child_key = ApiKey(
+        hashed_key=new_key_hash,
+        balance=0,
+        parent_key_hash=key.hashed_key,
+    )
+    session.add(child_key)
+    await session.commit()
+
+    return {
+        "api_key": "sk-" + new_key_hash,
+        "cost_msats": cost,
+        "parent_balance": key.balance,
+    }
 
 
 balance_router.include_router(lightning_router)
