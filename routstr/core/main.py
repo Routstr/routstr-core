@@ -61,6 +61,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Initialize application settings (env -> computed -> DB precedence)
         async with create_session() as session:
             s = await SettingsService.initialize(session)
+            if s.reset_reserved_balance_on_startup:
+                from .db import reset_all_reserved_balances
+
+                await reset_all_reserved_balances(session)
 
         # Apply app metadata from settings
         try:
