@@ -253,6 +253,11 @@ async def list_models(
             else 1.01,
         )
         for r in rows
+        if include_disabled
+        or (
+            r.upstream_provider_id in providers_by_id
+            and providers_by_id[r.upstream_provider_id].enabled
+        )
     ]
 
 
@@ -265,6 +270,8 @@ async def get_model_by_id(
     if not row or not row.enabled:
         return None
     provider = await session.get(UpstreamProviderRow, provider_id)
+    if not provider or not provider.enabled:
+        return None
     provider_fee = provider.provider_fee if provider else 1.01
     return _row_to_model(row, apply_provider_fee=True, provider_fee=provider_fee)
 
