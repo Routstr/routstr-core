@@ -276,19 +276,17 @@ class BaseUpstreamProvider:
 
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and "model" in data:
+            if isinstance(data, dict):
                 original_model = model_obj.id
-                transformed_model = self.transform_model_name(original_model)
-                data["model"] = transformed_model
-                logger.debug(
-                    "Transformed model name in request",
-                    extra={
-                        "original": original_model,
-                        "transformed": transformed_model,
-                        "provider": self.provider_type or self.base_url,
-                    },
-                )
-                return json.dumps(data).encode()
+
+                data = self.update_parameters_from_model_name(data, original_model)
+
+                if "model" in data:
+                    transformed_model = self.transform_model_name(original_model)
+                    data["model"] = transformed_model
+
+                data = self.transform_parameters(data)
+            return json.dumps(data).encode()
         except Exception as e:
             logger.debug(
                 "Could not transform request body",
@@ -299,6 +297,43 @@ class BaseUpstreamProvider:
             )
 
         return body
+
+    def update_parameters_from_model_name(self, data: dict, model_id: str) -> dict:
+        """Extract parameters from model name for provider-specific requirements.
+
+        Args:
+            data: Original request body data
+
+        Returns:
+            Transformed request body data
+        """
+        if model_id.endswith(":thinking"):
+            model_id = model_id.removesuffix(":thinking")
+            data["reasoning"] = {"effort": "medium"}
+        if model_id.endswith("-thinking"):
+            model_id = model_id.removesuffix("-thinking")
+            data["reasoning"] = {"effort": "medium"}
+
+        return data
+
+    def transform_parameters(self, data: dict) -> dict:
+        """Transform parameters for provider-specific requirements.
+
+        Args:
+            data: Original request body data
+
+        Returns:
+            Transformed request body data
+        """
+        # generic input to messages transformation
+        if (
+            "input" in data
+            and isinstance(data["input"], list)
+            and isinstance(data["input"][0], dict)
+            and "role" in data["input"][0]
+        ):
+            data["messages"] = data.pop("input")
+        return data
 
     def _extract_upstream_error_message(
         self, body_bytes: bytes
@@ -1094,7 +1129,9 @@ class BaseUpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
+        print(f"request_body: {request_body[:100]!r}")
         transformed_body = self.prepare_request_body(request_body, model_obj)
+        print(f"transformed_body: {transformed_body[:100]!r}")
 
         logger.info(
             "Forwarding request to upstream",
