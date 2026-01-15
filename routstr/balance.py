@@ -154,7 +154,8 @@ async def refund_wallet_endpoint(
         return cached
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
-    remaining_balance_msats: int = key.balance
+
+    remaining_balance_msats: int = key.total_balance
 
     if key.refund_currency == "sat":
         remaining_balance = remaining_balance_msats // 1000

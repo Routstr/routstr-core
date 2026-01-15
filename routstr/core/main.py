@@ -33,9 +33,9 @@ setup_logging()
 logger = get_logger(__name__)
 
 if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.2.1-{os.getenv('VERSION_SUFFIX')}"
+    __version__ = f"0.2.2-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.2.1"
+    __version__ = "0.2.2"
 
 
 @asynccontextmanager
@@ -61,6 +61,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Initialize application settings (env -> computed -> DB precedence)
         async with create_session() as session:
             s = await SettingsService.initialize(session)
+            if s.reset_reserved_balance_on_startup:
+                from .db import reset_all_reserved_balances
+
+                await reset_all_reserved_balances(session)
 
         if not s.admin_password:
             logger.warning(
