@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio.engine import create_async_engine
-from sqlmodel import Field, Relationship, SQLModel, func, select
+from sqlmodel import Field, Relationship, SQLModel, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
@@ -51,6 +51,14 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     @property
     def total_balance(self) -> int:
         return self.balance - self.reserved_balance
+
+
+async def reset_all_reserved_balances(session: AsyncSession) -> None:
+    logger.info("Resetting all reserved balances to 0")
+    stmt = update(ApiKey).values(reserved_balance=0)
+    await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+    logger.info("Reserved balances reset successfully")
 
 
 class ModelRow(SQLModel, table=True):  # type: ignore
