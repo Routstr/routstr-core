@@ -9,6 +9,7 @@ import gc
 import statistics
 import time
 from typing import Any, Dict, List
+from unittest.mock import patch
 
 import psutil
 import pytest
@@ -105,42 +106,46 @@ class TestPerformanceBaseline:
             ("GET", "/v1/wallet/info", authenticated_client, None),
         ]
 
-        # Warm up
-        for _ in range(10):
-            await integration_client.get("/")
+        # Enable provider discovery for this test
+        with patch(
+            "routstr.core.settings.settings.providers_refresh_interval_seconds", 300
+        ):
+            # Warm up
+            for _ in range(10):
+                await integration_client.get("/")
 
-        # Test each endpoint
-        for method, path, client, data in endpoints:
-            response_times = []
+            # Test each endpoint
+            for method, path, client, data in endpoints:
+                response_times = []
 
-            for i in range(100):
-                start = time.time()
+                for i in range(100):
+                    start = time.time()
 
-                if method == "GET":
-                    response = await client.get(path)
-                else:
-                    response = await client.post(path, json=data)
+                    if method == "GET":
+                        response = await client.get(path)
+                    else:
+                        response = await client.post(path, json=data)
 
-                duration = time.time() - start
-                response_times.append(duration * 1000)  # Convert to ms
+                    duration = time.time() - start
+                    response_times.append(duration * 1000)  # Convert to ms
 
-                assert response.status_code in [200, 201]
+                    assert response.status_code in [200, 201]
 
-                if i % 10 == 0:
-                    metrics.record_system_metrics()
+                    if i % 10 == 0:
+                        metrics.record_system_metrics()
 
-            # Verify 95th percentile < 500ms
-            p95 = sorted(response_times)[int(len(response_times) * 0.95)]
-            assert p95 < 500, (
-                f"{method} {path} p95 response time {p95}ms exceeds 500ms limit"
-            )
+                # Verify 95th percentile < 500ms
+                p95 = sorted(response_times)[int(len(response_times) * 0.95)]
+                assert p95 < 500, (
+                    f"{method} {path} p95 response time {p95}ms exceeds 500ms limit"
+                )
 
-            print(f"\n{method} {path}:")
-            print(f"  Mean: {statistics.mean(response_times):.2f}ms")
-            print(f"  P95: {p95:.2f}ms")
-            print(
-                f"  P99: {sorted(response_times)[int(len(response_times) * 0.99)]:.2f}ms"
-            )
+                print(f"\n{method} {path}:")
+                print(f"  Mean: {statistics.mean(response_times):.2f}ms")
+                print(f"  P95: {p95:.2f}ms")
+                print(
+                    f"  P99: {sorted(response_times)[int(len(response_times) * 0.99)]:.2f}ms"
+                )
 
 
 @pytest.mark.integration

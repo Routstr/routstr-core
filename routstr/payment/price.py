@@ -79,15 +79,29 @@ async def _fetch_btc_usd_price() -> float:
     """Fetch the lowest BTC/USD price from multiple exchanges."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            prices = await asyncio.gather(
-                _kraken_btc_usd(client),
-                _coinbase_btc_usd(client),
-                _binance_btc_usdt(client),
-            )
-            valid_prices = [price for price in prices if price is not None]
+            tasks = [
+                asyncio.create_task(_kraken_btc_usd(client)),
+                asyncio.create_task(_coinbase_btc_usd(client)),
+                asyncio.create_task(_binance_btc_usdt(client)),
+            ]
+            valid_prices: list[float] = []
+
+            for future in asyncio.as_completed(tasks):
+                price = await future
+                if price is not None:
+                    valid_prices.append(price)
+
+                if len(valid_prices) >= 2:
+                    break
+
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
             if not valid_prices:
                 logger.error("No valid BTC prices obtained from any exchange")
                 raise ValueError("Unable to fetch BTC price from any exchange")
+
             return min(valid_prices)
         except Exception as e:
             logger.error(

@@ -105,6 +105,9 @@ class LogManager:
         level: str | None = None,
         request_id: str | None = None,
         search_text: str | None = None,
+        status_codes: list[int] | None = None,
+        methods: list[str] | None = None,
+        endpoints: list[str] | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """
@@ -134,7 +137,13 @@ class LogManager:
 
         for log_data in iterator:
             if not self._matches_filters(
-                log_data, level, request_id, search_text_lower
+                log_data,
+                level,
+                request_id,
+                search_text_lower,
+                status_codes,
+                methods,
+                endpoints,
             ):
                 continue
 
@@ -153,12 +162,45 @@ class LogManager:
         level: str | None,
         request_id: str | None,
         search_text_lower: str | None,
+        status_codes: list[int] | None = None,
+        methods: list[str] | None = None,
+        endpoints: list[str] | None = None,
     ) -> bool:
         if level and log_data.get("levelname", "").upper() != level.upper():
             return False
 
         if request_id and log_data.get("request_id") != request_id:
             return False
+
+        if status_codes:
+            entry_status = log_data.get("status_code")
+            if entry_status is not None:
+                try:
+                    if int(entry_status) not in status_codes:
+                        return False
+                except (ValueError, TypeError):
+                    return False
+            else:
+                return False
+
+        if methods:
+            entry_method = log_data.get("method", "").upper()
+            if entry_method not in [m.upper() for m in methods]:
+                return False
+
+        if endpoints:
+            entry_path = log_data.get("path", "")
+            matched = False
+            for endpoint in endpoints:
+                clean_endpoint = endpoint.lstrip("/")
+                if entry_path.startswith(clean_endpoint):
+                    matched = True
+                    break
+                if clean_endpoint in entry_path:
+                    matched = True
+                    break
+            if not matched:
+                return False
 
         if search_text_lower:
             message = str(log_data.get("message", "")).lower()
