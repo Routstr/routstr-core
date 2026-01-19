@@ -40,16 +40,23 @@ async def recieve_token(
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Internal send function - returns amount and serialized token"""
     wallet: Wallet = await get_wallet(mint_url or settings.primary_mint, unit)
+    logger.info("Sending", extra={"amount": amount, "unit": unit, "mint_url": mint_url})
     proofs = get_proofs_per_mint_and_unit(
         wallet, mint_url or settings.primary_mint, unit
     )
-
+    logger.info("Proofs", extra={"proofs": proofs})
+    logger.info(
+        "Selecting to send",
+        extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+    )
     send_proofs, _ = await wallet.select_to_send(
         proofs, amount, set_reserved=True, include_fees=False
     )
+    logger.info("Send proofs", extra={"send_proofs": send_proofs})
     token = await wallet.serialize_proofs(
         send_proofs, include_dleq=False, legacy=False, memo=None
     )
+    logger.info("Token created", extra={"token": token})
     return amount, token
 
 
