@@ -1,18 +1,18 @@
 """
 Real Cashu mint integration for integration tests.
 
-This module provides a real sixty_nuts Wallet implementation that can be used
+This module provides a real cashu Wallet implementation that can be used
 with an actual Cashu mint instance for more thorough integration testing.
 """
 
 import os
 from typing import Optional, Tuple
 
-from sixty_nuts import Wallet
+from cashu.wallet.wallet import Wallet
 
 
 class RealMintWallet:
-    """Real Cashu mint wallet using sixty_nuts library"""
+    """Real Cashu mint wallet using cashu library"""
 
     def __init__(self, mint_url: str, nsec: str):
         self.mint_url = mint_url
@@ -22,7 +22,12 @@ class RealMintWallet:
     async def init(self) -> None:
         """Initialize the wallet connection"""
         if not self._wallet:
-            self._wallet = await Wallet.create(nsec=self.nsec)
+            self._wallet = await Wallet.with_db(
+                self.mint_url,
+                db="sqlite+aiosqlite:///:memory:",
+                load_all_keysets=True,
+                unit="sat",
+            )
 
     @property
     def wallet(self) -> Wallet:

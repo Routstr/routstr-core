@@ -9,7 +9,7 @@ import os
 try:
     from .real_testmint import create_real_mint_wallet
 except ImportError:
-    # sixty_nuts not available, tests will be skipped
+    # cashu not available, tests will be skipped
     create_real_mint_wallet = None  # type: ignore
 
 
@@ -17,9 +17,9 @@ async def test_real_wallet() -> None:
     """Test basic operations with a real Cashu mint wallet"""
     print("Testing real Cashu mint wallet...")
 
-    # Check if sixty_nuts dependency is available
+    # Check if cashu dependency is available
     if create_real_mint_wallet is None:
-        print("sixty_nuts not available. Skipping real mint tests.")
+        print("cashu not available. Skipping real mint tests.")
         return
 
     # Check if real mint is enabled

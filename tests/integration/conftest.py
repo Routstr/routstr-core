@@ -113,7 +113,7 @@ class TestmintWallet:
         self.refund_history: List[Dict[str, Any]] = []
 
     async def init(self) -> None:
-        """Initialize the sixty_nuts wallet"""
+        """Initialize the cashu wallet"""
         # In mock mode, we don't actually create a real wallet
         # This is just a placeholder for the mock implementation
         self.wallet = None
@@ -518,7 +518,9 @@ async def integration_app(
         with (
             patch("routstr.core.db.engine", integration_engine),
             patch.object(_settings, "cashu_mints", [mint_url]),
-            patch("routstr.payment.wallet.credit_balance", testmint_wallet.credit_balance),
+            patch(
+                "routstr.payment.wallet.credit_balance", testmint_wallet.credit_balance
+            ),
             patch("routstr.payment.wallet.send_token", testmint_wallet.send_token),
             patch("routstr.payment.wallet.recieve_token", testmint_wallet.redeem_token),
             patch("routstr.payment.wallet.get_balance", testmint_wallet.get_balance),
