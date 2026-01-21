@@ -20,7 +20,7 @@ async def get_balance(unit: str) -> int:
 
 
 async def recieve_token(
-    token: str,
+    token: str, force_primary: bool = False
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
     token_obj = deserialize_token_from_string(token)
     if len(token_obj.keysets) > 1:
@@ -29,7 +29,7 @@ async def recieve_token(
     wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
     wallet.keyset_id = token_obj.keysets[0]
 
-    if token_obj.mint not in settings.cashu_mints:
+    if force_primary or token_obj.mint not in settings.cashu_mints:
         return await swap_to_primary_mint(token_obj, wallet)
 
     wallet.verify_proofs_dleq(token_obj.proofs)
@@ -58,26 +58,15 @@ async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str
     return token
 
 
-async def swap_to_primary_mint(
-    token_obj: Token, token_wallet: Wallet
+async def _swap_to_primary_internal(
+    proofs: list[Proof], amount: int, unit: str, token_wallet: Wallet
 ) -> tuple[int, str, str]:
-    logger.info(
-        "swap_to_primary_mint",
-        extra={
-            "mint": token_obj.mint,
-            "amount": token_obj.amount,
-            "unit": token_obj.unit,
-        },
-    )
     # Ensure amount is an integer
-    if not isinstance(token_obj.amount, int):
-        token_amount = int(token_obj.amount)
-    else:
-        token_amount = token_obj.amount
+    token_amount = int(amount)
 
-    if token_obj.unit == "sat":
+    if unit == "sat":
         amount_msat = token_amount * 1000
-    elif token_obj.unit == "msat":
+    elif unit == "msat":
         amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
@@ -93,7 +82,7 @@ async def swap_to_primary_mint(
 
     melt_quote = await token_wallet.melt_quote(mint_quote.request)
     _ = await token_wallet.melt(
-        proofs=token_obj.proofs,
+        proofs=proofs,
         invoice=mint_quote.request,
         fee_reserve_sat=melt_quote.fee_reserve,
         quote_id=melt_quote.quote,
@@ -101,6 +90,91 @@ async def swap_to_primary_mint(
     _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
 
     return int(minted_amount), settings.primary_mint_unit, settings.primary_mint
+
+
+async def swap_to_primary_mint(
+    token_obj: Token, token_wallet: Wallet
+) -> tuple[int, str, str]:
+    logger.info(
+        "swap_to_primary_mint",
+        extra={
+            "mint": token_obj.mint,
+            "amount": token_obj.amount,
+            "unit": token_obj.unit,
+        },
+    )
+    return await _swap_to_primary_internal(
+        token_obj.proofs, token_obj.amount, token_obj.unit, token_wallet
+    )
+
+
+async def migrate_balance_to_primary(key: db.ApiKey, session: db.AsyncSession) -> None:
+    if not key.refund_mint_url or key.refund_mint_url == settings.primary_mint:
+        return
+
+    logger.info(
+        "Migrating balance to primary mint",
+        extra={
+            "key_hash": key.hashed_key[:8] + "...",
+            "current_mint": key.refund_mint_url,
+            "balance": key.balance,
+        },
+    )
+
+    if key.balance > 0:
+        source_mint = key.refund_mint_url
+        source_unit = key.refund_currency or "sat"
+        amount = key.balance
+
+        # Adjust unit if needed (db stores msats, wallet might use sats)
+        if source_unit == "sat":
+            amount_to_send = amount // 1000
+        else:
+            amount_to_send = amount
+
+        try:
+            wallet = await get_wallet(source_mint, source_unit)
+            proofs = get_proofs_per_mint_and_unit(wallet, source_mint, source_unit)
+
+            send_proofs, _ = await wallet.select_to_send(
+                proofs, amount_to_send, set_reserved=True, include_fees=False
+            )
+
+            minted_amount, minted_unit, _ = await _swap_to_primary_internal(
+                send_proofs, amount_to_send, source_unit, wallet
+            )
+
+            # Convert back to msats for DB update
+            if minted_unit == "sat":
+                new_balance = minted_amount * 1000
+            else:
+                new_balance = minted_amount
+
+            # Update balance with new amount (minus fees)
+            key.balance = new_balance
+
+            logger.info(
+                "Migration successful",
+                extra={
+                    "old_balance": amount,
+                    "new_balance": new_balance,
+                    "fee_paid": amount - new_balance,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                "Migration failed",
+                extra={"error": str(e), "key_hash": key.hashed_key[:8] + "..."},
+            )
+            # If migration fails, we abort the whole process (credit_balance will raise)
+            raise
+
+    # Update key metadata
+    key.refund_mint_url = None
+    key.refund_currency = None
+    session.add(key)
+    await session.commit()
+    await session.refresh(key)
 
 
 async def credit_balance(
@@ -112,7 +186,23 @@ async def credit_balance(
     )
 
     try:
-        amount, unit, mint_url = await recieve_token(cashu_token)
+        # Check for multi-mint situation
+        token_obj = deserialize_token_from_string(cashu_token)
+        target_mint = key.refund_mint_url or settings.primary_mint
+        force_primary = False
+
+        if token_obj.mint != target_mint:
+            if target_mint != settings.primary_mint:
+                await migrate_balance_to_primary(key, session)
+                target_mint = settings.primary_mint
+
+            # If token mint is different from (now possibly updated) target mint
+            if token_obj.mint != target_mint:
+                force_primary = True
+
+        amount, unit, mint_url = await recieve_token(
+            cashu_token, force_primary=force_primary
+        )
         logger.info(
             "credit_balance: Token redeemed successfully",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
