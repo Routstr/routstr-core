@@ -12,7 +12,7 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from ..auth import adjust_payment_for_tokens
+from ..auth import adjust_payment_for_tokens, revert_pay_for_request
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, create_session
 
@@ -1256,6 +1256,8 @@ class BaseUpstreamProvider:
                 },
             )
 
+            await revert_pay_for_request(key, session, max_cost_for_model)
+
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1286,6 +1288,8 @@ class BaseUpstreamProvider:
                     "traceback": tb,
                 },
             )
+
+            await revert_pay_for_request(key, session, max_cost_for_model)
 
             return create_error_response(
                 "internal_error",
@@ -1465,6 +1469,8 @@ class BaseUpstreamProvider:
                 },
             )
 
+            await revert_pay_for_request(key, session, max_cost_for_model)
+
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1495,6 +1501,8 @@ class BaseUpstreamProvider:
                     "traceback": tb,
                 },
             )
+
+            await revert_pay_for_request(key, session, max_cost_for_model)
 
             return create_error_response(
                 "internal_error",
