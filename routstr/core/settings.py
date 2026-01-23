@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic.v1 import BaseModel, BaseSettings, Field
+from pydantic.v1 import BaseModel, BaseSettings, Field, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 
@@ -37,9 +37,19 @@ class Settings(BaseSettings):
 
     # Cashu
     cashu_mints: list[str] = Field(default_factory=list, env="CASHU_MINTS")
+
+    @validator("cashu_mints", pre=True, each_item=True)
+    def normalize_mint_url(cls, v: str) -> str:
+        if isinstance(v, str):
+            return v.rstrip("/")
+        return v
+
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
+    disable_testnut_mock_upstream: bool = Field(
+        default=False, env="DISABLE_TESTNUT_MOCK_UPSTREAM"
+    )
 
     # Pricing
     # Default behavior: derive pricing from MODELS

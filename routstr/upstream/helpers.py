@@ -220,6 +220,17 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         results = await asyncio.gather(*tasks)
         upstreams = [p for p in results if p is not None]
 
+        if (
+            "https://testnut.cashu.space" in settings.cashu_mints
+            and not settings.disable_testnut_mock_upstream
+        ):
+            from .fake import MockUpstreamProvider
+
+            mock_provider = MockUpstreamProvider("mock", "mock")
+            await mock_provider.refresh_models_cache()
+            upstreams.append(mock_provider)
+            logger.info("Initialized MockUpstreamProvider for testnut mint")
+
         return upstreams
 
 
