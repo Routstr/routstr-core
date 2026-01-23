@@ -47,6 +47,9 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=None,
         description="Currency of the cashu-token",
     )
+    parent_key_hash: str | None = Field(
+        default=None, foreign_key="api_keys.hashed_key", index=True
+    )
 
     @property
     def total_balance(self) -> int:

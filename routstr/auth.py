@@ -286,30 +286,55 @@ async def validate_bearer_key(
     )
 
 
+async def get_billing_key(key: ApiKey, session: AsyncSession) -> ApiKey:
+    """Returns the key that should be charged for the request."""
+    if key.parent_key_hash:
+        parent = await session.get(ApiKey, key.parent_key_hash)
+        if parent:
+            # We want to keep the total_requests and total_spent on the child key
+            # but use the balance and reserved_balance of the parent.
+            # However, pay_for_request updates reserved_balance and total_requests.
+            # To stay simple, we charge the parent's balance and update parent's total_requests.
+            return parent
+        else:
+            logger.error(
+                "Parent key not found for child key",
+                extra={
+                    "child_key_hash": key.hashed_key[:8] + "...",
+                    "parent_key_hash": key.parent_key_hash[:8] + "...",
+                },
+            )
+    return key
+
+
 async def pay_for_request(
     key: ApiKey, cost_per_request: int, session: AsyncSession
 ) -> int:
     """Process payment for a request."""
 
+    billing_key = await get_billing_key(key, session)
+
     logger.info(
         "Processing payment for request",
         extra={
             "key_hash": key.hashed_key[:8] + "...",
-            "current_balance": key.balance,
+            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "current_balance": billing_key.balance,
             "required_cost": cost_per_request,
-            "sufficient_balance": key.balance >= cost_per_request,
+            "sufficient_balance": billing_key.balance >= cost_per_request,
         },
     )
 
-    if key.total_balance < cost_per_request:
+    if billing_key.total_balance < cost_per_request:
         logger.warning(
             "Insufficient balance for request",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
-                "balance": key.balance,
-                "reserved_balance": key.reserved_balance,
+                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                "balance": billing_key.balance,
+                "reserved_balance": billing_key.reserved_balance,
                 "required": cost_per_request,
-                "shortfall": cost_per_request - key.total_balance,
+                "shortfall": cost_per_request - billing_key.total_balance,
             },
         )
 
@@ -317,7 +342,7 @@ async def pay_for_request(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {key.total_balance} available. (reserved: {key.reserved_balance})",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.total_balance} available. (reserved: {billing_key.reserved_balance})",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
                 }
@@ -328,15 +353,16 @@ async def pay_for_request(
         "Charging base cost for request",
         extra={
             "key_hash": key.hashed_key[:8] + "...",
+            "billing_key_hash": billing_key.hashed_key[:8] + "...",
             "cost": cost_per_request,
-            "balance_before": key.balance,
+            "balance_before": billing_key.balance,
         },
     )
 
     # Charge the base cost for the request atomically to avoid race conditions
     stmt = (
         update(ApiKey)
-        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
         .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
@@ -344,6 +370,16 @@ async def pay_for_request(
         )
     )
     result = await session.exec(stmt)  # type: ignore[call-overload]
+
+    # Also increment total_requests on the child key if it's different
+    if billing_key.hashed_key != key.hashed_key:
+        child_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .values(total_requests=col(ApiKey.total_requests) + 1)
+        )
+        await session.exec(child_stmt)  # type: ignore[call-overload]
+
     await session.commit()
 
     if result.rowcount == 0:
@@ -351,8 +387,9 @@ async def pay_for_request(
             "Concurrent request depleted balance",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
+                "billing_key_hash": billing_key.hashed_key[:8] + "...",
                 "required_cost": cost_per_request,
-                "current_balance": key.balance,
+                "current_balance": billing_key.balance,
             },
         )
 
@@ -361,23 +398,26 @@ async def pay_for_request(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {key.balance} available.",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.balance} available.",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
                 }
             },
         )
 
-    await session.refresh(key)
+    await session.refresh(billing_key)
+    if billing_key.hashed_key != key.hashed_key:
+        await session.refresh(key)
 
     logger.info(
         "Payment processed successfully",
         extra={
             "key_hash": key.hashed_key[:8] + "...",
+            "billing_key_hash": billing_key.hashed_key[:8] + "...",
             "charged_amount": cost_per_request,
-            "new_balance": key.balance,
-            "total_spent": key.total_spent,
-            "total_requests": key.total_requests,
+            "new_balance": billing_key.balance,
+            "total_spent": billing_key.total_spent,
+            "total_requests": billing_key.total_requests,
         },
     )
 
@@ -387,9 +427,11 @@ async def pay_for_request(
 async def revert_pay_for_request(
     key: ApiKey, session: AsyncSession, cost_per_request: int
 ) -> None:
+    billing_key = await get_billing_key(key, session)
+
     stmt = (
         update(ApiKey)
-        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
             total_requests=col(ApiKey.total_requests) - 1,
@@ -397,27 +439,40 @@ async def revert_pay_for_request(
     )
 
     result = await session.exec(stmt)  # type: ignore[call-overload]
+
+    # Also decrement total_requests on the child key if it's different
+    if billing_key.hashed_key != key.hashed_key:
+        child_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .values(total_requests=col(ApiKey.total_requests) - 1)
+        )
+        await session.exec(child_stmt)  # type: ignore[call-overload]
+
     await session.commit()
     if result.rowcount == 0:
         logger.error(
             "Failed to revert payment - insufficient reserved balance",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
+                "billing_key_hash": billing_key.hashed_key[:8] + "...",
                 "cost_to_revert": cost_per_request,
-                "current_reserved_balance": key.reserved_balance,
+                "current_reserved_balance": billing_key.reserved_balance,
             },
         )
         raise HTTPException(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"failed to revert request payment: {cost_per_request} mSats required. {key.balance} available.",
+                    "message": f"failed to revert request payment: {cost_per_request} mSats required. {billing_key.balance} available.",
                     "type": "payment_error",
                     "code": "payment_error",
                 }
             },
         )
-    await session.refresh(key)
+    await session.refresh(billing_key)
+    if billing_key.hashed_key != key.hashed_key:
+        await session.refresh(key)
 
 
 async def adjust_payment_for_tokens(
@@ -428,15 +483,17 @@ async def adjust_payment_for_tokens(
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
     """
+    billing_key = await get_billing_key(key, session)
     model = response_data.get("model", "unknown")
 
     logger.debug(
         "Starting payment adjustment for tokens",
         extra={
             "key_hash": key.hashed_key[:8] + "...",
+            "billing_key_hash": billing_key.hashed_key[:8] + "...",
             "model": model,
             "deducted_max_cost": deducted_max_cost,
-            "current_balance": key.balance,
+            "current_balance": billing_key.balance,
             "has_usage": "usage" in response_data,
         },
     )
@@ -446,8 +503,10 @@ async def adjust_payment_for_tokens(
         try:
             release_stmt = (
                 update(ApiKey)
-                .where(col(ApiKey.hashed_key) == key.hashed_key)
-                .values(reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost)
+                .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+                .values(
+                    reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost
+                )
             )
             await session.exec(release_stmt)  # type: ignore[call-overload]
             await session.commit()
@@ -455,13 +514,18 @@ async def adjust_payment_for_tokens(
                 "Released reservation without charging (fallback)",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
+                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
                     "deducted_max_cost": deducted_max_cost,
                 },
             )
         except Exception as e:
             logger.error(
                 "Failed to release reservation in fallback",
-                extra={"error": str(e), "key_hash": key.hashed_key[:8] + "..."},
+                extra={
+                    "error": str(e),
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                },
             )
 
     match await calculate_cost(response_data, deducted_max_cost, session):
@@ -470,6 +534,7 @@ async def adjust_payment_for_tokens(
                 "Using max cost data (no token adjustment)",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
+                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
                     "model": model,
                     "max_cost": cost.total_msats,
                 },
@@ -477,7 +542,7 @@ async def adjust_payment_for_tokens(
             # Finalize by releasing reservation and charging max cost
             finalize_stmt = (
                 update(ApiKey)
-                .where(col(ApiKey.hashed_key) == key.hashed_key)
+                .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                 .values(
                     reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
                     balance=col(ApiKey.balance) - cost.total_msats,
@@ -485,27 +550,41 @@ async def adjust_payment_for_tokens(
                 )
             )
             result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
+
+            # Also update total_spent on the child key if it's different
+            if billing_key.hashed_key != key.hashed_key:
+                child_stmt = (
+                    update(ApiKey)
+                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .values(total_spent=col(ApiKey.total_spent) + cost.total_msats)
+                )
+                await session.exec(child_stmt)  # type: ignore[call-overload]
+
             await session.commit()
             if result.rowcount == 0:
                 logger.error(
                     "Failed to finalize max-cost payment - retrying reservation release",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "deducted_max_cost": deducted_max_cost,
-                        "current_reserved_balance": key.reserved_balance,
+                        "current_reserved_balance": billing_key.reserved_balance,
                         "total_cost": cost.total_msats,
                         "model": model,
                     },
                 )
                 await release_reservation_only()
             else:
-                await session.refresh(key)
+                await session.refresh(billing_key)
+                if billing_key.hashed_key != key.hashed_key:
+                    await session.refresh(key)
                 logger.info(
                     "Max cost payment finalized",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "charged_amount": cost.total_msats,
-                        "new_balance": key.balance,
+                        "new_balance": billing_key.balance,
                         "model": model,
                     },
                 )
@@ -521,6 +600,7 @@ async def adjust_payment_for_tokens(
                 "Calculated token-based cost",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
+                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
                     "model": model,
                     "token_cost": cost.total_msats,
                     "deducted_max_cost": deducted_max_cost,
@@ -533,11 +613,15 @@ async def adjust_payment_for_tokens(
             if cost_difference == 0:
                 logger.debug(
                     "Finalizing with exact reserved cost",
-                    extra={"key_hash": key.hashed_key[:8] + "...", "model": model},
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                        "model": model,
+                    },
                 )
                 finalize_stmt = (
                     update(ApiKey)
-                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                     .values(
                         reserved_balance=col(ApiKey.reserved_balance)
                         - deducted_max_cost,
@@ -546,8 +630,20 @@ async def adjust_payment_for_tokens(
                     )
                 )
                 await session.exec(finalize_stmt)  # type: ignore[call-overload]
+
+                # Also update total_spent on the child key if it's different
+                if billing_key.hashed_key != key.hashed_key:
+                    child_stmt = (
+                        update(ApiKey)
+                        .where(col(ApiKey.hashed_key) == key.hashed_key)
+                        .values(total_spent=col(ApiKey.total_spent) + total_cost_msats)
+                    )
+                    await session.exec(child_stmt)  # type: ignore[call-overload]
+
                 await session.commit()
-                await session.refresh(key)
+                await session.refresh(billing_key)
+                if billing_key.hashed_key != key.hashed_key:
+                    await session.refresh(key)
                 return cost.dict()
 
             # this should never happen why do we handle this???
@@ -557,16 +653,17 @@ async def adjust_payment_for_tokens(
                     "Additional charge required for token usage",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "additional_charge": cost_difference,
-                        "current_balance": key.balance,
-                        "sufficient_balance": key.balance >= cost_difference,
+                        "current_balance": billing_key.balance,
+                        "sufficient_balance": billing_key.balance >= cost_difference,
                         "model": model,
                     },
                 )
 
                 finalize_stmt = (
                     update(ApiKey)
-                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                     .values(
                         reserved_balance=col(ApiKey.reserved_balance)
                         - deducted_max_cost,
@@ -575,18 +672,31 @@ async def adjust_payment_for_tokens(
                     )
                 )
                 result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
+
+                # Also update total_spent on the child key if it's different
+                if billing_key.hashed_key != key.hashed_key:
+                    child_stmt = (
+                        update(ApiKey)
+                        .where(col(ApiKey.hashed_key) == key.hashed_key)
+                        .values(total_spent=col(ApiKey.total_spent) + total_cost_msats)
+                    )
+                    await session.exec(child_stmt)  # type: ignore[call-overload]
+
                 await session.commit()
 
                 if result.rowcount:
                     cost.total_msats = total_cost_msats
-                    await session.refresh(key)
+                    await session.refresh(billing_key)
+                    if billing_key.hashed_key != key.hashed_key:
+                        await session.refresh(key)
 
                     logger.info(
                         "Finalized payment with additional charge",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
+                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
                             "charged_amount": total_cost_msats,
-                            "new_balance": key.balance,
+                            "new_balance": billing_key.balance,
                             "model": model,
                         },
                     )
@@ -595,6 +705,7 @@ async def adjust_payment_for_tokens(
                         "Failed to finalize additional charge - releasing reservation",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
+                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
                             "attempted_charge": total_cost_msats,
                             "model": model,
                         },
@@ -607,15 +718,16 @@ async def adjust_payment_for_tokens(
                     "Refunding excess payment",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "refund_amount": refund,
-                        "current_balance": key.balance,
+                        "current_balance": billing_key.balance,
                         "model": model,
                     },
                 )
 
                 refund_stmt = (
                     update(ApiKey)
-                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                     .values(
                         reserved_balance=col(ApiKey.reserved_balance)
                         - deducted_max_cost,
@@ -624,6 +736,16 @@ async def adjust_payment_for_tokens(
                     )
                 )
                 result = await session.exec(refund_stmt)  # type: ignore[call-overload]
+
+                # Also update total_spent on the child key if it's different
+                if billing_key.hashed_key != key.hashed_key:
+                    child_stmt = (
+                        update(ApiKey)
+                        .where(col(ApiKey.hashed_key) == key.hashed_key)
+                        .values(total_spent=col(ApiKey.total_spent) + total_cost_msats)
+                    )
+                    await session.exec(child_stmt)  # type: ignore[call-overload]
+
                 await session.commit()
 
                 if result.rowcount == 0:
@@ -631,8 +753,9 @@ async def adjust_payment_for_tokens(
                         "Failed to finalize payment - releasing reservation",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
+                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
                             "deducted_max_cost": deducted_max_cost,
-                            "current_reserved_balance": key.reserved_balance,
+                            "current_reserved_balance": billing_key.reserved_balance,
                             "total_cost": total_cost_msats,
                             "model": model,
                         },
@@ -640,14 +763,17 @@ async def adjust_payment_for_tokens(
                     await release_reservation_only()
                 else:
                     cost.total_msats = total_cost_msats
-                    await session.refresh(key)
+                    await session.refresh(billing_key)
+                    if billing_key.hashed_key != key.hashed_key:
+                        await session.refresh(key)
 
                     logger.info(
                         "Refund processed successfully",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
+                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
                             "refunded_amount": refund,
-                            "new_balance": key.balance,
+                            "new_balance": billing_key.balance,
                             "final_cost": cost.total_msats,
                             "model": model,
                         },
