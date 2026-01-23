@@ -153,7 +153,7 @@ MINT_B = "https://mint-b.com"
 
 
 @pytest.fixture
-def mock_multi_mint_context():
+def mock_multi_mint_context() -> object:
     from routstr.core.settings import settings
 
     with (
@@ -174,7 +174,9 @@ def mock_multi_mint_context():
 
 
 @pytest.mark.asyncio
-async def test_topup_different_mint_migrates_and_forces_swap(mock_multi_mint_context):
+async def test_topup_different_mint_migrates_and_forces_swap(
+    mock_multi_mint_context: dict[str, MagicMock],
+) -> None:
     """
     Case: User is on Mint A, tops up with Mint B token.
     Expectation:
@@ -207,7 +209,9 @@ async def test_topup_different_mint_migrates_and_forces_swap(mock_multi_mint_con
 
 
 @pytest.mark.asyncio
-async def test_topup_same_mint_as_refund_mint(mock_multi_mint_context):
+async def test_topup_same_mint_as_refund_mint(
+    mock_multi_mint_context: dict[str, MagicMock],
+) -> None:
     """
     Case: User is on Mint A, tops up with Mint A token.
     Expectation: No migration, no forced swap.
@@ -238,7 +242,9 @@ async def test_topup_same_mint_as_refund_mint(mock_multi_mint_context):
 
 
 @pytest.mark.asyncio
-async def test_topup_primary_when_on_primary(mock_multi_mint_context):
+async def test_topup_primary_when_on_primary(
+    mock_multi_mint_context: dict[str, MagicMock],
+) -> None:
     """
     Case: User is on Primary (or None), tops up with Primary token.
     Expectation: No migration, no forced swap.
@@ -269,7 +275,9 @@ async def test_topup_primary_when_on_primary(mock_multi_mint_context):
 
 
 @pytest.mark.asyncio
-async def test_topup_mint_a_when_on_primary(mock_multi_mint_context):
+async def test_topup_mint_a_when_on_primary(
+    mock_multi_mint_context: dict[str, MagicMock],
+) -> None:
     """
     Case: User is on Primary, tops up with Mint A token.
     Expectation: No migration (already on primary), but force swap incoming token.
