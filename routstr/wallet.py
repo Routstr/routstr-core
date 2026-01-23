@@ -187,7 +187,13 @@ async def credit_balance(
 
     try:
         # Check for multi-mint situation
-        token_obj = deserialize_token_from_string(cashu_token)
+        try:
+            token_obj = deserialize_token_from_string(cashu_token)
+        except Exception as e:
+            # Wrap any deserialization error as ValueError for consistent error handling
+            # This ensures invalid tokens result in 400 Bad Request
+            raise ValueError(f"Invalid token: {str(e)}")
+
         target_mint = key.refund_mint_url or settings.primary_mint
         force_primary = False
 
