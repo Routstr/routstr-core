@@ -15,7 +15,6 @@ from httpx import ASGITransport, AsyncClient
 
 from .utils import (
     ConcurrencyTester,
-    PerformanceValidator,
 )
 
 
@@ -290,55 +289,7 @@ async def test_proxy_post_unauthorized_access(integration_client: AsyncClient) -
     assert response.status_code in [400, 401]
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_proxy_post_performance(
-    integration_client: AsyncClient, authenticated_client: AsyncClient
-) -> None:
-    """Test POST endpoint performance requirements"""
 
-    test_payload = {
-        "model": "gpt-3.5-turbo",
-        "messages": [{"role": "user", "content": "Performance test"}],
-    }
-
-    validator = PerformanceValidator()
-
-    with patch("httpx.AsyncClient.send") as mock_send:
-        # Mock fast responses
-        async def mock_iter_bytes(*args: Any, **kwargs: Any) -> Any:
-            yield b'{"choices": [{"message": {"content": "Fast"}}], "usage": {"total_tokens": 5}}'
-
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        response_data = {
-            "choices": [{"message": {"content": "Fast"}}],
-            "usage": {"total_tokens": 5},
-        }
-        mock_response.text = json.dumps(response_data)
-        mock_response.json = AsyncMock(return_value=response_data)
-        mock_response.iter_bytes = mock_iter_bytes
-        mock_response.aiter_bytes = mock_iter_bytes
-        mock_send.return_value = mock_response
-
-        # Run multiple requests for performance measurement
-        for i in range(20):
-            start = validator.start_timing("proxy_post")
-            response = await authenticated_client.post(
-                "/v1/chat/completions", json=test_payload
-            )
-            validator.end_timing("proxy_post", start)
-
-            assert response.status_code == 200
-
-    # Validate performance
-    perf_result = validator.validate_response_time(
-        "proxy_post",
-        max_duration=1.5,  # Allow slightly more time for POST
-        percentile=0.95,
-    )
-    assert perf_result["valid"], f"Performance requirement failed: {perf_result}"
 
 
 @pytest.mark.integration

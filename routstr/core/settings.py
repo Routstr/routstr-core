@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic.v1 import BaseModel, BaseSettings, Field, validator
+from pydantic.v1 import BaseModel, BaseSettings, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 
@@ -37,13 +37,6 @@ class Settings(BaseSettings):
 
     # Cashu
     cashu_mints: list[str] = Field(default_factory=list, env="CASHU_MINTS")
-
-    @validator("cashu_mints", pre=True, each_item=True)
-    def normalize_mint_url(cls, v: str) -> str:
-        if isinstance(v, str):
-            return v.rstrip("/")
-        return v
-
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
@@ -59,14 +52,18 @@ class Settings(BaseSettings):
     exchange_fee: float = Field(default=1.005, env="EXCHANGE_FEE")
     upstream_provider_fee: float = Field(default=1.05, env="UPSTREAM_PROVIDER_FEE")
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
+    child_key_cost: int = Field(default=1000, env="CHILD_KEY_COST")
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
+    reset_reserved_balance_on_startup: bool = Field(
+        default=True, env="RESET_RESERVED_BALANCE_ON_STARTUP"
+    )  # deactivate in horizontal scaling setups
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
-        default=300, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
+        default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
     )
     pricing_refresh_interval_seconds: int = Field(
         default=120, env="PRICING_REFRESH_INTERVAL_SECONDS"

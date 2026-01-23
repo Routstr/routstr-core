@@ -13,10 +13,7 @@ from starlette.exceptions import HTTPException
 from ..balance import balance_router, deprecated_wallet_router
 from ..discovery import providers_cache_refresher, providers_router
 from ..nip91 import announce_provider
-from ..payment.models import (
-    models_router,
-    update_sats_pricing,
-)
+from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..wallet import periodic_payout
@@ -61,6 +58,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Initialize application settings (env -> computed -> DB precedence)
         async with create_session() as session:
             s = await SettingsService.initialize(session)
+            if s.reset_reserved_balance_on_startup:
+                from .db import reset_all_reserved_balances
+
+                await reset_all_reserved_balances(session)
+
+        if not s.admin_password:
+            logger.warning(
+                f"Admin password is not set. Visit {s.http_url or 'http://localhost:8000'}/admin to set the password."
+            )
 
         # Apply app metadata from settings
         try:

@@ -102,6 +102,8 @@ async def get_all_models_with_overrides(
             )
             for row in override_rows
             if row.upstream_provider_id is not None
+            and row.upstream_provider_id in providers_by_id
+            and providers_by_id[row.upstream_provider_id].enabled
         }
 
     all_models: dict[str, Model] = {}
@@ -217,14 +219,6 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         tasks = [_init_single_provider(row) for row in existing_providers]
         results = await asyncio.gather(*tasks)
         upstreams = [p for p in results if p is not None]
-
-        if "https://testnut.cashu.space" in settings.cashu_mints:
-            from .fake import MockUpstreamProvider
-
-            mock_provider = MockUpstreamProvider("mock", "mock")
-            await mock_provider.refresh_models_cache()
-            upstreams.append(mock_provider)
-            logger.info("Initialized MockUpstreamProvider for testnut mint")
 
         return upstreams
 

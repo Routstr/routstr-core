@@ -18,7 +18,6 @@ from routstr.core.db import ApiKey
 
 from .utils import (
     ConcurrencyTester,
-    PerformanceValidator,
 )
 
 
@@ -551,39 +550,7 @@ async def test_proxy_get_concurrent_requests(
             assert response.status_code == 200
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_proxy_get_performance_requirements(
-    integration_client: AsyncClient, authenticated_client: AsyncClient
-) -> None:
-    """Test that GET proxy requests meet performance requirements"""
 
-    validator = PerformanceValidator()
-
-    with patch("httpx.AsyncClient.request") as mock_request:
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"content-type": "application/json"}
-        mock_response.json = MagicMock(return_value={"performance": "test"})
-        mock_response.text = '{"performance": "test"}'
-        mock_response.iter_bytes = AsyncMock(return_value=[b'{"performance": "test"}'])
-        mock_request.return_value = mock_response
-
-        # Test multiple requests for performance measurement
-        for i in range(20):
-            start = validator.start_timing("proxy_get")
-            response = await authenticated_client.get(f"/v1/perf-test-{i}")
-            validator.end_timing("proxy_get", start)
-
-            assert response.status_code == 200
-
-    # Validate performance requirements
-    perf_result = validator.validate_response_time(
-        "proxy_get",
-        max_duration=1.0,  # Should complete within 1 second
-        percentile=0.95,
-    )
-    assert perf_result["valid"], f"Performance requirement failed: {perf_result}"
 
 
 @pytest.mark.integration

@@ -124,7 +124,7 @@ async def partial_apikeys(request: Request) -> str:
 
     rows = "".join(
         [
-            f"<tr><td>{key.hashed_key}</td><td>{key.balance}</td><td>{key.total_spent}</td><td>{key.total_requests}</td><td>{key.refund_address}</td><td>{fmt_time(key.key_expiry_time)}</td></tr>"
+            f"<tr><td>{key.hashed_key}{' <br><small>(Child of ' + key.parent_key_hash[:8] + '...)</small>' if key.parent_key_hash else ''}</td><td>{key.balance}</td><td>{key.total_spent}</td><td>{key.total_requests}</td><td>{key.refund_address}</td><td>{fmt_time(key.key_expiry_time)}</td></tr>"
             for key in api_keys
         ]
     )
@@ -158,6 +158,7 @@ async def get_temporary_balances_api(request: Request) -> list[dict[str, object]
             "total_requests": key.total_requests,
             "refund_address": key.refund_address,
             "key_expiry_time": key.key_expiry_time,
+            "parent_key_hash": key.parent_key_hash,
         }
         for key in api_keys
     ]
