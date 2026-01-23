@@ -17,7 +17,6 @@ from .core.db import (
     get_session,
 )
 from .core.exceptions import UpstreamError
-from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
