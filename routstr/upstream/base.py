@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
 import traceback
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Mapping
