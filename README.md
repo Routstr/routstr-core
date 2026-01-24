@@ -13,7 +13,7 @@ This repo contains Routstr Core: a FastAPI-based reverse proxy that sits in fron
 
 - **Overview**: <https://docs.routstr.com/overview/>
 - **Provider Guide**: <https://docs.routstr.com/provider/quickstart/>
-- **User Guide**: <https://docs.routstr.com/user-guide/>
+- **User Guide**: <https://docs.routstr.com/user-guide/introduction/>
 
 ## Basic Usage
 
@@ -40,7 +40,7 @@ print(response.choices[0].message.content)
 ### cURL
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl https://api.routstr.com/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "x-cashu: cashuBo2FteCJodHRwczovL21..." \
   -d '{
@@ -65,9 +65,5 @@ docker run -d \
 ```bash
 make setup
 cp .env.example .env
-fastapi run routstr --host 0.0.0.0 --port 8000
+fastapi run routstr
 ```
-
-## License
-
-GPLv3. See `LICENSE`.
