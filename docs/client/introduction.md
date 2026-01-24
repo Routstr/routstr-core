@@ -17,7 +17,7 @@ Cashu ([cashu.me](https://cashu.me)) or Lightning ([Strike](https://strike.me), 
 
 ### 🌐 Provider
 
-A Routstr node, e.g. `https://api.routstr.com/v1`
+A Routstr node, e.g. `https://api.routstr.com`
 
 ### 🤖 Client
 
