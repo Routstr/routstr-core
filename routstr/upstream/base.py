@@ -451,164 +451,111 @@ class BaseUpstreamProvider:
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            stored_chunks: list[bytes] = []
             usage_finalized: bool = False
             last_model_seen: str | None = None
+            usage_chunk_data: dict | None = None
+            done_seen: bool = False
 
-            async def finalize_without_usage() -> bytes | None:
+            async def finalize_db_only() -> None:
                 nonlocal usage_finalized
                 if usage_finalized:
-                    return None
+                    return
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
-                        logger.warning(
-                            "Key not found when finalizing streaming payment",
-                            extra={"key_hash": key.hashed_key[:8] + "..."},
-                        )
-                        usage_finalized = True
-                        return None
+                        return
                     try:
-                        fallback: dict = {
-                            "model": last_model_seen or "unknown",
-                            "usage": None,
-                        }
-                        cost_data = await adjust_payment_for_tokens(
-                            fresh_key, fallback, new_session, max_cost_for_model
+                        await adjust_payment_for_tokens(
+                            fresh_key,
+                            {"model": last_model_seen or "unknown", "usage": None},
+                            new_session,
+                            max_cost_for_model,
                         )
                         usage_finalized = True
-                        logger.info(
-                            "Finalized streaming payment without explicit usage",
-                            extra={
-                                "key_hash": key.hashed_key[:8] + "...",
-                                "cost_data": cost_data,
-                                "balance_after_adjustment": fresh_key.balance,
-                            },
-                        )
-                        return f"data: {json.dumps({'cost': cost_data})}\n\n".encode()
-                    except Exception as cost_error:
-                        logger.error(
-                            "Error finalizing payment without usage",
-                            extra={
-                                "error": str(cost_error),
-                                "error_type": type(cost_error).__name__,
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
-                        )
-                        usage_finalized = True
-                        return None
-
-            try:
-                async for chunk in response.aiter_bytes():
-                    stored_chunks.append(chunk)
-                    try:
-                        for part in re.split(b"data: ", chunk):
-                            if not part or part.strip() in (b"[DONE]", b""):
-                                continue
-                            try:
-                                obj = json.loads(part)
-                                if isinstance(obj, dict) and obj.get("model"):
-                                    last_model_seen = str(obj.get("model"))
-                            except json.JSONDecodeError:
-                                pass
                     except Exception:
                         pass
 
-                    yield chunk
+            try:
+                async for chunk in response.aiter_bytes():
+                    # Split chunk into SSE events
+                    parts = re.split(b"data: ", chunk)
+                    for i, part in enumerate(parts):
+                        if not part:
+                            continue
 
-                logger.debug(
-                    "Streaming completed, analyzing usage data",
-                    extra={
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "chunks_count": len(stored_chunks),
-                    },
-                )
+                        stripped_part = part.strip()
+                        if not stripped_part:
+                            continue
 
-                for i in range(len(stored_chunks) - 1, -1, -1):
-                    chunk = stored_chunks[i]
-                    if not chunk:
-                        continue
-                    try:
-                        events = re.split(b"data: ", chunk)
-                        for event_data in events:
-                            if not event_data or event_data.strip() in (b"[DONE]", b""):
-                                continue
-                            try:
-                                data = json.loads(event_data)
-                                if isinstance(data, dict) and data.get("model"):
-                                    last_model_seen = str(data.get("model"))
-                                if isinstance(data, dict) and isinstance(
-                                    data.get("usage"), dict
-                                ):
-                                    async with create_session() as new_session:
-                                        fresh_key = await new_session.get(
-                                            key.__class__, key.hashed_key
-                                        )
-                                        if fresh_key:
-                                            try:
-                                                cost_data = (
-                                                    await adjust_payment_for_tokens(
-                                                        fresh_key,
-                                                        data,
-                                                        new_session,
-                                                        max_cost_for_model,
-                                                    )
-                                                )
-                                                usage_finalized = True
-                                                logger.info(
-                                                    "Payment adjustment completed for streaming",
-                                                    extra={
-                                                        "key_hash": key.hashed_key[:8]
-                                                        + "...",
-                                                        "cost_data": cost_data,
-                                                        "model": last_model_seen,
-                                                        "balance_after_adjustment": fresh_key.balance,
-                                                    },
-                                                )
-                                                yield f"data: {json.dumps({'cost': cost_data})}\n\n".encode()
-                                            except Exception as cost_error:
-                                                logger.error(
-                                                    "Error adjusting payment for streaming tokens",
-                                                    extra={
-                                                        "error": str(cost_error),
-                                                        "error_type": type(
-                                                            cost_error
-                                                        ).__name__,
-                                                        "key_hash": key.hashed_key[:8]
-                                                        + "...",
-                                                    },
-                                                )
-                                    break
-                            except json.JSONDecodeError:
-                                continue
-                    except Exception as e:
-                        logger.error(
-                            "Error processing streaming response chunk",
-                            extra={
-                                "error": str(e),
-                                "error_type": type(e).__name__,
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
+                        if stripped_part == b"[DONE]":
+                            done_seen = True
+                            continue
+
+                        try:
+                            obj = json.loads(part)
+                            if isinstance(obj, dict):
+                                if obj.get("model"):
+                                    last_model_seen = str(obj.get("model"))
+
+                                if isinstance(obj.get("usage"), dict):
+                                    # Hold this chunk back to merge cost later
+                                    usage_chunk_data = obj
+                                    continue
+                        except json.JSONDecodeError:
+                            pass
+
+                        prefix = (
+                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
                         )
+                        yield prefix + part
+
+                # Stream finished, process usage if found
+                if usage_chunk_data:
+                    async with create_session() as session:
+                        fresh_key = await session.get(key.__class__, key.hashed_key)
+                        if fresh_key:
+                            try:
+                                cost_data = await adjust_payment_for_tokens(
+                                    fresh_key,
+                                    usage_chunk_data,
+                                    session,
+                                    max_cost_for_model,
+                                )
+                                # Merge cost into usage
+                                usage_chunk_data["usage"]["cost"] = cost_data.get(
+                                    "total_usd", 0.0
+                                )
+                                # Keep detailed cost in metadata
+                                usage_chunk_data["metadata"] = usage_chunk_data.get(
+                                    "metadata", {}
+                                )
+                                usage_chunk_data["metadata"]["routstr"] = {
+                                    "cost": cost_data
+                                }
+                                yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                                usage_finalized = True
+                            except Exception:
+                                # Fallback: yield original usage chunk if adjustment fails
+                                yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
 
                 if not usage_finalized:
-                    maybe_cost_event = await finalize_without_usage()
-                    if maybe_cost_event is not None:
-                        yield maybe_cost_event
+                    await finalize_db_only()
+
+                if done_seen:
+                    yield b"data: [DONE]\n\n"
 
             except Exception as stream_error:
                 logger.warning(
-                    "Streaming interrupted; finalizing without usage",
+                    "Streaming interrupted; finalizing in background",
                     extra={
                         "error": str(stream_error),
-                        "error_type": type(stream_error).__name__,
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
                 raise
             finally:
                 if not usage_finalized:
-                    await finalize_without_usage()
+                    await finalize_db_only()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -648,6 +595,7 @@ class BaseUpstreamProvider:
             },
         )
 
+        content: bytes | None = None
         try:
             content = await response.aread()
             response_json = json.loads(content)
@@ -664,6 +612,14 @@ class BaseUpstreamProvider:
             cost_data = await adjust_payment_for_tokens(
                 key, response_json, session, deducted_max_cost
             )
+
+            # Merge cost into usage for OpenCode
+            if "usage" in response_json:
+                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+
+            # Keep detailed cost
+            response_json["metadata"] = response_json.get("metadata", {})
+            response_json["metadata"]["routstr"] = {"cost": cost_data}
             response_json["cost"] = cost_data
 
             logger.info(
@@ -749,180 +705,135 @@ class BaseUpstreamProvider:
         async def stream_with_responses_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            stored_chunks: list[bytes] = []
             usage_finalized: bool = False
             last_model_seen: str | None = None
             reasoning_tokens: int = 0
+            usage_chunk_data: dict | None = None
+            done_seen: bool = False
 
-            async def finalize_without_usage() -> bytes | None:
+            async def finalize_db_only() -> None:
                 nonlocal usage_finalized
                 if usage_finalized:
-                    return None
+                    return
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
-                        logger.warning(
-                            "Key not found when finalizing Responses API streaming payment",
-                            extra={"key_hash": key.hashed_key[:8] + "..."},
-                        )
-                        usage_finalized = True
-                        return None
+                        return
                     try:
-                        fallback: dict = {
-                            "model": last_model_seen or "unknown",
-                            "usage": None,
-                        }
-                        cost_data = await adjust_payment_for_tokens(
-                            fresh_key, fallback, new_session, max_cost_for_model
+                        await adjust_payment_for_tokens(
+                            fresh_key,
+                            {"model": last_model_seen or "unknown", "usage": None},
+                            new_session,
+                            max_cost_for_model,
                         )
                         usage_finalized = True
-                        logger.info(
-                            "Finalized Responses API streaming payment without explicit usage",
-                            extra={
-                                "key_hash": key.hashed_key[:8] + "...",
-                                "cost_data": cost_data,
-                                "balance_after_adjustment": fresh_key.balance,
-                            },
-                        )
-                        return f"data: {json.dumps({'cost': cost_data})}\\n\\n".encode()
-                    except Exception as cost_error:
-                        logger.error(
-                            "Error finalizing Responses API payment without usage",
-                            extra={
-                                "error": str(cost_error),
-                                "error_type": type(cost_error).__name__,
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
-                        )
-                        usage_finalized = True
-                        return None
-
-            try:
-                async for chunk in response.aiter_bytes():
-                    stored_chunks.append(chunk)
-                    try:
-                        for part in re.split(b"data: ", chunk):
-                            if not part or part.strip() in (b"[DONE]", b""):
-                                continue
-                            try:
-                                obj = json.loads(part)
-                                if isinstance(obj, dict):
-                                    if obj.get("model"):
-                                        last_model_seen = str(obj.get("model"))
-
-                                    # Track reasoning tokens for Responses API
-                                    if usage := obj.get("usage", {}):
-                                        if (
-                                            isinstance(usage, dict)
-                                            and "reasoning_tokens" in usage
-                                        ):
-                                            reasoning_tokens += usage.get(
-                                                "reasoning_tokens", 0
-                                            )
-                            except json.JSONDecodeError:
-                                pass
                     except Exception:
                         pass
 
-                    yield chunk
+            try:
+                async for chunk in response.aiter_bytes():
+                    # Split chunk into SSE events
+                    parts = re.split(b"data: ", chunk)
+                    for i, part in enumerate(parts):
+                        if not part:
+                            continue
 
-                logger.debug(
-                    "Responses API streaming completed, analyzing usage data",
-                    extra={
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "chunks_count": len(stored_chunks),
-                        "reasoning_tokens": reasoning_tokens,
-                    },
-                )
+                        stripped_part = part.strip()
+                        if not stripped_part:
+                            continue
 
-                # Process final usage data
-                for i in range(len(stored_chunks) - 1, -1, -1):
-                    chunk = stored_chunks[i]
-                    if not chunk:
-                        continue
-                    try:
-                        events = re.split(b"data: ", chunk)
-                        for event_data in events:
-                            if not event_data or event_data.strip() in (b"[DONE]", b""):
-                                continue
-                            try:
-                                data = json.loads(event_data)
-                                if isinstance(data, dict) and data.get("model"):
-                                    last_model_seen = str(data.get("model"))
-                                if isinstance(data, dict) and isinstance(
-                                    data.get("usage"), dict
-                                ):
-                                    # Include reasoning tokens in usage calculation
-                                    async with create_session() as new_session:
-                                        fresh_key = await new_session.get(
-                                            key.__class__, key.hashed_key
+                        if stripped_part == b"[DONE]":
+                            done_seen = True
+                            continue
+
+                        try:
+                            obj = json.loads(part)
+                            if isinstance(obj, dict):
+                                if obj.get("model"):
+                                    last_model_seen = str(obj.get("model"))
+
+                                # Track reasoning tokens for Responses API
+                                if usage := obj.get("usage", {}):
+                                    if (
+                                        isinstance(usage, dict)
+                                        and "reasoning_tokens" in usage
+                                    ):
+                                        reasoning_tokens += usage.get(
+                                            "reasoning_tokens", 0
                                         )
-                                        if fresh_key:
-                                            try:
-                                                cost_data = (
-                                                    await adjust_payment_for_tokens(
-                                                        fresh_key,
-                                                        data,
-                                                        new_session,
-                                                        max_cost_for_model,
-                                                    )
-                                                )
-                                                usage_finalized = True
-                                                logger.info(
-                                                    "Payment adjustment completed for Responses API streaming",
-                                                    extra={
-                                                        "key_hash": key.hashed_key[:8]
-                                                        + "...",
-                                                        "cost_data": cost_data,
-                                                        "model": last_model_seen,
-                                                        "reasoning_tokens": reasoning_tokens,
-                                                        "balance_after_adjustment": fresh_key.balance,
-                                                    },
-                                                )
-                                                yield f"data: {json.dumps({'cost': cost_data})}\\n\\n".encode()
-                                            except Exception as cost_error:
-                                                logger.error(
-                                                    "Error adjusting payment for Responses API streaming tokens",
-                                                    extra={
-                                                        "error": str(cost_error),
-                                                        "error_type": type(
-                                                            cost_error
-                                                        ).__name__,
-                                                        "key_hash": key.hashed_key[:8]
-                                                        + "...",
-                                                    },
-                                                )
-                                    break
-                            except json.JSONDecodeError:
-                                continue
-                    except Exception as e:
-                        logger.error(
-                            "Error processing Responses API streaming response chunk",
-                            extra={
-                                "error": str(e),
-                                "error_type": type(e).__name__,
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
+
+                                # Responses API usage is in response.completed/incomplete events
+                                chunk_type = obj.get("type", "")
+                                if chunk_type in (
+                                    "response.completed",
+                                    "response.incomplete",
+                                ):
+                                    usage_chunk_data = obj
+                                    continue
+                        except json.JSONDecodeError:
+                            pass
+
+                        prefix = (
+                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
                         )
+                        yield prefix + part
+
+                # Stream finished, process usage if found
+                if usage_chunk_data:
+                    async with create_session() as session:
+                        fresh_key = await session.get(key.__class__, key.hashed_key)
+                        if fresh_key:
+                            try:
+                                cost_data = await adjust_payment_for_tokens(
+                                    fresh_key,
+                                    usage_chunk_data,
+                                    session,
+                                    max_cost_for_model,
+                                )
+                                # Merge cost into usage chunk
+                                if (
+                                    "response" in usage_chunk_data
+                                    and "usage" in usage_chunk_data["response"]
+                                ):
+                                    usage_chunk_data["response"]["usage"]["cost"] = (
+                                        cost_data.get("total_usd", 0.0)
+                                    )
+                                elif "usage" in usage_chunk_data:
+                                    usage_chunk_data["usage"]["cost"] = cost_data.get(
+                                        "total_usd", 0.0
+                                    )
+
+                                # Keep detailed cost in metadata
+                                usage_chunk_data["metadata"] = usage_chunk_data.get(
+                                    "metadata", {}
+                                )
+                                usage_chunk_data["metadata"]["routstr"] = {
+                                    "cost": cost_data
+                                }
+                                yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                                usage_finalized = True
+                            except Exception:
+                                # Fallback: yield original usage chunk if adjustment fails
+                                yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
 
                 if not usage_finalized:
-                    maybe_cost_event = await finalize_without_usage()
-                    if maybe_cost_event is not None:
-                        yield maybe_cost_event
+                    await finalize_db_only()
+
+                if done_seen:
+                    yield b"data: [DONE]\n\n"
 
             except Exception as stream_error:
                 logger.warning(
-                    "Responses API streaming interrupted; finalizing without usage",
+                    "Responses API streaming interrupted; finalizing in background",
                     extra={
                         "error": str(stream_error),
-                        "error_type": type(stream_error).__name__,
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
                 raise
             finally:
                 if not usage_finalized:
-                    await finalize_without_usage()
+                    await finalize_db_only()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -962,6 +873,7 @@ class BaseUpstreamProvider:
             },
         )
 
+        content: bytes | None = None
         try:
             content = await response.aread()
             response_json = json.loads(content)
@@ -981,6 +893,14 @@ class BaseUpstreamProvider:
             cost_data = await adjust_payment_for_tokens(
                 key, response_json, session, deducted_max_cost
             )
+
+            # Merge cost into usage for OpenCode
+            if "usage" in response_json:
+                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+
+            # Keep detailed cost
+            response_json["metadata"] = response_json.get("metadata", {})
+            response_json["metadata"]["routstr"] = {"cost": cost_data}
             response_json["cost"] = cost_data
 
             logger.info(
