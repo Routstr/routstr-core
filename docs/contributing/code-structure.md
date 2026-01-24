@@ -7,10 +7,13 @@ This guide provides a detailed overview of Routstr Core's codebase organization 
 ```
 routstr-core/
 ├── routstr/                    # Main application package
-│   ├── __init__.py            # Package initialization, loads .env
-│   ├── auth.py                # Authentication and authorization
+│   ├── __init__.py            # Package initialization, exports FastAPI app
+│   ├── algorithm.py           # Model selection/mapping logic
+│   ├── auth.py                # Bearer/Cashu auth and payment handling
 │   ├── balance.py             # Balance management endpoints
 │   ├── discovery.py           # Nostr relay discovery
+│   ├── lightning.py           # Lightning invoice topups
+│   ├── nip91.py               # Node announcement logic
 │   ├── proxy.py               # Request proxying logic
 │   ├── wallet.py              # Cashu wallet operations
 │   │
@@ -18,19 +21,23 @@ routstr-core/
 │   │   ├── __init__.py
 │   │   ├── admin.py          # Admin dashboard and API
 │   │   ├── db.py             # Database models and connection
-│   │   ├── exceptions.py     # Custom exception classes
+│   │   ├── exceptions.py     # Exception handlers
 │   │   ├── logging.py        # Structured logging setup
 │   │   ├── main.py           # FastAPI app initialization
 │   │   └── middleware.py     # HTTP middleware components
 │   │
-│   └── payment/               # Payment processing
-│       ├── __init__.py
-│       ├── cost_calculation.py # Usage cost calculation
-│       ├── helpers.py         # Payment utilities
-│       ├── lnurl.py          # Lightning URL support
-│       ├── models.py         # Model pricing management
-│       ├── price.py          # BTC/USD price handling
-│       └── x_cashu.py        # Cashu header protocol
+│   ├── payment/               # Payment processing
+│   │   ├── __init__.py
+│   │   ├── cost_calculation.py # Usage cost calculation
+│   │   ├── helpers.py         # Payment utilities
+│   │   ├── lnurl.py          # Lightning URL support
+│   │   ├── models.py         # Model pricing management
+│   │   └── price.py          # BTC/USD price handling
+│   │
+│   └── upstream/              # Upstream provider integrations
+│       ├── base.py           # Base provider logic
+│       ├── helpers.py        # Provider init and model refresh
+│       └── ...               # Provider implementations
 │
 ├── tests/                     # Test suite
 │   ├── __init__.py
@@ -45,7 +52,12 @@ routstr-core/
 │   └── versions/             # Migration files
 │
 ├── scripts/                  # Utility scripts
-│   └── models_meta.py       # Fetch model pricing
+│   ├── models_meta.py       # Fetch model pricing
+│   └── ...                  # Build/update helpers
+│
+├── examples/                 # Example clients
+├── testing-clients/          # HTML test clients
+├── ui/                       # Next.js admin UI
 │
 ├── docs/                    # Documentation
 ├── logs/                    # Application logs (git ignored)
@@ -71,30 +83,27 @@ routstr-core/
 #### `routstr/__init__.py`
 
 ```python
-# Loads environment variables
-import dotenv
-dotenv.load_dotenv()
-
-# Exports FastAPI app
 from .core.main import app as fastapi_app
+
+__all__ = ["fastapi_app"]
 ```
 
 #### `routstr/core/main.py`
 
 ```python
 # FastAPI application setup
-app = FastAPI(
-    title="Routstr Node",
-    lifespan=lifespan,  # Manages startup/shutdown
-)
+app = FastAPI(version=__version__, lifespan=lifespan)
 
 # Middleware registration
 app.add_middleware(CORSMiddleware, ...)
 app.add_middleware(LoggingMiddleware)
 
 # Router inclusion
+app.include_router(models_router)
 app.include_router(admin_router)
 app.include_router(balance_router)
+app.include_router(deprecated_wallet_router)
+app.include_router(providers_router)
 app.include_router(proxy_router)
 ```
 
@@ -102,29 +111,24 @@ app.include_router(proxy_router)
 
 #### `routstr/auth.py`
 
-Handles API key validation and authorization:
+Handles bearer key validation and payment lifecycle (bearer or Cashu token):
 
 ```python
-class APIKeyAuth:
-    """FastAPI dependency for API key authentication"""
-    
-    async def __call__(self, request: Request) -> APIKey:
-        # Extract and validate API key
-        # Check balance
-        # Return authenticated key object
-
-# Usage in routes:
-@router.get("/protected")
-async def protected_route(api_key: APIKey = Depends(APIKeyAuth())):
-    pass
+async def validate_bearer_key(
+    bearer_key: str,
+    session: AsyncSession,
+    refund_address: Optional[str] = None,
+    key_expiry_time: Optional[int] = None,
+) -> ApiKey:
+    """Validate bearer API key or redeem Cashu token into a balance."""
 ```
 
 Key functions:
 
-- `create_api_key()` - Generate new API keys
-- `validate_api_key()` - Verify and retrieve key
-- `check_balance()` - Ensure sufficient funds
-- `update_last_used()` - Track usage
+- `validate_bearer_key()` - Validate API key or Cashu token
+- `pay_for_request()` - Reserve max cost before upstream call
+- `adjust_payment_for_tokens()` - Adjust final cost after response
+- `revert_pay_for_request()` - Refund on upstream failure
 
 ### Payment Processing
 
@@ -133,56 +137,30 @@ Key functions:
 Calculates request costs:
 
 ```python
-def calculate_request_cost(
-    model: str,
-    prompt_tokens: int,
-    completion_tokens: int,
-    **kwargs
-) -> CostData:
-    """Calculate cost in millisatoshis"""
-    # Model-based or fixed pricing
-    # Token counting
-    # Fee application
-    # Currency conversion
+async def calculate_cost(
+    response_data: dict, max_cost: int, session: AsyncSession
+) -> CostData | MaxCostData | CostDataError:
+    """Calculate cost in millisatoshis from response usage or model pricing."""
 ```
 
 #### `routstr/payment/models.py`
 
-Manages model pricing data:
+Manages model pricing, database overrides, and pricing refresh:
 
 ```python
-class ModelPrice:
+class Model(BaseModel):
     id: str
     name: str
-    pricing: dict[str, float]  # USD prices
-    context_length: int
-    
-# Global model registry
-MODELS: dict[str, ModelPrice] = load_models()
+    pricing: Pricing
+    sats_pricing: Pricing | None = None
 
-# Dynamic price updates
 async def update_sats_pricing():
-    """Background task to update BTC prices"""
+    """Periodic task to update sats pricing for providers and overrides."""
 ```
 
-#### `routstr/payment/x_cashu.py`
+#### `routstr/proxy.py` + `routstr/upstream/*`
 
-Implements Cashu payment protocol:
-
-```python
-class XCashuHandler:
-    """Handle x-cashu header payments"""
-    
-    async def process_request_payment(
-        self, 
-        token: str,
-        estimated_cost: int
-    ) -> PaymentResult:
-        # Validate token
-        # Check minimum amount
-        # Process payment
-        # Generate change
-```
+The `x-cashu` header is handled by the proxy route and delegated to upstream providers.
 
 ### Request Proxying
 
@@ -191,17 +169,11 @@ class XCashuHandler:
 Core proxy functionality:
 
 ```python
-@router.api_route("/{path:path}", methods=ALL_METHODS)
-async def proxy_request(
-    request: Request,
-    path: str,
-    api_key: APIKey = Depends(APIKeyAuth())
-) -> Response:
-    """Forward requests to upstream provider"""
-    # Build upstream request
-    # Stream response
-    # Track usage
-    # Deduct costs
+@proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
+async def proxy(
+    request: Request, path: str, session: AsyncSession = Depends(get_session)
+) -> Response | StreamingResponse:
+    """Forward requests to upstream provider and charge usage."""
 ```
 
 Key features:
@@ -215,27 +187,29 @@ Key features:
 
 #### `routstr/core/db.py`
 
-SQLModel definitions:
+SQLModel definitions (selected):
 
 ```python
-class APIKey(SQLModel, table=True):
-    id: int | None = Field(primary_key=True)
-    key_hash: str = Field(index=True, unique=True)
-    balance: int  # millisatoshis
-    total_deposited: int = 0
+class ApiKey(SQLModel, table=True):
+    hashed_key: str = Field(primary_key=True)
+    balance: int
+    reserved_balance: int = 0
+    refund_address: str | None = None
+    key_expiry_time: int | None = None
     total_spent: int = 0
-    created_at: datetime
-    expires_at: datetime | None = None
-    metadata: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    total_requests: int = 0
 
-class Transaction(SQLModel, table=True):
-    id: int | None = Field(primary_key=True)
-    api_key_id: int = Field(foreign_key="apikey.id")
-    amount: int  # can be negative
-    balance_after: int
-    type: TransactionType
-    description: str
-    timestamp: datetime
+class LightningInvoice(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    bolt11: str
+    amount_sats: int
+    status: str
+
+class UpstreamProviderRow(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    provider_type: str
+    base_url: str
+    api_key: str
 ```
 
 ### Admin Interface
@@ -245,18 +219,17 @@ class Transaction(SQLModel, table=True):
 Web dashboard and admin API:
 
 ```python
-@admin_router.get("/admin/")
+@admin_router.get("/admin")
 async def admin_dashboard(request: Request):
     """Render admin HTML interface"""
     # Authentication check
     # Load statistics
     # Render template
 
-@admin_router.post("/admin/api/withdraw")
+@admin_router.post("/admin/withdraw")
 async def withdraw_balance(
-    api_key: str,
-    amount: int | None = None
-) -> WithdrawalResponse:
+    request: Request, withdraw_request: WithdrawRequest
+) -> dict[str, str]:
     """Generate eCash token for withdrawal"""
 ```
 
@@ -271,25 +244,14 @@ Features:
 
 #### `routstr/wallet.py`
 
-Cashu wallet operations:
+Cashu wallet operations (function-based):
 
 ```python
-class WalletManager:
-    """Manage Cashu wallet instances"""
-    
-    async def redeem_token(
-        self, 
-        token: str,
-        mint_url: str | None = None
-    ) -> int:
-        """Redeem eCash token and return value"""
-        
-    async def create_token(
-        self,
-        amount: int,
-        mint_url: str
-    ) -> str:
-        """Create eCash token for withdrawal"""
+async def recieve_token(token: str) -> tuple[int, str, str]:
+    """Redeem eCash token and return amount/unit/mint."""
+
+async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str:
+    """Create eCash token for withdrawal."""
 ```
 
 ### Utility Modules
@@ -301,12 +263,9 @@ Structured logging configuration:
 ```python
 def setup_logging():
     """Configure JSON structured logging"""
-    # Set log level
-    # Configure formatters
-    # Add handlers
-    
-class RequestIdMiddleware:
-    """Add request ID to all logs"""
+
+class RequestIdFilter(logging.Filter):
+    """Attach request ID to log records."""
 ```
 
 #### `routstr/core/middleware.py`
@@ -316,27 +275,18 @@ HTTP middleware components:
 ```python
 class LoggingMiddleware:
     """Log all HTTP requests/responses"""
-    
-class ErrorHandlingMiddleware:
-    """Consistent error responses"""
 ```
 
 #### `routstr/core/exceptions.py`
 
-Custom exception hierarchy:
+Exception handlers:
 
 ```python
-class RoustrError(Exception):
-    """Base exception with error details"""
-    status_code: int
-    error_type: str
-    detail: str
+async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """HTTP exception handler with request ID"""
 
-class PaymentError(RoustrError):
-    """Payment-related errors"""
-
-class UpstreamError(RoustrError):
-    """Upstream API errors"""
+async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Fallback exception handler with request ID"""
 ```
 
 ## Configuration Files
@@ -348,7 +298,7 @@ Project metadata and dependencies:
 ```toml
 [project]
 name = "routstr"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
     "fastapi[standard]>=0.115",
     "sqlmodel>=0.0.24",
@@ -409,13 +359,13 @@ Using FastAPI's DI system:
 
 ```python
 # Define dependency
-async def get_db() -> AsyncSession:
-    async with async_session() as session:
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    async with AsyncSession(engine, expire_on_commit=False) as session:
         yield session
 
 # Use in routes
 @router.get("/items")
-async def get_items(db: AsyncSession = Depends(get_db)):
+async def get_items(db: AsyncSession = Depends(get_session)):
     result = await db.execute(select(Item))
     return result.scalars().all()
 ```
