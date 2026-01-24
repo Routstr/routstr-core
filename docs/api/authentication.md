@@ -425,4 +425,4 @@ All API key usage is logged:
 
 - [Endpoints](endpoints.md) - Complete endpoint reference
 - [Errors](errors.md) - Error handling guide
-- [Using the API](../user-guide/using-api.md) - Integration examples
+- [Using the API](../client/integration.md) - Integration examples

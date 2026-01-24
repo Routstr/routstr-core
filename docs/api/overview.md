@@ -99,19 +99,19 @@ All errors follow a consistent format:
 
 Standard OpenAI-compatible endpoints:
 
-- **Chat Completions**: `/v1/chat/completions`
-- **Completions**: `/v1/completions` *(Coming soon)*
-- **Embeddings**: `/v1/embeddings` *(Coming soon)*
-- **Images**: `/v1/images/generations` *(Coming soon)*
-- **Audio**: `/v1/audio/transcriptions` *(Coming soon)*
 - **Models**: `/v1/models`
+- **Responses**: `/v1/responses`
+- **Chat Completions**: `/v1/chat/completions`
+- **Embeddings**: `/v1/embeddings`
+- **Completions**: `/v1/completions` *(planned)*
+- **Images**: `/v1/images/generations` *(planned)*
+- **Audio**: `/v1/audio/transcriptions` *(planned)*
 
 ### Payment Endpoints
 
 Routstr-specific payment management:
 
-- **Wallet**: `/v1/wallet/*`
-- **Balance**: `/v1/balance`
+- **Balance**: `/v1/balance/*`
 - **Node Info**: `/v1/info`
 
 ### Admin Endpoints
@@ -137,9 +137,25 @@ Protected administrative functions:
 
 | Header | Description |
 |--------|-------------|
-| `X-Routstr-Version` | API version override |
 | `X-Cashu` | eCash token for per-request payment |
-| `X-Max-Cost` | Maximum acceptable cost in sats |
+
+#### X-Cashu: Stateless Per-Request Payment
+
+Instead of using `Authorization: Bearer sk-...`, you can send a Cashu token directly in the `X-Cashu` header. The response will include an `X-Cashu-Refund` header with your change.
+
+```bash
+curl https://api.routstr.com/v1/chat/completions \
+  -H "X-Cashu: cashuA3s8jKx9..." \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+The response includes your change in the same header:
+```
+X-Cashu: cashuA7k2mNp4...
+```
+
+This is fully stateless—no session, no `/v1/balance/refund` call needed. However, **streaming does not work with `X-Cashu`** because the refund can only be calculated after the full response is generated.
 
 ## Response Headers
 
@@ -149,16 +165,8 @@ Protected administrative functions:
 |--------|-------------|
 | `Content-Type` | Response format |
 | `Content-Length` | Response size |
-| `X-Routstr-Request-ID` | Unique request identifier |
-| `X-Routstr-Version` | API version used |
-
-### Cost Headers
-
-| Header | Description |
-|--------|-------------|
-| `X-Routstr-Cost` | Request cost in sats |
-| `X-Routstr-Balance` | Remaining balance |
-| `X-Cashu` | Change token (if applicable) |
+| `X-Request-ID` | Unique request identifier |
+| `X-Cashu` | Change token (when request used `X-Cashu` header) |
 
 ## Streaming Responses
 
@@ -245,8 +253,6 @@ X-Webhook-Signature: sha256=...
 
 - Current version: `v1`
 - Version in URL path: `/v1/endpoint`
-- Override with header: `X-Routstr-Version: v2`
-- Deprecation notices: 6 months
 
 ## Status Codes
 
@@ -284,82 +290,23 @@ Responses are compressed with gzip when:
 - Response is larger than 1KB
 - Content type is compressible
 
-## Pagination
+## Batch Requests *(planned)*
 
-List endpoints support pagination:
+Process multiple operations in one request. Coming soon.
 
-```
-GET /v1/transactions?limit=50&offset=100
-```
+## Node Info
 
-Response includes pagination metadata:
-
-```json
-{
-  "data": [...],
-  "has_more": true,
-  "total": 500,
-  "limit": 50,
-  "offset": 100
-}
-```
-
-## Field Filtering
-
-Select specific fields in responses:
+Get node metadata:
 
 ```
-GET /v1/models?fields=id,name,pricing
+GET /v1/info
 ```
 
-## Batch Requests
-
-Process multiple operations in one request:
-
-```json
-POST /v1/batch
-{
-  "requests": [
-    {"method": "POST", "endpoint": "/chat/completions", "body": {...}},
-    {"method": "GET", "endpoint": "/models"},
-    {"method": "GET", "endpoint": "/balance"}
-  ]
-}
-```
-
-## Idempotency
-
-Prevent duplicate operations:
-
-```
-Idempotency-Key: unique-request-id
-```
-
-Keys are stored for 24 hours.
-
-## Health Check
-
-Monitor service status:
-
-```
-GET /health
-
-Response:
-{
-  "status": "healthy",
-  "version": "0.2.0",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "checks": {
-    "database": "ok",
-    "upstream": "ok",
-    "mint": "ok"
-  }
-}
-```
+Supported models and pricing are available at `/v1/models`.
 
 ## Next Steps
 
 - [Authentication](authentication.md) - Detailed auth guide
 - [Endpoints](endpoints.md) - Complete endpoint reference
 - [Errors](errors.md) - Error handling guide
-- [Examples](../user-guide/using-api.md) - Code examples
+- [Integration Guide](../client/integration.md) - Code examples
