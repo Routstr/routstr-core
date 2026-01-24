@@ -110,5 +110,5 @@ Higher margins, fewer clients:
 
 ### Mixed Strategy
 
-- Cheap models (GPT-3.5, Haiku): Low margin to attract volume
-- Premium models (GPT-4, Opus): High margin for profit
+- Cheap models (GLM-4.7-Flash, Seed-1.6): Low margin to attract volume
+- Premium models (GPT-5-Pro, Claude-Opus): High margin for profit
