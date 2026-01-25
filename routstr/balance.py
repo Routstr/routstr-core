@@ -3,7 +3,7 @@ import hashlib
 from time import monotonic
 from typing import Annotated, NoReturn
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from .auth import validate_bearer_key
