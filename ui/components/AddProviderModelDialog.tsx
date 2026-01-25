@@ -248,7 +248,9 @@ export function AddProviderModelDialog({
     const pricing = model.pricing as Record<string, number>;
     const topProvider = model.top_provider as Record<string, unknown> | null;
 
-    form.setValue('id', model.id);
+    if (!isOverride) {
+      form.setValue('id', model.id);
+    }
     form.setValue('name', model.name);
     form.setValue('description', model.description || '');
     form.setValue('context_length', model.context_length);
@@ -425,7 +427,7 @@ export function AddProviderModelDialog({
           </DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        {!isEdit && !isOverride && (
+        {!isEdit && (
           <div className='bg-muted/30 rounded-md border p-3'>
             <div className='mb-2 text-sm font-medium'>Presets</div>
             <div className='grid gap-2 sm:grid-cols-3 sm:items-start'>
@@ -488,8 +490,9 @@ export function AddProviderModelDialog({
               </Popover>
             </div>
             <div className='text-muted-foreground mt-1 text-xs'>
-              Prefill fields from a preset model definition, then adjust as
-              needed.
+              {isOverride
+                ? 'Apply pricing and settings from a preset model (keeping the model ID unchanged).'
+                : 'Prefill fields from a preset model definition, then adjust as needed.'}
             </div>
           </div>
         )}
