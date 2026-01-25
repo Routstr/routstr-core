@@ -1,10 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import {
-  WalletService,
-  CreateChildKeyResponse,
-} from '@/lib/api/services/wallet';
+import { WalletService } from '@/lib/api/services/wallet';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -205,7 +202,7 @@ export function ChildKeyCreator({
                   </AlertTitle>
                   <AlertDescription className='text-green-700 dark:text-green-500'>
                     Copy {newKeys.length > 1 ? 'these keys' : 'this key'} now.
-                    You won't be able to see them again.
+                    You won&apos;t be able to see them again.
                     {resultInfo && (
                       <div className='mt-2 font-medium opacity-80'>
                         Total Cost: {resultInfo.cost_msats / 1000} sats | New
