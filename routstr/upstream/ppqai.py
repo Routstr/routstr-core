@@ -210,8 +210,8 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
             async with create_session() as session:
                 statement = select(UpstreamProviderRow).where(
-                    UpstreamProviderRow.base_url == self.base_url
-                    and UpstreamProviderRow.api_key == self.api_key
+                    UpstreamProviderRow.base_url == self.base_url,
+                    UpstreamProviderRow.api_key == self.api_key,
                 )
                 result = await session.exec(statement)
                 provider = result.first()
