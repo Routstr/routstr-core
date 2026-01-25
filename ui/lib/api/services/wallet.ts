@@ -29,6 +29,29 @@ export type RedeemTokenResponse = z.infer<typeof RedeemTokenResponseSchema>;
 export type SendTokenRequest = z.infer<typeof SendTokenRequestSchema>;
 export type SendTokenResponse = z.infer<typeof SendTokenResponseSchema>;
 
+export interface BalanceDetail {
+  mint_url: string;
+  unit: string;
+  wallet_balance: number;
+  user_balance: number;
+  owner_balance: number;
+  error?: string;
+}
+
+export interface WithdrawResponse {
+  token: string;
+}
+
+export interface CreateChildKeyResponse {
+  api_keys: string[];
+  api_key: string;
+  count: number;
+  cost_msats: number;
+  cost_sats: number;
+  parent_balance: number;
+  parent_balance_sats: number;
+}
+
 export class WalletService {
   static async redeemToken(token: string): Promise<RedeemTokenResponse> {
     try {
@@ -108,17 +131,38 @@ export class WalletService {
       throw error;
     }
   }
-}
 
-export interface BalanceDetail {
-  mint_url: string;
-  unit: string;
-  wallet_balance: number;
-  user_balance: number;
-  owner_balance: number;
-  error?: string;
-}
+  static async createChildKey(
+    baseUrl?: string,
+    apiKey?: string,
+    count: number = 1
+  ): Promise<CreateChildKeyResponse> {
+    try {
+      if (baseUrl && apiKey) {
+        const response = await fetch(`${baseUrl}/v1/balance/child-key`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ count }),
+        });
 
-export interface WithdrawResponse {
-  token: string;
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || 'Failed to create child key');
+        }
+
+        return (await response.json()) as CreateChildKeyResponse;
+      }
+
+      return await apiClient.post<CreateChildKeyResponse>(
+        '/v1/balance/child-key',
+        { count }
+      );
+    } catch (error) {
+      console.error('Error creating child key:', error);
+      throw error;
+    }
+  }
 }

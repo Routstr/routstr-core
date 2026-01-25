@@ -14,6 +14,7 @@ import { ConfigurationService } from '@/lib/api/services/configuration';
 import { CashuPaymentWorkflow } from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
 import { ApiKeyManager } from './api-key-manager';
+import { ChildKeyCreator } from '@/components/child-key-creator';
 
 type NodeInfo = {
   name: string;
@@ -23,6 +24,7 @@ type NodeInfo = {
   mints: string[];
   http_url?: string | null;
   onion_url?: string | null;
+  child_key_cost_msats?: number;
 };
 
 type WalletSnapshot = {
@@ -362,10 +364,11 @@ export function CheatSheet(): JSX.Element {
         </section>
 
         <Tabs defaultValue='cashu' className='w-full'>
-          <TabsList className='grid w-full grid-cols-3'>
+          <TabsList className='grid w-full grid-cols-4'>
             <TabsTrigger value='cashu'>Cashu Payments</TabsTrigger>
             <TabsTrigger value='lightning'>Lightning Payments</TabsTrigger>
             <TabsTrigger value='manage'>Manage Keys</TabsTrigger>
+            <TabsTrigger value='child-keys'>Child Keys</TabsTrigger>
           </TabsList>
 
           <TabsContent value='cashu' className='space-y-4'>
@@ -421,6 +424,15 @@ export function CheatSheet(): JSX.Element {
                 </CardContent>
               </Card>
             )}
+          </TabsContent>
+
+          <TabsContent value='child-keys' className='space-y-4'>
+            <ChildKeyCreator
+              baseUrl={normalizedBaseUrl}
+              apiKey={apiKeyInput}
+              onApiKeyChange={handleApiKeyChanged}
+              costPerKeyMsats={nodeInfo?.child_key_cost_msats}
+            />
           </TabsContent>
         </Tabs>
       </main>
