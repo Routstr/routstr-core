@@ -44,7 +44,6 @@ export interface WithdrawResponse {
 
 export interface CreateChildKeyResponse {
   api_keys: string[];
-  api_key: string;
   count: number;
   cost_msats: number;
   cost_sats: number;

@@ -65,8 +65,6 @@ export function ChildKeyCreator({
 
       if (result.api_keys && result.api_keys.length > 0) {
         setNewKeys(result.api_keys);
-      } else if (result.api_key) {
-        setNewKeys([result.api_key]);
       } else {
         throw new Error('No API keys returned from server');
       }

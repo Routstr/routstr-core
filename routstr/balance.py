@@ -310,7 +310,6 @@ async def create_child_key(
 
     response_data = {
         "api_keys": new_keys,
-        "api_key": new_keys[0],  # For backward compatibility
         "count": count,
         "cost_msats": total_cost,
         "cost_sats": total_cost // 1000,
