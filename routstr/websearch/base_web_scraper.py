@@ -27,7 +27,7 @@ class ScrapeFailureError(Exception):
     pass
 
 
-class BaseWebScrape(ABC):
+class BaseWebScraper(ABC):
     """
     Base class for web scrapers.
 

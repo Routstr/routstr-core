@@ -11,11 +11,11 @@ from datetime import datetime, timezone
 from typing import Dict
 
 from ..core.logging import get_logger
-from .BaseWebChunk import BaseWebChunk
-from .BaseWebRAG import BaseWebRAG
-from .BaseWebRank import BaseWebRank
-from .BaseWebScrape import BaseWebScrape
-from .BaseWebSearch import BaseWebSearch
+from .base_chunker import BaseChunker
+from .base_web_rag import BaseWebRAG
+from .base_ranker import BaseRanker
+from .base_web_scraper import BaseWebScraper
+from .base_web_searcher import BaseWebSearcher
 from .types import SearchResult
 
 logger = get_logger(__name__)
@@ -33,10 +33,10 @@ class CustomRAG(BaseWebRAG):
 
     def __init__(
         self,
-        search_provider: BaseWebSearch,
-        scrape_provider: BaseWebScrape,
-        chunk_provider: BaseWebChunk,
-        rank_provider: BaseWebRank,
+        search_provider: BaseWebSearcher,
+        scrape_provider: BaseWebScraper,
+        chunk_provider: BaseChunker,
+        rank_provider: BaseRanker,
     ):
         """
         Initialize CustomRAG with pipeline components.

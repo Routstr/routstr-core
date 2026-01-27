@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
-from routstr.websearch.HTTPWebScrape import HTTPWebScrape
+from routstr.websearch.http_web_scraper import HTTPWebScraper
 from routstr.websearch.types import WebPage
 
 @pytest.mark.asyncio
@@ -8,7 +8,7 @@ async def test_http_scrape_real_extraction_logic() -> None:
     """
     Mocks the network but tests Trafilatura library.
     """
-    scraper = HTTPWebScrape()
+    scraper = HTTPWebScraper()
     
     real_html_sample = """
     <html>
@@ -28,7 +28,7 @@ async def test_http_scrape_real_extraction_logic() -> None:
     """
     
     # Mock network call
-    with patch.object(HTTPWebScrape, "_fetch_html", new_callable=AsyncMock) as mock_fetch:
+    with patch.object(HTTPWebScraper, "_fetch_html", new_callable=AsyncMock) as mock_fetch:
         mock_fetch.return_value = real_html_sample
         
         page = WebPage(url="https://crypto-news.com/btc")
@@ -46,10 +46,10 @@ async def test_http_scrape_real_extraction_logic() -> None:
 @pytest.mark.asyncio
 async def test_http_scrape_fetch_failure() -> None:
     """Tests that a failed fetch returns the original webpage gracefully."""
-    scraper = HTTPWebScrape()
+    scraper = HTTPWebScraper()
     page = WebPage(url="https://fail.com", title="Original Title")
 
-    with patch.object(HTTPWebScrape, "_fetch_html", new_callable=AsyncMock) as mock_fetch:
+    with patch.object(HTTPWebScraper, "_fetch_html", new_callable=AsyncMock) as mock_fetch:
         mock_fetch.return_value = None # Simulate a fetch failure (e.g., 404)
 
         result = await scraper.scrape_url(page)
@@ -62,15 +62,15 @@ async def test_http_scrape_fetch_failure() -> None:
 @pytest.mark.asyncio
 async def test_http_scrape_extraction_crash() -> None:
     """Tests that if trafilatura crashes, the scraper still returns the raw HTML."""
-    scraper = HTTPWebScrape()
+    scraper = HTTPWebScraper()
     page = WebPage(url="https://crash.com")
     html = "<html><body>Raw HTML</body></html>"
 
-    with patch("routstr.websearch.HTTPWebScrape.trafilatura") as mock_traf:
+    with patch("routstr.websearch.http_web_scraper.trafilatura") as mock_traf:
         # Simulate trafilatura blowing up
         mock_traf.extract.side_effect = Exception("Crashed")
         
-        with patch.object(HTTPWebScrape, "_fetch_html", new_callable=AsyncMock) as mock_fetch:
+        with patch.object(HTTPWebScraper, "_fetch_html", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = html
             
             # This triggers the 'except Exception as e' in _extract_data

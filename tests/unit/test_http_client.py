@@ -1,7 +1,7 @@
 import pytest
 import httpx
 from unittest.mock import patch, AsyncMock, MagicMock
-from routstr.websearch.HTTPClient import HTTPClient
+from routstr.websearch.http_client import HTTPClient
 
 @pytest.mark.asyncio
 async def test_http_client_status_error_handling() -> None:

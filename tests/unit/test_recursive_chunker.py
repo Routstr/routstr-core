@@ -1,5 +1,5 @@
 import pytest
-from routstr.websearch.RecursiveChunker import RecursiveChunker
+from routstr.websearch.recursive_chunker import RecursiveChunker
 
 @pytest.mark.asyncio
 async def test_recursive_chunker_basic_fit() -> None:

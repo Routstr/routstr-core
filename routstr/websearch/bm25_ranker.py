@@ -4,7 +4,7 @@ from typing import Dict, List, Set
 
 from ..core.logging import get_logger
 from ..core.settings import settings
-from .BaseWebRank import BaseWebRank
+from .base_ranker import BaseRanker
 from .types import SearchResult
 
 logger = get_logger(__name__)
@@ -20,7 +20,7 @@ except ImportError:
     BM25Okapi = None
 
 
-class BM25WebRank(BaseWebRank):
+class BM25Ranker(BaseRanker):
     """
     BM25-based ranker that performs local-to-global pruning.
     """

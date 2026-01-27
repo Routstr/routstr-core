@@ -9,14 +9,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from ..core.logging import get_logger
-from .BaseWebSearch import BaseWebSearch
+from .base_web_searcher import BaseWebSearcher
 from .types import SearchResult, WebPage
-from .HTTPClient import HTTPClient
+from .http_client import HTTPClient
 
 logger = get_logger(__name__)
 
 
-class SerperWebSearch(BaseWebSearch):
+class SerperWebSearcher(BaseWebSearcher):
     """
     A web search provider that uses the Serper API to get search results.
     """

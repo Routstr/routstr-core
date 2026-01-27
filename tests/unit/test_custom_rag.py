@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from datetime import datetime
-from routstr.websearch.CustomRAG import CustomRAG
+from routstr.websearch.custom_web_rag import CustomRAG
 from routstr.websearch.types import SearchResult, WebPage
 
 @pytest.mark.asyncio

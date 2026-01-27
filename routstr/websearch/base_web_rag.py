@@ -1,15 +1,16 @@
 """
-Base class for Web search for AI context enhancement using Retrieval Augmented Generation (RAG).
+Base classes for Retrieval Augmented Generation (RAG) providers.
 
+This module defines the core interfaces and data structures for all-in-one RAG providers
+that combine web search, content extraction, and chunking into a unified solution for
+AI context enhancement.
 """
 
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse
 
-import httpx
 
 from ..core.logging import get_logger
 from .types import SearchResult
@@ -17,22 +18,16 @@ from .types import SearchResult
 logger = get_logger(__name__)
 
 
-class BaseWebSearch(ABC):
-    """Base class for web search providers."""
+class BaseWebRAG(ABC):
+    """Base class for RAG providers.
+
+    Defines the interface for providers that handle the complete RAG pipeline in single unified API call.
+    """
 
     provider_name: str = "Base"
 
     def __init__(self) -> None:
-        """Initialize the base web search provider."""
-        self.client_timeout: httpx.Timeout = httpx.Timeout(3.0, connect=3.0)
-        self.client_headers: dict = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        }
-        self.client_redirects: bool = True
-
-        # Domain Blocklist will be used by Search provider if domain exclusion is supported
-        # TODO: Unify this with BaseRAG.BLOCKED_DOMAINS?
-        # I could move it to HTTPClient
+        # Domain Blocklist will be passed to RAG provider and used if domain exclusion is supported
         self.EXCLUDE_DOMAINS = {
             "youtube.com",
             "youtu.be",
@@ -43,40 +38,39 @@ class BaseWebSearch(ABC):
         }
 
     @abstractmethod
-    async def search(self, query: str, max_results: int = 5) -> SearchResult:
-        """Perform web search and return results."""
+    async def retrieve_context(self, query: str, max_results: int = 5) -> SearchResult:
+        """Perform web retrieval
+
+        Args:
+            query: The search query for retrieving relevant web content
+            max_results: Maximum number of web sources to process
+
+        Returns:
+            SearchResult with processed content, chunks, and metadata
+        """
 
     @abstractmethod
     async def check_availability(self) -> bool:
-        """
-        Check if the search provider API is healthy and reachable.
-        Returns: True if available, False otherwise.
-        """
+        """Check if the RAG provider service is available and API key is valid.
 
-    def is_blocked(self, url: str) -> bool:
-        """Check if a URL's domain is in the blocklist.
-
-        Args:
-            url: The URL to check.
+        Performs a lightweight API call to verify:
+        - Service accessibility
+        - API key validity
+        - Service operational status
 
         Returns:
-            True if the domain is blocked, False otherwise.
+            True if provider is available and functional, False otherwise
         """
-        # Extract domain from URL
-        domain = urlparse(url).netloc
-        # Remove 'www.' if present to ensure matching
-        if domain.startswith("www."):
-            domain = domain[4:]
-        #if domain in self.EXCLUDE_DOMAINS:
-        #    print(f"URL in excluded list: {url}")  # TODO: DEBUG Print
-        return domain in self.EXCLUDE_DOMAINS
 
     async def _load_mock_data(self, file_name: str) -> Dict[str, Any]:
-        """
-        Load mock data from local JSON file for testing purposes.
+        """Load mock API response data from local JSON file for testing purposes.
+
+        Args:
+            file_name: Name of the JSON file containing mock response data
 
         Returns:
-            Dictionary containing mock API response
+            Dictionary containing mock API response data
+
         """
         logger.debug("Using mock data from file.")
         from pathlib import Path
@@ -89,12 +83,15 @@ class BaseWebSearch(ABC):
     async def _save_api_response(
         self, response_data: Dict[str, Any], query: str, provider: str
     ) -> None:
-        """
-        Save API response to a timestamped JSON file.
+        """Save live API response to timestamped JSON file for debugging and testing.
 
         Args:
             response_data: The API response dictionary to save
-            query: The search query (used in filename)
+            query: The search query (used in filename generation)
+            provider: Provider name (used in filename generation)
+
+        Note:
+            Creates files in api_responses/ directory with timestamp and sanitized query
         """
         import json
         from pathlib import Path
@@ -109,7 +106,7 @@ class BaseWebSearch(ABC):
             "".join(c for c in query if c.isalnum() or c in (" ", "-", "_"))
             .rstrip()
             .replace(" ", "_")
-        )
+        )[:60]
         filename = f"{provider}_{safe_query}_{timestamp}.json"
         file_path = responses_dir / filename
 

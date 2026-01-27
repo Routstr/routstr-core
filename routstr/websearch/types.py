@@ -19,12 +19,12 @@ class WebScrapeProvider(StrEnum):
     HTTP = "http"
 
 
-class WebChunkProvider(StrEnum):
+class ChunkProvider(StrEnum):
     FIXED = "fixed"
     RECURSIVE = "recursive"
 
 
-class WebRankProvider(StrEnum):
+class RankProvider(StrEnum):
     BM25 = "bm25"
 
 

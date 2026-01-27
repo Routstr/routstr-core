@@ -16,7 +16,7 @@ from .types import SearchResult, WebPage
 logger = get_logger(__name__)
 
 
-class BaseWebChunk(ABC):
+class BaseChunker(ABC):
     """Base class for content chunkers."""
 
     chunker_name: str = "base"

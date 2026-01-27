@@ -1,5 +1,5 @@
 import pytest
-from routstr.websearch.FixedSizeChunker import FixedSizeChunker
+from routstr.websearch.fixed_size_chunker import FixedSizeChunker
 
 @pytest.mark.asyncio
 async def test_fixed_chunker_basic_split() -> None:
@@ -13,4 +13,3 @@ async def test_fixed_chunker_basic_split() -> None:
     assert len(chunks) == 2
     assert chunks[0] == "1234567890"
     assert chunks[1] == "ABCDEFGHIJ"
-

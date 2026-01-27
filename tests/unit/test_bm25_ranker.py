@@ -1,12 +1,12 @@
 import pytest
-from routstr.websearch.BM25WebRank import BM25WebRank
+from routstr.websearch.bm25_ranker import BM25Ranker
 from routstr.websearch.types import SearchResult, WebPage
 
 @pytest.mark.asyncio
 async def test_bm25_tokenization_logic() -> None:
     """Verify that tokenization handles case sensitivity and punctuation."""
     # We test the internal _sort_chunks logic
-    ranker = BM25WebRank(max_chunks_per_source=5)
+    ranker = BM25Ranker(max_chunks_per_source=5)
     query = "->bitcoin?!" 
     
     chunks = [
@@ -23,7 +23,7 @@ async def test_bm25_tokenization_logic() -> None:
 async def test_bm25_local_pruning() -> None:
     """Verify that each webpage is limited to local_k chunks."""
     local_limit = 2
-    ranker = BM25WebRank(max_chunks_per_source=local_limit)
+    ranker = BM25Ranker(max_chunks_per_source=local_limit)
     
     # Mock a page with 5 chunks
     page = WebPage(
@@ -42,7 +42,7 @@ async def test_bm25_local_pruning() -> None:
 @pytest.mark.asyncio
 async def test_bm25_global_pruning() -> None:
     """Verify that the total number of chunks across all pages is capped at global_k."""
-    ranker = BM25WebRank(max_chunks_per_source=10)
+    ranker = BM25Ranker(max_chunks_per_source=10)
     ranker.global_k = 3 # Force a small global limit for testing
     
     # Two pages with 3 chunks each (total 6)
@@ -62,7 +62,7 @@ async def test_bm25_global_pruning() -> None:
 @pytest.mark.asyncio
 async def test_bm25_relevance_ranking_accuracy() -> None:
     """Verify that the most relevant chunks are actually selected."""
-    ranker = BM25WebRank(max_chunks_per_source=5)
+    ranker = BM25Ranker(max_chunks_per_source=5)
     ranker.global_k = 1 # We only want the single best chunk
     
     query = "what is the lightning network?"
@@ -89,7 +89,7 @@ async def test_bm25_relevance_ranking_accuracy() -> None:
 @pytest.mark.asyncio
 async def test_bm25_handles_empty_results() -> None:
     """Ensure the ranker doesn't crash if no pages or chunks are provided."""
-    ranker = BM25WebRank()
+    ranker = BM25Ranker()
     
     # Empty result
     empty_result = SearchResult(query="test", webpages=[])

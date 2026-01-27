@@ -1,9 +1,9 @@
 import pytest
 import asyncio
-from routstr.websearch.BaseWebScrape import BaseWebScrape
+from routstr.websearch.base_web_scraper import BaseWebScraper
 from routstr.websearch.types import WebPage
 
-class MockScraper(BaseWebScrape):
+class MockScraper(BaseWebScraper):
     """Minimal implementation to test the Base class orchestration."""
     async def scrape_url(self, webpage: WebPage) -> WebPage:
         # Simulate a small delay

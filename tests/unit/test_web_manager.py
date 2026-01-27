@@ -1,18 +1,18 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
-from routstr.websearch.WebManager import WebManager
+from routstr.websearch.web_manager import WebManager
 from routstr.websearch.types import RAGProvider, WebSearchProvider, WebPage, SearchResult
 from routstr.core.settings import settings
 import json
 
-from routstr.websearch.TavilyWebRAG import TavilyWebRAG
-from routstr.websearch.ExaWebRAG import ExaWebRAG
-from routstr.websearch.CustomRAG import CustomRAG
-from routstr.websearch.SerperWebSearch import SerperWebSearch
-from routstr.websearch.HTTPWebScrape import HTTPWebScrape
-from routstr.websearch.RecursiveChunker import RecursiveChunker
-from routstr.websearch.FixedSizeChunker import FixedSizeChunker
-from routstr.websearch.BM25WebRank import BM25WebRank
+from routstr.websearch.tavily_web_rag import TavilyWebRAG
+from routstr.websearch.exa_web_rag import ExaWebRAG
+from routstr.websearch.custom_web_rag import CustomRAG
+from routstr.websearch.serper_web_searcher import SerperWebSearcher
+from routstr.websearch.http_web_scraper import HTTPWebScraper
+from routstr.websearch.recursive_chunker import RecursiveChunker
+from routstr.websearch.fixed_size_chunker import FixedSizeChunker
+from routstr.websearch.bm25_ranker import BM25Ranker
 
 @pytest.mark.asyncio
 async def test_is_rag_enabled_logic() -> None:
@@ -107,8 +107,8 @@ async def test_get_web_search_provider_resolution() -> None:
     settings.serper_api_key = "test_serper_key"
     
     provider = await manager.get_web_search_provider()
-    from routstr.websearch.SerperWebSearch import SerperWebSearch
-    assert isinstance(provider, SerperWebSearch)
+    from routstr.websearch.serper_web_searcher import SerperWebSearcher
+    assert isinstance(provider, SerperWebSearcher)
     assert provider.api_key == "test_serper_key"
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_web_manager_search_factory() -> None:
     # Test Serper
     settings.web_search_provider = "serper"
     settings.serper_api_key = "test_key"
-    assert isinstance(await manager.get_web_search_provider(), SerperWebSearch)
+    assert isinstance(await manager.get_web_search_provider(), SerperWebSearcher)
     
     # Test Fallback for unknown
     manager._search_provider = None
@@ -292,12 +292,12 @@ async def test_web_manager_scraper_factory() -> None:
     manager = WebManager()
     
     # Test Default/None
-    assert isinstance(await manager.get_web_scraper_provider(), HTTPWebScrape)
+    assert isinstance(await manager.get_web_scraper_provider(), HTTPWebScraper)
     
     # Test Unknown strings fallback to HTTP
     manager._scraper_provider = None
     settings.web_scraper_provider = "mystery_scraper"
-    assert isinstance(await manager.get_web_scraper_provider(), HTTPWebScrape)
+    assert isinstance(await manager.get_web_scraper_provider(), HTTPWebScraper)
 
 @pytest.mark.asyncio
 async def test_web_manager_chunker_factory() -> None:
@@ -325,12 +325,12 @@ async def test_web_manager_ranker_factory() -> None:
     
     # Test BM25
     settings.web_ranking_provider = "bm25"
-    assert isinstance(await manager.get_web_ranker_provider(), BM25WebRank)
+    assert isinstance(await manager.get_web_ranker_provider(), BM25Ranker)
     
     # Test fallbacks to BM25
     manager._rank_provider = None
     settings.web_ranking_provider = "invalid"
-    assert isinstance(await manager.get_web_ranker_provider(), BM25WebRank)
+    assert isinstance(await manager.get_web_ranker_provider(), BM25Ranker)
 
 @pytest.mark.asyncio
 async def test_web_manager_rag_all_in_one_factories() -> None:

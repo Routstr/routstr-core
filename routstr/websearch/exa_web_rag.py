@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from ..core.logging import get_logger
-from .BaseWebRAG import BaseWebRAG
+from .base_web_rag import BaseWebRAG
 from .types import SearchResult, WebPage
-from .HTTPClient import HTTPClient
+from .http_client import HTTPClient
 
 logger = get_logger(__name__)
 

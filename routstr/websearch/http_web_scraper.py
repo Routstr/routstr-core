@@ -5,7 +5,7 @@ from typing import List, Optional
 import httpx
 
 from ..core.logging import get_logger
-from .BaseWebScrape import BaseWebScrape, ScrapeFailureError
+from .base_web_scraper import BaseWebScraper, ScrapeFailureError
 from .types import WebPage
 
 logger = get_logger(__name__)
@@ -23,7 +23,7 @@ except ImportError:
     trafilatura = None
 
 
-class HTTPWebScrape(BaseWebScrape):
+class HTTPWebScraper(BaseWebScraper):
     """
     High-performance scraper using HTTPX and Trafilatura.
     """

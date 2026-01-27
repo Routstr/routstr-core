@@ -34,7 +34,7 @@ from ..payment.models import (
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
-from ..websearch.WebManager import web_manager
+from ..websearch.web_manager import web_manager
 
 logger = get_logger(__name__)
 
