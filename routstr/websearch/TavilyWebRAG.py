@@ -182,7 +182,7 @@ class TavilyWebRAG(BaseWebRAG):
             "auto_parameters": False,
             "country": None,
             "search_depth": "advanced",  # Use advanced to get chunks functionality
-            "include_answer": True,  # Includes a LLM summery when set True -> no further cost but latency
+            "include_answer": True,  # Includes a LLM summary when set True -> no further cost but latency
             "include_images": False,  # We don't need images for RAG
             "include_favicon": False,
             "include_raw_content": False,  # We'll use chunks instead of raw content

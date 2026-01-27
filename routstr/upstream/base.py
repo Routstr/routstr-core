@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import time
 import asyncio
 import json
 import re
@@ -583,6 +583,10 @@ class BaseUpstreamProvider:
             # TODO: rename to repsonse_data, in line with auth/adjust_payment_for_tokens
             response_json = json.loads(content)
 
+            if hasattr(response, "llm_start_ms"):
+                latency = int(time.time() * 1000) - response.llm_start_ms
+                print(f"Generation took: {latency}ms")
+
             logger.debug(
                 "Parsed response JSON",
                 extra={
@@ -736,12 +740,12 @@ class BaseUpstreamProvider:
                 "has_request_body": request_body is not None,
             },
         )
-        # print(request_body)
+        print(transformed_body[:500])
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
             timeout=None,
         )
-
+        llm_start = int(time.time() * 1000)
         try:
             if transformed_body is not None:
                 response = await client.send(
@@ -754,6 +758,7 @@ class BaseUpstreamProvider:
                     ),
                     stream=True,
                 )
+                response.llm_start_ms = llm_start 
             else:
                 response = await client.send(
                     client.build_request(

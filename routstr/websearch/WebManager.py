@@ -509,6 +509,7 @@ class WebManager:
 
             enhanced_request_body = json.dumps(request_data).encode("utf-8")
             logger.info(f"Successfully injected web context for query: '{query}'")
+            #print(enhanced_request_body[:500])
             return enhanced_request_body, sources
 
         except json.JSONDecodeError as e:
@@ -534,7 +535,7 @@ class WebManager:
             res_block.append(f"  <url>{page.url}</url>")
             
             if page.publication_date:
-                res_block.append(f"  <date>{page.publication_date}</date>")
+                res_block.append(f"  <published>{page.publication_date}</published>")
             
             if page.summary:
                 res_block.append(f" <summary>{page.summary}</summary>")
@@ -553,7 +554,7 @@ class WebManager:
             "Use the sources above to answer the user's request as accurately as possible.",
             "If the sources do not contain enough information to answer the query, inform the user that the provided context is insufficient instead of speculating.",
             "Cite sources using their ID in brackets (e.g. [1]), formatted as markdown superscript (^[1]^).",
-            "Pay attention to the publication date (<date>), if available.",
+            "Pay attention to the <published> property, if available, which shows the date on which the website was first published.",
         ]
 
         parts.append("\n<instructions>")
