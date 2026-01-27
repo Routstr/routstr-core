@@ -31,11 +31,11 @@ async def test_child_key_flow(integration_session: AsyncSession) -> None:
         ChildKeyRequest(count=1), parent_key, integration_session
     )
 
-    assert "api_key" in result
+    assert "api_keys" in result
     assert result["cost_msats"] == 1000
     assert result["parent_balance"] == 9000
 
-    child_key_raw = result["api_key"][3:]  # remove sk-
+    child_key_raw = result["api_keys"][0][3:]  # remove sk-
 
     # 3. Verify child key exists in DB
     child_key_db = await integration_session.get(ApiKey, child_key_raw)
