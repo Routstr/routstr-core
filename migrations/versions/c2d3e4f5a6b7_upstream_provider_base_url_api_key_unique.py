@@ -77,9 +77,10 @@ def upgrade() -> None:
 
     inspector = sa.inspect(conn)
     for constraint in inspector.get_unique_constraints("upstream_providers"):
-        if constraint.get("column_names") == ["base_url"] and constraint.get("name"):
+        name = constraint.get("name")
+        if constraint.get("column_names") == ["base_url"] and name:
             op.drop_constraint(
-                constraint["name"],
+                name,
                 "upstream_providers",
                 type_="unique",
             )
