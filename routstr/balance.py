@@ -251,12 +251,24 @@ async def donate(token: str, ref: str | None = None) -> str:
         return "Invalid token."
 
 
+class ChildKeyRequest(BaseModel):
+    count: int
+
+
 @router.post("/child-key")
 async def create_child_key(
+    payload: ChildKeyRequest,
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Creates a child API key that uses the parent's balance."""
+    """Creates one or more child API keys that use the parent's balance."""
+    # Log incoming request for debugging
+    logger.debug(f"Child key creation request: count={payload.count}")
+
+    count = payload.count
+    if count < 1 or count > 50:
+        raise HTTPException(status_code=400, detail="Count must be between 1 and 50.")
+
     # Check if this is already a child key
     if key.parent_key_hash:
         raise HTTPException(
@@ -264,38 +276,48 @@ async def create_child_key(
             detail="Cannot create a child key for another child key.",
         )
 
-    cost = settings.child_key_cost
+    cost_per_key = settings.child_key_cost
+    total_cost = cost_per_key * count
 
-    if key.total_balance < cost:
+    if key.total_balance < total_cost:
         raise HTTPException(
             status_code=402,
-            detail=f"Insufficient balance to create child key. {cost} mSats required.",
+            detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
         )
 
     # Deduct cost from parent
-    key.balance -= cost
-    key.total_spent += cost
+    key.balance -= total_cost
+    key.total_spent += total_cost
     session.add(key)
 
-    # Generate new key
+    # Generate new keys
     import secrets
 
-    new_key_raw = secrets.token_hex(32)
-    new_key_hash = new_key_raw  # We use the raw key as the hash for sk- keys
+    new_keys = []
+    for _ in range(count):
+        new_key_raw = secrets.token_hex(32)
+        new_key_hash = new_key_raw  # We use the raw key as the hash for sk- keys
 
-    child_key = ApiKey(
-        hashed_key=new_key_hash,
-        balance=0,
-        parent_key_hash=key.hashed_key,
-    )
-    session.add(child_key)
+        child_key = ApiKey(
+            hashed_key=new_key_hash,
+            balance=0,
+            parent_key_hash=key.hashed_key,
+        )
+        session.add(child_key)
+        new_keys.append("sk-" + new_key_hash)
+
     await session.commit()
 
-    return {
-        "api_key": "sk-" + new_key_hash,
-        "cost_msats": cost,
+    response_data = {
+        "api_keys": new_keys,
+        "count": count,
+        "cost_msats": total_cost,
+        "cost_sats": total_cost // 1000,
         "parent_balance": key.balance,
+        "parent_balance_sats": key.balance // 1000,
     }
+    logger.debug(f"Child key creation response: {response_data}")
+    return response_data
 
 
 @router.api_route(

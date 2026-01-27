@@ -434,6 +434,42 @@ Authorization: Bearer sk-...
 }
 ```
 
+### Create Child Key
+
+Creates one or more child API keys that share the parent's balance. Each child key creation costs a fixed amount (configurable).
+
+```http
+POST /v1/balance/child-key
+Authorization: Bearer sk-...
+```
+
+**Request Body:**
+
+```json
+{
+  "count": 1
+}
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `count` | integer | Yes | - | Number of child keys to create (1-50) |
+
+**Response:**
+
+```json
+{
+  "api_keys": ["sk-abc...", "sk-def..."],
+  "count": 2,
+  "cost_msats": 2000,
+  "cost_sats": 2,
+  "parent_balance": 98000,
+  "parent_balance_sats": 98
+}
+```
+
 ## Provider Discovery
 
 ## Admin Settings

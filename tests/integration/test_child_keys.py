@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import adjust_payment_for_tokens, pay_for_request
-from routstr.balance import create_child_key
+from routstr.balance import ChildKeyRequest, create_child_key
 from routstr.core.db import ApiKey
 from routstr.core.settings import settings
 
@@ -27,13 +27,15 @@ async def test_child_key_flow(integration_session: AsyncSession) -> None:
     settings.child_key_cost = 1000  # 1 sat
 
     # 2. Call create_child_key
-    result = await create_child_key(parent_key, integration_session)
+    result = await create_child_key(
+        ChildKeyRequest(count=1), parent_key, integration_session
+    )
 
-    assert "api_key" in result
+    assert "api_keys" in result
     assert result["cost_msats"] == 1000
     assert result["parent_balance"] == 9000
 
-    child_key_raw = result["api_key"][3:]  # remove sk-
+    child_key_raw = result["api_keys"][0][3:]  # remove sk-
 
     # 3. Verify child key exists in DB
     child_key_db = await integration_session.get(ApiKey, child_key_raw)
@@ -111,7 +113,9 @@ async def test_child_key_insufficient_balance(
     settings.child_key_cost = 1000
 
     with pytest.raises(HTTPException) as exc:
-        await create_child_key(parent_key, integration_session)
+        await create_child_key(
+            ChildKeyRequest(count=1), parent_key, integration_session
+        )
     assert exc.value.status_code == 402
 
 
@@ -132,6 +136,6 @@ async def test_child_key_cannot_create_child(integration_session: AsyncSession) 
     await integration_session.refresh(child_key)
 
     with pytest.raises(HTTPException) as exc:
-        await create_child_key(child_key, integration_session)
+        await create_child_key(ChildKeyRequest(count=1), child_key, integration_session)
     assert exc.value.status_code == 400
     assert "Cannot create a child key for another child key" in str(exc.value.detail)

@@ -188,6 +188,7 @@ async def info() -> dict:
         "mints": global_settings.cashu_mints,
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
+        "child_key_cost_msats": global_settings.child_key_cost,
     }
 
 
