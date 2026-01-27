@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel import Field, Relationship, SQLModel, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -111,11 +112,14 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
+    __table_args__ = (
+        UniqueConstraint("base_url", "api_key", name="uq_upstream_providers_base_url_api_key"),
+    )
     id: int | None = Field(default=None, primary_key=True)
     provider_type: str = Field(
         description="Provider type: custom, openai, anthropic, azure, openrouter, etc."
     )
-    base_url: str = Field(unique=True, description="Base URL of the upstream API")
+    base_url: str = Field(description="Base URL of the upstream API")
     api_key: str = Field(description="API key for the upstream provider")
     api_version: str | None = Field(
         default=None, description="API version for Azure OpenAI"

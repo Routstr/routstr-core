@@ -236,7 +236,7 @@ async def _seed_providers_from_settings(
     from . import upstream_provider_classes
 
     providers_to_add: list[UpstreamProviderRow] = []
-    seeded_base_urls: set[str] = set()
+    seeded_provider_keys: set[tuple[str, str]] = set()
 
     provider_classes_by_type = {
         cls.provider_type: cls
@@ -261,7 +261,8 @@ async def _seed_providers_from_settings(
                 base_url = provider_class.default_base_url  # type: ignore[attr-defined]
                 result = await session.exec(
                     select(UpstreamProviderRow).where(
-                        UpstreamProviderRow.base_url == base_url
+                        UpstreamProviderRow.base_url == base_url,
+                        UpstreamProviderRow.api_key == api_key,
                     )
                 )
                 if not result.first():
@@ -273,13 +274,15 @@ async def _seed_providers_from_settings(
                             enabled=True,
                         )
                     )
-                    seeded_base_urls.add(base_url)
+                    seeded_provider_keys.add((base_url, api_key))
 
     ollama_base_url = os.environ.get("OLLAMA_BASE_URL")
     if ollama_base_url:
+        ollama_api_key = os.environ.get("OLLAMA_API_KEY", "")
         result = await session.exec(
             select(UpstreamProviderRow).where(
-                UpstreamProviderRow.base_url == ollama_base_url
+                UpstreamProviderRow.base_url == ollama_base_url,
+                UpstreamProviderRow.api_key == ollama_api_key,
             )
         )
         if not result.first():
@@ -287,18 +290,20 @@ async def _seed_providers_from_settings(
                 UpstreamProviderRow(
                     provider_type="ollama",
                     base_url=ollama_base_url,
-                    api_key=os.environ.get("OLLAMA_API_KEY", ""),
+                    api_key=ollama_api_key,
                     enabled=True,
                 )
             )
-            seeded_base_urls.add(ollama_base_url)
+            seeded_provider_keys.add((ollama_base_url, ollama_api_key))
 
     if settings.chat_completions_api_version and settings.upstream_base_url:
         base_url = settings.upstream_base_url
-        if base_url not in seeded_base_urls:
+        api_key = settings.upstream_api_key
+        if (base_url, api_key) not in seeded_provider_keys:
             result = await session.exec(
                 select(UpstreamProviderRow).where(
-                    UpstreamProviderRow.base_url == base_url
+                    UpstreamProviderRow.base_url == base_url,
+                    UpstreamProviderRow.api_key == api_key,
                 )
             )
             if not result.first():
@@ -306,19 +311,21 @@ async def _seed_providers_from_settings(
                     UpstreamProviderRow(
                         provider_type="azure",
                         base_url=base_url,
-                        api_key=settings.upstream_api_key,
+                        api_key=api_key,
                         api_version=settings.chat_completions_api_version,
                         enabled=True,
                     )
                 )
-                seeded_base_urls.add(base_url)
+                seeded_provider_keys.add((base_url, api_key))
 
     if settings.upstream_base_url and settings.upstream_api_key:
         base_url = settings.upstream_base_url
-        if base_url not in seeded_base_urls:
+        api_key = settings.upstream_api_key
+        if (base_url, api_key) not in seeded_provider_keys:
             result = await session.exec(
                 select(UpstreamProviderRow).where(
-                    UpstreamProviderRow.base_url == base_url
+                    UpstreamProviderRow.base_url == base_url,
+                    UpstreamProviderRow.api_key == api_key,
                 )
             )
             if not result.first():
@@ -326,11 +333,11 @@ async def _seed_providers_from_settings(
                     UpstreamProviderRow(
                         provider_type="custom",
                         base_url=base_url,
-                        api_key=settings.upstream_api_key,
+                        api_key=api_key,
                         enabled=True,
                     )
                 )
-                seeded_base_urls.add(base_url)
+                seeded_provider_keys.add((base_url, api_key))
 
     for provider in providers_to_add:
         session.add(provider)
