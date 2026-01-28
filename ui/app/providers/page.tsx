@@ -259,8 +259,8 @@ function ProviderBalance({
               {paymentStatus === 'paid'
                 ? 'Your account balance has been updated.'
                 : invoiceData
-                ? 'Scan the QR code or copy the Lightning invoice to pay.'
-                : 'Enter the amount you want to add to your account balance.'}
+                  ? 'Scan the QR code or copy the Lightning invoice to pay.'
+                  : 'Enter the amount you want to add to your account balance.'}
             </DialogDescription>
           </DialogHeader>
 
