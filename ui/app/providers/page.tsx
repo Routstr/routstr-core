@@ -389,7 +389,9 @@ export default function ProvidersPage() {
     useState<UpstreamProvider | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
-  const [expandedProviders, setExpandedProviders] = useState<Set<number>>(new Set());
+  const [expandedProviders, setExpandedProviders] = useState<Set<number>>(
+    new Set()
+  );
   const [viewingModels, setViewingModels] = useState<number | null>(null);
   const [isCreatingAccount, setIsCreatingAccount] = useState(false);
   const [modelDialogState, setModelDialogState] = useState<{
