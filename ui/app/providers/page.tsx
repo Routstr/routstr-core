@@ -224,7 +224,7 @@ function ProviderBalance({
     displayValue = `$${balance.toFixed(2)}`;
   } else if (balance && typeof balance === 'object') {
     // Legacy support for object response
-    const b = balance as Record;
+    const b = balance as Record<string, unknown>;
     if (typeof b.balance === 'number') {
       displayValue = `$${b.balance.toFixed(2)}`;
     } else if (typeof b.balance === 'string') {
@@ -389,7 +389,7 @@ export default function ProvidersPage() {
     useState<UpstreamProvider | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
-  const [expandedProviders, setExpandedProviders] = useState<Set>(new Set());
+  const [expandedProviders, setExpandedProviders] = useState<Set<number>>(new Set());
   const [viewingModels, setViewingModels] = useState<number | null>(null);
   const [isCreatingAccount, setIsCreatingAccount] = useState(false);
   const [modelDialogState, setModelDialogState] = useState<{
