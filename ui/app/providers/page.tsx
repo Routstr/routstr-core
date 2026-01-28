@@ -224,7 +224,7 @@ function ProviderBalance({
     displayValue = `$${balance.toFixed(2)}`;
   } else if (balance && typeof balance === 'object') {
     // Legacy support for object response
-    const b = balance as Record<string, unknown>;
+    const b = balance as Record;
     if (typeof b.balance === 'number') {
       displayValue = `$${b.balance.toFixed(2)}`;
     } else if (typeof b.balance === 'string') {
@@ -259,8 +259,8 @@ function ProviderBalance({
               {paymentStatus === 'paid'
                 ? 'Your account balance has been updated.'
                 : invoiceData
-                  ? 'Scan the QR code or copy the Lightning invoice to pay.'
-                  : 'Enter the amount you want to add to your account balance.'}
+                ? 'Scan the QR code or copy the Lightning invoice to pay.'
+                : 'Enter the amount you want to add to your account balance.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -286,7 +286,9 @@ function ProviderBalance({
               <div className='rounded-lg border-2 border-gray-200 p-2 dark:border-gray-800'>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(invoiceData.payment_request)}`}
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(
+                    invoiceData.payment_request
+                  )}`}
                   alt='Lightning Invoice QR Code'
                   className='h-64 w-64'
                 />
@@ -387,9 +389,7 @@ export default function ProvidersPage() {
     useState<UpstreamProvider | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
-  const [expandedProviders, setExpandedProviders] = useState<Set<number>>(
-    new Set()
-  );
+  const [expandedProviders, setExpandedProviders] = useState<Set>(new Set());
   const [viewingModels, setViewingModels] = useState<number | null>(null);
   const [isCreatingAccount, setIsCreatingAccount] = useState(false);
   const [modelDialogState, setModelDialogState] = useState<{
@@ -949,9 +949,7 @@ export default function ProvidersPage() {
                                     <span className='hidden sm:inline'>
                                       Provided Models
                                     </span>
-                                    <span className='sm:hidden'>
-                                      Provided
-                                    </span>
+                                    <span className='sm:hidden'>Provided</span>
                                     <Badge
                                       variant='secondary'
                                       className='ml-1 text-xs sm:ml-2'
@@ -1003,57 +1001,54 @@ export default function ProvidersPage() {
                                     </div>
                                   ) : (
                                     <div className='space-y-2'>
-                                      {providerModels.db_models.map(
-                                        (model) => (
-                                          <div
-                                            key={model.id}
-                                            className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
-                                          >
-                                            <div className='min-w-0 flex-1'>
-                                              <div className='flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2'>
-                                                <span className='truncate font-mono text-sm font-medium'>
-                                                  {model.id}
-                                                </span>
-                                                <Badge
-                                                  variant={
-                                                    model.enabled
-                                                      ? 'default'
-                                                      : 'secondary'
-                                                  }
-                                                  className='w-fit text-xs'
-                                                >
-                                                  {model.enabled
-                                                    ? 'Enabled'
-                                                    : 'Disabled'}
-                                                </Badge>
-                                              </div>
-                                              <div className='text-muted-foreground mt-1 text-xs break-words'>
-                                                {model.description ||
-                                                  model.name}
-                                              </div>
-                                            </div>
-                                            <div className='flex items-center gap-2'>
-                                              <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                                {model.context_length?.toLocaleString()}{' '}
-                                                tokens
-                                              </div>
-                                              <Button
-                                                variant='ghost'
-                                                size='icon'
-                                                className='h-8 w-8'
-                                                onClick={() =>
-                                                  handleEditModel(
-                                                    provider.id,
-                                                    model
-                                                  )
+                                      {providerModels.db_models.map((model) => (
+                                        <div
+                                          key={model.id}
+                                          className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
+                                        >
+                                          <div className='min-w-0 flex-1'>
+                                            <div className='flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2'>
+                                              <span className='truncate font-mono text-sm font-medium'>
+                                                {model.id}
+                                              </span>
+                                              <Badge
+                                                variant={
+                                                  model.enabled
+                                                    ? 'default'
+                                                    : 'secondary'
                                                 }
+                                                className='w-fit text-xs'
                                               >
-                                                <Pencil className='h-4 w-4' />
-                                              </Button>
+                                                {model.enabled
+                                                  ? 'Enabled'
+                                                  : 'Disabled'}
+                                              </Badge>
+                                            </div>
+                                            <div className='text-muted-foreground mt-1 text-xs break-words'>
+                                              {model.description || model.name}
                                             </div>
                                           </div>
-                                        )
-                                      )}
+                                          <div className='flex items-center gap-2'>
+                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                              {model.context_length?.toLocaleString()}{' '}
+                                              tokens
+                                            </div>
+                                            <Button
+                                              variant='ghost'
+                                              size='icon'
+                                              className='h-8 w-8'
+                                              onClick={() =>
+                                                handleEditModel(
+                                                  provider.id,
+                                                  model
+                                                )
+                                              }
+                                            >
+                                              <Pencil className='h-4 w-4' />
+                                            </Button>
+                                          </div>
+                                        </div>
+                                      ))}
                                     </div>
                                   )}
                                 </TabsContent>
