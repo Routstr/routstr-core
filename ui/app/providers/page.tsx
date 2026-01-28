@@ -933,222 +933,99 @@ export default function ProvidersPage() {
                               </div>
                             ) : providerModels &&
                               viewingModels === provider.id ? (
-                              providerModels.remote_models.length === 0 ? (
-                                // No provided models - show custom models directly without tabs
-                                <div className='space-y-2'>
-                                  {providerModels.db_models.length === 0 ? (
-                                    <div className='flex flex-col items-center justify-center gap-2 py-4'>
-                                      <div className='text-muted-foreground text-sm'>
-                                        No models configured. Add custom models
-                                        to use this provider.
-                                      </div>
-                                      <Button
-                                        variant='outline'
-                                        size='sm'
-                                        onClick={() =>
-                                          handleAddModel(provider.id)
-                                        }
-                                      >
-                                        <Plus className='mr-2 h-4 w-4' />
-                                        Add Custom Model
-                                      </Button>
-                                    </div>
-                                  ) : (
-                                    <div className='space-y-2'>
-                                      {providerModels.db_models.map((model) => (
-                                        <div
-                                          key={model.id}
-                                          className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
-                                        >
-                                          <div className='min-w-0 flex-1'>
-                                            <div className='flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2'>
-                                              <span className='truncate font-mono text-sm font-medium'>
-                                                {model.id}
-                                              </span>
-                                              <Badge
-                                                variant={
-                                                  model.enabled
-                                                    ? 'default'
-                                                    : 'secondary'
-                                                }
-                                                className='w-fit text-xs'
-                                              >
-                                                {model.enabled
-                                                  ? 'Enabled'
-                                                  : 'Disabled'}
-                                              </Badge>
-                                            </div>
-                                            <div className='text-muted-foreground mt-1 text-xs break-words'>
-                                              {model.description || model.name}
-                                            </div>
-                                          </div>
-                                          <div className='flex items-center gap-2'>
-                                            <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                              {model.context_length?.toLocaleString()}{' '}
-                                              tokens
-                                            </div>
-                                            <Button
-                                              variant='ghost'
-                                              size='icon'
-                                              className='h-8 w-8'
-                                              onClick={() =>
-                                                handleEditModel(
-                                                  provider.id,
-                                                  model
-                                                )
-                                              }
-                                            >
-                                              <Pencil className='h-4 w-4' />
-                                            </Button>
-                                          </div>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                              ) : (
-                                // Has provided models - show tabs
-                                <Tabs
-                                  defaultValue='provided'
-                                  className='w-full'
-                                >
-                                  <TabsList className='grid w-full grid-cols-2'>
-                                    <TabsTrigger
-                                      value='provided'
-                                      className='text-xs sm:text-sm'
-                                    >
-                                      <span className='hidden sm:inline'>
-                                        Provided Models
-                                      </span>
-                                      <span className='sm:hidden'>
-                                        Provided
-                                      </span>
-                                      <Badge
-                                        variant='secondary'
-                                        className='ml-1 text-xs sm:ml-2'
-                                      >
-                                        {providerModels.remote_models.length}
-                                      </Badge>
-                                    </TabsTrigger>
-                                    <TabsTrigger
-                                      value='custom'
-                                      className='text-xs sm:text-sm'
-                                    >
-                                      <span className='hidden sm:inline'>
-                                        Custom Models
-                                      </span>
-                                      <span className='sm:hidden'>Custom</span>
-                                      <Badge
-                                        variant='secondary'
-                                        className='ml-1 text-xs sm:ml-2'
-                                      >
-                                        {providerModels.db_models.length}
-                                      </Badge>
-                                    </TabsTrigger>
-                                  </TabsList>
-                                  <TabsContent
-                                    value='custom'
-                                    className='mt-4 space-y-2'
-                                  >
-                                    <div className='flex items-center justify-between'>
-                                      {providerModels.db_models.length > 0 && (
-                                        <div className='text-muted-foreground text-sm'>
-                                          Custom models override or extend the
-                                          provider&apos;s catalog.
-                                        </div>
-                                      )}
-                                      <Button
-                                        variant='outline'
-                                        size='sm'
-                                        onClick={() =>
-                                          handleAddModel(provider.id)
-                                        }
-                                      >
-                                        <Plus className='mr-2 h-4 w-4' />
-                                        Add
-                                      </Button>
-                                    </div>
-                                    {providerModels.db_models.length === 0 ? (
-                                      <div className='text-muted-foreground py-4 text-center text-sm'>
-                                        No custom models configured
-                                      </div>
-                                    ) : (
-                                      <div className='space-y-2'>
-                                        {providerModels.db_models.map(
-                                          (model) => (
-                                            <div
-                                              key={model.id}
-                                              className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
-                                            >
-                                              <div className='min-w-0 flex-1'>
-                                                <div className='flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2'>
-                                                  <span className='truncate font-mono text-sm font-medium'>
-                                                    {model.id}
-                                                  </span>
-                                                  <Badge
-                                                    variant={
-                                                      model.enabled
-                                                        ? 'default'
-                                                        : 'secondary'
-                                                    }
-                                                    className='w-fit text-xs'
-                                                  >
-                                                    {model.enabled
-                                                      ? 'Enabled'
-                                                      : 'Disabled'}
-                                                  </Badge>
-                                                </div>
-                                                <div className='text-muted-foreground mt-1 text-xs break-words'>
-                                                  {model.description ||
-                                                    model.name}
-                                                </div>
-                                              </div>
-                                              <div className='flex items-center gap-2'>
-                                                <div className='text-muted-foreground text-xs whitespace-nowrap'>
-                                                  {model.context_length?.toLocaleString()}{' '}
-                                                  tokens
-                                                </div>
-                                                <Button
-                                                  variant='ghost'
-                                                  size='icon'
-                                                  className='h-8 w-8'
-                                                  onClick={() =>
-                                                    handleEditModel(
-                                                      provider.id,
-                                                      model
-                                                    )
-                                                  }
-                                                >
-                                                  <Pencil className='h-4 w-4' />
-                                                </Button>
-                                              </div>
-                                            </div>
-                                          )
-                                        )}
-                                      </div>
-                                    )}
-                                  </TabsContent>
-                                  <TabsContent
+                              <Tabs
+                                defaultValue={
+                                  providerModels.remote_models.length > 0
+                                    ? 'provided'
+                                    : 'custom'
+                                }
+                                className='w-full'
+                              >
+                                <TabsList className='grid w-full grid-cols-2'>
+                                  <TabsTrigger
                                     value='provided'
-                                    className='mt-4 space-y-2'
+                                    className='text-xs sm:text-sm'
                                   >
-                                    {providerModels.remote_models.length >
-                                      0 && (
-                                      <div className='text-muted-foreground mb-3 text-sm'>
-                                        Models automatically discovered from the
+                                    <span className='hidden sm:inline'>
+                                      Provided Models
+                                    </span>
+                                    <span className='sm:hidden'>
+                                      Provided
+                                    </span>
+                                    <Badge
+                                      variant='secondary'
+                                      className='ml-1 text-xs sm:ml-2'
+                                    >
+                                      {providerModels.remote_models.length}
+                                    </Badge>
+                                  </TabsTrigger>
+                                  <TabsTrigger
+                                    value='custom'
+                                    className='text-xs sm:text-sm'
+                                  >
+                                    <span className='hidden sm:inline'>
+                                      Custom Models
+                                    </span>
+                                    <span className='sm:hidden'>Custom</span>
+                                    <Badge
+                                      variant='secondary'
+                                      className='ml-1 text-xs sm:ml-2'
+                                    >
+                                      {providerModels.db_models.length}
+                                    </Badge>
+                                  </TabsTrigger>
+                                </TabsList>
+                                <TabsContent
+                                  value='custom'
+                                  className='mt-4 space-y-2'
+                                >
+                                  <div className='flex items-center justify-between'>
+                                    {providerModels.db_models.length > 0 && (
+                                      <div className='text-muted-foreground text-sm'>
+                                        Custom models override or extend the
                                         provider&apos;s catalog.
                                       </div>
                                     )}
+                                    <Button
+                                      variant='outline'
+                                      size='sm'
+                                      onClick={() =>
+                                        handleAddModel(provider.id)
+                                      }
+                                    >
+                                      <Plus className='mr-2 h-4 w-4' />
+                                      Add
+                                    </Button>
+                                  </div>
+                                  {providerModels.db_models.length === 0 ? (
+                                    <div className='text-muted-foreground py-4 text-center text-sm'>
+                                      No custom models configured
+                                    </div>
+                                  ) : (
                                     <div className='space-y-2'>
-                                      {providerModels.remote_models.map(
+                                      {providerModels.db_models.map(
                                         (model) => (
                                           <div
                                             key={model.id}
                                             className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
                                           >
                                             <div className='min-w-0 flex-1'>
-                                              <div className='truncate font-mono text-sm font-medium'>
-                                                {model.id}
+                                              <div className='flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2'>
+                                                <span className='truncate font-mono text-sm font-medium'>
+                                                  {model.id}
+                                                </span>
+                                                <Badge
+                                                  variant={
+                                                    model.enabled
+                                                      ? 'default'
+                                                      : 'secondary'
+                                                  }
+                                                  className='w-fit text-xs'
+                                                >
+                                                  {model.enabled
+                                                    ? 'Enabled'
+                                                    : 'Disabled'}
+                                                </Badge>
                                               </div>
                                               <div className='text-muted-foreground mt-1 text-xs break-words'>
                                                 {model.description ||
@@ -1161,27 +1038,83 @@ export default function ProvidersPage() {
                                                 tokens
                                               </div>
                                               <Button
-                                                variant='outline'
-                                                size='sm'
-                                                className='h-7 text-xs'
+                                                variant='ghost'
+                                                size='icon'
+                                                className='h-8 w-8'
                                                 onClick={() =>
-                                                  handleOverrideModel(
+                                                  handleEditModel(
                                                     provider.id,
                                                     model
                                                   )
                                                 }
                                               >
-                                                <Plus className='mr-1 h-3 w-3' />
-                                                Override
+                                                <Pencil className='h-4 w-4' />
                                               </Button>
                                             </div>
                                           </div>
                                         )
                                       )}
                                     </div>
-                                  </TabsContent>
-                                </Tabs>
-                              )
+                                  )}
+                                </TabsContent>
+                                <TabsContent
+                                  value='provided'
+                                  className='mt-4 space-y-2'
+                                >
+                                  {providerModels.remote_models.length > 0 ? (
+                                    <>
+                                      <div className='text-muted-foreground mb-3 text-sm'>
+                                        Models automatically discovered from the
+                                        provider&apos;s catalog.
+                                      </div>
+                                      <div className='space-y-2'>
+                                        {providerModels.remote_models.map(
+                                          (model) => (
+                                            <div
+                                              key={model.id}
+                                              className='hover:bg-accent flex flex-col gap-2 rounded-lg border p-3 transition-colors sm:flex-row sm:items-center sm:justify-between'
+                                            >
+                                              <div className='min-w-0 flex-1'>
+                                                <div className='truncate font-mono text-sm font-medium'>
+                                                  {model.id}
+                                                </div>
+                                                <div className='text-muted-foreground mt-1 text-xs break-words'>
+                                                  {model.description ||
+                                                    model.name}
+                                                </div>
+                                              </div>
+                                              <div className='flex items-center gap-2'>
+                                                <div className='text-muted-foreground text-xs whitespace-nowrap'>
+                                                  {model.context_length?.toLocaleString()}{' '}
+                                                  tokens
+                                                </div>
+                                                <Button
+                                                  variant='outline'
+                                                  size='sm'
+                                                  className='h-7 text-xs'
+                                                  onClick={() =>
+                                                    handleOverrideModel(
+                                                      provider.id,
+                                                      model
+                                                    )
+                                                  }
+                                                >
+                                                  <Plus className='mr-1 h-3 w-3' />
+                                                  Override
+                                                </Button>
+                                              </div>
+                                            </div>
+                                          )
+                                        )}
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div className='text-muted-foreground py-4 text-center text-sm'>
+                                      No provided models available
+                                    </div>
+                                  )}
+                                </TabsContent>
+                              </Tabs>
                             ) : null}
                           </div>
                         )}
