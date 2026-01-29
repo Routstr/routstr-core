@@ -2516,7 +2516,7 @@ async def get_provider_model(provider_id: int, model_id: str) -> dict[str, objec
                 status_code=404, detail="Model not found for this provider"
             )
         return _row_to_model(
-            row, apply_provider_fee=True, provider_fee=provider.provider_fee
+            row, apply_provider_fee=False, provider_fee=provider.provider_fee
         ).dict()  # type: ignore
 
 
@@ -2729,7 +2729,10 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
             raise HTTPException(status_code=404, detail="Provider not found")
 
         db_models = await list_models(
-            session=session, upstream_id=provider_id, include_disabled=True
+            session=session,
+            upstream_id=provider_id,
+            include_disabled=True,
+            apply_fees=False,
         )
 
         upstream_models = []
@@ -2737,10 +2740,7 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
         if upstream_instance:
             try:
                 raw_models = await upstream_instance.fetch_models()
-                upstream_models = [
-                    upstream_instance._apply_provider_fee_to_model(m)
-                    for m in raw_models
-                ]
+                upstream_models = raw_models
             except Exception as e:
                 logger.error(
                     f"Failed to fetch models from {provider.provider_type}: {e}"
