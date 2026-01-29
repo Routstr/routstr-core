@@ -230,6 +230,7 @@ async def list_models(
     session: AsyncSession,
     upstream_id: int,
     include_disabled: bool = False,
+    apply_fees: bool = True,
 ) -> list[Model]:
     from sqlmodel import select
 
@@ -247,7 +248,7 @@ async def list_models(
     return [
         _row_to_model(
             r,
-            apply_provider_fee=True,
+            apply_provider_fee=apply_fees,
             provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
             if r.upstream_provider_id in providers_by_id
             else 1.01,

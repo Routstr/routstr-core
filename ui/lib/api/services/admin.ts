@@ -139,18 +139,26 @@ export class AdminService {
   ): Record<string, unknown> {
     if (!pricing) return pricing;
     const result = { ...pricing };
-    if (typeof result.prompt === 'number') {
-      result.prompt = result.prompt * 1000000;
-    }
-    if (typeof result.completion === 'number') {
-      result.completion = result.completion * 1000000;
-    }
-    if (typeof result.request === 'number') {
-      result.request = result.request * 1000000;
-    }
-    if (typeof result.image === 'number') {
-      result.image = result.image * 1000000;
-    }
+
+    // Only prompt and completion are per-token and need scaling to per-1M
+    const convertField = (field: string) => {
+      const val = result[field];
+      if (val !== undefined && val !== null) {
+        const num = typeof val === 'string' ? parseFloat(val) : (val as number);
+        if (!isNaN(num)) {
+          // Multiply by 1M and round to avoid floating point artifacts (e.g. 0.40399999999999997)
+          // 9 decimals is plenty for USD/1M tokens (0.000000001)
+          result[field] = parseFloat((num * 1000000).toFixed(9));
+        }
+      }
+    };
+
+    convertField('prompt');
+    convertField('completion');
+
+    // Other fields (request, image, etc.) are already flat fees (per item)
+    // so we do NOT scale them.
+
     return result;
   }
 
@@ -159,18 +167,23 @@ export class AdminService {
   ): Record<string, unknown> {
     if (!pricing) return pricing;
     const result = { ...pricing };
-    if (typeof result.prompt === 'number') {
-      result.prompt = result.prompt / 1000000;
-    }
-    if (typeof result.completion === 'number') {
-      result.completion = result.completion / 1000000;
-    }
-    if (typeof result.request === 'number') {
-      result.request = result.request / 1000000;
-    }
-    if (typeof result.image === 'number') {
-      result.image = result.image / 1000000;
-    }
+
+    // Only prompt and completion are per-1M in UI and need scaling down to per-token
+    const convertField = (field: string) => {
+      const val = result[field];
+      if (val !== undefined && val !== null) {
+        const num = typeof val === 'string' ? parseFloat(val) : (val as number);
+        if (!isNaN(num)) {
+          result[field] = num / 1000000;
+        }
+      }
+    };
+
+    convertField('prompt');
+    convertField('completion');
+
+    // Other fields stay as flat fees
+
     return result;
   }
 
@@ -291,7 +304,19 @@ export class AdminService {
     const data = await apiClient.get<ProviderModels>(
       `/admin/api/upstream-providers/${providerId}/models`
     );
-    return data;
+
+    // Convert pricing for all models in the list so the UI receives "per 1M tokens" values
+    return {
+      ...data,
+      db_models: data.db_models.map((m) => ({
+        ...m,
+        pricing: this.convertPricingToPerMillionTokens(m.pricing),
+      })),
+      remote_models: data.remote_models.map((m) => ({
+        ...m,
+        pricing: this.convertPricingToPerMillionTokens(m.pricing),
+      })),
+    };
   }
 
   static async createProviderModel(
@@ -515,8 +540,8 @@ export class AdminService {
       : null;
 
     const pricing = {
-      prompt: (data.input_cost as number) / 1000000,
-      completion: (data.output_cost as number) / 1000000,
+      prompt: data.input_cost as number,
+      completion: data.output_cost as number,
       request: (data.min_cost_per_request as number) || 0,
       image: 0,
       web_search: 0,
@@ -570,8 +595,8 @@ export class AdminService {
     const existingModel = await this.getModel(modelId, providerId);
 
     const pricing = {
-      prompt: (data.input_cost as number) / 1000000,
-      completion: (data.output_cost as number) / 1000000,
+      prompt: data.input_cost as number,
+      completion: data.output_cost as number,
       request: (data.min_cost_per_request as number) || 0,
       image: 0,
       web_search: 0,

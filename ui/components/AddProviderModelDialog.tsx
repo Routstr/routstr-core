@@ -808,45 +808,6 @@ export function AddProviderModelDialog({
                     </FormItem>
                   )}
                 />
-                <FormField
-                  control={form.control}
-                  name='max_prompt_cost'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Max Prompt Cost</FormLabel>
-                      <FormControl>
-                        <Input type='number' step='0.0001' {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name='max_completion_cost'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Max Completion Cost</FormLabel>
-                      <FormControl>
-                        <Input type='number' step='0.0001' {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name='max_cost'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Max Total Cost</FormLabel>
-                      <FormControl>
-                        <Input type='number' step='0.0001' {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
               </div>
             </div>
 
