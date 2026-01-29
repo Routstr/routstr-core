@@ -484,6 +484,25 @@ export default function ProvidersPage() {
     },
   });
 
+  const deleteModelMutation = useMutation({
+    mutationFn: ({
+      providerId,
+      modelId,
+    }: {
+      providerId: number;
+      modelId: string;
+    }) => AdminService.deleteProviderModel(providerId, modelId),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ['provider-models', variables.providerId],
+      });
+      toast.success('Model deleted successfully');
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to delete model: ${error.message}`);
+    },
+  });
+
   const handleCreateAccount = async () => {
     setIsCreatingAccount(true);
     try {
@@ -559,6 +578,12 @@ export default function ProvidersPage() {
   const handleDelete = (id: number) => {
     if (confirm('Are you sure you want to delete this provider?')) {
       deleteMutation.mutate(id);
+    }
+  };
+
+  const handleDeleteModel = (providerId: number, modelId: string) => {
+    if (confirm('Are you sure you want to delete this model?')) {
+      deleteModelMutation.mutate({ providerId, modelId });
     }
   };
 
@@ -1047,6 +1072,22 @@ export default function ProvidersPage() {
                                               }
                                             >
                                               <Pencil className='h-4 w-4' />
+                                            </Button>
+                                            <Button
+                                              variant='ghost'
+                                              size='icon'
+                                              className='text-destructive hover:text-destructive h-8 w-8'
+                                              onClick={() =>
+                                                handleDeleteModel(
+                                                  provider.id,
+                                                  model.id
+                                                )
+                                              }
+                                              disabled={
+                                                deleteModelMutation.isPending
+                                              }
+                                            >
+                                              <Trash2 className='h-4 w-4' />
                                             </Button>
                                           </div>
                                         </div>
