@@ -2166,9 +2166,6 @@ UPSTREAM_PROVIDERS_JS: str = """<!--html-->
         } catch (e) {
             alert(e.message);
         }
-        } catch (e) {
-            alert(e.message);
-        }
     }
 
     window.addEventListener('DOMContentLoaded', fetchProviders);
@@ -2347,7 +2344,6 @@ def upstream_providers_page() -> str:
                     <button id="override-save-btn" onclick="saveModelOverride()">Create Override</button>
                     <button onclick="closeModelOverrideModal()" style="background-color: #718096;">Cancel</button>
                 </div>
-            </div>
             </div>
         </div>
 
@@ -2558,6 +2554,10 @@ async def delete_all_provider_models(provider_id: int) -> dict[str, object]:
     return {"ok": True, "deleted": len(rows)}
 
 
+class BatchOverrideRequest(BaseModel):
+    models: list[ModelCreate]
+
+
 @admin_router.post(
     "/api/upstream-providers/{provider_id}/batch-override",
     dependencies=[Depends(require_admin_api)],
@@ -2639,11 +2639,6 @@ async def batch_override_provider_models(
     await refresh_model_maps()
     return {"ok": True, "count": overridden_count, "message": f"Successfully batch overridden {overridden_count} models"}
 
-
-class BatchOverrideRequest(BaseModel):
-    models: list[ModelCreate]
-
-
 class UpstreamProviderCreate(BaseModel):
     provider_type: str
     base_url: str
@@ -2688,14 +2683,12 @@ async def create_upstream_provider(
     async with create_session() as session:
         result = await session.exec(
             select(UpstreamProviderRow).where(
-                UpstreamProviderRow.base_url == payload.base_url,
-                UpstreamProviderRow.api_key == payload.api_key,
+                UpstreamProviderRow.base_url == payload.base_url
             )
         )
         if result.first():
             raise HTTPException(
-                status_code=409,
-                detail="Provider with this base URL and API key already exists",
+                status_code=409, detail="Provider with this base URL already exists"
             )
 
         provider = UpstreamProviderRow(
