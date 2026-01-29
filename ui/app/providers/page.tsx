@@ -21,6 +21,7 @@ import {
   AdminModel,
 } from '@/lib/api/services/admin';
 import { AddProviderModelDialog } from '@/components/AddProviderModelDialog';
+import { BatchOverrideDialog } from '@/components/BatchOverrideDialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   AlertCircle,
@@ -403,6 +404,9 @@ export default function ProvidersPage() {
     mode: 'create',
     initialData: null,
   });
+  const [batchOverrideProviderId, setBatchOverrideProviderId] = useState<
+    number | null
+  >(null);
 
   const [formData, setFormData] = useState<CreateUpstreamProvider>({
     provider_type: 'openrouter',
@@ -625,6 +629,10 @@ export default function ProvidersPage() {
       mode: 'override',
       initialData: model,
     });
+  };
+
+  const handleBatchOverride = (providerId: number) => {
+    setBatchOverrideProviderId(providerId);
   };
 
   return (
@@ -942,16 +950,28 @@ export default function ProvidersPage() {
                                         No models configured. Add custom models
                                         to use this provider.
                                       </div>
-                                      <Button
-                                        variant='outline'
-                                        size='sm'
-                                        onClick={() =>
-                                          handleAddModel(provider.id)
-                                        }
-                                      >
-                                        <Plus className='mr-2 h-4 w-4' />
-                                        Add Custom Model
-                                      </Button>
+                                      <div className='flex gap-2'>
+                                        <Button
+                                          variant='outline'
+                                          size='sm'
+                                          onClick={() =>
+                                            handleBatchOverride(provider.id)
+                                          }
+                                        >
+                                          <Database className='mr-2 h-4 w-4' />
+                                          Batch Override
+                                        </Button>
+                                        <Button
+                                          variant='outline'
+                                          size='sm'
+                                          onClick={() =>
+                                            handleAddModel(provider.id)
+                                          }
+                                        >
+                                          <Plus className='mr-2 h-4 w-4' />
+                                          Add Custom Model
+                                        </Button>
+                                      </div>
                                     </div>
                                   ) : (
                                     <div className='space-y-2'>
@@ -1057,16 +1077,28 @@ export default function ProvidersPage() {
                                           provider&apos;s catalog.
                                         </div>
                                       )}
-                                      <Button
-                                        variant='outline'
-                                        size='sm'
-                                        onClick={() =>
-                                          handleAddModel(provider.id)
-                                        }
-                                      >
-                                        <Plus className='mr-2 h-4 w-4' />
-                                        Add
-                                      </Button>
+                                      <div className='flex gap-2'>
+                                        <Button
+                                          variant='outline'
+                                          size='sm'
+                                          onClick={() =>
+                                            handleBatchOverride(provider.id)
+                                          }
+                                        >
+                                          <Database className='mr-2 h-4 w-4' />
+                                          Batch Override
+                                        </Button>
+                                        <Button
+                                          variant='outline'
+                                          size='sm'
+                                          onClick={() =>
+                                            handleAddModel(provider.id)
+                                          }
+                                        >
+                                          <Plus className='mr-2 h-4 w-4' />
+                                          Add
+                                        </Button>
+                                      </div>
                                     </div>
                                     {providerModels.db_models.length === 0 ? (
                                       <div className='text-muted-foreground py-4 text-center text-sm'>
@@ -1355,6 +1387,19 @@ export default function ProvidersPage() {
             }}
             initialData={modelDialogState.initialData}
             mode={modelDialogState.mode}
+          />
+        )}
+
+        {batchOverrideProviderId && (
+          <BatchOverrideDialog
+            providerId={batchOverrideProviderId}
+            isOpen={!!batchOverrideProviderId}
+            onClose={() => setBatchOverrideProviderId(null)}
+            onSuccess={() => {
+              queryClient.invalidateQueries({
+                queryKey: ['provider-models', batchOverrideProviderId],
+              });
+            }}
           />
         )}
       </SidebarInset>
