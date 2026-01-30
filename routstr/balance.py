@@ -44,6 +44,9 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
         "total_requests": key.total_requests,
         "total_spent": key.total_spent,
+        "balance_limit": key.balance_limit,
+        "balance_limit_reset": key.balance_limit_reset,
+        "validity_date": key.validity_date,
     }
 
 
@@ -253,6 +256,9 @@ async def donate(token: str, ref: str | None = None) -> str:
 
 class ChildKeyRequest(BaseModel):
     count: int
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
 
 
 @router.post("/child-key")
@@ -302,6 +308,9 @@ async def create_child_key(
             hashed_key=new_key_hash,
             balance=0,
             parent_key_hash=key.hashed_key,
+            balance_limit=payload.balance_limit,
+            balance_limit_reset=payload.balance_limit_reset,
+            validity_date=payload.validity_date,
         )
         session.add(child_key)
         new_keys.append("sk-" + new_key_hash)
@@ -318,6 +327,37 @@ async def create_child_key(
     }
     logger.debug(f"Child key creation response: {response_data}")
     return response_data
+
+
+class ChildKeyResetRequest(BaseModel):
+    child_key: str
+
+
+@router.post("/child-key/reset")
+async def reset_child_key_spent(
+    payload: ChildKeyResetRequest,
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Resets the total_spent of a child key. Must be called by the parent."""
+    child_key_raw = payload.child_key
+    if child_key_raw.startswith("sk-"):
+        child_key_raw = child_key_raw[3:]
+
+    child_key = await session.get(ApiKey, child_key_raw)
+    if not child_key:
+        raise HTTPException(status_code=404, detail="Child key not found.")
+
+    if child_key.parent_key_hash != key.hashed_key:
+        raise HTTPException(
+            status_code=403, detail="Unauthorized. You are not the parent of this key."
+        )
+
+    child_key.total_spent = 0
+    session.add(child_key)
+    await session.commit()
+
+    return {"success": True, "message": "Child key balance reset successfully."}
 
 
 @router.api_route(

@@ -349,6 +349,66 @@ async def pay_for_request(
             },
         )
 
+    # Check balance limit for child keys (or any key with a limit)
+    if (
+        key.balance_limit is not None
+        and key.total_spent + cost_per_request > key.balance_limit
+    ):
+        logger.warning(
+            "Balance limit exceeded",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "total_spent": key.total_spent,
+                "balance_limit": key.balance_limit,
+                "required": cost_per_request,
+            },
+        )
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": {
+                    "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent.",
+                    "type": "insufficient_quota",
+                    "code": "balance_limit_exceeded",
+                }
+            },
+        )
+
+    # Check validity date
+    if key.validity_date is not None:
+        import time
+
+        if time.time() > key.validity_date:
+            logger.warning(
+                "Key validity date expired",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "validity_date": key.validity_date,
+                    "current_time": time.time(),
+                },
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": {
+                        "message": "API key has expired (validity date reached).",
+                        "type": "invalid_request_error",
+                        "code": "key_expired",
+                    }
+                },
+            )
+
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": {
+                    "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent.",
+                    "type": "insufficient_quota",
+                    "code": "balance_limit_exceeded",
+                }
+            },
+        )
+
     logger.debug(
         "Charging base cost for request",
         extra={

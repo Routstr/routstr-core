@@ -134,7 +134,10 @@ export class WalletService {
   static async createChildKey(
     baseUrl?: string,
     apiKey?: string,
-    count: number = 1
+    count: number = 1,
+    balanceLimit?: number,
+    balanceLimitReset?: string,
+    validityDate?: number
   ): Promise<CreateChildKeyResponse> {
     try {
       if (baseUrl && apiKey) {
@@ -144,7 +147,12 @@ export class WalletService {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${apiKey}`,
           },
-          body: JSON.stringify({ count }),
+          body: JSON.stringify({
+            count,
+            balance_limit: balanceLimit,
+            balance_limit_reset: balanceLimitReset,
+            validity_date: validityDate,
+          }),
         });
 
         if (!response.ok) {
@@ -157,10 +165,48 @@ export class WalletService {
 
       return await apiClient.post<CreateChildKeyResponse>(
         '/v1/balance/child-key',
-        { count }
+        {
+          count,
+          balance_limit: balanceLimit,
+          balance_limit_reset: balanceLimitReset,
+          validity_date: validityDate,
+        }
       );
     } catch (error) {
       console.error('Error creating child key:', error);
+      throw error;
+    }
+  }
+
+  static async resetChildKeySpent(
+    baseUrl: string | undefined,
+    parentKey: string,
+    childKey: string
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      const url = baseUrl
+        ? `${baseUrl}/v1/balance/child-key/reset`
+        : '/v1/balance/child-key/reset';
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${parentKey}`,
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ child_key: childKey }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to reset child key');
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('Error resetting child key:', error);
       throw error;
     }
   }

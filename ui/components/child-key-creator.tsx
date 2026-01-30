@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { Key, Copy, Check, Loader2 } from 'lucide-react';
+import { Key, Copy, Check, Loader2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ChildKeyCreatorProps {
@@ -31,6 +31,18 @@ export function ChildKeyCreator({
   const [internalApiKey, setInternalApiKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [count, setCount] = useState(1);
+  const [balanceLimit, setBalanceLimit] = useState<string>('');
+  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
+  const [validityDate, setValidityDate] = useState<string>('');
+  const [childKeyToCheck, setChildKeyToCheck] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<{
+    total_spent: number;
+    balance_limit: number | null;
+    validity_date: number | null;
+    is_expired: boolean;
+    is_drained: boolean;
+  } | null>(null);
   const [newKeys, setNewKeys] = useState<string[]>([]);
   const [resultInfo, setResultInfo] = useState<{
     cost_msats: number;
@@ -58,7 +70,12 @@ export function ChildKeyCreator({
       const result = await WalletService.createChildKey(
         baseUrl,
         activeApiKey,
-        requestedCount
+        requestedCount,
+        balanceLimit ? parseInt(balanceLimit) : undefined,
+        balanceLimitReset || undefined,
+        validityDate
+          ? Math.floor(new Date(validityDate + 'T23:59:59').getTime() / 1000)
+          : undefined
       );
 
       console.log('Created child keys:', result);
@@ -86,6 +103,47 @@ export function ChildKeyCreator({
       );
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCheckKey = async () => {
+    if (!childKeyToCheck) {
+      toast.error('Please provide a Child API key to check');
+      return;
+    }
+
+    setChecking(true);
+    setKeyStatus(null);
+    try {
+      const baseUrlToUse = baseUrl || '';
+      const response = await fetch(`${baseUrlToUse}/v1/balance/info`, {
+        headers: {
+          Authorization: `Bearer ${childKeyToCheck}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch key info');
+      }
+
+      const info = await response.json();
+      const now = Math.floor(Date.now() / 1000);
+
+      setKeyStatus({
+        total_spent: info.total_spent,
+        balance_limit: info.balance_limit,
+        validity_date: info.validity_date,
+        is_expired: info.validity_date ? now > info.validity_date : false,
+        is_drained: info.balance_limit
+          ? info.total_spent >= info.balance_limit
+          : false,
+      });
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to check child key'
+      );
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -152,27 +210,70 @@ export function ChildKeyCreator({
                     </span>
                   )}
                 </div>
-                <Input
-                  type='number'
-                  min={1}
-                  max={50}
-                  value={count}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value);
-                    if (!isNaN(val)) {
-                      setCount(Math.max(1, Math.min(50, val)));
-                    } else {
-                      setCount(1);
-                    }
-                  }}
-                  className='w-full sm:w-24'
-                />
-              </div>
-              <Button
-                onClick={handleCreateKey}
-                disabled={loading || (!!baseUrl && !activeApiKey)}
-                className='w-full sm:w-auto'
-              >
+                  <Input
+                    type='number'
+                    min={1}
+                    max={50}
+                    value={count}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value);
+                      if (!isNaN(val)) {
+                        setCount(Math.max(1, Math.min(50, val)));
+                      } else {
+                        setCount(1);
+                      }
+                    }}
+                    className='w-full sm:w-24'
+                  />
+                </div>
+
+                <div className='flex-1 space-y-2'>
+                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                    Balance Limit (mSats)
+                  </label>
+                  <Input
+                    type='number'
+                    placeholder='No limit'
+                    value={balanceLimit}
+                    onChange={(e) => setBalanceLimit(e.target.value)}
+                    className='w-full'
+                  />
+                </div>
+
+                <div className='flex-1 space-y-2'>
+                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                    Validity Date
+                  </label>
+                  <Input
+                    type='date'
+                    value={validityDate}
+                    onChange={(e) => setValidityDate(e.target.value)}
+                    className='w-full'
+                  />
+                </div>
+
+                <div className='flex-1 space-y-2'>
+                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                    Reset Policy
+                  </label>
+                  <select
+                    value={balanceLimitReset}
+                    onChange={(e) => setBalanceLimitReset(e.target.value)}
+                    className='bg-background flex h-9 w-full rounded-md border border-input px-3 py-1 text-sm shadow-sm transition-colors'
+                  >
+                    <option value=''>None</option>
+                    <option value='daily'>Daily</option>
+                    <option value='weekly'>Weekly</option>
+                    <option value='monthly'>Monthly</option>
+                  </select>
+                </div>
+
+                <Button
+                  onClick={handleCreateKey}
+                  disabled={loading || (!!baseUrl && !activeApiKey)}
+                  className='w-full sm:w-auto'
+                >
+
                 {loading ? (
                   <>
                     <Loader2 className='mr-2 h-4 w-4 animate-spin' />
@@ -276,6 +377,91 @@ export function ChildKeyCreator({
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className='text-lg'>Check Child Key Status</CardTitle>
+          <CardDescription>
+            View the current spending, limit, and expiration status of any child
+            key.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className='space-y-4'>
+            <div className='space-y-2'>
+              <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                Child API Key
+              </label>
+              <Input
+                value={childKeyToCheck}
+                onChange={(e) => setChildKeyToCheck(e.target.value)}
+                placeholder='sk-...'
+                className='font-mono text-sm'
+              />
+            </div>
+            <Button
+              onClick={handleCheckKey}
+              disabled={checking || !childKeyToCheck}
+              variant='outline'
+              className='w-full'
+            >
+              {checking ? (
+                <>
+                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                  Checking...
+                </>
+              ) : (
+                <>
+                  <RotateCcw className='mr-2 h-4 w-4' />
+                  Check Status
+                </>
+              )}
+            </Button>
+
+            {keyStatus && (
+              <div className='bg-muted/30 mt-4 space-y-3 rounded-lg border p-4 text-sm'>
+                <div className='flex justify-between'>
+                  <span className='text-muted-foreground'>Total Spent:</span>
+                  <span className='font-mono font-medium'>
+                    {keyStatus.total_spent} mSats
+                  </span>
+                </div>
+                {keyStatus.balance_limit !== null && (
+                  <div className='flex justify-between'>
+                    <span className='text-muted-foreground'>Limit:</span>
+                    <span className='font-mono font-medium'>
+                      {keyStatus.balance_limit} mSats
+                    </span>
+                  </div>
+                )}
+                {keyStatus.validity_date !== null && (
+                  <div className='flex justify-between'>
+                    <span className='text-muted-foreground'>Expires:</span>
+                    <span className='font-mono font-medium'>
+                      {new Date(
+                        keyStatus.validity_date * 1000
+                      ).toLocaleDateString()}
+                    </span>
+                  </div>
+                )}
+                <div className='flex gap-2 pt-2'>
+                  {keyStatus.is_drained && (
+                    <Badge variant='destructive'>Drained</Badge>
+                  )}
+                  {keyStatus.is_expired && (
+                    <Badge variant='destructive'>Expired</Badge>
+                  )}
+                  {!keyStatus.is_drained && !keyStatus.is_expired && (
+                    <Badge className='bg-green-600 hover:bg-green-700'>
+                      Active
+                    </Badge>
+                  )}
+                </div>
               </div>
             )}
           </div>

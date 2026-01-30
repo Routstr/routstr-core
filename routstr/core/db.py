@@ -51,6 +51,18 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     parent_key_hash: str | None = Field(
         default=None, foreign_key="api_keys.hashed_key", index=True
     )
+    balance_limit: int | None = Field(
+        default=None,
+        description="Max spendable balance in msats for this key (mostly for child keys)",
+    )
+    balance_limit_reset: str | None = Field(
+        default=None,
+        description="Reset policy for balance limit (manual, daily, monthly, etc.)",
+    )
+    validity_date: int | None = Field(
+        default=None,
+        description="Unix timestamp after which the key is no longer valid",
+    )
 
     @property
     def total_balance(self) -> int:
@@ -113,7 +125,9 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     __table_args__ = (
-        UniqueConstraint("base_url", "api_key", name="uq_upstream_providers_base_url_api_key"),
+        UniqueConstraint(
+            "base_url", "api_key", name="uq_upstream_providers_base_url_api_key"
+        ),
     )
     id: int | None = Field(default=None, primary_key=True)
     provider_type: str = Field(
