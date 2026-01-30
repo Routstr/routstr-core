@@ -341,6 +341,23 @@ export class AdminService {
     };
   }
 
+  static async batchOverrideProviderModels(
+    providerId: number,
+    models: AdminModel[]
+  ): Promise<{ ok: boolean; count: number; message: string }> {
+    const payload = {
+      models: models.map((m) => ({
+        ...m,
+        pricing: this.convertPricingToPerToken(m.pricing),
+      })),
+    };
+    return await apiClient.post<{
+      ok: boolean;
+      count: number;
+      message: string;
+    }>(`/admin/api/upstream-providers/${providerId}/batch-override`, payload);
+  }
+
   static async getProviderModel(
     providerId: number,
     modelId: string

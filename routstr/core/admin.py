@@ -2554,6 +2554,91 @@ async def delete_all_provider_models(provider_id: int) -> dict[str, object]:
     return {"ok": True, "deleted": len(rows)}
 
 
+class BatchOverrideRequest(BaseModel):
+    models: list[ModelCreate]
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/batch-override",
+    dependencies=[Depends(require_admin_api)],
+)
+async def batch_override_provider_models(
+    provider_id: int, payload: BatchOverrideRequest
+) -> dict[str, object]:
+    """Batch override models for a specific provider."""
+    logger.info(
+        f"BATCH_OVERRIDE called: provider_id={provider_id}, count={len(payload.models)}"
+    )
+    
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+            
+        overridden_count = 0
+        
+        for model_data in payload.models:
+            # Try to get existing model regardless of whether it's enabled or not
+            existing_row = await session.get(ModelRow, (model_data.id, provider_id))
+            
+            if existing_row:
+                # Update existing
+                existing_row.name = model_data.name
+                existing_row.description = model_data.description
+                existing_row.created = int(model_data.created)
+                existing_row.context_length = int(model_data.context_length)
+                existing_row.architecture = json.dumps(model_data.architecture)
+                existing_row.pricing = json.dumps(model_data.pricing)
+                existing_row.sats_pricing = None
+                existing_row.per_request_limits = (
+                    json.dumps(model_data.per_request_limits)
+                    if model_data.per_request_limits is not None
+                    else None
+                )
+                existing_row.top_provider = (
+                    json.dumps(model_data.top_provider) if model_data.top_provider else None
+                )
+                existing_row.canonical_slug = model_data.canonical_slug
+                existing_row.alias_ids = (
+                    json.dumps(model_data.alias_ids) if model_data.alias_ids else None
+                )
+                existing_row.enabled = model_data.enabled
+                session.add(existing_row)
+            else:
+                # Create new
+                row = ModelRow(
+                    id=model_data.id,
+                    name=model_data.name,
+                    description=model_data.description,
+                    created=int(model_data.created),
+                    context_length=int(model_data.context_length),
+                    architecture=json.dumps(model_data.architecture),
+                    pricing=json.dumps(model_data.pricing),
+                    sats_pricing=None,
+                    per_request_limits=(
+                        json.dumps(model_data.per_request_limits)
+                        if model_data.per_request_limits is not None
+                        else None
+                    ),
+                    top_provider=(
+                        json.dumps(model_data.top_provider) if model_data.top_provider else None
+                    ),
+                    canonical_slug=model_data.canonical_slug,
+                    alias_ids=(
+                        json.dumps(model_data.alias_ids) if model_data.alias_ids else None
+                    ),
+                    upstream_provider_id=provider_id,
+                    enabled=model_data.enabled,
+                )
+                session.add(row)
+            
+            overridden_count += 1
+            
+        await session.commit()
+
+    await refresh_model_maps()
+    return {"ok": True, "count": overridden_count, "message": f"Successfully batch overridden {overridden_count} models"}
+
 class UpstreamProviderCreate(BaseModel):
     provider_type: str
     base_url: str
@@ -2598,14 +2683,12 @@ async def create_upstream_provider(
     async with create_session() as session:
         result = await session.exec(
             select(UpstreamProviderRow).where(
-                UpstreamProviderRow.base_url == payload.base_url,
-                UpstreamProviderRow.api_key == payload.api_key,
+                UpstreamProviderRow.base_url == payload.base_url
             )
         )
         if result.first():
             raise HTTPException(
-                status_code=409,
-                detail="Provider with this base URL and API key already exists",
+                status_code=409, detail="Provider with this base URL already exists"
             )
 
         provider = UpstreamProviderRow(
