@@ -3,8 +3,6 @@ import { apiClient } from '../client';
 import { ConfigurationService } from './configuration';
 import axios from 'axios';
 
-
-
 export const adminLoginSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 });
@@ -71,5 +69,3 @@ export async function adminLogout(): Promise<void> {
     ConfigurationService.clearToken();
   }
 }
-
-
