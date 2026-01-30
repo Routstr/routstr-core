@@ -1,0 +1,143 @@
+import asyncio
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
+from fastapi import FastAPI
+
+# when other refactor is merged:
+# from ..nostr import announce_provider, providers_cache_refresher
+from ..discovery import providers_cache_refresher
+from ..nip91 import announce_provider
+from ..payment.models import update_sats_pricing
+from ..payment.price import update_prices_periodically
+from ..proxy import initialize_upstreams, refresh_model_maps_periodically
+from ..wallet import periodic_payout
+from .db import create_session, init_db, run_migrations
+from .logging import get_logger
+from .settings import SettingsService
+from .settings import settings as global_settings
+
+logger = get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    logger.info("Application startup initiated", extra={"version": app.version})
+
+    btc_price_task = None
+    pricing_task = None
+    payout_task = None
+    nip91_task = None
+    providers_task = None
+    models_refresh_task = None
+    model_maps_refresh_task = None
+
+    try:
+        # Run database migrations on startup
+        run_migrations()
+
+        # Initialize database connection pools
+        # This creates any tables that might not be tracked by migrations yet
+        await init_db()
+
+        # Initialize application settings (env -> computed -> DB precedence)
+        async with create_session() as session:
+            s = await SettingsService.initialize(session)
+            if s.reset_reserved_balance_on_startup:
+                from .db import reset_all_reserved_balances
+
+                await reset_all_reserved_balances(session)
+
+        if not s.admin_password:
+            logger.warning(
+                f"Admin password is not set. Visit {s.http_url or 'http://localhost:8000'}/admin to set the password."
+            )
+
+        # Apply app metadata from settings
+        try:
+            app.title = s.name
+            app.description = s.description
+        except Exception:
+            pass
+
+        # await ensure_models_bootstrapped()
+
+        from ..payment.price import _update_prices
+        from ..proxy import get_upstreams
+        from ..upstream.helpers import refresh_upstreams_models_periodically
+
+        _update_prices_task = asyncio.create_task(_update_prices())
+        _initialize_upstreams_task = asyncio.create_task(initialize_upstreams())
+
+        # ensure both setup tasks complete
+        await asyncio.gather(
+            _update_prices_task, _initialize_upstreams_task, return_exceptions=True
+        )
+
+        btc_price_task = asyncio.create_task(update_prices_periodically())
+        pricing_task = asyncio.create_task(update_sats_pricing())
+        if global_settings.models_refresh_interval_seconds > 0:
+            models_refresh_task = asyncio.create_task(
+                refresh_upstreams_models_periodically(get_upstreams())
+            )
+        model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
+        payout_task = asyncio.create_task(periodic_payout())
+        if global_settings.nsec:
+            nip91_task = asyncio.create_task(announce_provider())
+        if global_settings.providers_refresh_interval_seconds > 0:
+            providers_task = asyncio.create_task(providers_cache_refresher())
+
+        yield
+
+    except asyncio.CancelledError:
+        # Expected during shutdown
+        pass
+    except Exception as e:
+        logger.error(
+            "Application startup failed",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+        raise
+    finally:
+        logger.info("Application shutdown initiated")
+
+        if btc_price_task is not None:
+            btc_price_task.cancel()
+        if pricing_task is not None:
+            pricing_task.cancel()
+        if payout_task is not None:
+            payout_task.cancel()
+        if nip91_task is not None:
+            nip91_task.cancel()
+        if providers_task is not None:
+            providers_task.cancel()
+        if models_refresh_task is not None:
+            models_refresh_task.cancel()
+        if model_maps_refresh_task is not None:
+            model_maps_refresh_task.cancel()
+
+        try:
+            tasks_to_wait = []
+            if btc_price_task is not None:
+                tasks_to_wait.append(btc_price_task)
+            if pricing_task is not None:
+                tasks_to_wait.append(pricing_task)
+            if payout_task is not None:
+                tasks_to_wait.append(payout_task)
+            if nip91_task is not None:
+                tasks_to_wait.append(nip91_task)
+            if providers_task is not None:
+                tasks_to_wait.append(providers_task)
+            if models_refresh_task is not None:
+                tasks_to_wait.append(models_refresh_task)
+            if model_maps_refresh_task is not None:
+                tasks_to_wait.append(model_maps_refresh_task)
+
+            if tasks_to_wait:
+                await asyncio.gather(*tasks_to_wait, return_exceptions=True)
+            logger.info("Background tasks stopped successfully")
+        except Exception as e:
+            logger.error(
+                "Error stopping background tasks",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
