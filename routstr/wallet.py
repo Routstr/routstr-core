@@ -319,6 +319,7 @@ async def periodic_payout() -> None:
                             wallet, mint_url, unit, not_reserved=True
                         )
                         proofs = await slow_filter_spend_proofs(proofs, wallet)
+                        await asyncio.sleep(5)
                         user_balance = await db.balances_for_mint_and_unit(
                             session, mint_url, unit
                         )
@@ -344,8 +345,6 @@ async def periodic_payout() -> None:
                                     "amount_received": amount_received,
                                 },
                             )
-
-                        await asyncio.sleep(5)
         except Exception as e:
             logger.error(
                 f"Error sending payout: {type(e).__name__}",
