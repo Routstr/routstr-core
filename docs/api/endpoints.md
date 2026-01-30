@@ -563,4 +563,4 @@ Rate limit information is included in response headers.
 
 - [Errors](errors.md) - Error handling reference
 - [Authentication](authentication.md) - Auth details
-- [Examples](../user-guide/using-api.md) - Code examples
+- [Integration Guide](../client/integration.md) - Code examples

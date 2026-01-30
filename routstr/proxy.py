@@ -271,28 +271,42 @@ async def proxy(
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
-            if is_responses_api:
-                response = await upstream.forward_responses_request(
-                    request,
-                    path,
-                    headers,
-                    request_body,
-                    key,
-                    max_cost_for_model,
-                    session,
-                    model_obj,
+            try:
+                if is_responses_api:
+                    response = await upstream.forward_responses_request(
+                        request,
+                        path,
+                        headers,
+                        request_body,
+                        key,
+                        max_cost_for_model,
+                        session,
+                        model_obj,
+                    )
+                else:
+                    response = await upstream.forward_request(
+                        request,
+                        path,
+                        headers,
+                        request_body,
+                        key,
+                        max_cost_for_model,
+                        session,
+                        model_obj,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Upstream request failed, ensuring payment is reverted",
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "path": path,
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "max_cost_for_model": max_cost_for_model,
+                    },
                 )
-            else:
-                response = await upstream.forward_request(
-                    request,
-                    path,
-                    headers,
-                    request_body,
-                    key,
-                    max_cost_for_model,
-                    session,
-                    model_obj,
-                )
+                await revert_pay_for_request(key, session, max_cost_for_model)
+                raise
 
             if response.status_code != 200:
                 # Check if we should retry (502 Upstream Error or 429 Rate Limit)

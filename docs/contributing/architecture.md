@@ -4,7 +4,7 @@ This document describes the high-level architecture of Routstr Core, helping con
 
 ## System Overview
 
-Routstr Core is a FastAPI-based reverse proxy that adds Bitcoin micropayments to OpenAI-compatible APIs.
+Routstr Core is a FastAPI-based reverse proxy that adds Bitcoin micropayments to OpenAI-compatible APIs and can optionally announce providers via Nostr.
 
 ```mermaid
 graph TB
@@ -20,7 +20,7 @@ graph TB
         Auth[Auth Module]
         Payment[Payment Module]
         Proxy[Proxy Module]
-        DB[(SQLite DB)]
+        DB[(SQLModel DB)]
         
         API --> Auth
         Auth --> Payment
@@ -40,57 +40,87 @@ graph TB
 
 The main application is initialized in `routstr/core/main.py`:
 
-- **Lifespan Management**: Handles startup/shutdown tasks
-- **Middleware**: CORS, logging, error handling
-- **Routers**: Modular endpoint organization
-- **Background Tasks**: Price updates, automatic payouts
+- **Lifespan Management**: Runs migrations, initializes DB, refreshes pricing/models, starts background tasks
+- **Middleware**: CORS and request logging
+- **Routers**: Admin, pricing/models, balance/wallet, providers discovery, proxy
+- **Background Tasks**: Price refresh, model map refresh, payouts, node announcements, provider discovery refresh
 
 ### Authentication System
 
 Located in `routstr/auth.py`, handles:
 
-- **API Key Validation**: Hashed key storage and lookup
-- **Balance Checking**: Ensures sufficient funds
-- **Rate Limiting**: Optional request throttling
-- **Token Redemption**: Converts eCash to balance
+- **API Key Validation**: SHA-256 hashed key lookup and persistence
+- **Balance Checking**: Ensures sufficient funds before requests
+- **Token Redemption**: Converts Cashu tokens to balance
 
 ### Payment Processing
 
 The `routstr/payment/` module manages:
 
 - **Cost Calculation**: Token-based or fixed pricing
-- **Model Pricing**: Dynamic pricing from models.json
-- **Currency Conversion**: BTC/USD rate management
-- **Fee Application**: Exchange and provider fees
+- **Model Pricing**: Derived from upstream providers and DB overrides
+- **Currency Conversion**: BTC/USD price refresh and conversion
+- **Fee Application**: Provider fee applied to upstream model pricing
 
 ### Request Proxying
 
 `routstr/proxy.py` handles:
 
-- **Request Forwarding**: Preserves headers and body
-- **Response Streaming**: Efficient memory usage
-- **Usage Tracking**: Counts tokens and costs
-- **Error Handling**: Graceful upstream failures
+- **Request Forwarding**: Forwards requests to selected upstream providers
+- **Response Streaming**: Streaming and non-streaming paths
+- **Usage Tracking**: Adjusts costs after upstream responses
+- **Error Handling**: Maps upstream errors to consistent responses
 
 ### Database Layer
 
 Using SQLModel in `routstr/core/db.py`:
 
 ```python
-# Core models
-APIKey:
-  - id: Primary key
-  - key_hash: Hashed API key
+# Core tables
+ApiKey:
+  - hashed_key: Primary key (SHA-256 of key or Cashu token)
   - balance: Current balance (msats)
-  - created_at: Timestamp
-  - metadata: JSON field
+  - reserved_balance: Reserved balance (msats)
+  - refund_address: Optional LNURL for refunds
+  - key_expiry_time: Optional refund expiry timestamp
+  - total_spent: Total spent (msats)
+  - total_requests: Request count
+  - refund_mint_url: Mint URL for refunds
+  - refund_currency: Refund currency
 
-Transaction:
+UpstreamProviderRow:
   - id: Primary key
-  - api_key_id: Foreign key
-  - amount: Transaction amount
-  - type: deposit/usage/withdrawal
-  - timestamp: When occurred
+  - provider_type: openai/anthropic/azure/openrouter/etc.
+  - base_url: Provider API base URL
+  - api_key: Provider API key
+  - api_version: Optional API version
+  - enabled: Provider enabled flag
+  - provider_fee: Provider fee multiplier
+
+ModelRow:
+  - id: Model ID
+  - upstream_provider_id: Provider foreign key
+  - name: Model name
+  - architecture: JSON
+  - pricing: JSON
+  - sats_pricing: JSON
+  - per_request_limits: JSON
+  - top_provider: JSON
+  - canonical_slug: Canonical model slug
+  - alias_ids: Model aliases
+  - enabled: Model enabled flag
+
+LightningInvoice:
+  - id: Primary key
+  - bolt11: Invoice
+  - amount_sats: Amount in sats
+  - payment_hash: Payment hash
+  - status: pending/paid/expired/cancelled
+  - api_key_hash: Optional associated API key
+  - purpose: create/topup
+  - created_at: Unix timestamp
+  - expires_at: Unix timestamp
+  - paid_at: Unix timestamp
 ```
 
 ## Request Flow
@@ -107,10 +137,10 @@ sequenceDiagram
     C->>R: API Request + Key
     R->>D: Validate Key
     D-->>R: Key Info + Balance
-    R->>R: Check Balance
+    R->>R: Reserve Max Cost
     R->>P: Forward Request
     P-->>R: AI Response
-    R->>D: Deduct Cost
+    R->>D: Finalize Cost (adjust by usage)
     R-->>C: Return Response
 ```
 
@@ -124,36 +154,20 @@ sequenceDiagram
     participant M as Cashu Mint
     participant D as Database
     
-    C->>R: Create Key Request + Token
-    R->>W: Validate Token
+    C->>R: Request + Cashu Token
+    R->>W: Redeem Token
     W->>M: Verify with Mint
     M-->>W: Token Valid
     W-->>R: Token Amount
-    R->>D: Create Key + Balance
-    R-->>C: Return API Key
+    R->>D: Create/Update Key + Balance
+    R-->>C: Continue Request
 ```
 
 ## Key Design Decisions
 
 ### 1. Async Architecture
 
-Everything is async for maximum performance:
-
-```python
-async def handle_request(request: Request) -> Response:
-    # Non-blocking database queries
-    api_key = await get_api_key(request.headers["Authorization"])
-    
-    # Concurrent operations
-    balance_check, rate_limit = await asyncio.gather(
-        check_balance(api_key),
-        check_rate_limit(api_key)
-    )
-    
-    # Stream response without blocking
-    async for chunk in proxy_request(request):
-        yield chunk
-```
+The system is async end-to-end, with background tasks for pricing refresh, provider discovery, model map refresh, and payouts.
 
 ### 2. Modular Design
 
@@ -166,82 +180,46 @@ Components are loosely coupled:
 
 ### 3. Error Handling
 
-Graceful degradation and clear error messages:
-
-```python
-class RoustrError(Exception):
-    """Base exception with structured error response"""
-    status_code: int = 500
-    error_type: str = "internal_error"
-    
-class InsufficientBalanceError(RoustrError):
-    status_code = 402
-    error_type = "insufficient_balance"
-```
+Exceptions are handled by FastAPI exception handlers to return consistent JSON responses with a request ID.
 
 ### 4. Database Migrations
 
-Using Alembic for schema management:
-
-- Auto-migrations on startup
-- Version control for schema changes
-- Rollback capability
-- Zero-downtime updates
+Alembic migrations are run on startup, and tables are created for any models not tracked by migrations.
 
 ## Security Architecture
 
 ### API Key Security
 
 - **Storage**: SHA-256 hashed keys
-- **Generation**: Cryptographically secure random
-- **Validation**: Constant-time comparison
-- **Rotation**: Support for key expiry
+- **Generation**: Cryptographically secure random (when creating new keys)
+- **Validation**: Hash lookup in DB
+- **Expiry**: Optional refund flow via `key_expiry_time` and `refund_address`
 
 ### Payment Security
 
-- **Token Validation**: Cryptographic verification
-- **Double-Spend Prevention**: Mint verification
-- **Balance Protection**: Atomic transactions
-- **Audit Trail**: All transactions logged
+- **Token Validation**: Cashu token redemption via mint
+- **Balance Protection**: Atomic updates and reserved balance tracking
+- **Audit Trail**: Structured logging of payments and adjustments
 
 ### Network Security
 
-- **HTTPS**: Enforced in production
 - **CORS**: Configurable origins
-- **Rate Limiting**: Per-key limits
 - **Input Validation**: Pydantic models
 
 ## Performance Considerations
 
 ### Caching Strategy
 
-```python
-# Model pricing cache
-@lru_cache(maxsize=100)
-def get_model_price(model_id: str) -> ModelPrice:
-    return MODELS.get(model_id)
-
-# Balance cache with TTL
-balance_cache = TTLCache(maxsize=1000, ttl=60)
-```
+Model and provider selections are cached in process memory and refreshed on a schedule.
 
 ### Database Optimization
 
-- **Connection Pooling**: Reuse connections
-- **Indexed Queries**: Key lookups are O(1)
-- **Batch Operations**: Group updates
 - **Async I/O**: Non-blocking queries
+- **Atomic Updates**: Balance reservation and finalization updates
 
 ### Streaming Responses
 
-Efficient memory usage for large responses:
-
-```python
-async def stream_response(upstream_response):
-    async for chunk in upstream_response.aiter_bytes():
-        # Process chunk without loading full response
-        yield process_chunk(chunk)
-```
+Streaming responses are forwarded from upstream providers with usage tracking hooks.
 
 ## Extension Points
 
@@ -273,8 +251,6 @@ async def stream_response(upstream_response):
 
 - Mock external dependencies
 - Test business logic in isolation
-- Fast execution (< 1 second per test)
-- High coverage target (> 80%)
 
 ### Integration Tests
 
@@ -285,10 +261,7 @@ async def stream_response(upstream_response):
 
 ### Performance Tests
 
-- Load testing with locust
-- Memory profiling
-- Database query optimization
-- Response time benchmarks
+- Response time benchmarks (as needed)
 
 ## Monitoring and Observability
 
@@ -308,41 +281,17 @@ logger.info("api_request", extra={
 
 ### Metrics Collection
 
-Key metrics tracked:
-
-- Request rate by endpoint
-- Token usage by model
-- Balance changes
-- Error rates
-- Response times
+Structured logs are emitted for requests, pricing, and payment events.
 
 ### Health Checks
 
-```python
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "version": __version__,
-        "database": await check_db(),
-        "upstream": await check_upstream(),
-        "mints": await check_mints()
-    }
-```
+Use `/v1/info` for basic service metadata and configuration visibility.
 
 ## Deployment Architecture
 
 ### Container Structure
 
-```dockerfile
-# Multi-stage build
-FROM python:3.11-slim AS builder
-# Install dependencies
-
-FROM python:3.11-slim
-# Copy only runtime needs
-# Run as non-root user
-```
+See `core/Dockerfile` for the current container build configuration.
 
 ### Environment Configuration
 
@@ -352,10 +301,9 @@ FROM python:3.11-slim
 
 ### Scaling Considerations
 
-- **Horizontal**: Multiple instances behind load balancer
+- **Horizontal**: Multiple instances behind a load balancer
 - **Vertical**: Async handles high concurrency
-- **Database**: Consider PostgreSQL for scale
-- **Caching**: Redis for distributed cache
+- **Database**: Configure `DATABASE_URL` for external databases
 
 ## Future Architecture
 

@@ -1,83 +1,44 @@
 # Routstr Core Documentation
 
-Welcome to the official documentation for **Routstr Core** - a FastAPI-based reverse proxy that enables Bitcoin micropayments for OpenAI-compatible APIs using the Cashu eCash protocol.
+**Routstr** is a decentralized protocol for permissionless AI inference. It enables an open marketplace where anyone can buy and sell compute using **Bitcoin eCash (Cashu)**.
 
-## What is Routstr Core?
+---
 
-Routstr Core is a payment proxy that sits between API clients and OpenAI-compatible services. It enables:
+## 🐣 For Clients (Users & Builders)
 
-- **Pay-per-request billing** using Bitcoin eCash tokens
-- **Seamless integration** with existing OpenAI clients
-- **Privacy-preserving payments** through the Cashu protocol
-- **Flexible pricing models** with per-token or per-request billing
-- **Multi-provider support** for various AI model providers
+If you want to use AI models in your application without accounts or KYC.
 
-### Key Features
+- **[Introduction](client/introduction.md)**: How the ecosystem works.
+- **[Payment Flow](client/payments.md)**: Funding sessions, topping up, and refunds.
+- **[Integration Guide](client/integration.md)**: Code examples for Python, JS, and cURL.
 
-- 🪙 **Cashu Wallet Integration** - Accept Lightning payments and redeem eCash tokens
-- 🔑 **API Key Management** - Secure key storage with balance tracking
-- 💰 **Dynamic Pricing** - Model-based pricing with live BTC/USD conversion
-- 🎛️ **Admin Dashboard** - Web interface for balance and key management
-- 🌐 **Nostr Discovery** - Find providers through decentralized relay network
-- 🐋 **Docker Support** - Easy deployment with optional Tor hidden service
-- ⚡ **Lightning Fast** - Minimal latency overhead for API requests
+## 🦁 For Providers (Node Operators)
 
-## How It Works
+If you want to run a node, resell API access, or monetize hardware.
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Routstr as Routstr Proxy
-    participant DB as Database
-    participant Upstream as AI Provider
-    participant Wallet as Cashu Wallet
+- **[Quick Start](provider/quickstart.md)**: Deploy a node in 5 minutes.
+- **[Deployment](provider/deployment.md)**: Production Docker setup.
+- **[Configuration](provider/configuration.md)**: Environment variables and settings.
+- **[Dashboard](provider/dashboard.md)**: Managing your node visually.
+- **[Pricing Strategy](provider/pricing.md)**: Setting margins and fees.
+- **[Discovery](provider/discovery.md)**: Announcing your node on Nostr.
+- **[Tor Support](provider/tor.md)**: Running an anonymous hidden service.
 
-    Client->>Routstr: API Request + eCash Token
-    Routstr->>Wallet: Validate & Redeem Token
-    Wallet-->>Routstr: Token Value (sats)
-    Routstr->>DB: Store/Update Balance
-    Routstr->>Upstream: Forward API Request
-    Upstream-->>Routstr: API Response + Usage Data
-    Routstr->>DB: Deduct Actual Cost
-    Routstr-->>Client: API Response
-```
+---
 
-## Quick Links
+## 🔌 API Reference
 
-<div class="grid cards" markdown>
+- **[Overview](api/overview.md)**: Base URL, headers, and standards.
+- **[Endpoints](api/endpoints.md)**: Full list of REST endpoints.
+- **[Authentication](api/authentication.md)**: Handling API keys and tokens.
+- **[Errors](api/errors.md)**: Status codes and debugging.
 
-- :rocket: **[Quick Start](getting-started/quickstart.md)**
+## 🛠️ Contributing
 
-    Get up and running with Docker in minutes
+- **[Architecture](contributing/architecture.md)**: System design.
+- **[Setup](contributing/setup.md)**: Development environment.
+- **[Testing](contributing/testing.md)**: Running tests.
 
-- :gear: **[Configuration](getting-started/configuration.md)**
+---
 
-    Learn about environment variables and settings
-
-- :book: **[User Guide](user-guide/introduction.md)**
-
-    Comprehensive guide for using Routstr
-
-- :hammer: **[Contributing](contributing/setup.md)**
-
-    Help improve Routstr Core
-
-</div>
-
-## Use Cases
-
-- **AI Application Developers** - Add Bitcoin payments to your AI apps without managing infrastructure
-- **API Resellers** - Resell API access with custom pricing and profit margins
-- **Privacy-Focused Users** - Access AI models without revealing personal information
-- **Micropayment Experiments** - Test new business models with instant, small payments
-
-## Getting Help
-
-- 📖 Browse the [User Guide](user-guide/introduction.md) for detailed usage instructions
-- 🐛 Report issues on [GitHub](https://github.com/routstr/routstr-core/issues)
-- 💬 Join the community discussions
-- 🔧 Check the [API Reference](api/overview.md) for technical details
-
-## License
-
-Routstr Core is open source software licensed under the GPLv3. See the [LICENSE](https://github.com/routstr/routstr-core/blob/main/LICENSE) file for details.
+*Powered by [Cashu](https://cashu.space) and [Nostr](https://nostr.com).*
