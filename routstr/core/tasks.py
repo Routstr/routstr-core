@@ -4,7 +4,10 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
-from ..nostr import announce_provider, providers_cache_refresher
+# when other refactor is merged:
+# from ..nostr import announce_provider, providers_cache_refresher
+from ..discovery import providers_cache_refresher
+from ..nip91 import announce_provider
 from ..payment.models import update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, refresh_model_maps_periodically
