@@ -291,9 +291,7 @@ async def raw_send_to_lnurl(
         lnurl_data["callback_url"], final_amount
     )
 
-    melt_quote_resp = await wallet.melt_quote(
-        invoice=bolt11_invoice, amount_msat=final_amount
-    )
+    melt_quote_resp = await wallet.melt_quote(invoice=bolt11_invoice)
 
     if amount:
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
