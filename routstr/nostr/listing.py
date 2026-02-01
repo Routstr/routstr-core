@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NIP-91: Routstr Provider Discoverability Implementation
+Listing: Routstr Provider Discoverability Implementation
 Automatically announces this Routstr proxy instance to Nostr relays.
 """
 
@@ -18,15 +18,15 @@ from nostr.key import PrivateKey
 from nostr.message_type import ClientMessageType
 from nostr.relay_manager import RelayManager
 
-from .core import get_logger
-from .core.settings import settings
+from ..core import get_logger
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 
 
 def get_app_version() -> str | None:
     try:
-        from .core.main import __version__ as imported_version
+        from ..core.main import __version__ as imported_version
 
         return imported_version
     except Exception:
@@ -71,7 +71,7 @@ def nsec_to_keypair(nsec: str) -> tuple[str, str] | None:
         return None
 
 
-def create_nip91_event(
+def create_listing_event(
     private_key_hex: str,
     provider_id: str,
     endpoint_urls: list[str],
@@ -80,7 +80,7 @@ def create_nip91_event(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Create a NIP-91 compliant provider announcement event (kind:38421).
+    Create a listing provider announcement event (kind:38421).
 
     Args:
         private_key_hex: 32-byte hex private key for signing
@@ -164,14 +164,14 @@ def events_semantically_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return True
 
 
-async def query_nip91_events(
+async def query_listing_events(
     relay_url: str,
     pubkey: str,
     provider_id: str | None = None,
     timeout: int = 30,
 ) -> tuple[list[dict[str, Any]], bool]:
     """
-    Query a Nostr relay for NIP-91 provider announcements (kind:38421) via nostr library.
+    Query a Nostr relay for listing provider announcements (kind:38421) via nostr library.
 
     Returns a tuple of (events, ok) where ok indicates whether the relay interaction
     succeeded without transport-level errors.
@@ -188,7 +188,7 @@ async def query_nip91_events(
 
             flt = Filter(kinds=[38421], authors=[pubkey], limit=10)
             filters = Filters([flt])
-            sub_id = f"nip91_{int(time.time())}"
+            sub_id = f"routstr_listing_{int(time.time())}"
             rm.add_subscription(sub_id, filters)
             req: list[Any] = [ClientMessageType.REQUEST, sub_id]
             req.extend(filters.to_json_array())
@@ -294,7 +294,7 @@ async def _determine_provider_id(public_key_hex: str, relay_urls: list[str]) -> 
 
     async def query_single_relay(relay_url: str) -> list[dict[str, Any]]:
         try:
-            events, _ok = await query_nip91_events(relay_url, public_key_hex, None)
+            events, _ok = await query_listing_events(relay_url, public_key_hex, None)
             return events
         except Exception:
             return []
@@ -330,7 +330,7 @@ async def publish_to_relay(
     timeout: int = 30,
 ) -> bool:
     """
-    Publish a NIP-91 event to a nostr relay via nostr library.
+    Publish a listing event to a nostr relay via nostr library.
     """
 
     def _sync_publish() -> bool:
@@ -341,7 +341,7 @@ async def publish_to_relay(
             time.sleep(1.0)
             # Publish the event as-is via publish_message to preserve signature
             rm.publish_message(json.dumps(["EVENT", event]))
-            logger.debug(f"Sent NIP-91 event {event.get('id', '')} to {relay_url}")
+            logger.debug(f"Sent listing event {event.get('id', '')} to {relay_url}")
             time.sleep(1.0)
             return True
         except Exception as e:
@@ -364,13 +364,13 @@ async def announce_provider() -> None:
     # Check for NSEC in environment (use NSEC only)
     nsec = settings.nsec
     if not nsec:
-        logger.info("Nostr private key not found (NSEC), skipping NIP-91 announcement")
+        logger.info("Nostr private key not found (NSEC), skipping listing announcement")
         return
 
     # Convert NSEC to keypair
     keypair = nsec_to_keypair(nsec)
     if not keypair:
-        logger.error("Failed to parse NSEC, skipping NIP-91 announcement")
+        logger.error("Failed to parse NSEC, skipping listing announcement")
         return
 
     private_key_hex, public_key_hex = keypair
@@ -409,7 +409,7 @@ async def announce_provider() -> None:
 
     if not endpoint_urls:
         logger.warning(
-            "No valid endpoints configured (HTTP_URL/ONION_URL). Skipping NIP-91 publish."
+            "No valid endpoints configured (HTTP_URL/ONION_URL). Skipping listing publish."
         )
         return
 
@@ -434,7 +434,7 @@ async def announce_provider() -> None:
 
     # Create the candidate event that we would publish
     version_str = get_app_version()
-    candidate_event = create_nip91_event(
+    candidate_event = create_listing_event(
         private_key_hex=private_key_hex,
         provider_id=provider_id,
         endpoint_urls=endpoint_urls,
@@ -474,7 +474,7 @@ async def announce_provider() -> None:
         if _should_skip(relay_url):
             logger.debug(f"Skipping {relay_url} due to backoff")
             continue
-        events, ok = await query_nip91_events(relay_url, public_key_hex, provider_id)
+        events, ok = await query_listing_events(relay_url, public_key_hex, provider_id)
         if ok:
             _register_success(relay_url)
             existing_events.extend(events)
@@ -489,7 +489,7 @@ async def announce_provider() -> None:
 
     if not all_match:
         logger.debug(
-            "No matching NIP-91 announcement found or differences detected; publishing update"
+            "No matching listing announcement found or differences detected; publishing update"
         )
         success_count = 0
         for relay_url in relay_urls:
@@ -502,11 +502,11 @@ async def announce_provider() -> None:
             else:
                 _register_failure(relay_url)
         logger.info(
-            f"Published NIP-91 announcement to {success_count}/{len(relay_urls)} relays"
+            f"Published listing announcement to {success_count}/{len(relay_urls)} relays"
         )
     else:
         logger.debug(
-            "Matching NIP-91 announcement already present; skipping publish on startup"
+            "Matching listing announcement already present; skipping publish on startup"
         )
 
     # Re-announce periodically (every 24 hours)
@@ -518,7 +518,7 @@ async def announce_provider() -> None:
 
             # Build fresh candidate event for comparison
             version_str = get_app_version()
-            candidate_event = create_nip91_event(
+            candidate_event = create_listing_event(
                 private_key_hex=private_key_hex,
                 provider_id=provider_id,
                 endpoint_urls=endpoint_urls,
@@ -533,7 +533,7 @@ async def announce_provider() -> None:
                 if _should_skip(relay_url):
                     logger.debug(f"Skipping {relay_url} due to backoff")
                     continue
-                events, ok = await query_nip91_events(
+                events, ok = await query_listing_events(
                     relay_url, public_key_hex, provider_id
                 )
                 if ok:
@@ -549,7 +549,7 @@ async def announce_provider() -> None:
 
             if all_match:
                 logger.debug(
-                    "Matching NIP-91 announcement already present; skipping periodic re-announce"
+                    "Matching listing announcement already present; skipping periodic re-announce"
                 )
                 continue
 
@@ -567,8 +567,8 @@ async def announce_provider() -> None:
                     _register_failure(relay_url)
 
         except asyncio.CancelledError:
-            logger.info("NIP-91 announcement task cancelled")
+            logger.info("Listing announcement task cancelled")
             break
         except Exception as e:
-            logger.debug(f"Error in NIP-91 announcement loop: {type(e).__name__}")
+            logger.debug(f"Error in listing announcement loop: {type(e).__name__}")
             # Continue running despite errors
