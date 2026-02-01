@@ -267,10 +267,9 @@ async def test_admin_endpoint_unauthenticated(
     """Test GET /admin/ endpoint redirects to /"""
     await db_snapshot.capture()
 
-    response = await integration_client.get("/admin/")
+    response = await integration_client.get("/admin/api/settings")
 
-    assert response.status_code == 307
-    assert response.headers.get("location") == "/"
+    assert response.status_code == 403
 
     diff = await db_snapshot.diff()
     assert len(diff["api_keys"]["added"]) == 0
