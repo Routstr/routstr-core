@@ -22,22 +22,7 @@ git clone https://github.com/YOUR_USERNAME/routstr-core.git
 cd routstr-core
 ```
 
-### 2. Install uv
-
-We use [uv](https://github.com/astral-sh/uv) for fast, reliable Python package management:
-
-```bash
-# Using the installer script
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Or with pip
-pip install uv
-
-# Or with Homebrew (macOS)
-brew install uv
-```
-
-### 3. Set Up Environment
+### 2. Set Up Environment
 
 Run the setup command:
 
@@ -47,13 +32,13 @@ make setup
 
 This will:
 
-- ✅ Install uv if not present
+- ✅ Install [uv](https://github.com/astral-sh/uv) if not present
 - ✅ Create a virtual environment
 - ✅ Install all dependencies
 - ✅ Install dev tools (mypy, ruff, pytest)
 - ✅ Install project in editable mode
 
-### 4. Configure Environment
+### 3. Configure Environment
 
 Create your environment file:
 
@@ -71,7 +56,7 @@ ADMIN_PASSWORD=development-password
 DATABASE_URL=sqlite+aiosqlite:///dev.db
 ```
 
-### 5. Verify Installation
+### 4. Verify Installation
 
 Run these commands to verify your setup:
 
@@ -168,41 +153,91 @@ Understanding the codebase:
 ```
 routstr-core/
 ├── routstr/                    # Main package
-│   ├── __init__.py            # Package initialization
+│   ├── __init__.py
+│   ├── algorithm.py           # Provider selection algorithms
 │   ├── auth.py                # Authentication logic
-│   ├── balance.py             # Balance management
+│   ├── balance.py             # Balance management API
 │   ├── discovery.py           # Nostr discovery
+│   ├── lightning.py           # Lightning invoice handling
+│   ├── nip91.py               # Node announcement implementation
 │   ├── proxy.py               # Request proxying
 │   ├── wallet.py              # Cashu wallet integration
 │   │
 │   ├── core/                  # Core modules
-│   │   ├── admin.py          # Admin dashboard
-│   │   ├── db.py             # Database models
+│   │   ├── admin.py          # Admin dashboard API
+│   │   ├── db.py             # Database models (SQLModel)
 │   │   ├── exceptions.py     # Custom exceptions
+│   │   ├── log_manager.py    # Log management
 │   │   ├── logging.py        # Logging setup
-│   │   ├── main.py           # FastAPI app
-│   │   └── middleware.py     # HTTP middleware
+│   │   ├── main.py           # FastAPI app entry
+│   │   ├── middleware.py     # HTTP middleware
+│   │   └── settings.py       # Configuration
 │   │
-│   └── payment/               # Payment processing
-│       ├── cost_calculation.py # Cost logic
-│       ├── helpers.py         # Utilities
-│       ├── lnurl.py          # Lightning URLs
-│       ├── models.py         # Model pricing
-│       ├── price.py          # BTC pricing
-│       └── x_cashu.py        # Cashu headers
+│   ├── payment/               # Payment processing
+│   │   ├── cost_calculation.py
+│   │   ├── helpers.py
+│   │   ├── lnurl.py          # LNURL support
+│   │   ├── models.py         # Model pricing
+│   │   └── price.py          # BTC/USD rates
+│   │
+│   └── upstream/              # Upstream providers
+│       ├── base.py           # Base provider class
+│       ├── helpers.py        # Shared utilities
+│       ├── openai.py         # OpenAI
+│       ├── anthropic.py      # Anthropic
+│       ├── gemini.py         # Google Gemini
+│       ├── openrouter.py     # OpenRouter
+│       └── ...               # More providers
+│
+├── ui/                        # Admin dashboard (Next.js)
+│   ├── app/                  # Next.js app router
+│   │   ├── page.tsx         # Landing page
+│   │   ├── balances/        # Balance management
+│   │   ├── logs/            # Request logs viewer
+│   │   ├── model/           # Model configuration
+│   │   ├── providers/       # Upstream providers
+│   │   ├── settings/        # Node settings
+│   │   └── transactions/    # Transaction history
+│   ├── components/           # React components
+│   │   ├── ui/              # shadcn/ui primitives
+│   │   ├── landing/         # Landing page components
+│   │   └── settings/        # Settings components
+│   └── lib/                  # Utilities & API client
+│       ├── api/             # Backend API client
+│       ├── auth/            # Auth context
+│       └── hooks/           # React hooks
 │
 ├── tests/                     # Test suite
-│   ├── unit/                 # Unit tests
-│   └── integration/          # Integration tests
+├── migrations/                # Alembic migrations
+├── scripts/                   # Utility scripts
+├── docs/                      # Documentation
+├── examples/                  # Usage examples
 │
-├── migrations/               # Database migrations
-├── scripts/                  # Utility scripts
-├── docs/                     # Documentation
-│
-├── Makefile                  # Dev commands
-├── pyproject.toml           # Project config
-└── compose.yml              # Docker setup
+├── Makefile                   # Dev commands
+├── pyproject.toml             # Project config
+└── compose.yml                # Docker setup
 ```
+
+### Admin Dashboard (UI)
+
+The admin dashboard is a Next.js app using:
+
+- **Next.js 14** with App Router
+- **shadcn/ui** for components
+- **Tailwind CSS** for styling
+- **pnpm** for package management
+
+```bash
+# Development
+cd ui
+pnpm install
+pnpm dev          # http://localhost:3000
+
+# Build for production
+pnpm build
+```
+
+The UI is served by the FastAPI backend at `/admin/` when built. Use `make build-ui` to build and copy to the backend.
 
 ## Common Tasks
 
@@ -383,7 +418,7 @@ rm -rf test_*.db
 Now that you're set up:
 
 1. Read the [Architecture Overview](architecture.md)
-3. Check [open issues](https://github.com/routstr/routstr-core/issues)
-4. Start with a small contribution
+2. Check [open issues](https://github.com/routstr/routstr-core/issues)
+3. Start with a small contribution
 
 Happy coding! 🚀

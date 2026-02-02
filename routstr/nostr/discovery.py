@@ -8,8 +8,8 @@ import httpx
 import websockets
 from fastapi import APIRouter, HTTPException
 
-from .core.logging import get_logger
-from .core.settings import settings
+from ..core.logging import get_logger
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 
@@ -72,8 +72,6 @@ async def query_nostr_relay_for_providers(
                     elif data[0] == "NOTICE":
                         try:
                             msg = str(data[1])
-                            if len(msg) > 200:
-                                msg = msg[:200] + "..."
                             logger.debug(f"Relay notice: {msg}")
                         except Exception:
                             logger.debug("Relay notice received")

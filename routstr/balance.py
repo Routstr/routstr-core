@@ -32,14 +32,28 @@ async def get_key_from_header(
     )
 
 
-# TODO: remove this endpoint when frontend is updated
-@router.get("/", include_in_schema=False)
-async def account_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
+async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
+    from .auth import get_billing_key
+
+    billing_key = await get_billing_key(key, session)
     return {
         "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-        "reserved": key.reserved_balance,
+        "balance": billing_key.balance,
+        "reserved": billing_key.reserved_balance,
+        "is_child": key.parent_key_hash is not None,
+        "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
+        "total_requests": key.total_requests,
+        "total_spent": key.total_spent,
     }
+
+
+# TODO: remove this endpoint when frontend is updated
+@router.get("/", include_in_schema=False)
+async def account_info(
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await get_balance_info(key, session)
 
 
 # TODO: Implement POST /v1/wallet/create endpoint
@@ -66,12 +80,11 @@ async def create_balance(
 
 
 @router.get("/info")
-async def wallet_info(key: ApiKey = Depends(get_key_from_header)) -> dict:
-    return {
-        "api_key": "sk-" + key.hashed_key,
-        "balance": key.balance,
-        "reserved": key.reserved_balance,
-    }
+async def wallet_info(
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await get_balance_info(key, session)
 
 
 class TopupRequest(BaseModel):
@@ -85,6 +98,10 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
+    from .auth import get_billing_key
+
+    billing_key = await get_billing_key(key, session)
+
     if topup_request is not None:
         cashu_token = topup_request.cashu_token
     if cashu_token is None:
@@ -94,7 +111,7 @@ async def topup_wallet_endpoint(
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")
     try:
-        amount_msats = await credit_balance(cashu_token, key, session)
+        amount_msats = await credit_balance(cashu_token, billing_key, session)
     except ValueError as e:
         error_msg = str(e)
         if "already spent" in error_msg.lower():
@@ -154,6 +171,12 @@ async def refund_wallet_endpoint(
         return cached
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
+
+    if key.parent_key_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot refund child key. Please refund the parent key instead.",
+        )
 
     remaining_balance_msats: int = key.total_balance
 
@@ -226,6 +249,75 @@ async def donate(token: str, ref: str | None = None) -> str:
         return "Thanks!"
     except Exception:
         return "Invalid token."
+
+
+class ChildKeyRequest(BaseModel):
+    count: int
+
+
+@router.post("/child-key")
+async def create_child_key(
+    payload: ChildKeyRequest,
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Creates one or more child API keys that use the parent's balance."""
+    # Log incoming request for debugging
+    logger.debug(f"Child key creation request: count={payload.count}")
+
+    count = payload.count
+    if count < 1 or count > 50:
+        raise HTTPException(status_code=400, detail="Count must be between 1 and 50.")
+
+    # Check if this is already a child key
+    if key.parent_key_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot create a child key for another child key.",
+        )
+
+    cost_per_key = settings.child_key_cost
+    total_cost = cost_per_key * count
+
+    if key.total_balance < total_cost:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
+        )
+
+    # Deduct cost from parent
+    key.balance -= total_cost
+    key.total_spent += total_cost
+    session.add(key)
+
+    # Generate new keys
+    import secrets
+
+    new_keys = []
+    for _ in range(count):
+        new_key_raw = secrets.token_hex(32)
+        new_key_hash = new_key_raw  # We use the raw key as the hash for sk- keys
+
+        child_key = ApiKey(
+            hashed_key=new_key_hash,
+            balance=0,
+            parent_key_hash=key.hashed_key,
+        )
+        session.add(child_key)
+        new_keys.append("sk-" + new_key_hash)
+
+    await session.commit()
+
+    response_data = {
+        "api_keys": new_keys,
+        "count": count,
+        "cost_msats": total_cost,
+        "cost_sats": total_cost // 1000,
+        "parent_balance": key.balance,
+        "parent_balance_sats": key.balance // 1000,
+    }
+    logger.debug(f"Child key creation response: {response_data}")
+    return response_data
 
 
 @router.api_route(

@@ -77,29 +77,27 @@ extra:
 
 nav:
   - Home: index.md
-  - Getting Started:
-      - Overview: getting-started/overview.md
-      - Quick Start: getting-started/quickstart.md
-      - Docker Setup: getting-started/docker.md
-      - Configuration: getting-started/configuration.md
-  - User Guide:
-      - Introduction: user-guide/introduction.md
-      - Payment Flow: user-guide/payment-flow.md
-      - Using the API: user-guide/using-api.md
-      - Admin Dashboard: user-guide/admin-dashboard.md
-      - Models & Pricing: user-guide/models-pricing.md
-  - Contributing:
-      - Setup Development: contributing/setup.md
-      - Architecture: contributing/architecture.md
-      - Code Structure: contributing/code-structure.md
-      - Testing: contributing/testing.md
+  - Overview: overview.md
+  - Client Guide:
+      - Introduction: client/introduction.md
+      - Payment Flow: client/payments.md
+      - Integration: client/integration.md
+  - Provider Guide:
+      - Quick Start: provider/quickstart.md
+      - Dashboard: provider/dashboard.md
+      - Deployment: provider/deployment.md
+      - Configuration: provider/configuration.md
+      - Pricing: provider/pricing.md
+      - Advanced Pricing: provider/advanced-pricing.md
+      - Discovery: provider/discovery.md
+      - Tor Support: provider/tor.md
   - API Reference:
       - Overview: api/overview.md
       - Authentication: api/authentication.md
       - Endpoints: api/endpoints.md
       - Errors: api/errors.md
-  - Advanced:
-      - Tor Support: advanced/tor.md
-      - Nostr Discovery: advanced/nostr.md
-      - Custom Pricing: advanced/custom-pricing.md
-      - Migrations: advanced/migrations.md
+  - Contributing:
+      - Setup Development: contributing/setup.md
+      - Architecture: contributing/architecture.md
+      - Code Structure: contributing/code-structure.md
+      - Testing: contributing/testing.md

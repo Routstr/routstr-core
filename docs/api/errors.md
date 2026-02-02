@@ -589,4 +589,4 @@ class ErrorMetrics:
 
 - [Authentication](authentication.md) - Auth error details
 - [Endpoints](endpoints.md) - Endpoint-specific errors
-- [Examples](../user-guide/using-api.md) - Error handling examples
+- [Integration Guide](../client/integration.md) - Error handling examples

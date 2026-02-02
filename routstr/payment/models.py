@@ -143,14 +143,6 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
         return []
 
 
-def is_openrouter_upstream() -> bool:
-    try:
-        base = (settings.upstream_base_url or "").strip().rstrip("/")
-    except Exception:
-        return False
-    return base.lower() == "https://openrouter.ai/api/v1"
-
-
 def _row_to_model(
     row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
 ) -> Model:
@@ -203,33 +195,11 @@ def _row_to_model(
     return model
 
 
-def _model_to_row_payload(model: Model) -> dict[str, str | int | bool | None]:
-    return {
-        "id": model.id,
-        "name": model.name,
-        "created": model.created,
-        "description": model.description,
-        "context_length": model.context_length,
-        "architecture": json.dumps(model.architecture.dict()),
-        "pricing": json.dumps(model.pricing.dict()),
-        "sats_pricing": json.dumps(model.sats_pricing.dict())
-        if model.sats_pricing
-        else None,
-        "per_request_limits": json.dumps(model.per_request_limits)
-        if model.per_request_limits is not None
-        else None,
-        "top_provider": json.dumps(model.top_provider.dict())
-        if model.top_provider is not None
-        else None,
-        "enabled": model.enabled,
-        "upstream_provider_id": model.upstream_provider_id,
-    }
-
-
 async def list_models(
     session: AsyncSession,
     upstream_id: int,
     include_disabled: bool = False,
+    apply_fees: bool = True,
 ) -> list[Model]:
     from sqlmodel import select
 
@@ -247,7 +217,7 @@ async def list_models(
     return [
         _row_to_model(
             r,
-            apply_provider_fee=True,
+            apply_provider_fee=apply_fees,
             provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
             if r.upstream_provider_id in providers_by_id
             else 1.01,
@@ -259,21 +229,6 @@ async def list_models(
             and providers_by_id[r.upstream_provider_id].enabled
         )
     ]
-
-
-async def get_model_by_id(
-    model_id: str, provider_id: int, session: AsyncSession
-) -> Model | None:
-    from ..core.db import UpstreamProviderRow
-
-    row = await session.get(ModelRow, (model_id, provider_id))
-    if not row or not row.enabled:
-        return None
-    provider = await session.get(UpstreamProviderRow, provider_id)
-    if not provider or not provider.enabled:
-        return None
-    provider_fee = provider.provider_fee if provider else 1.01
-    return _row_to_model(row, apply_provider_fee=True, provider_fee=provider_fee)
 
 
 def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
