@@ -6,6 +6,15 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 
+class UpstreamError(Exception):
+    """Exception raised when an upstream provider fails."""
+
+    def __init__(self, message: str, status_code: int = 502):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
+
+
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle HTTP exceptions and include request ID in response."""
     request_id = getattr(request.state, "request_id", "unknown")

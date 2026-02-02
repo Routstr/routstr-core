@@ -11,12 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from ..balance import balance_router, deprecated_wallet_router
-from ..discovery import providers_cache_refresher, providers_router
-from ..nip91 import announce_provider
-from ..payment.models import (
-    models_router,
-    update_sats_pricing,
-)
+from ..nostr import announce_provider, providers_cache_refresher
+from ..nostr.discovery import providers_router
+from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..wallet import periodic_payout
@@ -33,9 +30,9 @@ setup_logging()
 logger = get_logger(__name__)
 
 if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.2.2-{os.getenv('VERSION_SUFFIX')}"
+    __version__ = f"0.3.0-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.2.2"
+    __version__ = "0.3.0"
 
 
 @asynccontextmanager
@@ -191,6 +188,7 @@ async def info() -> dict:
         "mints": global_settings.cashu_mints,
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
+        "child_key_cost_msats": global_settings.child_key_cost,
     }
 
 

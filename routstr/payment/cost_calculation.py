@@ -15,6 +15,7 @@ class CostData(BaseModel):
     input_msats: int
     output_msats: int
     total_msats: int
+    total_usd: float = 0.0
 
 
 class MaxCostData(CostData):
@@ -61,6 +62,7 @@ async def calculate_cost(  # todo: can be sync
             input_msats=0,
             output_msats=0,
             total_msats=0,
+            total_usd=0.0,
         )
 
     usage_data = response_data["usage"]
@@ -101,6 +103,7 @@ async def calculate_cost(  # todo: can be sync
                 input_msats=-1,  # Cost field doesn't break down by token type
                 output_msats=-1,
                 total_msats=cost_in_msats,
+                total_usd=usd_cost,
             )
         except Exception as e:
             logger.warning(
@@ -210,6 +213,7 @@ async def calculate_cost(  # todo: can be sync
 
     output_msats = round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 3)
     token_based_cost = math.ceil(input_msats + output_msats)
+    total_usd = (token_based_cost / 1000.0) * sats_usd_price()
 
     logger.info(
         "Calculated token-based cost",
@@ -219,6 +223,7 @@ async def calculate_cost(  # todo: can be sync
             "input_cost_msats": input_msats,
             "output_cost_msats": output_msats,
             "total_cost_msats": token_based_cost,
+            "total_usd": total_usd,
             "model": response_data.get("model", "unknown"),
         },
     )
@@ -228,4 +233,5 @@ async def calculate_cost(  # todo: can be sync
         input_msats=int(input_msats),
         output_msats=int(output_msats),
         total_msats=token_based_cost,
+        total_usd=total_usd,
     )
