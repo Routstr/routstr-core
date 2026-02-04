@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
+import { KeyOptions } from '@/components/key-options';
 
 type WalletSnapshot = {
   apiKey: string;
@@ -86,9 +87,11 @@ export function CashuPaymentWorkflow({
   const [isTopupLoading, setIsTopupLoading] = useState(false);
   const [isRefunding, setIsRefunding] = useState(false);
   const [isSyncingBalance, setIsSyncingBalance] = useState(false);
-  const [hasInteractedCreate, setHasInteractedCreate] = useState(false);
   const [hasInteractedManage, setHasInteractedManage] = useState(false);
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
+  const [balanceLimit, setBalanceLimit] = useState<string>('');
+  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
+  const [validityDate, setValidityDate] = useState<string>('');
 
   const activeApiKey = apiKeyInput.trim();
 
@@ -121,6 +124,15 @@ export function CashuPaymentWorkflow({
       const params = new URLSearchParams({
         initial_balance_token: initialToken.trim(),
       });
+      if (balanceLimit) params.append('balance_limit', balanceLimit);
+      if (balanceLimitReset)
+        params.append('balance_limit_reset', balanceLimitReset);
+      if (validityDate) {
+        const timestamp = Math.floor(
+          new Date(validityDate + 'T23:59:59').getTime() / 1000
+        );
+        params.append('validity_date', timestamp.toString());
+      }
       const response = await fetch(
         `${baseUrl}/v1/balance/create?${params.toString()}`,
         {
@@ -154,7 +166,7 @@ export function CashuPaymentWorkflow({
     } finally {
       setIsCreatingKey(false);
     }
-  }, [initialToken, baseUrl, onApiKeyCreated]);
+  }, [initialToken, baseUrl, onApiKeyCreated, balanceLimit, balanceLimitReset, validityDate]);
 
   const handleSyncBalance = useCallback(async (): Promise<void> => {
     if (!activeApiKey) {
@@ -256,11 +268,10 @@ export function CashuPaymentWorkflow({
     [apiKey, onApiKeyChanged, onWalletInfoUpdated]
   );
 
-  const showCreateDetails =
-    hasInteractedCreate || initialToken.trim().length > 0;
   const showManageDetails = hasInteractedManage || Boolean(walletInfo);
   const showTopupDetails = hasInteractedTopup || topupToken.trim().length > 0;
   const canTopup = Boolean(activeApiKey);
+  const showCreateDetails = initialToken.trim().length > 0;
 
   return (
     <Card>
@@ -285,12 +296,20 @@ export function CashuPaymentWorkflow({
             value={initialToken}
             onChange={(event) => setInitialToken(event.target.value)}
             placeholder='cashuA1...'
-            rows={showCreateDetails ? 4 : 2}
+            rows={4}
             className='font-mono text-sm transition-all duration-200'
-            onFocus={() => setHasInteractedCreate(true)}
           />
-          {showCreateDetails && (
-            <div className='flex flex-wrap gap-2'>
+          <div className='space-y-4'>
+            <KeyOptions
+              balanceLimit={balanceLimit}
+              setBalanceLimit={setBalanceLimit}
+              validityDate={validityDate}
+              setValidityDate={setValidityDate}
+              balanceLimitReset={balanceLimitReset}
+              setBalanceLimitReset={setBalanceLimitReset}
+            />
+
+            <div className='flex flex-wrap items-center gap-3'>
               <Button
                 onClick={handleCreateKey}
                 disabled={isCreatingKey}
@@ -298,11 +317,13 @@ export function CashuPaymentWorkflow({
               >
                 {isCreatingKey ? 'Creating…' : 'Create API key'}
               </Button>
-              <span className='text-muted-foreground text-xs'>
+              <span className='text-muted-foreground text-[0.7rem] leading-relaxed'>
                 Redeems instantly and returns <code>sk-</code> key.
+                <br />
+                Optional limits can be set above for enhanced security.
               </span>
             </div>
-          )}
+          </div>
         </section>
 
         <Separator />

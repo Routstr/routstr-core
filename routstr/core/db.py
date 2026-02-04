@@ -59,6 +59,10 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=None,
         description="Reset policy for balance limit (manual, daily, monthly, etc.)",
     )
+    balance_limit_reset_date: int | None = Field(
+        default=None,
+        description="Unix timestamp of the last time the balance limit was reset",
+    )
     validity_date: int | None = Field(
         default=None,
         description="Unix timestamp after which the key is no longer valid",

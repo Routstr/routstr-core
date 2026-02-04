@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import time
 from time import monotonic
 from typing import Annotated, NoReturn
 
@@ -73,9 +74,24 @@ async def account_info(
 
 @router.get("/create")
 async def create_balance(
-    initial_balance_token: str, session: AsyncSession = Depends(get_session)
+    initial_balance_token: str,
+    balance_limit: int | None = None,
+    balance_limit_reset: str | None = None,
+    validity_date: int | None = None,
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
     key = await validate_bearer_key(initial_balance_token, session)
+
+    if balance_limit is not None or balance_limit_reset or validity_date:
+        key.balance_limit = balance_limit
+        key.balance_limit_reset = balance_limit_reset
+        key.validity_date = validity_date
+        if balance_limit_reset:
+            key.balance_limit_reset_date = int(time.time())
+        session.add(key)
+        await session.commit()
+        await session.refresh(key)
+
     return {
         "api_key": "sk-" + key.hashed_key,
         "balance": key.balance,
@@ -235,7 +251,9 @@ async def refund_wallet_endpoint(
 
     await _refund_cache_set(bearer_value, result)
 
-    await session.delete(key)
+    key.balance = 0
+    key.reserved_balance = 0
+    session.add(key)
     await session.commit()
 
     return result
@@ -310,6 +328,9 @@ async def create_child_key(
             parent_key_hash=key.hashed_key,
             balance_limit=payload.balance_limit,
             balance_limit_reset=payload.balance_limit_reset,
+            balance_limit_reset_date=int(time.time())
+            if payload.balance_limit_reset
+            else None,
             validity_date=payload.validity_date,
         )
         session.add(child_key)
@@ -354,6 +375,8 @@ async def reset_child_key_spent(
         )
 
     child_key.total_spent = 0
+    if child_key.balance_limit_reset:
+        child_key.balance_limit_reset_date = int(time.time())
     session.add(child_key)
     await session.commit()
 

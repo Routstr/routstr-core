@@ -14,6 +14,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { Key, Copy, Check, Loader2, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
+import { Badge } from '@/components/ui/badge';
+import { KeyOptions } from './key-options';
 
 interface ChildKeyCreatorProps {
   baseUrl?: string;
@@ -198,18 +200,14 @@ export function ChildKeyCreator({
               </div>
             )}
 
-            <div className='flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between'>
-              <div className='flex-1 space-y-2'>
-                <div className='flex items-center justify-between'>
-                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
-                    Number of keys
-                  </label>
-                  {costPerKeyMsats && (
-                    <span className='text-muted-foreground text-[10px]'>
-                      Cost: {costPerKeyMsats * count} mSats
-                    </span>
-                  )}
-                </div>
+            <div className='flex flex-col gap-6'>
+              <div className='flex flex-col gap-4 sm:flex-row sm:items-end'>
+                <div className='w-full sm:w-32 space-y-2'>
+                  <div className='flex items-center justify-between'>
+                    <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                      Number of keys
+                    </label>
+                  </div>
                   <Input
                     type='number'
                     min={1}
@@ -223,69 +221,51 @@ export function ChildKeyCreator({
                         setCount(1);
                       }
                     }}
-                    className='w-full sm:w-24'
+                    className='h-9'
                   />
                 </div>
 
-                <div className='flex-1 space-y-2'>
-                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
-                    Balance Limit (mSats)
-                  </label>
-                  <Input
-                    type='number'
-                    placeholder='No limit'
-                    value={balanceLimit}
-                    onChange={(e) => setBalanceLimit(e.target.value)}
-                    className='w-full'
+                <div className='flex-1'>
+                  <KeyOptions
+                    balanceLimit={balanceLimit}
+                    setBalanceLimit={setBalanceLimit}
+                    validityDate={validityDate}
+                    setValidityDate={setValidityDate}
+                    balanceLimitReset={balanceLimitReset}
+                    setBalanceLimitReset={setBalanceLimitReset}
                   />
                 </div>
+              </div>
 
-                <div className='flex-1 space-y-2'>
-                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
-                    Validity Date
-                  </label>
-                  <Input
-                    type='date'
-                    value={validityDate}
-                    onChange={(e) => setValidityDate(e.target.value)}
-                    className='w-full'
-                  />
-                </div>
-
-                <div className='flex-1 space-y-2'>
-                  <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
-                    Reset Policy
-                  </label>
-                  <select
-                    value={balanceLimitReset}
-                    onChange={(e) => setBalanceLimitReset(e.target.value)}
-                    className='bg-background flex h-9 w-full rounded-md border border-input px-3 py-1 text-sm shadow-sm transition-colors'
-                  >
-                    <option value=''>None</option>
-                    <option value='daily'>Daily</option>
-                    <option value='weekly'>Weekly</option>
-                    <option value='monthly'>Monthly</option>
-                  </select>
+              <div className='flex flex-wrap items-center justify-between gap-4'>
+                <div className='text-xs text-muted-foreground'>
+                  {costPerKeyMsats && (
+                    <p>
+                      Cost: <span className="font-medium text-foreground">{costPerKeyMsats * count} mSats</span>
+                      <span className="mx-2 opacity-50">|</span>
+                      Unit Cost: <span className="font-medium text-foreground">{costPerKeyMsats / 1000} sats</span>
+                    </p>
+                  )}
                 </div>
 
                 <Button
                   onClick={handleCreateKey}
                   disabled={loading || (!!baseUrl && !activeApiKey)}
-                  className='w-full sm:w-auto'
+                  className='w-full sm:w-auto min-w-[140px]'
                 >
-
-                {loading ? (
-                  <>
-                    <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <Key className='mr-2 h-4 w-4' />
-                    Generate {count > 1 ? `${count} Keys` : 'Key'}
-                  </>
-                )}
-              </Button>
+                  {loading ? (
+                    <>
+                      <Loader2 className='mr-2 h-4 w-4 animate-spin' />
+                      Creating...
+                    </>
+                  ) : (
+                    <>
+                      <Key className='mr-2 h-4 w-4' />
+                      Generate {count > 1 ? `${count} Keys` : 'Key'}
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
 
             <p className='text-muted-foreground text-xs'>

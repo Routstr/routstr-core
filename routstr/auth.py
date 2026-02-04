@@ -1,10 +1,14 @@
+import asyncio
 import hashlib
 import math
+import random
+import time
+from datetime import datetime
 from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import col, update
+from sqlmodel import col, select, update
 
 from .core import get_logger
 from .core.db import ApiKey, AsyncSession
@@ -349,35 +353,8 @@ async def pay_for_request(
             },
         )
 
-    # Check balance limit for child keys (or any key with a limit)
-    if (
-        key.balance_limit is not None
-        and key.total_spent + cost_per_request > key.balance_limit
-    ):
-        logger.warning(
-            "Balance limit exceeded",
-            extra={
-                "key_hash": key.hashed_key[:8] + "...",
-                "total_spent": key.total_spent,
-                "balance_limit": key.balance_limit,
-                "required": cost_per_request,
-            },
-        )
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": {
-                    "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent.",
-                    "type": "insufficient_quota",
-                    "code": "balance_limit_exceeded",
-                }
-            },
-        )
-
     # Check validity date
     if key.validity_date is not None:
-        import time
-
         if time.time() > key.validity_date:
             logger.warning(
                 "Key validity date expired",
@@ -398,16 +375,65 @@ async def pay_for_request(
                 },
             )
 
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": {
-                    "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent.",
-                    "type": "insufficient_quota",
-                    "code": "balance_limit_exceeded",
-                }
-            },
-        )
+    # Check balance limit for child keys (or any key with a limit)
+    if key.balance_limit is not None:
+        if key.balance_limit_reset:
+            now = int(time.time())
+            reset_date = key.balance_limit_reset_date or 0
+            should_reset = False
+
+            if key.balance_limit_reset == "daily":
+                if (
+                    datetime.fromtimestamp(now).date()
+                    > datetime.fromtimestamp(reset_date).date()
+                ):
+                    should_reset = True
+            elif key.balance_limit_reset == "weekly":
+                if (
+                    datetime.fromtimestamp(now).isocalendar()[:2]
+                    > datetime.fromtimestamp(reset_date).isocalendar()[:2]
+                ):
+                    should_reset = True
+            elif key.balance_limit_reset == "monthly":
+                dt_now = datetime.fromtimestamp(now)
+                dt_reset = datetime.fromtimestamp(reset_date)
+                if dt_now.year > dt_reset.year or dt_now.month > dt_reset.month:
+                    should_reset = True
+
+            if should_reset:
+                logger.info(
+                    "Resetting balance limit for key",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "policy": key.balance_limit_reset,
+                        "old_spent": key.total_spent,
+                    },
+                )
+                key.total_spent = 0
+                key.balance_limit_reset_date = now
+                session.add(key)
+                await session.flush()
+
+        if key.total_spent + cost_per_request > key.balance_limit:
+            logger.warning(
+                "Balance limit exceeded",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "total_spent": key.total_spent,
+                    "balance_limit": key.balance_limit,
+                    "required": cost_per_request,
+                },
+            )
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": {
+                        "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent.",
+                        "type": "insufficient_quota",
+                        "code": "balance_limit_exceeded",
+                    }
+                },
+            )
 
     logger.debug(
         "Charging base cost for request",
@@ -875,3 +901,65 @@ async def adjust_payment_for_tokens(
         "output_msats": 0,
         "total_msats": deducted_max_cost,
     }
+
+
+async def periodic_key_reset() -> None:
+    """Background task to reset key limits based on their policy."""
+    from .core.db import create_session
+
+    while True:
+        try:
+            interval = 3600  # Run every hour
+            jitter = 300
+            await asyncio.sleep(interval + random.uniform(0, jitter))
+        except asyncio.CancelledError:
+            break
+
+        try:
+            async with create_session() as session:
+                # Find all keys that have a reset policy
+                stmt = select(ApiKey).where(ApiKey.balance_limit_reset.is_not(None))  # type: ignore
+                keys = (await session.exec(stmt)).all()
+
+                now = int(time.time())
+                updated_count = 0
+
+                for key in keys:
+                    reset_date = key.balance_limit_reset_date or 0
+                    should_reset = False
+
+                    if key.balance_limit_reset == "daily":
+                        if (
+                            datetime.fromtimestamp(now).date()
+                            > datetime.fromtimestamp(reset_date).date()
+                        ):
+                            should_reset = True
+                    elif key.balance_limit_reset == "weekly":
+                        if (
+                            datetime.fromtimestamp(now).isocalendar()[:2]
+                            > datetime.fromtimestamp(reset_date).isocalendar()[:2]
+                        ):
+                            should_reset = True
+                    elif key.balance_limit_reset == "monthly":
+                        dt_now = datetime.fromtimestamp(now)
+                        dt_reset = datetime.fromtimestamp(reset_date)
+                        if dt_now.year > dt_reset.year or dt_now.month > dt_reset.month:
+                            should_reset = True
+
+                    if should_reset:
+                        key.total_spent = 0
+                        key.balance_limit_reset_date = now
+                        session.add(key)
+                        updated_count += 1
+
+                if updated_count > 0:
+                    await session.commit()
+                    logger.info(
+                        "Periodic key reset complete",
+                        extra={"keys_reset": updated_count},
+                    )
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in periodic_key_reset: {e}")
