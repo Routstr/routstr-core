@@ -9,7 +9,6 @@ from .types import SearchResult
 
 logger = get_logger(__name__)
 
-# --- Library Check ---
 RANK_BM25_AVAILABLE = False
 try:
     from rank_bm25 import BM25Okapi
@@ -41,14 +40,22 @@ class BM25Ranker(BaseRanker):
         return RANK_BM25_AVAILABLE
 
 
-    #TODO:  Add/update website relevancy scores based on the average score of the remaining chunks 
     async def rank(self, search_result: SearchResult, query: str) -> SearchResult:
-        """Orchestrates the 2-step ranking process"""
+        """
+        Orchestrates the 2-step ranking process:
+        1. Local pruning: Keep top-self.local_k chunks per webpage.
+        2. Global pruning: Keep top-self.global_k chunks across all webpages.
+        """
         if not RANK_BM25_AVAILABLE or not search_result.webpages:
             return search_result
 
         logger.info(
-            f"Ranking results for query: '{query}' (Local K: {self.local_k}, Global K: {self.global_k})"
+            f"Ranking results for query: '{query}'",
+            extra={
+                "query": query,
+                "local_k": self.local_k,
+                "global_k": self.global_k
+            }
         )
 
         # Statistics Tracking
@@ -66,7 +73,7 @@ class BM25Ranker(BaseRanker):
         for p in final_result.webpages:
             stats[p.url]["final"] = len(p.chunks or [])
 
-        self._print_report(query, stats)
+        self._log_report(query, stats)
 
         return final_result
 
@@ -134,12 +141,13 @@ class BM25Ranker(BaseRanker):
             tokenized_query, chunks, n=len(chunks)
         )  # n=len(chunks) returns every chunk, but sorted by score
 
-    def _print_report(self, query: str, stats: Dict[str, Dict[str, int]]) -> None:
-        """Prints a funnel report showing chunk retention."""
-        print("\n" + "=" * 95)
-        print(f"RANKING REPORT | Query: '{query}'")
-        print(f"{'Source URL':<55} | {'Start':<6} | {'L-Keep':<7} | {'FINAL'}")
-        print("-" * 95)
+    def _log_report(self, query: str, stats: Dict[str, Dict[str, int]]) -> None:
+        """Logs a funnel report showing chunk retention."""
+        report_lines = [
+            f"RANKING REPORT | Query: '{query}'",
+            f"{'Source URL':<40} | {'Start':<5} | {'L-Keep':<6} | {'FINAL'}",
+            "-" * 70
+        ]
 
         total_start = total_l_keep = total_final = 0
 
@@ -149,9 +157,15 @@ class BM25Ranker(BaseRanker):
             total_l_keep += l_keep
             total_final += final
 
-            display_url = (url[:52] + "...") if len(url) > 55 else url
-            print(f"{display_url:<55} | {initial:<6} | {l_keep:<7} | {final}")
+            # Sanitize URL for display
+            display_url = url.replace("https://", "").replace("http://", "")
+            if len(display_url) > 37:
+                display_url = display_url[:37] + "..."
+            
+            report_lines.append(f"{display_url:<40} | {initial:<5} | {l_keep:<6} | {final}")
 
-        print("-" * 95)
-        print(f"{'TOTALS':<55} | {total_start:<6} | {total_l_keep:<7} | {total_final}")
-        print("=" * 95 + "\n")
+        report_lines.append("-" * 70)
+        report_lines.append(f"{'TOTALS':<40} | {total_start:<5} | {total_l_keep:<6} | {total_final}")
+        
+        logger.info("BM25 Ranking completed", extra={"ranking_stats": stats})
+        logger.debug("\n".join(report_lines))

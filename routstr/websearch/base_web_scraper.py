@@ -96,6 +96,15 @@ class BaseWebScraper(ABC):
     async def scrape_search_results(self, search_result: SearchResult) -> SearchResult:
         """
         Main Entry Point: Takes a SearchResult, scrapes URLs, returns updated SearchResult.
+
+        Orchestrates the concurrent scraping of all webpages found in the
+        SearchResult. Updates each webpage with its extracted text content.
+
+        Args:
+            search_result: The SearchResult containing URLs to scrape.
+
+        Returns:
+            A new SearchResult with 'content' populated for each webpage.
         """
         if not search_result.webpages:
             logger.warning("No results to scrape")
@@ -115,7 +124,7 @@ class BaseWebScraper(ABC):
         success_count = len([p for p in scraped_pages if p.content])
 
         logger.info(
-            f"Scraped {success_count}/{count} successfully in {scrape_time_ms}ms",
+            f"Scraped {success_count}/{count} URLs successfully in {scrape_time_ms}ms",
             extra={
                 "scraping_summary": {
                     "successful": success_count,

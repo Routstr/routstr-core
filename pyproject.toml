@@ -21,6 +21,7 @@ dependencies = [
     "mdurl==0.1.2",
     "pillow>=10",
     "trafilatura>=1.6.0",
+    "rank-bm25",
 ]
 
 [dependency-groups]
@@ -35,7 +36,6 @@ dev = [
     "psutil>=5.9.0",
     "aiohttp>=3.9.0",
     "pytest-benchmark>=4.0.0",
-    "rank-bm25",
     "routstr",
 ]
 

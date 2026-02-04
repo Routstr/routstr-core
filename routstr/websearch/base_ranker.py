@@ -4,7 +4,13 @@ from .types import SearchResult
 
 
 class BaseRanker(ABC):
-    """Base class for search result ranking and pruning."""
+    """
+    Base class for search result ranking and pruning.
+
+    Rankers are responsible for evaluating the relevance of retrieved chunks
+    against the original query and selecting the most relvant ones for
+    inclusion in the LLM context.
+    """
 
     def __init__(self, provider_name: str = "base", max_chunks_per_source: int = 5):
         self.provider_name = provider_name
@@ -14,7 +20,16 @@ class BaseRanker(ABC):
     async def rank(self, search_result: SearchResult, query: str) -> SearchResult:
         """
         Rank and prune chunks within a SearchResult.
-        This is the primary entry point for the ranking component.
+
+        Evaluates chunks based on relevance to the query and limits the number
+        of chunks per source according to max_chunks_per_source.
+
+        Args:
+            search_result: The SearchResult containing chunked pages.
+            query: The original search query for relevance scoring.
+
+        Returns:
+            A new SearchResult with ranked and filtered chunks.
         """
         pass
 

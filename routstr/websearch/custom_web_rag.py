@@ -91,7 +91,10 @@ class CustomRAG(BaseWebRAG):
         """
         pipeline_start = datetime.now()
         timings: Dict[str, int] = {}
-        logger.info(f"Starting CustomRAG pipeline for query: '{query}'")
+        logger.info(
+            f"Starting CustomRAG pipeline for query: '{query}'",
+            extra={"query": query, "max_results": max_results}
+        )
 
         try:
             # Search
@@ -131,7 +134,11 @@ class CustomRAG(BaseWebRAG):
 
             logger.info(
                 f"CustomRAG pipeline completed: {len(search_response.webpages)} results in {timings['total']}ms",
-                extra={"timing (ms)": timings}
+                extra={
+                    "query": query,
+                    "result_count": len(search_response.webpages),
+                    "timings_ms": timings
+                }
             )
 
             # Update timing metadata and return a new object

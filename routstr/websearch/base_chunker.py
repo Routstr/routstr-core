@@ -17,7 +17,13 @@ logger = get_logger(__name__)
 
 
 class BaseChunker(ABC):
-    """Base class for content chunkers."""
+    """
+    Base class for content chunkers.
+
+    Chunkers are responsible for breaking down large text content into smaller,
+    manageable pieces (chunks) that can be effectively processed by LLMs or
+    ranked for relevance.
+    """
 
     chunker_name: str = "base"
 
@@ -51,7 +57,16 @@ class BaseChunker(ABC):
 
     async def chunk_search_results(self, search_result: SearchResult) -> SearchResult:
         """
-        Chunk the content in search results concurrently and return a new SearchResult.
+        Chunk the content in search results concurrently.
+
+        Iterates through all webpages in the SearchResult and applies the
+        chunking algorithm to their text content.
+
+        Args:
+            search_result: The SearchResult containing scraped webpages.
+
+        Returns:
+            A new SearchResult with 'chunks' populated for each webpage.
         """
         if not search_result.webpages:
             return search_result

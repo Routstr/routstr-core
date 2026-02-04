@@ -112,7 +112,7 @@ class HTTPWebScraper(BaseWebScraper):
                 )
 
         except Exception as e:
-            logger.warning(f"Fetch failed for {url}: {e}")
+            logger.debug(f"Fetch failed for {url}: {e}")
             return None
         finally:
             if local_client:
@@ -131,8 +131,7 @@ class HTTPWebScraper(BaseWebScraper):
             meta_data = trafilatura.extract_metadata(
                 html, default_url=webpage.url, extensive=True
             )
-            print(meta_data)
-
+            
             content = trafilatura.extract(
                 html,
                 favor_precision=True,

@@ -34,7 +34,7 @@ from ..payment.models import (
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
-from ..websearch.web_manager import web_manager
+from ..websearch.web_manager import web_manager, WebManager
 
 logger = get_logger(__name__)
 
@@ -698,7 +698,7 @@ class BaseUpstreamProvider:
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
-        transformed_body, enable_web_search = web_manager.extract_web_search_parameter(
+        transformed_body, enable_web_search = WebManager.extract_web_search_parameter(
             transformed_body
         )
 
@@ -708,7 +708,7 @@ class BaseUpstreamProvider:
         if (
             path.endswith("chat/completions")
             and transformed_body
-            and web_manager.is_rag_enabled()
+            and WebManager.is_rag_enabled()
             and enable_web_search
         ):
             try:
@@ -1151,6 +1151,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        web_search_executed: bool = False,
+        sources: dict[str, str] | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1207,6 +1209,10 @@ class BaseUpstreamProvider:
             )
 
             response_data = {"usage": usage_data, "model": model}
+
+            if web_search_executed:
+                response_data["web_search_executed"] = True
+
             try:
                 cost_data = await self.get_x_cashu_cost(
                     response_data, max_cost_for_model
@@ -1268,6 +1274,8 @@ class BaseUpstreamProvider:
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
                 yield (line + "\n").encode("utf-8")
+            if sources:
+                yield f"data: {json.dumps({'sources': sources})}\n\n".encode("utf-8")
 
         return StreamingResponse(
             generate(),
@@ -1284,6 +1292,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        web_search_executed: bool = False,
+        sources: dict[str, str] | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1304,6 +1314,11 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
+
+            # Add web_search_executed flag when websearch was executed
+            if web_search_executed:
+                response_json["web_search_executed"] = True
+
             cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
 
             if not cost_data:
@@ -1368,6 +1383,11 @@ class BaseUpstreamProvider:
                     },
                 )
 
+            if sources:
+                response_json["sources"] = sources
+                # Re-serialize the content with the sources included
+                content_str = json.dumps(response_json)
+
             return Response(
                 content=content_str,
                 status_code=response.status_code,
@@ -1414,6 +1434,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        web_search_executed: bool = False,
+        sources: dict[str, str] | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -1450,11 +1472,11 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str, response, amount, unit, max_cost_for_model, mint, web_search_executed=web_search_executed, sources=sources
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str, response, amount, unit, max_cost_for_model, mint, web_search_executed=web_search_executed, sources=sources
                 )
 
         except Exception as e:
@@ -1505,6 +1527,39 @@ class BaseUpstreamProvider:
 
         request_body = await request.body()
         transformed_body = self.prepare_request_body(request_body, model_obj)
+
+        transformed_body, enable_web_search = WebManager.extract_web_search_parameter(
+            transformed_body
+        )
+
+        web_search_executed = False
+        sources: dict[str, str] = {}
+        # Only search the web for chat completion
+        if (
+            path.endswith("chat/completions")
+            and transformed_body
+            and WebManager.is_rag_enabled()
+            and enable_web_search
+        ):
+            try:
+                logger.debug("Web search enabled and requested")
+                web_search_result = await web_manager.enhance_request_with_web_context(
+                    transformed_body
+                )
+                if web_search_result["success"]:
+                    transformed_body = web_search_result["body"]
+                    sources = web_search_result["sources"]
+                    web_search_executed = True
+            except Exception as e:
+                logger.warning(
+                    "Failed to enhance request with webcontext",
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    },
+                )
+
+
         logger.debug(
             "Forwarding request to upstream",
             extra={
@@ -1589,7 +1644,7 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model, mint
+                        response, amount, unit, max_cost_for_model, mint, web_search_executed=web_search_executed, sources=sources 
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)

@@ -6,8 +6,7 @@ logger = get_logger(__name__)
 
 class HTTPClient:
     """
-    A strict, high-performance HTTP utility.
-    No URL guessing. Centralized logging and connection pooling.
+    A HTTP utility with centralized logging and connection pooling.
     """
     def __init__(
         self, 
@@ -56,25 +55,53 @@ class HTTPClient:
         return await self._request("POST", url, json_data=json_data, headers=headers, return_json=return_json)
 
     async def _request(
-        self, 
-        method: str, 
-        url: str, 
+        self,
+        method: str,
+        url: str,
         json_data: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         return_json: bool = True
     ) -> Any:
+        """
+        Execute an asynchronous HTTP request with centralized logging and error handling.
+
+        Args:
+            method: HTTP method (GET, POST, etc.).
+            url: Target URL.
+            json_data: Optional JSON payload for POST requests.
+            params: Optional query parameters.
+            headers: Optional request-specific headers.
+            return_json: Whether to parse the response as JSON.
+
+        Returns:
+            Parsed JSON dictionary or raw text response.
+
+        Raises:
+            Exception: For HTTP errors or network failures.
+        """
         try:
             # httpx.AsyncClient(base_url=...) handles the join automatically
             response = await self._client.request(
                 method=method,
-                url=url, 
+                url=url,
                 json=json_data,
                 params=params,
                 headers=headers
             )
             
             response.raise_for_status()
+            
+            logger.debug(
+                f"HTTP {method} {url} success",
+                extra={
+                    "method": method,
+                    "url": str(response.url),
+                    "status_code": response.status_code,
+                    "elapsed_ms": int(response.elapsed.total_seconds() * 1000)
+                }
+            )
+            
             return response.json() if return_json else response.text
 
         except httpx.HTTPStatusError as e:

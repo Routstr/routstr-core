@@ -9,8 +9,6 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-import httpx
-
 from ..core.logging import get_logger
 from .types import SearchResult
 
@@ -24,15 +22,9 @@ class BaseWebSearcher(ABC):
 
     def __init__(self) -> None:
         """Initialize the base web search provider."""
-        self.client_timeout: httpx.Timeout = httpx.Timeout(3.0, connect=3.0)
-        self.client_headers: dict = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        }
-        self.client_redirects: bool = True
 
         # Domain Blocklist will be used by Search provider if domain exclusion is supported
-        # TODO: Unify this with BaseRAG.BLOCKED_DOMAINS?
-        # I could move it to HTTPClient
+        # TODO: Unify this with BaseWebRAG.BLOCKED_DOMAINS?
         self.EXCLUDE_DOMAINS = {
             "youtube.com",
             "youtu.be",
@@ -44,7 +36,16 @@ class BaseWebSearcher(ABC):
 
     @abstractmethod
     async def search(self, query: str, max_results: int = 5) -> SearchResult:
-        """Perform web search and return results."""
+        """
+        Performs web search and return results.
+
+        Args:
+            query: The search query.
+            max_results: Maximum number of results to return.
+
+        Returns:
+            SearchResult containing the list of found webpages.
+        """
 
     @abstractmethod
     async def check_availability(self) -> bool:

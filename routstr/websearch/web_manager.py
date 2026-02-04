@@ -35,12 +35,15 @@ class WebManager:
         self._chunker_provider: Optional[BaseChunker] = None
         self._rank_provider: Optional[BaseRanker] = None
 
-    def is_rag_enabled(self) -> bool:
+    @staticmethod
+    def is_rag_enabled() -> bool:
         """Check if RAG is enabled in settings."""
         if not settings.web_rag_provider:
             return False
         return settings.web_rag_provider.lower() != RAGProvider.DISABLED
 
+
+    # TODO: How can we simplify the get_XXX_provider() logic 
     async def get_rag_provider(self) -> Optional[BaseWebRAG]:
         """
         Get RAG provider based on RAG_PROVIDER configuration.
@@ -323,18 +326,18 @@ class WebManager:
         """
         Enhance AI request with web search context using configured RAG provider.
 
-        This method uses the unified RAG interface that handles the complete pipeline:
-        - All-in-one providers (Tavily, Exa): Search + extract + chunk in one call
-        - Custom provider: Manual pipeline with separate search, scrape, and chunk components
+        This method uses the unified RAG interface to handle the complete pipeline.
+        It extracts the query, retrieves context from the RAG provider, and injects
+        it as a system message in XML format into the request body.
 
         Args:
-            request_body: The original request body as bytes
+            request_body: The original request body as bytes.
 
         Returns:
             Dict containing:
-            - 'body': Enhanced request body as bytes
-            - 'sources': List of source strings
-            - 'success': Boolean indicating if RAG was successful and yielded results
+            - 'body': Enhanced request body as bytes with injected context.
+            - 'sources': Dict mapping source IDs to URLs.
+            - 'success': Boolean indicating if RAG yielded results.
         """
         try:
             # Get configured RAG provider (all-in-one or custom)
@@ -345,7 +348,7 @@ class WebManager:
                 return {"body": request_body, "sources": {}, "success": False}
 
             # Extract query from request
-            extracted_query = self._extract_query_from_request_body(request_body)
+            extracted_query = WebManager.extract_query_from_request_body(request_body)
 
             if not extracted_query:
                 return {"body": request_body, "sources": {}, "success": False}
@@ -359,15 +362,19 @@ class WebManager:
             # Log precise timing summary
             timings = search_result.time_ms
             total_time = timings.get("total", "N/A")
-            details = ", ".join([f"{k}: {v}ms" for k, v in timings.items() if k != "total"])
-            detail_str = f" ({details})" if details else ""
             
             logger.info(
-                f"RAG [{rag_provider.provider_name}] completed in {total_time}ms{detail_str}"
+                f"RAG [{rag_provider.provider_name}] completed in {total_time}ms",
+                extra={
+                    "provider": rag_provider.provider_name,
+                    "query": extracted_query,
+                    "timings_ms": timings,
+                    "result_count": len(search_result.webpages) if search_result else 0
+                }
             )
 
             # Inject context into request
-            enhanced_body, sources = await self._inject_web_context_into_request(
+            enhanced_body, sources = await WebManager.inject_web_context_into_request(
                 request_body, search_result, extracted_query
             )
 
@@ -384,25 +391,24 @@ class WebManager:
                     "rag_provider": settings.web_rag_provider,
                 },
             )
-            return {"body": request_body, "sources": [], "success": False}
+            return {"body": request_body, "sources": {}, "success": False}
 
     @staticmethod
     def extract_web_search_parameter(body: bytes | None) -> Tuple[bytes | None, bool]:
         """
         Extracts the 'enable_web_search' parameter from a JSON request body.
 
-        This function parses the body, extracts the boolean value of the
-        'enable_web_search' key, and returns the body bytes with the key removed
-        to prevent it from being forwarded to the upstream provider.
+        Parses the body to find 'enable_web_search', then removes it from the
+        dictionary to prevent the parameter from being leaked to upstream providers.
+        Returns a new serialized JSON body.
 
         Args:
-            body: The raw request body as bytes
+            body: The raw request body as bytes.
 
         Returns:
             A tuple containing:
-            - bytes | None: The modified body as bytes, with 'enable_web_search' removed.
-                            Returns the original body if parsing fails or it's not JSON.
-            - bool: The extracted value of 'enable_web_search', defaulting to False.
+            - bytes | None: The modified body without 'enable_web_search'.
+            - bool: The extracted boolean value, defaulting to False.
         """
         if not body:
             return None, False
@@ -430,7 +436,8 @@ class WebManager:
             )
             return body, enable_web_search  # Still return the flag
 
-    def _extract_query_from_request_body(self, request_body: bytes) -> str:
+    @staticmethod
+    def extract_query_from_request_body(request_body: bytes) -> str:
         """
         Extract search query from user messages in request body.
 
@@ -457,8 +464,9 @@ class WebManager:
             logger.warning(f"Failed to extract query from request body: {e}")
             return ""
 
-    async def _inject_web_context_into_request(
-        self, request_body: bytes, search_result: SearchResult, query: str
+    @staticmethod
+    async def inject_web_context_into_request(
+        request_body: bytes, search_result: SearchResult, query: str
     ) -> tuple[bytes, dict[str, str]]:
         """
         Inject web search context into AI request, filtering out None values and empty content.
@@ -469,7 +477,7 @@ class WebManager:
             query: The search query used
 
         Returns:
-            Tuple of (Enhanced request body as bytes, List of source strings)
+            Tuple of (Enhanced request body as bytes, Dicts of IDs + source urls)
         """
 
         if not search_result or not search_result.webpages:
@@ -478,9 +486,11 @@ class WebManager:
         # Prepare list of sources
         sources = {str(i): res.url for i, res in enumerate(search_result.webpages, 1)}
 
-        web_context = self._generate_xml_context(search_result, query)
+        web_context = WebManager.generate_xml_context(search_result, query)
 
-        print(web_context) #TODO: DEBUG PRINT
+        # TODO: This adds a lot of data to the logs. Remove?
+        logger.debug("Generated web context for injection", extra={"web_context": web_context})
+
         # Parse and enhance the request
         try:
             request_data = json.loads(request_body.decode("utf-8"))
@@ -520,8 +530,8 @@ class WebManager:
             return request_body, {} # Return no sources on Failure
 
 
-
-    def _generate_xml_context(self, search_result: SearchResult, query: str) -> str:
+    @staticmethod
+    def generate_xml_context(search_result: SearchResult, query: str) -> str:
         """Helper to build the structured XML string."""
         parts = ["<search_results>"]
         parts.append(f"Websearch yielded {len(search_result.webpages)} results for query: '{query}'")

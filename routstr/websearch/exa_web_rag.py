@@ -54,18 +54,22 @@ class ExaWebRAG(BaseWebRAG):
         """
         Perform RAG retrieval using Exa's neural search API.
 
+        Uses neural search to find semantically relevant content. Retrieves
+        highlights (most relevant sentences) for each result to provide
+        concise context for the LLM.
+
         Args:
-            query: The search query for retrieving relevant web content
-            max_results: Maximum number of web sources to process (max 10 recommended)
+            query: The search query for retrieving relevant web content.
+            max_results: Maximum number of web sources to process.
 
         Returns:
-            SearchResult with neural-ranked content, extracted highlights, and metadata
-
-        Raises:
-            Exception: If API call fails or response parsing fails
+            SearchResult with extracted highlights.
         """
         start_time = datetime.now()
-        logger.info(f"Performing Exa API search for: '{query}'")
+        logger.info(
+            f"Performing Exa API search for: '{query}'",
+            extra={"query": query, "max_results": max_results}
+        )
 
         try:
             # --- MOCK DATA FOR TESTING ---
@@ -130,7 +134,12 @@ class ExaWebRAG(BaseWebRAG):
             logger.warning(f"No results found for query: '{query}'")
 
         logger.info(
-            f"Exa search completed successfully: {len(parsed_results)} results"
+            f"Exa search completed successfully: {len(parsed_results)} results",
+            extra={
+                "query": query,
+                "result_count": len(parsed_results),
+                "total_ms": total_ms
+            }
         )
 
         return SearchResult(
@@ -145,16 +154,15 @@ class ExaWebRAG(BaseWebRAG):
         """
         Make live API call to Exa's neural search endpoint.
 
+        Configures the payload for 'neural' search with highlight extraction.
+        Disables raw text and summary retrieval to focus on high-relevance chunks.
+
         Args:
-            query: The search query
-            max_results: Maximum number of results to return
+            query: The search query.
+            max_results: Maximum number of results to return (max 10).
 
         Returns:
-            Dictionary containing the complete Exa API response
-
-        Raises:
-            Exception: If API call fails or returns non-200 status
-
+            Dictionary containing the complete Exa API response.
         """
         logger.debug(f"Making live Exa API call for: '{query}'")
 
@@ -209,7 +217,7 @@ class ExaWebRAG(BaseWebRAG):
         Returns:
             True if Exa service is available, False otherwise
         """
-        logger.info("Checking Exa API availability")
+        logger.debug("Checking Exa API availability")
 
         try:
             await self.client.get(

@@ -39,14 +39,18 @@ class BaseWebRAG(ABC):
 
     @abstractmethod
     async def retrieve_context(self, query: str, max_results: int = 5) -> SearchResult:
-        """Perform web retrieval
+        """
+        Perform complete RAG retrieval pipeline.
+
+        This method is the primary entry point for all-in-one RAG providers.
+        It handles search, extraction, and chunking in a single operation.
 
         Args:
-            query: The search query for retrieving relevant web content
-            max_results: Maximum number of web sources to process
+            query: The search query for retrieving relevant web content.
+            max_results: Maximum number of web sources to process.
 
         Returns:
-            SearchResult with processed content, chunks, and metadata
+            SearchResult with processed content, chunks, and metadata.
         """
 
     @abstractmethod
@@ -107,6 +111,8 @@ class BaseWebRAG(ABC):
             .rstrip()
             .replace(" ", "_")
         )[:60]
+        if not safe_query:
+            safe_query = "query"
         filename = f"{provider}_{safe_query}_{timestamp}.json"
         file_path = responses_dir / filename
 

@@ -56,18 +56,16 @@ class TavilyWebRAG(BaseWebRAG):
         """
         Perform complete RAG pipeline using Tavily's all-in-one API.
 
-        Executes web search, content extraction, and chunking in a single call
-        to Tavily's advanced search endpoint with RAG-optimized parameters.
+        Executes web search, content extraction, and chunking in a single call.
+        Queries exceeding 400 characters are truncated to meet API limits.
+        Uses 'advanced' search depth to retrieve RAG-optimized content chunks.
 
         Args:
-            query: The search query for retrieving relevant web content
-            max_results: Maximum number of web sources to process (max 10 for Tavily)
+            query: The search query for retrieving relevant web content.
+            max_results: Maximum number of web sources to process (max 20).
 
         Returns:
-            SearchResult with processed content, pre-chunked highlights, and metadata
-
-        Raises:
-            Exception: If API call fails or response parsing fails
+            SearchResult with processed content, pre-chunked highlights, and metadata.
         """
         start_time = datetime.now()
 
@@ -77,12 +75,15 @@ class TavilyWebRAG(BaseWebRAG):
                 f"Tavily's limit of 400 characters exceeded with {len(query)} characters. Using only first 400 characters."
             )
 
-        logger.debug(f"Performing Tavily API search for: '{query}'")
+        logger.info(
+            f"Performing Tavily API search for: '{query}'",
+            extra={"query": query, "max_results": max_results}
+        )
 
         try:
             # --- MOCK DATA FOR TESTING  ---
             api_response = await self._load_mock_data(
-                "tavily_What_happend_between_the_US_and_Venezuela_20260113_113921.json"
+                "tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
                 # tavily_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_150031.json
             )
             # ---------------------------------------------------------------
@@ -111,12 +112,16 @@ class TavilyWebRAG(BaseWebRAG):
         """
         Map Tavily API response to a SearchResult object.
 
+        Extracts results and maps them to WebPage objects. Tavily's 'content'
+        field is split into chunks using the ' [...] ' delimiter.
+
         Args:
-            api_response: The raw response from Tavily API
-            query: The original search query
+            api_response: The raw response from Tavily API.
+            query: The original search query.
+            total_ms: Total execution time in milliseconds.
 
         Returns:
-            A populated SearchResult object
+            A populated SearchResult object.
         """
         tavily_results = api_response.get("results", [])
         parsed_results = []
@@ -143,7 +148,12 @@ class TavilyWebRAG(BaseWebRAG):
             logger.warning(f"No results found for query: '{query}'")
 
         logger.info(
-            f"Tavily search completed successfully: {len(parsed_results)} results"
+            f"Tavily search completed successfully: {len(parsed_results)} results",
+            extra={
+                "query": query,
+                "result_count": len(parsed_results),
+                "total_ms": total_ms
+            }
         )
 
         return SearchResult(
@@ -217,7 +227,7 @@ class TavilyWebRAG(BaseWebRAG):
         Returns:
             True if Tavily service is available and API key is valid, False otherwise
         """
-        logger.info("Checking Tavily API availability")
+        logger.debug("Checking Tavily API availability")
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
