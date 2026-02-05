@@ -103,7 +103,7 @@ async def test_periodic_key_reset_job(integration_session: AsyncSession) -> None
     # but we can test the logic inside.
 
     # Implementation of periodic_key_reset logic for testing:
-    stmt = select(ApiKey).where(ApiKey.balance_limit_reset != None)
+    stmt = select(ApiKey).where(ApiKey.balance_limit_reset != None)  # noqa: E711
     keys = (await integration_session.exec(stmt)).all()
     now = int(time.time())
     for k in keys:
