@@ -70,6 +70,7 @@ async def test_key_daily_reset_policy(integration_session: AsyncSession) -> None
     # Wait, the charging logic in pay_for_request increments parent/billing_key's total_requests,
     # but total_spent is updated in adjust_payment_for_tokens.
     # However, the reset logic sets total_spent to 0.
+    assert key.balance_limit_reset_date is not None
     assert key.balance_limit_reset_date > yesterday
 
 
@@ -102,7 +103,7 @@ async def test_periodic_key_reset_job(integration_session: AsyncSession) -> None
     # but we can test the logic inside.
 
     # Implementation of periodic_key_reset logic for testing:
-    stmt = select(ApiKey).where(ApiKey.balance_limit_reset.is_not(None))
+    stmt = select(ApiKey).where(ApiKey.balance_limit_reset != None)
     keys = (await integration_session.exec(stmt)).all()
     now = int(time.time())
     for k in keys:
