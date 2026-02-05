@@ -65,9 +65,10 @@ async def test_full_balance_refund_returns_cashu_token(
     except Exception as e:
         pytest.fail(f"Invalid Cashu token format: {e}")
 
-    # Try to use the API key - should fail since it's been deleted
+    # Try to use the API key - should still work but have 0 balance
     response = await authenticated_client.get("/v1/wallet/")
-    assert response.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["balance"] == 0
 
     # The refund token has been validated above by decoding it
     # The API key deletion has been verified by the 401 response
@@ -261,17 +262,16 @@ async def test_database_state_after_refund(
     response = await authenticated_client.post("/v1/wallet/refund")
     assert response.status_code == 200
 
-    # Verify key is deleted after refund
-    result = await integration_session.execute(
-        select(ApiKey).where(ApiKey.hashed_key == hashed_key)  # type: ignore[arg-type]
-    )
-    assert result.scalar_one_or_none() is None
+    # Refresh the key to get the updated balance from the database
+    await integration_session.refresh(key_before)
 
-    # Count total keys to ensure only the specific one was deleted
+    # Verify key balance is 0 after refund
+    assert key_before.balance == 0
+
+    # Count total keys to ensure it wasn't deleted
     result = await integration_session.execute(select(ApiKey))
     remaining_keys = result.scalars().all()
-    # Should have no keys left (assuming clean test environment)
-    assert len(remaining_keys) == 0
+    assert len(remaining_keys) == 1
 
 
 @pytest.mark.integration
@@ -388,9 +388,10 @@ async def test_refund_during_active_usage(
     # Refund should succeed
     assert refund_response.status_code == 200
 
-    # Further usage should fail
+    # Further usage should return 200 but with 0 balance
     response = await authenticated_client.get("/v1/wallet/")
-    assert response.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["balance"] == 0
 
 
 @pytest.mark.integration
@@ -535,6 +536,3 @@ async def test_refund_with_expired_key(
         # Should still allow manual refund
         assert response.status_code == 200
         assert response.json()["recipient"] == "expired@ln.address"
-
-
-
