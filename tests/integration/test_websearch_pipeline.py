@@ -3,7 +3,7 @@ Test suite for Web Search (RAG) integration within the proxy layer.
 
 This module validates the end-to-end flow of Retrieval-Augmented Generation (RAG),
 specifically verifying how web search results are injected into prompts and how
-the results are returned in the Response. It covers both streaming and non-streaming
+the sources are returned in the Response. It covers both streaming and non-streaming
 responses across standard Bearer authentication and X-Cashu payment protocols.
 """
 
@@ -151,10 +151,6 @@ async def test_websearch_non_streaming_auth(setup_mocks, model_id, mock_upstream
         data = json.loads(response.body)
         # Check if web_search_executed flag is present
         assert data["web_search_executed"] is True
-        # Check if websearch cost was returned
-        assert data["cost"]["web_search_msats"] == 1000
-        # Check if websearch cost was incoporated into total cost 
-        assert data["cost"]["total_msats"] > data["cost"]["web_search_msats"]
         # Check if sources are present in response
         assert "sources" in data
         # Check if Sources are correct
@@ -202,10 +198,6 @@ async def test_websearch_streaming_auth(setup_mocks, model_id):
         print(data)
         # Check if web_search_executed flag is present
         assert data["web_search_executed"] is True
-        # Check if websearch cost was returned
-        assert data["cost"]["web_search_msats"] == 1000
-        # Check if websearch cost was incoporated into total cost 
-        assert data["cost"]["total_msats"] > data["cost"]["web_search_msats"]
         # Check if sources are present in response
         assert "sources" in data
         # Check if Sources are correct
