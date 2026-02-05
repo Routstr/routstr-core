@@ -463,11 +463,10 @@ class BaseUpstreamProvider:
                                         )
                                         if fresh_key:
                                             try:
-                                                # Add web_search_executed flag when websearch was executed
+                                                # Add web_search_executed flag for cost calculation
                                                 if (
                                                     web_search_executed
-                                                    and "web_search_executed"
-                                                    not in data
+                                                    and "web_search_executed" not in data
                                                 ):
                                                     data["web_search_executed"] = True
 
@@ -491,8 +490,12 @@ class BaseUpstreamProvider:
                                                 )
 
                                                 final_payload = {"cost": cost_data}
+
+                                                if web_search_executed:
+                                                    final_payload["web_search_executed"] = True
                                                 if sources:
                                                     final_payload["sources"] = sources
+
 
                                                 yield f"data: {json.dumps(final_payload)}\n\n".encode()
                                             except Exception as cost_error:
@@ -693,9 +696,7 @@ class BaseUpstreamProvider:
         """
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
-
         url = f"{self.base_url}/{path}"
-
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
         transformed_body, enable_web_search = WebManager.extract_web_search_parameter(
@@ -722,7 +723,7 @@ class BaseUpstreamProvider:
                     web_search_executed = True
             except Exception as e:
                 logger.warning(
-                    "Failed to enhance request with webcontext",
+                    f"Failed to enhance request with web context: {e}",
                     extra={
                         "error": str(e),
                         "error_type": type(e).__name__,
@@ -1274,8 +1275,13 @@ class BaseUpstreamProvider:
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
                 yield (line + "\n").encode("utf-8")
-            if sources:
-                yield f"data: {json.dumps({'sources': sources})}\n\n".encode("utf-8")
+            if sources or web_search_executed:
+                metadata = {}
+                if sources:
+                    metadata["sources"] = sources
+                if web_search_executed:
+                    metadata["web_search_executed"] = True
+                yield f"data: {json.dumps(metadata)}\n\n".encode("utf-8")
 
         return StreamingResponse(
             generate(),
@@ -1552,7 +1558,7 @@ class BaseUpstreamProvider:
                     web_search_executed = True
             except Exception as e:
                 logger.warning(
-                    "Failed to enhance request with webcontext",
+                    f"Failed to enhance request with web context: {e}",
                     extra={
                         "error": str(e),
                         "error_type": type(e).__name__,

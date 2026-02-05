@@ -81,7 +81,7 @@ async def test_extract_query_from_request_body() -> None:
         ]
     }
     sample_body = json.dumps(history).encode("utf-8")
-    query = manager._extract_query_from_request_body(sample_body)
+    query = manager.extract_query_from_request_body(sample_body)
     assert query == "Does it use Cashu?"
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_generate_xml_context_complex_validation() -> None:
         summary="Bitcoin reached a new all-time high today." # Global Summary
     )
 
-    xml = manager._generate_xml_context(mock_result, "bitcoin news")
+    xml = manager.generate_xml_context(mock_result, "bitcoin news")
 
 
     # Global Summary Check
@@ -214,7 +214,7 @@ async def test_enhance_request_outer_exception_handling() -> None:
 @pytest.mark.asyncio
 async def test_inject_context_before_last_user_message() -> None:
     """
-    Targets: _inject_web_context_into_request
+    Targets: inject_web_context_into_request
     Verifies that the system message is correctly placed BEFORE the last user message.
     """
     manager = WebManager()
@@ -231,7 +231,7 @@ async def test_inject_context_before_last_user_message() -> None:
     }
     body_bytes = json.dumps(body_dict).encode("utf-8")
     
-    enhanced_bytes, sources = await manager._inject_web_context_into_request(body_bytes, search_res, "q")
+    enhanced_bytes, sources = await manager.inject_web_context_into_request(body_bytes, search_res, "q")
     enhanced_dict = json.loads(enhanced_bytes)
     
     # Order should now be: S1 -> U1 -> A1 -> [NEW RAG SYSTEM MESSAGE] -> U2
@@ -243,7 +243,7 @@ async def test_inject_context_before_last_user_message() -> None:
 @pytest.mark.asyncio
 async def test_inject_context_json_decode_error() -> None:
     """
-    Targets: _inject_web_context_into_request (JSON Error path)
+    Targets: inject_web_context_into_request (JSON Error path)
     Tests the exception handler when the request body is not valid JSON.
     """
     manager = WebManager()
@@ -252,7 +252,7 @@ async def test_inject_context_json_decode_error() -> None:
     bad_body = b"not a json string"
     
     # Should hit: except json.JSONDecodeError as e:
-    body, sources = await manager._inject_web_context_into_request(bad_body, search_res, "q")
+    body, sources = await manager.inject_web_context_into_request(bad_body, search_res, "q")
     
     assert body == bad_body # Returns original input on failure
     assert sources == {}
@@ -260,12 +260,12 @@ async def test_inject_context_json_decode_error() -> None:
 @pytest.mark.asyncio
 async def test_inject_context_general_exception() -> None:
     """
-    Targets: _inject_web_context_into_request (General Exception path)
+    Targets: inject_web_context_into_request (General Exception path)
     Forces a TypeError (e.g. passing None) to check the general error catch.
     """
     manager = WebManager()
     # Passing None to an operation expecting bytes will trigger the general Exception block
-    body, sources = await manager._inject_web_context_into_request(None, None, "q")
+    body, sources = await manager.inject_web_context_into_request(None, None, "q")
     
     assert body is None
     assert sources == {}

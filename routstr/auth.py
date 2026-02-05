@@ -429,7 +429,6 @@ async def adjust_payment_for_tokens(
     Returns cost data to be included in the response.
     """
     model = response_data.get("model", "unknown")
-
     logger.debug(
         "Starting payment adjustment for tokens",
         extra={
