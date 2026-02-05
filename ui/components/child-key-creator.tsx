@@ -202,7 +202,7 @@ export function ChildKeyCreator({
 
             <div className='flex flex-col gap-6'>
               <div className='flex flex-col gap-4 sm:flex-row sm:items-end'>
-                <div className='w-full sm:w-32 space-y-2'>
+                <div className='w-full space-y-2 sm:w-32'>
                   <div className='flex items-center justify-between'>
                     <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
                       Number of keys
@@ -238,12 +238,18 @@ export function ChildKeyCreator({
               </div>
 
               <div className='flex flex-wrap items-center justify-between gap-4'>
-                <div className='text-xs text-muted-foreground'>
+                <div className='text-muted-foreground text-xs'>
                   {costPerKeyMsats && (
                     <p>
-                      Cost: <span className="font-medium text-foreground">{costPerKeyMsats * count} mSats</span>
-                      <span className="mx-2 opacity-50">|</span>
-                      Unit Cost: <span className="font-medium text-foreground">{costPerKeyMsats / 1000} sats</span>
+                      Cost:{' '}
+                      <span className='text-foreground font-medium'>
+                        {costPerKeyMsats * count} mSats
+                      </span>
+                      <span className='mx-2 opacity-50'>|</span>
+                      Unit Cost:{' '}
+                      <span className='text-foreground font-medium'>
+                        {costPerKeyMsats / 1000} sats
+                      </span>
                     </p>
                   )}
                 </div>
@@ -251,7 +257,7 @@ export function ChildKeyCreator({
                 <Button
                   onClick={handleCreateKey}
                   disabled={loading || (!!baseUrl && !activeApiKey)}
-                  className='w-full sm:w-auto min-w-[140px]'
+                  className='w-full min-w-[140px] sm:w-auto'
                 >
                   {loading ? (
                     <>

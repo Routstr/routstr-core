@@ -234,7 +234,15 @@ export function LightningPaymentWorkflow({
     } finally {
       setIsCreating(false);
     }
-  }, [createAmount, baseUrl, pollInvoiceStatus, onApiKeyCreated, balanceLimit, balanceLimitReset, validityDate]);
+  }, [
+    createAmount,
+    baseUrl,
+    pollInvoiceStatus,
+    onApiKeyCreated,
+    balanceLimit,
+    balanceLimitReset,
+    validityDate,
+  ]);
 
   const handleTopupInvoice = useCallback(async (): Promise<void> => {
     const amount = parseInt(topupAmount);

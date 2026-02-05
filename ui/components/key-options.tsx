@@ -55,7 +55,7 @@ export function KeyOptions({
         <select
           value={balanceLimitReset}
           onChange={(e) => setBalanceLimitReset(e.target.value)}
-          className='bg-background flex h-9 w-full rounded-md border border-input px-3 py-1 text-xs shadow-sm transition-colors'
+          className='bg-background border-input flex h-9 w-full rounded-md border px-3 py-1 text-xs shadow-sm transition-colors'
         >
           <option value=''>None</option>
           <option value='daily'>Daily</option>
