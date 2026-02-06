@@ -403,6 +403,7 @@ export function LightningPaymentWorkflow({
               setValidityDate={setValidityDate}
               balanceLimitReset={balanceLimitReset}
               setBalanceLimitReset={setBalanceLimitReset}
+              showBalanceLimit={false}
             />
 
             <div className='space-y-3'>

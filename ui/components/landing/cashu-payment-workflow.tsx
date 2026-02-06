@@ -314,6 +314,7 @@ export function CashuPaymentWorkflow({
               setValidityDate={setValidityDate}
               balanceLimitReset={balanceLimitReset}
               setBalanceLimitReset={setBalanceLimitReset}
+              showBalanceLimit={false}
             />
 
             <div className='flex flex-wrap items-center gap-3'>

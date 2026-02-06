@@ -8,6 +8,7 @@ interface KeyOptionsProps {
   setValidityDate: (val: string) => void;
   balanceLimitReset: string;
   setBalanceLimitReset: (val: string) => void;
+  showBalanceLimit?: boolean;
 }
 
 export function KeyOptions({
@@ -17,22 +18,25 @@ export function KeyOptions({
   setValidityDate,
   balanceLimitReset,
   setBalanceLimitReset,
+  showBalanceLimit = true,
 }: KeyOptionsProps) {
   return (
     <div className='grid gap-4 sm:grid-cols-3'>
-      <div className='space-y-2'>
-        <label className='text-muted-foreground flex items-center gap-1.5 text-[0.7rem] tracking-wider uppercase'>
-          <Zap className='h-3 w-3' />
-          Balance Limit (mSats)
-        </label>
-        <Input
-          type='number'
-          placeholder='No limit'
-          value={balanceLimit}
-          onChange={(e) => setBalanceLimit(e.target.value)}
-          className='h-9 text-xs'
-        />
-      </div>
+      {showBalanceLimit && (
+        <div className='space-y-2'>
+          <label className='text-muted-foreground flex items-center gap-1.5 text-[0.7rem] tracking-wider uppercase'>
+            <Zap className='h-3 w-3' />
+            Balance Limit (mSats)
+          </label>
+          <Input
+            type='number'
+            placeholder='No limit'
+            value={balanceLimit}
+            onChange={(e) => setBalanceLimit(e.target.value)}
+            className='h-9 text-xs'
+          />
+        </div>
+      )}
 
       <div className='space-y-2'>
         <label className='text-muted-foreground flex items-center gap-1.5 text-[0.7rem] tracking-wider uppercase'>
