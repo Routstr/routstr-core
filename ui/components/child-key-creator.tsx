@@ -12,7 +12,15 @@ import {
 } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { Key, Copy, Check, Loader2, RotateCcw, Plus, Trash2 } from 'lucide-react';
+import {
+  Key,
+  Copy,
+  Check,
+  Loader2,
+  RotateCcw,
+  Plus,
+  Trash2,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { KeyOptions } from './key-options';
@@ -252,7 +260,7 @@ export function ChildKeyCreator({
                     <Button
                       variant='ghost'
                       size='icon'
-                      className='absolute top-2 right-2 h-7 w-7 text-destructive hover:bg-destructive/10 hover:text-destructive'
+                      className='text-destructive hover:bg-destructive/10 hover:text-destructive absolute top-2 right-2 h-7 w-7'
                       onClick={() => removeConfig(config.id)}
                     >
                       <Trash2 className='h-4 w-4' />
@@ -271,7 +279,9 @@ export function ChildKeyCreator({
                         onChange={(e) => {
                           const val = parseInt(e.target.value);
                           updateConfig(config.id, {
-                            count: isNaN(val) ? 1 : Math.max(1, Math.min(50, val)),
+                            count: isNaN(val)
+                              ? 1
+                              : Math.max(1, Math.min(50, val)),
                           });
                         }}
                         className='h-9'
@@ -317,7 +327,10 @@ export function ChildKeyCreator({
                       Total Cost:{' '}
                       <span className='text-foreground font-medium'>
                         {costPerKeyMsats *
-                          configs.reduce((acc, c) => acc + Number(c.count), 0)}{' '}
+                          configs.reduce(
+                            (acc, c) => acc + Number(c.count),
+                            0
+                          )}{' '}
                         mSats
                       </span>
                     </p>
@@ -337,7 +350,12 @@ export function ChildKeyCreator({
                   ) : (
                     <>
                       <Key className='mr-2 h-4 w-4' />
-                      Generate {configs.reduce((acc, c) => acc + Number(c.count), 0)} Keys
+                      Generate{' '}
+                      {configs.reduce(
+                        (acc, c) => acc + Number(c.count),
+                        0
+                      )}{' '}
+                      Keys
                     </>
                   )}
                 </Button>
