@@ -55,9 +55,48 @@ async def get_temporary_balances_api(request: Request) -> list[dict[str, object]
             "refund_address": key.refund_address,
             "key_expiry_time": key.key_expiry_time,
             "parent_key_hash": key.parent_key_hash,
+            "balance_limit": key.balance_limit,
+            "balance_limit_reset": key.balance_limit_reset,
+            "validity_date": key.validity_date,
         }
         for key in api_keys
     ]
+
+
+class ApiKeyUpdate(BaseModel):
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
+
+
+@admin_router.patch(
+    "/api/apikeys/{hashed_key}", dependencies=[Depends(require_admin_api)]
+)
+async def update_apikey(
+    request: Request, hashed_key: str, update: ApiKeyUpdate
+) -> dict:
+    async with create_session() as session:
+        key = await session.get(ApiKey, hashed_key)
+        if not key:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        if update.balance_limit is not None:
+            key.balance_limit = update.balance_limit
+        if update.balance_limit_reset is not None:
+            key.balance_limit_reset = update.balance_limit_reset
+        if update.validity_date is not None:
+            key.validity_date = update.validity_date
+
+        session.add(key)
+        await session.commit()
+        await session.refresh(key)
+
+    return {
+        "hashed_key": key.hashed_key,
+        "balance_limit": key.balance_limit,
+        "balance_limit_reset": key.balance_limit_reset,
+        "validity_date": key.validity_date,
+    }
 
 
 @admin_router.get("/api/balances", dependencies=[Depends(require_admin_api)])

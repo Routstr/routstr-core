@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
+from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
 from ..nostr import announce_provider, providers_cache_refresher
 from ..nostr.discovery import providers_router
@@ -46,6 +47,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
+    key_reset_task = None
 
     try:
         # Run database migrations on startup
@@ -101,6 +103,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             nip91_task = asyncio.create_task(announce_provider())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
+        key_reset_task = asyncio.create_task(periodic_key_reset())
 
         yield
 
@@ -130,6 +133,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
+        if key_reset_task is not None:
+            key_reset_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -147,6 +152,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(models_refresh_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
+            if key_reset_task is not None:
+                tasks_to_wait.append(key_reset_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)

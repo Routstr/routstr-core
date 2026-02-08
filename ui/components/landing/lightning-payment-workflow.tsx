@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
+import { KeyOptions } from '@/components/key-options';
 
 type WalletSnapshot = {
   apiKey: string;
@@ -89,7 +90,10 @@ export function LightningPaymentWorkflow({
   const [isTopupping, setIsTopupping] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
 
-  const [hasInteractedCreate, setHasInteractedCreate] = useState(false);
+  const [balanceLimit, setBalanceLimit] = useState<string>('');
+  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
+  const [validityDate, setValidityDate] = useState<string>('');
+
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
   const [hasInteractedRecover, setHasInteractedRecover] = useState(false);
 
@@ -166,13 +170,29 @@ export function LightningPaymentWorkflow({
     setIsCreating(true);
 
     try {
+      const payload: {
+        amount_sats: number;
+        purpose: string;
+        balance_limit?: number;
+        balance_limit_reset?: string;
+        validity_date?: number;
+      } = {
+        amount_sats: amount,
+        purpose: 'create',
+      };
+
+      if (balanceLimit) payload.balance_limit = parseInt(balanceLimit);
+      if (balanceLimitReset) payload.balance_limit_reset = balanceLimitReset;
+      if (validityDate) {
+        payload.validity_date = Math.floor(
+          new Date(validityDate + 'T23:59:59').getTime() / 1000
+        );
+      }
+
       const response = await fetch(`${baseUrl}/v1/balance/lightning/invoice`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount_sats: amount,
-          purpose: 'create',
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -214,7 +234,15 @@ export function LightningPaymentWorkflow({
     } finally {
       setIsCreating(false);
     }
-  }, [createAmount, baseUrl, pollInvoiceStatus, onApiKeyCreated]);
+  }, [
+    createAmount,
+    baseUrl,
+    pollInvoiceStatus,
+    onApiKeyCreated,
+    balanceLimit,
+    balanceLimitReset,
+    validityDate,
+  ]);
 
   const handleTopupInvoice = useCallback(async (): Promise<void> => {
     const amount = parseInt(topupAmount);
@@ -333,14 +361,13 @@ export function LightningPaymentWorkflow({
     }
   }, [recoverInvoice, baseUrl, onApiKeyCreated]);
 
-  const showCreateDetails =
-    hasInteractedCreate || createAmount.trim().length > 0;
   const showTopupDetails =
     hasInteractedTopup ||
     topupAmount.trim().length > 0 ||
     topupApiKey.trim().length > 0;
   const showRecoverDetails =
     hasInteractedRecover || recoverInvoice.trim().length > 0;
+  const showCreateDetails = createAmount.trim().length > 0;
 
   return (
     <Card>
@@ -367,9 +394,18 @@ export function LightningPaymentWorkflow({
             onChange={(event) => setCreateAmount(event.target.value)}
             placeholder='Amount in sats (e.g., 1000)'
             className='text-sm'
-            onFocus={() => setHasInteractedCreate(true)}
           />
-          {showCreateDetails && (
+          <div className='space-y-4'>
+            <KeyOptions
+              balanceLimit={balanceLimit}
+              setBalanceLimit={setBalanceLimit}
+              validityDate={validityDate}
+              setValidityDate={setValidityDate}
+              balanceLimitReset={balanceLimitReset}
+              setBalanceLimitReset={setBalanceLimitReset}
+              showBalanceLimit={false}
+            />
+
             <div className='space-y-3'>
               <Button
                 onClick={handleCreateInvoice}
@@ -473,7 +509,7 @@ export function LightningPaymentWorkflow({
                 </div>
               )}
             </div>
-          )}
+          </div>
         </section>
 
         <Separator />
