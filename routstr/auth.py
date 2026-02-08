@@ -151,7 +151,7 @@ async def validate_bearer_key(
 
             # Early check: Billing balance check (Parent balance)
             billing_key = await get_billing_key(existing_key, session)
-            if billing_key.total_balance < min_cost:
+            if min_cost > 0 and billing_key.total_balance < min_cost:
                 logger.warning(
                     "Insufficient billing balance during validation",
                     extra={
@@ -174,7 +174,8 @@ async def validate_bearer_key(
 
             # Early check: Spending limit check (Child key limit)
             if (
-                existing_key.balance_limit is not None
+                min_cost > 0
+                and existing_key.balance_limit is not None
                 and existing_key.total_spent + existing_key.reserved_balance + min_cost
                 > existing_key.balance_limit
             ):
