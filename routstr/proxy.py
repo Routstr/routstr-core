@@ -17,6 +17,7 @@ from .core.db import (
     get_session,
 )
 from .core.exceptions import UpstreamError
+from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -176,6 +177,9 @@ async def proxy(
     max_cost_for_model = await calculate_discounted_max_cost(
         _max_cost_for_model, request_body_dict, model_obj=model_obj
     )
+    # Ensure max_cost_for_model is at least the minimum allowed request cost
+    max_cost_for_model = max(max_cost_for_model, settings.min_request_msat)
+
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
     if x_cashu := headers.get("x-cashu", None):
@@ -206,7 +210,9 @@ async def proxy(
         )
 
     elif auth := headers.get("authorization", None):
-        key = await get_bearer_token_key(headers, path, session, auth)
+        key = await get_bearer_token_key(
+            headers, path, session, auth, max_cost_for_model
+        )
 
     else:
         if request.method not in ["GET"]:
@@ -367,7 +373,7 @@ async def proxy(
 
 
 async def get_bearer_token_key(
-    headers: dict, path: str, session: AsyncSession, auth: str
+    headers: dict, path: str, session: AsyncSession, auth: str, min_cost: int = 0
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
     bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
@@ -383,6 +389,7 @@ async def get_bearer_token_key(
             "bearer_key_preview": bearer_key[:20] + "..."
             if len(bearer_key) > 20
             else bearer_key,
+            "min_cost": min_cost,
         },
     )
 
@@ -421,6 +428,7 @@ async def get_bearer_token_key(
             session,
             refund_address,
             key_expiry_time,  # type: ignore
+            min_cost=min_cost,
         )
         logger.info(
             "Bearer token validated successfully",

@@ -12,10 +12,18 @@ import {
 } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { Key, Copy, Check, Loader2, RotateCcw } from 'lucide-react';
+import { Key, Copy, Check, Loader2, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { KeyOptions } from './key-options';
+
+interface KeyConfig {
+  id: string;
+  count: number;
+  balanceLimit: string;
+  balanceLimitReset: string;
+  validityDate: string;
+}
 
 interface ChildKeyCreatorProps {
   baseUrl?: string;
@@ -32,10 +40,15 @@ export function ChildKeyCreator({
 }: ChildKeyCreatorProps) {
   const [internalApiKey, setInternalApiKey] = useState('');
   const [loading, setLoading] = useState(false);
-  const [count, setCount] = useState(1);
-  const [balanceLimit, setBalanceLimit] = useState<string>('');
-  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
-  const [validityDate, setValidityDate] = useState<string>('');
+  const [configs, setConfigs] = useState<KeyConfig[]>([
+    {
+      id: crypto.randomUUID(),
+      count: 1,
+      balanceLimit: '',
+      balanceLimitReset: '',
+      validityDate: '',
+    },
+  ]);
   const [childKeyToCheck, setChildKeyToCheck] = useState('');
   const [checking, setChecking] = useState(false);
   const [keyStatus, setKeyStatus] = useState<{
@@ -59,43 +72,72 @@ export function ChildKeyCreator({
     onApiKeyChange?.(val);
   };
 
+  const addConfig = () => {
+    setConfigs([
+      ...configs,
+      {
+        id: crypto.randomUUID(),
+        count: 1,
+        balanceLimit: '',
+        balanceLimitReset: '',
+        validityDate: '',
+      },
+    ]);
+  };
+
+  const removeConfig = (id: string) => {
+    if (configs.length > 1) {
+      setConfigs(configs.filter((c) => c.id !== id));
+    }
+  };
+
+  const updateConfig = (id: string, updates: Partial<KeyConfig>) => {
+    setConfigs(configs.map((c) => (c.id === id ? { ...c, ...updates } : c)));
+  };
+
   const handleCreateKey = async () => {
     if (!activeApiKey && baseUrl) {
       toast.error('Please provide a Parent API key first');
       return;
     }
 
-    const requestedCount = Math.max(1, Math.min(50, Number(count)));
-
     setLoading(true);
     try {
-      const result = await WalletService.createChildKey(
-        baseUrl,
-        activeApiKey,
-        requestedCount,
-        balanceLimit ? parseInt(balanceLimit) : undefined,
-        balanceLimitReset || undefined,
-        validityDate
-          ? Math.floor(new Date(validityDate + 'T23:59:59').getTime() / 1000)
-          : undefined
-      );
+      let allNewKeys: string[] = [];
+      let totalCost = 0;
+      let lastParentBalance = 0;
 
-      console.log('Created child keys:', result);
+      for (const config of configs) {
+        const requestedCount = Math.max(1, Math.min(50, Number(config.count)));
+        const result = await WalletService.createChildKey(
+          baseUrl,
+          activeApiKey,
+          requestedCount,
+          config.balanceLimit ? parseInt(config.balanceLimit) : undefined,
+          config.balanceLimitReset || undefined,
+          config.validityDate
+            ? Math.floor(
+                new Date(config.validityDate + 'T23:59:59').getTime() / 1000
+              )
+            : undefined
+        );
 
-      if (result.api_keys && result.api_keys.length > 0) {
-        setNewKeys(result.api_keys);
-      } else {
-        throw new Error('No API keys returned from server');
+        if (result.api_keys) {
+          allNewKeys = [...allNewKeys, ...result.api_keys];
+        }
+        totalCost += result.cost_msats;
+        lastParentBalance = result.parent_balance;
       }
 
+      setNewKeys(allNewKeys);
       setResultInfo({
-        cost_msats: result.cost_msats,
-        parent_balance: result.parent_balance,
+        cost_msats: totalCost,
+        parent_balance: lastParentBalance,
       });
 
       toast.success(
-        `${requestedCount} child API key${
-          requestedCount > 1 ? 's' : ''
+        `${allNewKeys.length} child API key${
+          allNewKeys.length > 1 ? 's' : ''
         } created successfully`
       );
     } catch (error) {
@@ -201,54 +243,82 @@ export function ChildKeyCreator({
             )}
 
             <div className='flex flex-col gap-6'>
-              <div className='flex flex-col gap-4 sm:flex-row sm:items-end'>
-                <div className='w-full space-y-2 sm:w-32'>
-                  <div className='flex items-center justify-between'>
-                    <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
-                      Number of keys
-                    </label>
-                  </div>
-                  <Input
-                    type='number'
-                    min={1}
-                    max={50}
-                    value={count}
-                    onChange={(e) => {
-                      const val = parseInt(e.target.value);
-                      if (!isNaN(val)) {
-                        setCount(Math.max(1, Math.min(50, val)));
-                      } else {
-                        setCount(1);
-                      }
-                    }}
-                    className='h-9'
-                  />
-                </div>
+              {configs.map((config, index) => (
+                <div
+                  key={config.id}
+                  className='bg-muted/30 relative space-y-4 rounded-lg border p-4 pt-6'
+                >
+                  {configs.length > 1 && (
+                    <Button
+                      variant='ghost'
+                      size='icon'
+                      className='absolute top-2 right-2 h-7 w-7 text-destructive hover:bg-destructive/10 hover:text-destructive'
+                      onClick={() => removeConfig(config.id)}
+                    >
+                      <Trash2 className='h-4 w-4' />
+                    </Button>
+                  )}
+                  <div className='flex flex-col gap-4 sm:flex-row sm:items-end'>
+                    <div className='w-full space-y-2 sm:w-32'>
+                      <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                        Number of keys
+                      </label>
+                      <Input
+                        type='number'
+                        min={1}
+                        max={50}
+                        value={config.count}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value);
+                          updateConfig(config.id, {
+                            count: isNaN(val) ? 1 : Math.max(1, Math.min(50, val)),
+                          });
+                        }}
+                        className='h-9'
+                      />
+                    </div>
 
-                <div className='flex-1'>
-                  <KeyOptions
-                    balanceLimit={balanceLimit}
-                    setBalanceLimit={setBalanceLimit}
-                    validityDate={validityDate}
-                    setValidityDate={setValidityDate}
-                    balanceLimitReset={balanceLimitReset}
-                    setBalanceLimitReset={setBalanceLimitReset}
-                  />
+                    <div className='flex-1'>
+                      <KeyOptions
+                        balanceLimit={config.balanceLimit}
+                        setBalanceLimit={(val) =>
+                          updateConfig(config.id, { balanceLimit: val })
+                        }
+                        validityDate={config.validityDate}
+                        setValidityDate={(val) =>
+                          updateConfig(config.id, { validityDate: val })
+                        }
+                        balanceLimitReset={config.balanceLimitReset}
+                        setBalanceLimitReset={(val) =>
+                          updateConfig(config.id, { balanceLimitReset: val })
+                        }
+                      />
+                    </div>
+                  </div>
                 </div>
+              ))}
+
+              <div className='flex justify-center'>
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={addConfig}
+                  className='gap-2 border-dashed'
+                >
+                  <Plus className='h-4 w-4' />
+                  Add Another Configuration
+                </Button>
               </div>
 
               <div className='flex flex-wrap items-center justify-between gap-4'>
                 <div className='text-muted-foreground text-xs'>
                   {costPerKeyMsats && (
                     <p>
-                      Cost:{' '}
+                      Total Cost:{' '}
                       <span className='text-foreground font-medium'>
-                        {costPerKeyMsats * count} mSats
-                      </span>
-                      <span className='mx-2 opacity-50'>|</span>
-                      Unit Cost:{' '}
-                      <span className='text-foreground font-medium'>
-                        {costPerKeyMsats / 1000} sats
+                        {costPerKeyMsats *
+                          configs.reduce((acc, c) => acc + Number(c.count), 0)}{' '}
+                        mSats
                       </span>
                     </p>
                   )}
@@ -267,7 +337,7 @@ export function ChildKeyCreator({
                   ) : (
                     <>
                       <Key className='mr-2 h-4 w-4' />
-                      Generate {count > 1 ? `${count} Keys` : 'Key'}
+                      Generate {configs.reduce((acc, c) => acc + Number(c.count), 0)} Keys
                     </>
                   )}
                 </Button>
