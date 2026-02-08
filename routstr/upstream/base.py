@@ -427,7 +427,11 @@ class BaseUpstreamProvider:
         )
 
     async def handle_streaming_chat_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        max_cost_for_model: int,
+        background_tasks: BackgroundTasks,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -534,7 +538,14 @@ class BaseUpstreamProvider:
                                 }
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
-                            except Exception:
+                            except Exception as e:
+                                logger.exception(
+                                    "Error during usage finalization",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(e),
+                                    },
+                                )
                                 # Fallback: yield original usage chunk if adjustment fails
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
 
@@ -555,7 +566,9 @@ class BaseUpstreamProvider:
                 raise
             finally:
                 if not usage_finalized:
-                    await finalize_db_only()
+                    # Create a background task to ensure finalization happens
+                    # even if the generator is closed early
+                    background_tasks.add_task(finalize_db_only)
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -1136,12 +1149,12 @@ class BaseUpstreamProvider:
                     )
 
                     if is_streaming and response.status_code == 200:
-                        result = await self.handle_streaming_chat_completion(
-                            response, key, max_cost_for_model
-                        )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
                         background_tasks.add_task(client.aclose)
+                        result = await self.handle_streaming_chat_completion(
+                            response, key, max_cost_for_model, background_tasks
+                        )
                         result.background = background_tasks
                         return result
 
