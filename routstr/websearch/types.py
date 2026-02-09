@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
 from enum import StrEnum
-
+from typing import Dict, List, Optional
 
 
 class RAGProvider(StrEnum):
@@ -58,3 +57,14 @@ class SearchResult:
     summary: Optional[str] = None
     timestamp: Optional[str] = None
     time_ms: Optional[Dict[str, int]] = field(default_factory=dict)
+
+
+@dataclass
+class WebSearchContext:
+    """Context information about a web search/RAG operation.
+
+    Used to pass RAG-related metadata through the request processing pipeline.
+    """
+
+    executed: bool = False
+    sources: Dict[str, str] = field(default_factory=dict)

@@ -1,6 +1,6 @@
 import logging
 from dataclasses import replace
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import httpx
 
@@ -11,8 +11,11 @@ from .types import WebPage
 logger = get_logger(__name__)
 
 TRAFILATURA_AVAILABLE = False
+trafilatura: Any = None
 try:
-    import trafilatura
+    import trafilatura as tf
+
+    trafilatura = tf
 
     logging.getLogger("trafilatura").setLevel(logging.WARNING)
     logging.getLogger("htmldate").setLevel(logging.WARNING)
@@ -20,7 +23,6 @@ try:
     TRAFILATURA_AVAILABLE = True
 except ImportError:
     logger.warning("Trafilatura not installed. Content extraction will be unavailable.")
-    trafilatura = None
 
 
 class HTTPWebScraper(BaseWebScraper):
@@ -131,7 +133,7 @@ class HTTPWebScraper(BaseWebScraper):
             meta_data = trafilatura.extract_metadata(
                 html, default_url=webpage.url, extensive=True
             )
-            
+
             content = trafilatura.extract(
                 html,
                 favor_precision=True,

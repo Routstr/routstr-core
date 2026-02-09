@@ -3,7 +3,6 @@ from dataclasses import replace
 from typing import Dict, List, Set
 
 from ..core.logging import get_logger
-from ..core.settings import settings
 from .base_ranker import BaseRanker
 from .types import SearchResult
 
@@ -25,20 +24,21 @@ class BM25Ranker(BaseRanker):
     """
 
     def __init__(self, max_chunks_per_source: int = 5) -> None:
-        super().__init__(provider_name="bm25", max_chunks_per_source=max_chunks_per_source)
+        super().__init__(
+            provider_name="bm25", max_chunks_per_source=max_chunks_per_source
+        )
 
         # Number of selected Chunks per Website during _rank_local
         # This acts as an upperlimit as _rank_global removes the most irrelevant chunks
         self.local_k = max_chunks_per_source
 
         # Number of overall selected Chunks during _rank_global
-        # TODO: Maybe move this to a setting? 
+        # TODO: Maybe move this to a setting?
         self.global_k = 20
 
     async def check_availability(self) -> bool:
         """Returns True if rank_bm25 is installed and available."""
         return RANK_BM25_AVAILABLE
-
 
     async def rank(self, search_result: SearchResult, query: str) -> SearchResult:
         """
@@ -51,11 +51,7 @@ class BM25Ranker(BaseRanker):
 
         logger.info(
             f"Ranking results for query: '{query}'",
-            extra={
-                "query": query,
-                "local_k": self.local_k,
-                "global_k": self.global_k
-            }
+            extra={"query": query, "local_k": self.local_k, "global_k": self.global_k},
         )
 
         # Statistics Tracking
@@ -146,7 +142,7 @@ class BM25Ranker(BaseRanker):
         report_lines = [
             f"RANKING REPORT | Query: '{query}'",
             f"{'Source URL':<40} | {'Start':<5} | {'L-Keep':<6} | {'FINAL'}",
-            "-" * 70
+            "-" * 70,
         ]
 
         total_start = total_l_keep = total_final = 0
@@ -161,11 +157,15 @@ class BM25Ranker(BaseRanker):
             display_url = url.replace("https://", "").replace("http://", "")
             if len(display_url) > 37:
                 display_url = display_url[:37] + "..."
-            
-            report_lines.append(f"{display_url:<40} | {initial:<5} | {l_keep:<6} | {final}")
+
+            report_lines.append(
+                f"{display_url:<40} | {initial:<5} | {l_keep:<6} | {final}"
+            )
 
         report_lines.append("-" * 70)
-        report_lines.append(f"{'TOTALS':<40} | {total_start:<5} | {total_l_keep:<6} | {total_final}")
-        
+        report_lines.append(
+            f"{'TOTALS':<40} | {total_start:<5} | {total_l_keep:<6} | {total_final}"
+        )
+
         logger.info("BM25 Ranking completed", extra={"ranking_stats": stats})
         logger.debug("\n".join(report_lines))

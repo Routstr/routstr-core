@@ -5,17 +5,18 @@ from typing import Any, Optional, Tuple
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .base_chunker import BaseChunker
-from .base_web_rag import BaseWebRAG
 from .base_ranker import BaseRanker
+from .base_web_rag import BaseWebRAG
 from .base_web_scraper import BaseWebScraper
 from .base_web_searcher import BaseWebSearcher
 from .custom_web_rag import CustomRAG
 from .types import (
-    RAGProvider,
-    SearchResult,
     ChunkProvider,
+    RAGProvider,
     RankProvider,
+    SearchResult,
     WebScrapeProvider,
+    WebSearchContext,
     WebSearchProvider,
 )
 
@@ -42,8 +43,7 @@ class WebManager:
             return False
         return settings.web_rag_provider.lower() != RAGProvider.DISABLED
 
-
-    # TODO: How can we simplify the get_XXX_provider() logic 
+    # TODO: How can we simplify the get_XXX_provider() logic
     async def get_rag_provider(self) -> Optional[BaseWebRAG]:
         """
         Get RAG provider based on RAG_PROVIDER configuration.
@@ -74,7 +74,9 @@ class WebManager:
                 try:
                     from .tavily_web_rag import TavilyWebRAG
 
-                    if not settings.tavily_api_key:  # TODO: I could move this to the init function
+                    if (
+                        not settings.tavily_api_key
+                    ):  # TODO: I could move this to the init function
                         logger.warning(
                             "Tavily selected as RAG provider but no API key configured"
                         )
@@ -191,7 +193,9 @@ class WebManager:
                     from .serper_web_searcher import SerperWebSearcher
 
                     if not settings.serper_api_key:
-                        logger.warning("Serper provider selected but no API key configured")
+                        logger.warning(
+                            "Serper provider selected but no API key configured"
+                        )
                         return None
                     self._search_provider = SerperWebSearcher(
                         api_key=settings.serper_api_key
@@ -277,7 +281,7 @@ class WebManager:
             case ChunkProvider.RECURSIVE:
                 try:
                     from .recursive_chunker import RecursiveChunker
-                    
+
                     self._chunker_provider = RecursiveChunker(
                         chunk_size=settings.max_chunk_size
                     )
@@ -314,7 +318,9 @@ class WebManager:
                 try:
                     from .bm25_ranker import BM25Ranker
 
-                    self._rank_provider = BM25Ranker(max_chunks_per_source = settings.max_chunks_per_source)
+                    self._rank_provider = BM25Ranker(
+                        max_chunks_per_source=settings.max_chunks_per_source
+                    )
                     return self._rank_provider
                 except Exception as e:
                     logger.error(f"Failed to initialize BM25WebRank: {e}")
@@ -336,22 +342,22 @@ class WebManager:
         Returns:
             Dict containing:
             - 'body': Enhanced request body as bytes with injected context.
-            - 'sources': Dict mapping source IDs to URLs.
-            - 'success': Boolean indicating if RAG yielded results.
+            - 'websearchcontext': WebSearchContext object containing sources and execution status.
         """
+        context = WebSearchContext()
         try:
             # Get configured RAG provider (all-in-one or custom)
             rag_provider = await self.get_rag_provider()
 
             if not rag_provider:
                 logger.warning("No RAG provider available, cannot enhance request")
-                return {"body": request_body, "sources": {}, "success": False}
+                return {"body": request_body, "websearchcontext": context}
 
             # Extract query from request
             extracted_query = WebManager.extract_query_from_request_body(request_body)
 
             if not extracted_query:
-                return {"body": request_body, "sources": {}, "success": False}
+                return {"body": request_body, "websearchcontext": context}
 
             # Perform complete RAG pipeline (handles all complexity internally)
             max_web_searches = settings.web_search_max_results
@@ -361,16 +367,16 @@ class WebManager:
 
             # Log precise timing summary
             timings = search_result.time_ms
-            total_time = timings.get("total", "N/A")
-            
+            total_time = timings.get("total", "N/A") if timings else "N/A"
+
             logger.info(
                 f"RAG [{rag_provider.provider_name}] completed in {total_time}ms",
                 extra={
                     "provider": rag_provider.provider_name,
                     "query": extracted_query,
                     "timings_ms": timings,
-                    "result_count": len(search_result.webpages) if search_result else 0
-                }
+                    "result_count": len(search_result.webpages) if search_result else 0,
+                },
             )
 
             # Inject context into request
@@ -379,8 +385,11 @@ class WebManager:
             )
 
             # If we have results, it's a success
-            success = bool(search_result and search_result.webpages)
-            return {"body": enhanced_body, "sources": sources, "success": success}
+            if search_result and search_result.webpages:
+                context.executed = True
+                context.sources = sources
+
+            return {"body": enhanced_body, "websearchcontext": context}
 
         except Exception as e:
             logger.error(
@@ -391,7 +400,7 @@ class WebManager:
                     "rag_provider": settings.web_rag_provider,
                 },
             )
-            return {"body": request_body, "sources": {}, "success": False}
+            return {"body": request_body, "websearchcontext": context}
 
     @staticmethod
     def extract_web_search_parameter(body: bytes | None) -> Tuple[bytes | None, bool]:
@@ -489,7 +498,9 @@ class WebManager:
         web_context = WebManager.generate_xml_context(search_result, query)
 
         # TODO: This adds a lot of data to the logs. Remove?
-        logger.debug("Generated web context for injection", extra={"web_context": web_context})
+        logger.debug(
+            "Generated web context for injection", extra={"web_context": web_context}
+        )
 
         # Parse and enhance the request
         try:
@@ -519,23 +530,24 @@ class WebManager:
 
             enhanced_request_body = json.dumps(request_data).encode("utf-8")
             logger.info(f"Successfully injected web context for query: '{query}'")
-            #print(enhanced_request_body[:500])
+            # print(enhanced_request_body[:500])
             return enhanced_request_body, sources
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse request body for context injection: {e}")
-            return request_body, {} # Return no sources on Failure
+            return request_body, {}  # Return no sources on Failure
         except Exception as e:
             logger.error(f"Unexpected error during context injection: {e}")
-            return request_body, {} # Return no sources on Failure
-
+            return request_body, {}  # Return no sources on Failure
 
     @staticmethod
     def generate_xml_context(search_result: SearchResult, query: str) -> str:
         """Helper to build the structured XML string."""
         parts = ["<search_results>"]
-        parts.append(f"Websearch yielded {len(search_result.webpages)} results for query: '{query}'")
-        
+        parts.append(
+            f"Websearch yielded {len(search_result.webpages)} results for query: '{query}'"
+        )
+
         if search_result.summary:
             parts.append(f"<search_summary>{search_result.summary}</search_summary>")
 
@@ -543,10 +555,10 @@ class WebManager:
             res_block = [f'<source id="{i}">']
             res_block.append(f"  <title>{page.title or 'No Title'}</title>")
             res_block.append(f"  <url>{page.url}</url>")
-            
+
             if page.publication_date:
                 res_block.append(f"  <published>{page.publication_date}</published>")
-            
+
             if page.summary:
                 res_block.append(f" <summary>{page.summary}</summary>")
 
@@ -554,8 +566,10 @@ class WebManager:
                 content = " [...] ".join(page.chunks)
                 res_block.append(f"  <content> {content} </content>")
             else:
-                res_block.append("  <error>No extractable content available for this source.</error>")
-                
+                res_block.append(
+                    "  <error>No extractable content available for this source.</error>"
+                )
+
             res_block.append("</source>")
             parts.append("\n".join(res_block))
 
@@ -571,9 +585,9 @@ class WebManager:
         for instr in instructions:
             parts.append(f"  <instruction>{instr}</instruction>")
         parts.append("</instructions>")
-        
+
         parts.append("</search_results>")
-            
+
         return "\n".join(parts)
 
 

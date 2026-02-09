@@ -6,7 +6,7 @@ Base class for Web search for AI context enhancement using Retrieval Augmented G
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from urllib.parse import urlparse
 
 from ..core.logging import get_logger
@@ -68,7 +68,7 @@ class BaseWebSearcher(ABC):
         # Remove 'www.' if present to ensure matching
         if domain.startswith("www."):
             domain = domain[4:]
-        #if domain in self.EXCLUDE_DOMAINS:
+        # if domain in self.EXCLUDE_DOMAINS:
         #    print(f"URL in excluded list: {url}")  # TODO: DEBUG Print
         return domain in self.EXCLUDE_DOMAINS
 

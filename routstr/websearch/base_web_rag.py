@@ -9,8 +9,7 @@ AI context enhancement.
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict, Optional
-
+from typing import Any, Dict
 
 from ..core.logging import get_logger
 from .types import SearchResult

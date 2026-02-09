@@ -12,8 +12,8 @@ from typing import Any, Dict
 
 from ..core.logging import get_logger
 from .base_web_rag import BaseWebRAG
-from .types import SearchResult, WebPage
 from .http_client import HTTPClient
+from .types import SearchResult, WebPage
 
 logger = get_logger(__name__)
 
@@ -37,13 +37,11 @@ class ExaWebRAG(BaseWebRAG):
         """
         super().__init__()
 
-        
         if not api_key:
             raise ValueError("Exa API key cannot be empty.")
 
         self.client = HTTPClient(
-            base_url="https://api.exa.ai",
-            default_headers={"x-api-key": api_key}
+            base_url="https://api.exa.ai", default_headers={"x-api-key": api_key}
         )
 
         self.api_key = api_key
@@ -68,19 +66,19 @@ class ExaWebRAG(BaseWebRAG):
         start_time = datetime.now()
         logger.info(
             f"Performing Exa API search for: '{query}'",
-            extra={"query": query, "max_results": max_results}
+            extra={"query": query, "max_results": max_results},
         )
 
         try:
             # --- MOCK DATA FOR TESTING ---
             api_response = await self._load_mock_data(
                 "exa_What_happend_between_the_US_and_Venezuela_20260116_122619.json"
-                #"exa_what_is_the_latest_news_about_the_Donald_Trump_peace_deal_Which_websites_did_you_search_be_brief_20251219_163302.json"
+                # "exa_what_is_the_latest_news_about_the_Donald_Trump_peace_deal_Which_websites_did_you_search_be_brief_20251219_163302.json"
                 # exa_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_145745.json
             )
             # ---------------------------------------------------------------
-            #api_response = await self._call_exa_api(query, max_results)
-            #await self._save_api_response(api_response, query, "exa")
+            # api_response = await self._call_exa_api(query, max_results)
+            # await self._save_api_response(api_response, query, "exa")
             # ---------------------------------------------------------------
 
             total_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -98,7 +96,7 @@ class ExaWebRAG(BaseWebRAG):
             raise Exception(error_msg)
 
     def _map_to_search_result(
-        self, api_response: Dict[str, Any], query: str, total_ms: int 
+        self, api_response: Dict[str, Any], query: str, total_ms: int
     ) -> SearchResult:
         """
         Map Exa API response to a SearchResult object.
@@ -138,8 +136,8 @@ class ExaWebRAG(BaseWebRAG):
             extra={
                 "query": query,
                 "result_count": len(parsed_results),
-                "total_ms": total_ms
-            }
+                "total_ms": total_ms,
+            },
         )
 
         return SearchResult(
@@ -199,7 +197,6 @@ class ExaWebRAG(BaseWebRAG):
             "category": None,
         }
 
-
         # Make the API request
         return await self.client.post(url="/search", json_data=payload)
 
@@ -211,7 +208,7 @@ class ExaWebRAG(BaseWebRAG):
 
         Makes a lightweight call to Exa's health endpoint to confirm:
         - Service is accessible and operational
-        
+
         Exa's /health endpoint returns the string "I am healthy." if healthy
 
         Returns:
@@ -220,10 +217,7 @@ class ExaWebRAG(BaseWebRAG):
         logger.debug("Checking Exa API availability")
 
         try:
-            await self.client.get(
-                url="/health",
-                return_json=False 
-            )
+            await self.client.get(url="/health", return_json=False)
             return True
         except Exception as e:
             logger.error(f"Exa availability check failed: {e}")

@@ -12,8 +12,8 @@ from typing import Dict
 
 from ..core.logging import get_logger
 from .base_chunker import BaseChunker
-from .base_web_rag import BaseWebRAG
 from .base_ranker import BaseRanker
+from .base_web_rag import BaseWebRAG
 from .base_web_scraper import BaseWebScraper
 from .base_web_searcher import BaseWebSearcher
 from .types import SearchResult
@@ -93,15 +93,16 @@ class CustomRAG(BaseWebRAG):
         timings: Dict[str, int] = {}
         logger.info(
             f"Starting CustomRAG pipeline for query: '{query}'",
-            extra={"query": query, "max_results": max_results}
+            extra={"query": query, "max_results": max_results},
         )
 
         try:
             # Search
             stage_start = datetime.now()
             search_response = await self.search_provider.search(query, max_results)
-            timings["search"] = int((datetime.now() - stage_start).total_seconds() * 1000)
-
+            timings["search"] = int(
+                (datetime.now() - stage_start).total_seconds() * 1000
+            )
 
             if not search_response.webpages:
                 logger.warning(f"No search results found for query: '{query}'")
@@ -112,17 +113,21 @@ class CustomRAG(BaseWebRAG):
                     time_ms=timings,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 )
-            
+
             # SCRAPE
             stage_start = datetime.now()
             search_response = await self.scraper_provider.scrape_search_results(
                 search_response
             )
-            timings["scrape"] = int((datetime.now() - stage_start).total_seconds() * 1000)
+            timings["scrape"] = int(
+                (datetime.now() - stage_start).total_seconds() * 1000
+            )
 
             # 3. CHUNK
             step_start = datetime.now()
-            search_response = await self.chunker_provider.chunk_search_results(search_response)
+            search_response = await self.chunker_provider.chunk_search_results(
+                search_response
+            )
             timings["chunk"] = int((datetime.now() - step_start).total_seconds() * 1000)
 
             step_start = datetime.now()
@@ -130,15 +135,17 @@ class CustomRAG(BaseWebRAG):
             timings["rank"] = int((datetime.now() - step_start).total_seconds() * 1000)
 
             # Calculate total pipeline time
-            timings["total"] = int((datetime.now() - pipeline_start).total_seconds() * 1000)
+            timings["total"] = int(
+                (datetime.now() - pipeline_start).total_seconds() * 1000
+            )
 
             logger.info(
                 f"CustomRAG pipeline completed: {len(search_response.webpages)} results in {timings['total']}ms",
                 extra={
                     "query": query,
                     "result_count": len(search_response.webpages),
-                    "timings_ms": timings
-                }
+                    "timings_ms": timings,
+                },
             )
 
             # Update timing metadata and return a new object

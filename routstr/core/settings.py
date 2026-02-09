@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from pydantic.v1 import BaseModel, BaseSettings, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -75,12 +75,12 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
 
-    ## RAG Configuration #TODO: Rename some? 
+    ## RAG Configuration #TODO: Rename some?
     web_rag_provider: str = Field(default="disabled", env="WEB_RAG_PROVIDER")
     tavily_api_key: str = Field(default="", env="TAVILY_API_KEY")
     exa_api_key: str = Field(default="", env="EXA_API_KEY")
     web_search_max_results: int = Field(default=5, env="WEB_SEARCH_MAX_RESULTS")
-    web_search_fixed_cost: int = Field(default=10, env="WEB_SEARCH_FIXED_COST") 
+    web_search_fixed_cost: int = Field(default=10, env="WEB_SEARCH_FIXED_COST")
 
     # Custom RAG (only used when web_rag_provider = "custom")
     web_search_provider: str = Field(default="", env="WEB_SEARCH_PROVIDER")
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     web_scraper_provider: str = Field(default="http", env="WEB_SCRAPER_PROVIDER")
 
     web_chunker_provider: str = Field(default="recursive", env="WEB_CHUNKER_PROVIDER")
-    max_chunk_size: int = Field(default=500, env="MAX_CHUNK_SIZE") 
+    max_chunk_size: int = Field(default=500, env="MAX_CHUNK_SIZE")
     max_chunks_per_source: int = Field(default=5, env="MAX_CHUNKS_PER_SOURCE")
     web_ranking_provider: str = Field(default="bm25", env="WEB_RANKING_PROVIDER")
 

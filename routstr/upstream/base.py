@@ -1,11 +1,11 @@
 from __future__ import annotations
-import time
+
 import asyncio
 import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
@@ -14,7 +14,6 @@ from fastapi.responses import Response, StreamingResponse
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, create_session
-from ..core.settings import settings
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -34,7 +33,8 @@ from ..payment.models import (
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
-from ..websearch.web_manager import web_manager, WebManager
+from ..websearch.types import WebSearchContext
+from ..websearch.web_manager import WebManager, web_manager
 
 logger = get_logger(__name__)
 
@@ -343,8 +343,7 @@ class BaseUpstreamProvider:
         response: httpx.Response,
         key: ApiKey,
         max_cost_for_model: int,
-        web_search_executed: bool = False,
-        sources: dict[str, str] | None = None,
+        web_context: WebSearchContext = WebSearchContext(),
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -352,6 +351,7 @@ class BaseUpstreamProvider:
             response: Streaming response from upstream
             key: API key for the authenticated user
             max_cost_for_model: Maximum cost deducted upfront for the model
+            web_context: Context object containing web search results
 
         Returns:
             StreamingResponse with cost data injected at the end
@@ -384,10 +384,13 @@ class BaseUpstreamProvider:
                         fallback: dict = {
                             "model": last_model_seen or "unknown",
                             "usage": None,
-                            "web_search_executed": web_search_executed,
                         }
                         cost_data = await adjust_payment_for_tokens(
-                            fresh_key, fallback, new_session, max_cost_for_model
+                            fresh_key,
+                            fallback,
+                            new_session,
+                            max_cost_for_model,
+                            web_context=web_context,
                         )
                         usage_finalized = True
                         logger.info(
@@ -400,8 +403,8 @@ class BaseUpstreamProvider:
                         )
 
                         final_payload = {"cost": cost_data}
-                        if sources:
-                            final_payload["sources"] = sources
+                        if web_context.sources:
+                            final_payload["sources"] = web_context.sources
 
                         return f"data: {json.dumps(final_payload)}\n\n".encode()
                     except Exception as cost_error:
@@ -463,19 +466,13 @@ class BaseUpstreamProvider:
                                         )
                                         if fresh_key:
                                             try:
-                                                # Add web_search_executed flag for cost calculation
-                                                if (
-                                                    web_search_executed
-                                                    and "web_search_executed" not in data
-                                                ):
-                                                    data["web_search_executed"] = True
-
                                                 cost_data = (
                                                     await adjust_payment_for_tokens(
                                                         fresh_key,
                                                         data,
                                                         new_session,
                                                         max_cost_for_model,
+                                                        web_context=web_context,
                                                     )
                                                 )
                                                 usage_finalized = True
@@ -489,13 +486,18 @@ class BaseUpstreamProvider:
                                                     },
                                                 )
 
-                                                final_payload = {"cost": cost_data}
+                                                final_payload: dict[str, Any] = {
+                                                    "cost": cost_data
+                                                }
 
-                                                if web_search_executed:
-                                                    final_payload["web_search_executed"] = True
-                                                if sources:
-                                                    final_payload["sources"] = sources
-
+                                                if web_context.executed:
+                                                    final_payload[
+                                                        "web_search_executed"
+                                                    ] = True
+                                                if web_context.sources:
+                                                    final_payload["sources"] = (
+                                                        web_context.sources
+                                                    )
 
                                                 yield f"data: {json.dumps(final_payload)}\n\n".encode()
                                             except Exception as cost_error:
@@ -558,8 +560,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         session: AsyncSession,
         deducted_max_cost: int,
-        web_search_executed: bool = False,
-        sources: dict[str, str] | None = None,
+        web_context: WebSearchContext = WebSearchContext(),
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -568,6 +569,7 @@ class BaseUpstreamProvider:
             key: API key for the authenticated user
             session: Database session for updating balance
             deducted_max_cost: Maximum cost deducted upfront
+            web_context: Context object containing web search results
 
         Returns:
             Response with cost data added to JSON body
@@ -583,12 +585,8 @@ class BaseUpstreamProvider:
 
         try:
             content = await response.aread()
-            # TODO: rename to repsonse_data, in line with auth/adjust_payment_for_tokens
+            # TODO: rename to response_data, in line with auth/adjust_payment_for_tokens
             response_json = json.loads(content)
-
-            if hasattr(response, "llm_start_ms"):
-                latency = int(time.time() * 1000) - response.llm_start_ms
-                print(f"Generation took: {latency}ms")
 
             logger.debug(
                 "Parsed response JSON",
@@ -599,16 +597,18 @@ class BaseUpstreamProvider:
                 },
             )
 
-            # Add web_search_executed flag when websearch was executed
-            if web_search_executed:
-                response_json["web_search_executed"] = True
-
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
+                web_context=web_context,
             )
             response_json["cost"] = cost_data
-            if sources:
-                response_json["sources"] = sources
+            if web_context.executed:
+                response_json["web_search_executed"] = True
+            if web_context.sources:
+                response_json["sources"] = web_context.sources
 
             logger.info(
                 "Token adjustment completed for non-streaming",
@@ -703,8 +703,7 @@ class BaseUpstreamProvider:
             transformed_body
         )
 
-        web_search_executed = False
-        sources: dict[str, str] = {}
+        web_context = WebSearchContext()
         # Only search the web for chat completion
         if (
             path.endswith("chat/completions")
@@ -717,10 +716,8 @@ class BaseUpstreamProvider:
                 web_search_result = await web_manager.enhance_request_with_web_context(
                     transformed_body
                 )
-                if web_search_result["success"]:
-                    transformed_body = web_search_result["body"]
-                    sources = web_search_result["sources"]
-                    web_search_executed = True
+                transformed_body = web_search_result["body"]
+                web_context = web_search_result["websearchcontext"]
             except Exception as e:
                 logger.warning(
                     f"Failed to enhance request with web context: {e}",
@@ -741,12 +738,12 @@ class BaseUpstreamProvider:
                 "has_request_body": request_body is not None,
             },
         )
-        print(transformed_body[:500])
+        if transformed_body:
+            print(transformed_body[:500])
         client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
             timeout=None,
         )
-        llm_start = int(time.time() * 1000)
         try:
             if transformed_body is not None:
                 response = await client.send(
@@ -759,7 +756,6 @@ class BaseUpstreamProvider:
                     ),
                     stream=True,
                 )
-                response.llm_start_ms = llm_start 
             else:
                 response = await client.send(
                     client.build_request(
@@ -830,8 +826,7 @@ class BaseUpstreamProvider:
                         response,
                         key,
                         max_cost_for_model,
-                        web_search_executed=web_search_executed,
-                        sources=sources,
+                        web_context=web_context,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -846,8 +841,7 @@ class BaseUpstreamProvider:
                             key,
                             session,
                             max_cost_for_model,
-                            web_search_executed=web_search_executed,
-                            sources=sources,
+                            web_context=web_context,
                         )
                     finally:
                         await response.aclose()
@@ -1152,8 +1146,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        web_search_executed: bool = False,
-        sources: dict[str, str] | None = None,
+        web_context: WebSearchContext = WebSearchContext(),
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1163,6 +1156,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            web_context: Context object containing web search results
 
         Returns:
             StreamingResponse with refund token in header if applicable
@@ -1211,7 +1205,7 @@ class BaseUpstreamProvider:
 
             response_data = {"usage": usage_data, "model": model}
 
-            if web_search_executed:
+            if web_context.executed:
                 response_data["web_search_executed"] = True
 
             try:
@@ -1275,11 +1269,11 @@ class BaseUpstreamProvider:
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
                 yield (line + "\n").encode("utf-8")
-            if sources or web_search_executed:
-                metadata = {}
-                if sources:
-                    metadata["sources"] = sources
-                if web_search_executed:
+            if web_context.sources or web_context.executed:
+                metadata: dict[str, Any] = {}
+                if web_context.sources:
+                    metadata["sources"] = web_context.sources
+                if web_context.executed:
                     metadata["web_search_executed"] = True
                 yield f"data: {json.dumps(metadata)}\n\n".encode("utf-8")
 
@@ -1298,8 +1292,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        web_search_executed: bool = False,
-        sources: dict[str, str] | None = None,
+        web_context: WebSearchContext = WebSearchContext(),
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1309,6 +1302,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            web_context: Context object containing web search results
 
         Returns:
             Response with refund token in header if applicable
@@ -1322,7 +1316,7 @@ class BaseUpstreamProvider:
             response_json = json.loads(content_str)
 
             # Add web_search_executed flag when websearch was executed
-            if web_search_executed:
+            if web_context.executed:
                 response_json["web_search_executed"] = True
 
             cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
@@ -1389,8 +1383,8 @@ class BaseUpstreamProvider:
                     },
                 )
 
-            if sources:
-                response_json["sources"] = sources
+            if web_context.sources:
+                response_json["sources"] = web_context.sources
                 # Re-serialize the content with the sources included
                 content_str = json.dumps(response_json)
 
@@ -1440,8 +1434,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        web_search_executed: bool = False,
-        sources: dict[str, str] | None = None,
+        web_context: WebSearchContext = WebSearchContext(),
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -1450,6 +1443,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            web_context: Context object containing web search results
 
         Returns:
             StreamingResponse or Response depending on response type
@@ -1478,11 +1472,23 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint, web_search_executed=web_search_executed, sources=sources
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    web_context=web_context,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint, web_search_executed=web_search_executed, sources=sources
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    web_context=web_context,
                 )
 
         except Exception as e:
@@ -1538,8 +1544,7 @@ class BaseUpstreamProvider:
             transformed_body
         )
 
-        web_search_executed = False
-        sources: dict[str, str] = {}
+        web_context = WebSearchContext()
         # Only search the web for chat completion
         if (
             path.endswith("chat/completions")
@@ -1552,10 +1557,8 @@ class BaseUpstreamProvider:
                 web_search_result = await web_manager.enhance_request_with_web_context(
                     transformed_body
                 )
-                if web_search_result["success"]:
-                    transformed_body = web_search_result["body"]
-                    sources = web_search_result["sources"]
-                    web_search_executed = True
+                transformed_body = web_search_result["body"]
+                web_context = web_search_result["websearchcontext"]
             except Exception as e:
                 logger.warning(
                     f"Failed to enhance request with web context: {e}",
@@ -1564,7 +1567,6 @@ class BaseUpstreamProvider:
                         "error_type": type(e).__name__,
                     },
                 )
-
 
         logger.debug(
             "Forwarding request to upstream",
@@ -1650,7 +1652,12 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model, mint, web_search_executed=web_search_executed, sources=sources 
+                        response,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        mint,
+                        web_context=web_context,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)

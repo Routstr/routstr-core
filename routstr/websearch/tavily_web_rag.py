@@ -12,8 +12,9 @@ from typing import Any, Dict
 
 from ..core.logging import get_logger
 from .base_web_rag import BaseWebRAG
-from .types import SearchResult, WebPage
 from .http_client import HTTPClient
+from .types import SearchResult, WebPage
+
 logger = get_logger(__name__)
 
 
@@ -45,9 +46,9 @@ class TavilyWebRAG(BaseWebRAG):
 
         self.client = HTTPClient(
             base_url="https://api.tavily.com",
-            default_headers={"Authorization": f"Bearer {api_key}"}
+            default_headers={"Authorization": f"Bearer {api_key}"},
         )
-    
+
         self.api_key = api_key
 
         logger.info("TavilyWebRAG initialized.")
@@ -77,7 +78,7 @@ class TavilyWebRAG(BaseWebRAG):
 
         logger.info(
             f"Performing Tavily API search for: '{query}'",
-            extra={"query": query, "max_results": max_results}
+            extra={"query": query, "max_results": max_results},
         )
 
         try:
@@ -87,8 +88,8 @@ class TavilyWebRAG(BaseWebRAG):
                 # tavily_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_150031.json
             )
             # ---------------------------------------------------------------
-            #api_response = await self._call_tavily_api(query, max_results)
-            #await self._save_api_response(api_response, query, "tavily")
+            # api_response = await self._call_tavily_api(query, max_results)
+            # await self._save_api_response(api_response, query, "tavily")
             # ---------------------------------------------------------------
 
             total_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -152,8 +153,8 @@ class TavilyWebRAG(BaseWebRAG):
             extra={
                 "query": query,
                 "result_count": len(parsed_results),
-                "total_ms": total_ms
-            }
+                "total_ms": total_ms,
+            },
         )
 
         return SearchResult(
@@ -205,11 +206,6 @@ class TavilyWebRAG(BaseWebRAG):
             "end_date": None,
             "chunks_per_source": 3,  # TODO: use setting # number of chunks per source; Tavily's max: 3
             "include_usage": True,  # Can be used to update admin interface in the future
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
         }
 
         # Make the API request

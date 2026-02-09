@@ -15,7 +15,6 @@ from datetime import datetime
 from typing import List
 
 from ..core.logging import get_logger
-from ..core.settings import settings
 from .types import SearchResult, WebPage
 
 logger = get_logger(__name__)
@@ -116,9 +115,7 @@ class BaseWebScraper(ABC):
 
         start_time = datetime.now()
 
-        scraped_pages = await self.scrape_webpages(
-            pages_to_scrape
-        )
+        scraped_pages = await self.scrape_webpages(pages_to_scrape)
 
         scrape_time_ms = int((datetime.now() - start_time).total_seconds() * 1000)
         success_count = len([p for p in scraped_pages if p.content])

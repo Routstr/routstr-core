@@ -10,8 +10,8 @@ from typing import Any, Dict
 
 from ..core.logging import get_logger
 from .base_web_searcher import BaseWebSearcher
-from .types import SearchResult, WebPage
 from .http_client import HTTPClient
+from .types import SearchResult, WebPage
 
 logger = get_logger(__name__)
 
@@ -33,15 +33,12 @@ class SerperWebSearcher(BaseWebSearcher):
 
         super().__init__()
 
-
         if not api_key:
             raise ValueError("Serper API key cannot be empty.")
         self.api_key = api_key
 
-        
         self.client = HTTPClient(
-            base_url="https://google.serper.dev",
-            default_headers={"X-API-KEY": api_key}
+            base_url="https://google.serper.dev", default_headers={"X-API-KEY": api_key}
         )
 
         logger.info("SerperWebSearch initialized with API key.")
@@ -50,7 +47,6 @@ class SerperWebSearcher(BaseWebSearcher):
         """
         Perform web search using the Serper API and return a SearchResponse.
         """
-        start_time = datetime.now()
         logger.info(f"Performing Serper API search for: '{query}'")
 
         try:
@@ -64,7 +60,6 @@ class SerperWebSearcher(BaseWebSearcher):
             # api_response = await self._call_serper_api(query, max_results)
             # await self._save_api_response(api_response, query, "serper")
             # ---------------------------------------------------------------
-
 
             return self._map_to_search_result(api_response, query)
 
@@ -81,10 +76,8 @@ class SerperWebSearcher(BaseWebSearcher):
 
     async def _call_serper_api(self, query: str, max_results: int) -> Dict[str, Any]:
         return await self.client.post(
-            url="/search",
-            json_data={"q": query, "num": max_results}
+            url="/search", json_data={"q": query, "num": max_results}
         )
-    
 
     def _map_to_search_result(
         self, api_response: Dict[str, Any], query: str
@@ -102,7 +95,7 @@ class SerperWebSearcher(BaseWebSearcher):
 
         for i, item in enumerate(serper_results):
             url = item.get("link", "Unknown URL")
-            
+
             if not self.is_blocked(url=url):
                 result = WebPage(
                     title=item.get("title", None),
@@ -110,8 +103,8 @@ class SerperWebSearcher(BaseWebSearcher):
                     summary=item.get("snippet", None),
                     publication_date=item.get("date", None),
                     relevance_score=1.0 - (i * 0.1),  # Position-based relevance
-                    content=None,           # Serper organic doesn't provide full content
-                    chunks=None,    # Serper doesn't provide RAG chunks
+                    content=None,  # Serper organic doesn't provide full content
+                    chunks=None,  # Serper doesn't provide RAG chunks
                 )
                 parsed_results.append(result)
 
@@ -128,7 +121,6 @@ class SerperWebSearcher(BaseWebSearcher):
             summary=None,  # Serper doesn't provide a generated answer in the organic endpoint
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
-
 
     async def check_availability(self) -> bool:
         """

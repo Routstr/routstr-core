@@ -28,7 +28,7 @@ class RecursiveChunker(BaseChunker):
 
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 0) -> None:
         """Initialize the recursive semantic chunker.
-        
+
         Args:
             chunk_size: Maximum size of each chunk in characters.
             chunk_overlap: Number of characters to overlap between chunks.
@@ -49,7 +49,7 @@ class RecursiveChunker(BaseChunker):
         if not text or not text.strip():
             logger.debug("Empty text provided, returning empty chunk list")
             return []
-        
+
         # Clean up multiple spaces/tabs to normalize text
         text = re.sub(r"[ \t]+", " ", text).strip()
 
@@ -61,7 +61,6 @@ class RecursiveChunker(BaseChunker):
                 f"Text length ({text_length}) <= chunk_size, returning single chunk"
             )
             return [text]
-
 
         # Define the hierarchy of separators
         separators = ["\n\n", "\n", "SENTENCE_END", " "]

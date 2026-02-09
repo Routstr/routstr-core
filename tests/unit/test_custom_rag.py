@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from datetime import datetime
+
+import pytest
+
 from routstr.websearch.custom_web_rag import CustomRAG
 from routstr.websearch.types import SearchResult, WebPage
+
 
 @pytest.mark.asyncio
 async def test_custom_rag_pipeline_flow() -> None:
@@ -27,7 +29,7 @@ async def test_custom_rag_pipeline_flow() -> None:
         search_provider=mock_search,
         scrape_provider=mock_scrape,
         chunk_provider=mock_chunk,
-        rank_provider=mock_rank
+        rank_provider=mock_rank,
     )
 
     result = await pipeline.retrieve_context("test query", max_results=5)
@@ -46,20 +48,21 @@ async def test_custom_rag_pipeline_flow() -> None:
     assert "total" in result.time_ms
     assert result.time_ms["total"] >= 0
 
+
 @pytest.mark.asyncio
 async def test_custom_rag_stop_on_no_results() -> None:
     """Verify that if search returns no results, the pipeline stops early to save resources."""
     mock_search = AsyncMock()
     mock_scrape = AsyncMock()
-    
+
     # Search returns empty list
     mock_search.search.return_value = SearchResult(query="test", webpages=[])
-    
+
     pipeline = CustomRAG(
         search_provider=mock_search,
         scrape_provider=mock_scrape,
         chunk_provider=AsyncMock(),
-        rank_provider=AsyncMock()
+        rank_provider=AsyncMock(),
     )
 
     result = await pipeline.retrieve_context("test query")
@@ -69,12 +72,13 @@ async def test_custom_rag_stop_on_no_results() -> None:
 
     mock_scrape.scrape_search_results.assert_not_called()
 
+
 @pytest.mark.asyncio
 async def test_custom_rag_availability_check() -> None:
     """Verify that check_availability only returns True if ALL components are healthy."""
     mock_search = AsyncMock()
     mock_scrape = AsyncMock()
-    mock_chunk = MagicMock() # Chunker uses validate_parameters (sync)
+    mock_chunk = MagicMock()  # Chunker uses validate_parameters (sync)
 
     pipeline = CustomRAG(mock_search, mock_scrape, mock_chunk, AsyncMock())
 
