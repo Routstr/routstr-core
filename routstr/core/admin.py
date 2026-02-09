@@ -717,9 +717,7 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
                 )
 
         db_model_ids = {model.id for model in db_models}
-        filtered_remote_models = [
-            m for m in upstream_models if m.name not in db_model_ids
-        ]
+        filtered_remote_models = [m for m in upstream_models if m.id not in db_model_ids]
 
         return {
             "provider": {
