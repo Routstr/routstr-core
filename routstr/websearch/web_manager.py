@@ -73,14 +73,6 @@ class WebManager:
             case RAGProvider.TAVILY:
                 try:
                     from .tavily_web_rag import TavilyWebRAG
-
-                    if (
-                        not settings.tavily_api_key
-                    ):  # TODO: I could move this to the init function
-                        logger.warning(
-                            "Tavily selected as RAG provider but no API key configured"
-                        )
-                        return None
                     tavily = TavilyWebRAG(api_key=settings.tavily_api_key)
                     if not await tavily.check_availability():
                         logger.warning(
@@ -98,12 +90,6 @@ class WebManager:
             case RAGProvider.EXA:
                 try:
                     from .exa_web_rag import ExaWebRAG
-
-                    if not settings.exa_api_key:
-                        logger.warning(
-                            "Exa selected as RAG provider but no API key configured"
-                        )
-                        return None
                     exa = ExaWebRAG(api_key=settings.exa_api_key)
                     if not await exa.check_availability():
                         logger.warning(
@@ -191,12 +177,6 @@ class WebManager:
             case WebSearchProvider.SERPER:
                 try:
                     from .serper_web_searcher import SerperWebSearcher
-
-                    if not settings.serper_api_key:
-                        logger.warning(
-                            "Serper provider selected but no API key configured"
-                        )
-                        return None
                     self._search_provider = SerperWebSearcher(
                         api_key=settings.serper_api_key
                     )
@@ -496,11 +476,6 @@ class WebManager:
         sources = {str(i): res.url for i, res in enumerate(search_result.webpages, 1)}
 
         web_context = WebManager.generate_xml_context(search_result, query)
-
-        # TODO: This adds a lot of data to the logs. Remove?
-        logger.debug(
-            "Generated web context for injection", extra={"web_context": web_context}
-        )
 
         # Parse and enhance the request
         try:

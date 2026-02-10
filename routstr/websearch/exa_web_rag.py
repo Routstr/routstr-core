@@ -14,6 +14,7 @@ from ..core.logging import get_logger
 from .base_web_rag import BaseWebRAG
 from .http_client import HTTPClient
 from .types import SearchResult, WebPage
+from ..core.settings import settings
 
 logger = get_logger(__name__)
 
@@ -169,14 +170,14 @@ class ExaWebRAG(BaseWebRAG):
             "query": query,
             "type": "neural",
             "numResults": min(
-                max_results, 10
-            ),  # Exa's max is 100, but a maximum of 10 is requested
+                max_results, 100
+            ),  # Exa's max is 100
             "contents": {
                 "text": False,  # Complete page content
                 "summary": False,  # Short summary of page content
                 "highlights": {  # Most relevant chunks
                     "numSentences": 3,  # Number of sentences per highlight
-                    "highlightsPerUrl": 5,  # Chunks per URL #TODO: Use setting
+                    "highlightsPerUrl": settings.max_chunks_per_source,  # Chunks per URL
                 },
                 "livecrawl": "preferred",  # https://exa.ai/docs/reference/livecrawling-contents
                 "extras": {"links": 0, "imageLinks": 0},
@@ -191,8 +192,8 @@ class ExaWebRAG(BaseWebRAG):
             "startPublishedDate": None,
             "endPublishedDate": None,
             "includeDomains": None,
-            "excludeDomains": list(self.EXCLUDE_DOMAINS)
-            if self.EXCLUDE_DOMAINS
+            "excludeDomains": list(self.EXCLUDED_DOMAINS)
+            if self.EXCLUDED_DOMAINS
             else [],
             "category": None,
         }

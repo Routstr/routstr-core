@@ -16,7 +16,12 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str) -> Any:  # type: ignore[override]
-            if field_name in {"cashu_mints", "cors_origins", "relays"}:
+            if field_name in {
+                "cashu_mints",
+                "cors_origins",
+                "relays",
+                "web_excluded_domains",
+            }:
                 v = str(raw_value).strip()
                 if v == "":
                     return []
@@ -81,6 +86,17 @@ class Settings(BaseSettings):
     exa_api_key: str = Field(default="", env="EXA_API_KEY")
     web_search_max_results: int = Field(default=5, env="WEB_SEARCH_MAX_RESULTS")
     web_search_fixed_cost: int = Field(default=10, env="WEB_SEARCH_FIXED_COST")
+    web_excluded_domains: list[str] = Field(
+        default=[
+            "youtube.com",
+            "youtu.be",
+            "vimeo.com",
+            "tiktok.com",
+            "instagram.com",
+            "facebook.com",
+        ],
+        env="WEB_EXCLUDED_DOMAINS",
+    )
 
     # Custom RAG (only used when web_rag_provider = "custom")
     web_search_provider: str = Field(default="", env="WEB_SEARCH_PROVIDER")

@@ -8,8 +8,6 @@ following the same modular pattern as the web search and scraping components.
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import replace
-from typing import List
-
 from ..core.logging import get_logger
 from .types import SearchResult, WebPage
 
@@ -27,22 +25,18 @@ class BaseChunker(ABC):
 
     chunker_name: str = "base"
 
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 0) -> None:
+    def __init__(self, chunk_size: int, chunk_overlap: float) -> None:
         """
         Initialize the chunker.
 
         Args:
             chunk_size: Maximum size of each chunk in characters
-            chunk_overlap: Number of characters to overlap between chunks
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        logger.info(
-            f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={chunk_overlap}"
-        )
 
     @abstractmethod
-    async def chunk_text(self, text: str) -> List[str]:
+    async def chunk_text(self, text: str) -> list[str]:
         """
         Chunk text into smaller pieces and return list of strings.
 
@@ -71,7 +65,8 @@ class BaseChunker(ABC):
         if not search_result.webpages:
             return search_result
         logger.info(
-            f"Chunking content for {len(search_result.webpages)} search results concurrently"
+            f"Chunking content for {len(search_result.webpages)} search results concurrently",
+            extra={"result_count": len(search_result.webpages)},
         )
 
         async def process(result: WebPage) -> WebPage:
@@ -82,7 +77,10 @@ class BaseChunker(ABC):
 
                 return replace(result, chunks=chunks)
             except Exception as e:
-                logger.error(f"Failed to chunk content for {result.url}: {e}")
+                logger.error(
+                    f"Failed to chunk content for {result.url}: {e}",
+                    extra={"url": result.url, "error": str(e)},
+                )
                 return replace(result, chunks=None)
 
         tasks = [process(result) for result in search_result.webpages]
@@ -93,7 +91,8 @@ class BaseChunker(ABC):
 
         return search_result
 
-    def validate_parameters(self) -> bool:
+
+    async def check_availability(self) -> bool:
         """
         Validate chunker parameters.
 
@@ -101,17 +100,28 @@ class BaseChunker(ABC):
             True if parameters are valid, False otherwise
         """
         if self.chunk_size <= 0:
-            logger.error(f"Invalid chunk_size: {self.chunk_size}. Must be > 0")
+            logger.error(
+                f"Invalid chunk_size: {self.chunk_size}. Must be > 0",
+                extra={"chunk_size": self.chunk_size},
+            )
             return False
 
         if self.chunk_overlap < 0:
-            logger.error(f"Invalid chunk_overlap: {self.chunk_overlap}. Must be >= 0")
+            logger.error(
+                f"Invalid chunk_overlap: {self.chunk_overlap}. Must be >= 0",
+                extra={"chunk_overlap": self.chunk_overlap},
+            )
             return False
 
         if self.chunk_overlap >= self.chunk_size:
             logger.error(
-                f"chunk_overlap ({self.chunk_overlap}) must be less than chunk_size ({self.chunk_size})"
+                f"chunk_overlap ({self.chunk_overlap}) must be less than chunk_size ({self.chunk_size})",
+                extra={
+                    "chunk_overlap": self.chunk_overlap,
+                    "chunk_size": self.chunk_size,
+                },
             )
             return False
 
         return True
+

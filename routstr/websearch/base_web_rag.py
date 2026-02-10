@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from ..core.logging import get_logger
+from ..core.settings import settings
 from .types import SearchResult
 
 logger = get_logger(__name__)
@@ -27,14 +28,7 @@ class BaseWebRAG(ABC):
 
     def __init__(self) -> None:
         # Domain Blocklist will be passed to RAG provider and used if domain exclusion is supported
-        self.EXCLUDE_DOMAINS = {
-            "youtube.com",
-            "youtu.be",
-            "vimeo.com",
-            "tiktok.com",
-            "instagram.com",
-            "facebook.com",
-        }
+        self.EXCLUDED_DOMAINS = set(settings.web_excluded_domains)
 
     @abstractmethod
     async def retrieve_context(self, query: str, max_results: int = 5) -> SearchResult:

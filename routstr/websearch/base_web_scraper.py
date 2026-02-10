@@ -37,10 +37,6 @@ class BaseWebScraper(ABC):
 
     scraper_name: str = "base"
 
-    def __init__(self, output_dir: str = "scraped_html"):
-        self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)  # debugging TODO: remove
-
     @abstractmethod
     async def scrape_url(self, webpage: WebPage) -> WebPage:
         """
@@ -133,28 +129,4 @@ class BaseWebScraper(ABC):
         )
         return replace(search_result, webpages=scraped_pages)
 
-    def _sanitize_filename(self, url: str) -> str:
-        """Create a safe filename from a URL."""
-        # Remove protocol
-        filename = url.replace("https://", "").replace("http://", "")
-        # Replace path separators and other unsafe characters
-        filename = re.sub(r'[\\/:*?"<>|]', "_", filename)
-        # Limit length and add .html extension
-        return f"{filename[:250]}.txt"
-
-    async def _write_to_file(self, filename: str, content: str) -> None:
-        """Asynchronously write raw HTML content to a file."""
-        try:
-            filename = self._sanitize_filename(filename)
-            filepath = os.path.join(self.output_dir, filename)
-
-            def write_file() -> None:
-                with open(filepath, "w") as f:
-                    f.write(filename)
-                    f.write("\n")
-                    f.write(content)
-
-            await asyncio.to_thread(write_file)
-
-        except Exception as e:
-            logger.error(f"Failed to write HTML for {filename} to file: {e}")
+   

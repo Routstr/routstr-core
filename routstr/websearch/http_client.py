@@ -23,7 +23,9 @@ class HTTPClient:
 
         # Standard headers
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            # We could also use a Routstr specific header, but this would most likely reduce successful scrapes
+            # Example: f"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; Routstr-User/1.0; +{settings.http_url}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
             "Accept": "application/json",
         }
         if default_headers:

@@ -19,7 +19,7 @@ class FixedSizeChunker(BaseChunker):
 
     chunker_name = "fixed"
 
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 25) -> None:
+    def __init__(self, chunk_size: int, chunk_overlap_perc: float = 0.1) -> None:
         """
         Initialize the fixed-size chunker.
 
@@ -27,10 +27,14 @@ class FixedSizeChunker(BaseChunker):
             chunk_size: Maximum size of each chunk in characters
             chunk_overlap: Number of characters to overlap between chunks
         """
+        # Chunks are exactly chunks_size long
+        # 10% overlap is included in the this length
+        chunk_overlap = int(chunk_size * chunk_overlap_perc)
         super().__init__(chunk_size, chunk_overlap)
-
-        if not self.validate_parameters():
-            raise ValueError(f"Invalid parameters for {self.chunker_name} chunker")
+        
+        logger.info(
+            f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={self.chunk_overlap}"
+        )
 
     async def chunk_text(self, text: str) -> List[str]:
         """
@@ -73,7 +77,6 @@ class FixedSizeChunker(BaseChunker):
                     chunks[-1] += remaining_text
                     break
 
-            # Create chunk
             chunk = text[start:end]
             chunks.append(chunk)
 
@@ -85,3 +88,5 @@ class FixedSizeChunker(BaseChunker):
                 start = self.chunk_size
 
         return chunks
+
+   

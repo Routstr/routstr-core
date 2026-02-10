@@ -7,7 +7,7 @@ from routstr.websearch.fixed_size_chunker import FixedSizeChunker
 async def test_fixed_chunker_basic_split() -> None:
     """Verify that text is split into exactly the specified chunk size."""
     chunk_size = 10
-    chunker = FixedSizeChunker(chunk_size=chunk_size, chunk_overlap=0)
+    chunker = FixedSizeChunker(chunk_size=chunk_size, chunk_overlap_perc=0)
     text = "1234567890ABCDEFGHIJ"  # 20 chars
 
     chunks = await chunker.chunk_text(text)

@@ -96,7 +96,8 @@ class SerperWebSearcher(BaseWebSearcher):
         for i, item in enumerate(serper_results):
             url = item.get("link", "Unknown URL")
 
-            if not self.is_blocked(url=url):
+            # Serper does not support excluding domains. We filter manually after the request
+            if not self.is_excluded(url=url):
                 result = WebPage(
                     title=item.get("title", None),
                     url=url,

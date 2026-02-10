@@ -30,11 +30,14 @@ class BM25Ranker(BaseRanker):
 
         # Number of selected Chunks per Website during _rank_local
         # This acts as an upperlimit as _rank_global removes the most irrelevant chunks
-        self.local_k = max_chunks_per_source
+        # Default: 5
+        self.local_k = max_chunks_per_source 
 
+        # We prune the most irrelevant chunks globally
+        # global_multiplier defines how many websites' worth of chunks are retained
+        self.global_multiplier = 6
         # Number of overall selected Chunks during _rank_global
-        # TODO: Maybe move this to a setting?
-        self.global_k = 20
+        self.global_k = self.local_k * self.global_multiplier 
 
     async def check_availability(self) -> bool:
         """Returns True if rank_bm25 is installed and available."""
@@ -59,12 +62,10 @@ class BM25Ranker(BaseRanker):
         for p in search_result.webpages:
             stats[p.url] = {"initial": len(p.chunks or [])}
 
-        # Local Pruning
         local_result = self._rank_local(search_result, query, top_k=self.local_k)
         for p in local_result.webpages:
             stats[p.url]["after_local"] = len(p.chunks or [])
 
-        # Global Pruning
         final_result = self._rank_global(local_result, query, total_k=self.global_k)
         for p in final_result.webpages:
             stats[p.url]["final"] = len(p.chunks or [])

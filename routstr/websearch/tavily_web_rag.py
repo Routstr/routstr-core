@@ -14,6 +14,8 @@ from ..core.logging import get_logger
 from .base_web_rag import BaseWebRAG
 from .http_client import HTTPClient
 from .types import SearchResult, WebPage
+from ..core.settings import settings
+
 
 logger = get_logger(__name__)
 
@@ -198,13 +200,13 @@ class TavilyWebRAG(BaseWebRAG):
             "include_favicon": False,
             "include_raw_content": False,  # We'll use chunks instead of raw content
             "max_results": min(max_results, 20),  # Tavily max is 20 (2026-01-13)
-            "exclude_domains": list(self.EXCLUDE_DOMAINS)
-            if self.EXCLUDE_DOMAINS
+            "exclude_domains": list(self.EXCLUDED_DOMAINS)
+            if self.EXCLUDED_DOMAINS
             else [],
             "time_range": None,  # No filtering by publishing date
             "start_date": None,
             "end_date": None,
-            "chunks_per_source": 3,  # TODO: use setting # number of chunks per source; Tavily's max: 3
+            "chunks_per_source": min(3, settings.max_chunks_per_source),  # Tavily's max: 3
             "include_usage": True,  # Can be used to update admin interface in the future
         }
 

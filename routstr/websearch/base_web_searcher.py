@@ -10,6 +10,7 @@ from typing import Any, Dict
 from urllib.parse import urlparse
 
 from ..core.logging import get_logger
+from ..core.settings import settings
 from .types import SearchResult
 
 logger = get_logger(__name__)
@@ -24,15 +25,7 @@ class BaseWebSearcher(ABC):
         """Initialize the base web search provider."""
 
         # Domain Blocklist will be used by Search provider if domain exclusion is supported
-        # TODO: Unify this with BaseWebRAG.BLOCKED_DOMAINS?
-        self.EXCLUDE_DOMAINS = {
-            "youtube.com",
-            "youtu.be",
-            "vimeo.com",
-            "tiktok.com",
-            "instagram.com",
-            "facebook.com",
-        }
+        self.EXCLUDED_DOMAINS = set(settings.web_excluded_domains)
 
     @abstractmethod
     async def search(self, query: str, max_results: int = 5) -> SearchResult:
@@ -54,8 +47,9 @@ class BaseWebSearcher(ABC):
         Returns: True if available, False otherwise.
         """
 
-    def is_blocked(self, url: str) -> bool:
-        """Check if a URL's domain is in the blocklist.
+    def is_excluded(self, url: str) -> bool:
+        """
+        Check if a URL's domain is in the blocklist.
 
         Args:
             url: The URL to check.
@@ -68,9 +62,7 @@ class BaseWebSearcher(ABC):
         # Remove 'www.' if present to ensure matching
         if domain.startswith("www."):
             domain = domain[4:]
-        # if domain in self.EXCLUDE_DOMAINS:
-        #    print(f"URL in excluded list: {url}")  # TODO: DEBUG Print
-        return domain in self.EXCLUDE_DOMAINS
+        return domain in self.EXCLUDED_DOMAINS
 
     async def _load_mock_data(self, file_name: str) -> Dict[str, Any]:
         """

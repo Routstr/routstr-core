@@ -78,14 +78,16 @@ async def test_custom_rag_availability_check() -> None:
     """Verify that check_availability only returns True if ALL components are healthy."""
     mock_search = AsyncMock()
     mock_scrape = AsyncMock()
-    mock_chunk = MagicMock()  # Chunker uses validate_parameters (sync)
+    mock_chunk = AsyncMock()  
+    mock_rank = AsyncMock()  
 
-    pipeline = CustomRAG(mock_search, mock_scrape, mock_chunk, AsyncMock())
+    pipeline = CustomRAG(mock_search, mock_scrape, mock_chunk, mock_rank)
 
     # Case 1: Scrape is down
     mock_search.check_availability.return_value = True
     mock_scrape.check_availability.return_value = False
-    mock_chunk.validate_parameters.return_value = True
+    mock_chunk.check_availability.return_value = True
+    mock_rank.check_availability.return_value = True
     assert await pipeline.check_availability() is False
 
     # Case 2: All are up

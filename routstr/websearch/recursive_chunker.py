@@ -26,19 +26,29 @@ class RecursiveChunker(BaseChunker):
 
     chunker_name = "recursive"
 
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 0) -> None:
+    def __init__(self, chunk_size: int, chunk_overlap_perc: float = 0.05) -> None:
         """Initialize the recursive semantic chunker.
 
         Args:
             chunk_size: Maximum size of each chunk in characters.
-            chunk_overlap: Number of characters to overlap between chunks.
         """
+
+        # Number of characters to overlap between chunks.
+        # Adds 5% overlap in total, half on each side, in addition to chunk_size
+        chunk_overlap = int(chunk_size * chunk_overlap_perc)
         super().__init__(chunk_size, chunk_overlap)
-        if not self.validate_parameters():
-            raise ValueError(f"Invalid parameters for {self.chunker_name} chunker")
+        
+  
+        logger.info(
+            f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={self.chunk_overlap}"
+        )
 
     async def chunk_text(self, text: str) -> List[str]:
         """Chunk text by recursively splitting on semantic boundaries.
+
+        Note:
+            The final chunks will be slightly larger than chunk_size because
+            overlap is added as contextual padding on both sides of each chunk.
 
         Args:
             text: The text to chunk
@@ -76,10 +86,6 @@ class RecursiveChunker(BaseChunker):
             f"Chunked text into {len(raw_chunks)} chunks using {self.chunker_name} strategy"
         )
 
-        # Console output for debugging
-        # for i, chunk in enumerate(raw_chunks):
-        #    print(f"{i}({len(chunk)}): {chunk}")
-
         return raw_chunks
 
     def _split_recursive(self, text: str, separators: List[str]) -> List[str]:
@@ -98,8 +104,7 @@ class RecursiveChunker(BaseChunker):
         current_sep = separators[0]
 
         if current_sep == "SENTENCE_END":
-            # Keep punctuation
-            splits = re.split(r"(?<=[.!?]) +", text)
+            splits = re.split(r"(?<=[.!?])\s+", text)
         elif current_sep == "\n\n":
             splits = re.split(r"\n\s*\n", text)
         elif current_sep == "\n":
@@ -143,7 +148,7 @@ class RecursiveChunker(BaseChunker):
 
         return final_chunks
 
-    def _join_pieces(self, pieces: List[str], separator_type: str) -> str:
+    def _join_pieces(self, pieces: list[str], separator_type: str) -> str:
         """Helper to join pieces back together with the correct character."""
         if separator_type == "\n\n":
             return "\n\n".join(pieces)
@@ -152,12 +157,29 @@ class RecursiveChunker(BaseChunker):
         return " ".join(pieces)
 
     def _apply_overlap(self, chunks: List[str]) -> List[str]:
-        """Applies overlap to the list of chunks by taking the tail of the previous chunk."""
         merged_chunks = []
-        for i, chunk in enumerate(chunks):
+        num_chunks = len(chunks)
+        
+        # Calculate half-overlap to keep chunk size growth under control
+        half_overlap = self.chunk_overlap // 2
+
+        # If overlap is too small to split across both sides, return as-is
+        if half_overlap <= 0:
+           return chunks   
+    
+        for i in range(num_chunks):
+            current = chunks[i]
+            
+            # Add tail of previous chunk to the START
+            prefix = ""
             if i > 0:
-                prev_chunk = chunks[i - 1]
-                overlap_text = prev_chunk[-self.chunk_overlap :]
-                chunk = overlap_text + chunk
-            merged_chunks.append(chunk)
+                prefix = chunks[i-1][-half_overlap:]
+                
+            # Add head of next chunk to the END
+            suffix = ""
+            if i < num_chunks - 1:
+                suffix = chunks[i+1][:half_overlap]
+                
+            merged_chunks.append(prefix + current + suffix)
+            
         return merged_chunks

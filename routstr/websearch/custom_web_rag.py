@@ -170,16 +170,14 @@ class CustomRAG(BaseWebRAG):
             True if all components are available, False otherwise
         """
         try:
-            # Check search provider availability
+            # Check external providers
             search_available = await self.search_provider.check_availability()
-
-            # Check scraper availability
             scraper_available = await self.scraper_provider.check_availability()
 
-            # Check chunker availability #TODO make consistant to scraper and search
-            chunker_available = self.chunker_provider.validate_parameters()
-
-            all_available = search_available and scraper_available and chunker_available
+            # Check internal providers
+            chunker_available = await self.chunker_provider.check_availability()
+            scraper_available = await self.scraper_provider.check_availability()
+            all_available = search_available and scraper_available and chunker_available and scraper_available
 
             if not all_available:
                 logger.warning(
