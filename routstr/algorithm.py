@@ -118,6 +118,13 @@ def create_model_mappings(
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
+    seen_model_provider: set[tuple[str, str]] = set()
+
+    providers_by_db_id: dict[int, "BaseUpstreamProvider"] = {}
+    for upstream in upstreams:
+        db_id = getattr(upstream, "db_id", None)
+        if isinstance(db_id, int):
+            providers_by_db_id[db_id] = upstream
 
     # Separate OpenRouter from other providers
     openrouter: "BaseUpstreamProvider" | None = None
@@ -148,6 +155,9 @@ def create_model_mappings(
     ) -> None:
         """Process all models from a given provider."""
         upstream_prefix = getattr(upstream, "upstream_name", None)
+        provider_key = getattr(upstream, "provider_type", "") or getattr(
+            upstream, "base_url", ""
+        )
 
         for model in upstream.get_cached_models():
             if not model.enabled or model.id in disabled_model_ids:
@@ -189,6 +199,7 @@ def create_model_mappings(
             # Try to set each alias
             for alias in aliases:
                 _add_candidate(alias, model_to_use, upstream)
+            seen_model_provider.add((model_to_use.id.lower(), provider_key.lower()))
 
     # Process non-OpenRouter providers first
     for upstream in other_upstreams:
@@ -197,6 +208,65 @@ def create_model_mappings(
     # Process OpenRouter last
     if openrouter:
         process_provider_models(openrouter, is_openrouter=True)
+
+    # Include enabled DB overrides even when provider discovery misses models.
+    # This is important for deployment-based providers like Azure.
+    for model_id, override_data in overrides_by_id.items():
+        if model_id in disabled_model_ids:
+            continue
+        try:
+            override_row, provider_fee = override_data
+            upstream_provider_id = getattr(override_row, "upstream_provider_id", None)
+            if not isinstance(upstream_provider_id, int):
+                continue
+
+            upstream = providers_by_db_id.get(upstream_provider_id)
+            if upstream is None:
+                continue
+
+            provider_key = getattr(upstream, "provider_type", "") or getattr(
+                upstream, "base_url", ""
+            )
+            dedupe_key = (model_id.lower(), provider_key.lower())
+            if dedupe_key in seen_model_provider:
+                continue
+
+            model_to_use = _row_to_model(
+                override_row, apply_provider_fee=True, provider_fee=provider_fee
+            )
+            if not model_to_use.enabled:
+                continue
+
+            base_id = get_base_model_id(model_to_use.id)
+            is_openrouter = (
+                getattr(upstream, "base_url", "") == "https://openrouter.ai/api/v1"
+            )
+            if not is_openrouter or base_id not in unique_models:
+                unique_model = model_to_use.copy(
+                    update={
+                        "id": base_id,
+                        "upstream_provider_id": upstream.provider_type,
+                    }
+                )
+                unique_models[base_id] = unique_model
+
+            aliases = resolve_model_alias(
+                model_to_use.id,
+                model_to_use.canonical_slug,
+                alias_ids=model_to_use.alias_ids,
+            )
+            upstream_prefix = getattr(upstream, "upstream_name", None)
+            if upstream_prefix and "/" not in model_to_use.id:
+                prefixed_id = f"{upstream_prefix}/{model_to_use.id}"
+                if prefixed_id not in aliases:
+                    aliases.append(prefixed_id)
+
+            for alias in aliases:
+                _add_candidate(alias, model_to_use, upstream)
+            seen_model_provider.add(dedupe_key)
+        except Exception:
+            # Keep model map creation resilient to malformed overrides.
+            continue
 
     # Sort candidates and build final maps
     model_instances: dict[str, "Model"] = {}
