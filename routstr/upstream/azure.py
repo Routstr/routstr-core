@@ -1,13 +1,9 @@
 from typing import TYPE_CHECKING, Mapping
 
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse
-
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
-    from ..auth import ApiKey
-    from ..core.db import AsyncSession, UpstreamProviderRow
+    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 
@@ -77,86 +73,35 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
     ) -> Mapping[str, str]:
         """Prepare query parameters for Azure OpenAI, adding API version."""
         params = dict(query_params or {})
-        # Ensure we use a valid Azure API version format
-        # Strip any hidden characters like Byte Order Marks (BOM) or whitespace
-        version = self.api_version.strip().replace("\ufeff", "")
-        if version == "v1":
+        version = (self.api_version or "").replace("\ufeff", "").strip()
+        if not version or version.lower() == "v1":
             version = "2024-02-15-preview"
         params["api-version"] = version
         return params
 
-    async def forward_request(
-        self,
-        request: Request,
-        path: str,
-        headers: dict,
-        request_body: bytes | None,
-        key: "ApiKey",
-        max_cost_for_model: int,
-        session: "AsyncSession",
-        model_obj: "Model",
-    ) -> Response | StreamingResponse:
-        """Forward request to Azure OpenAI."""
-        # Fix: If base_url contains /openai/v1, remove it
-        actual_base_url = self.base_url
-        if "/openai/v1" in actual_base_url:
-            actual_base_url = actual_base_url.split("/openai/v1")[0]
+    def normalize_request_path(
+        self, path: str, model_obj: "Model | None" = None
+    ) -> str:
+        """Build Azure deployment-specific request path."""
+        clean_path = super().normalize_request_path(path, model_obj).lstrip("/")
+        if model_obj is None:
+            return clean_path
 
-        # Use canonical_slug as it often stores the deployment name in Azure setups
-        # otherwise fallback to transform_model_name
         deployment_id = getattr(
             model_obj, "canonical_slug", None
         ) or self.transform_model_name(model_obj.id)
+        deployment_id = deployment_id.split("/")[-1]
+        return f"openai/deployments/{deployment_id}/{clean_path}"
 
-        # Ensure deployment_id doesn't contain a provider prefix (e.g., 'openai/' or 'azure/')
-        if "/" in deployment_id:
-            deployment_id = deployment_id.split("/")[-1]
-
-        # Azure format: openai/deployments/{deployment-id}/chat/completions
-        clean_path = path.lstrip("/")
-        if clean_path.startswith("v1/"):
-            clean_path = clean_path[3:]
-        azure_path = f"openai/deployments/{deployment_id}/{clean_path}"
-
-        # Temporary backup and restore base_url to use cleaned version
-        original_base = self.base_url
-        self.base_url = actual_base_url
-
-        # The query params are handled by super().forward_request via prepare_params
-        # We don't need to manually append them to full_url for the print if we want to be accurate
-        params = self.prepare_params(path, {})
-        full_url = (
-            f"{actual_base_url}/{azure_path}?api-version={params.get('api-version')}"
-        )
-        print(f"\n[DEBUG] Azure Forwarding URL: {full_url}")
-        print(f"[DEBUG] Deployment ID: {deployment_id}")
-
-        try:
-            response = await super().forward_request(
-                request,
-                azure_path,
-                headers,
-                request_body,
-                key,
-                max_cost_for_model,
-                session,
-                model_obj,
-            )
-
-            # Check if it's an error response to print details
-            if hasattr(response, "status_code") and response.status_code != 200:
-                print(f"[DEBUG] Azure Error Status: {response.status_code}")
-                if hasattr(response, "body"):
-                    print(
-                        f"[DEBUG] Azure Error Body: {response.body.decode() if isinstance(response.body, bytes) else response.body}"
-                    )
-
-            return response
-        except Exception as e:
-            print(f"[DEBUG] Azure Exception: {str(e)}")
-            raise
-        finally:
-            self.base_url = original_base
+    def get_request_base_url(
+        self, path: str, model_obj: "Model | None" = None
+    ) -> str:
+        """Use endpoint root, stripping accidental /openai/v1 suffix if present."""
+        base_url = self.base_url.rstrip("/")
+        marker = "/openai/v1"
+        if marker in base_url:
+            base_url = base_url.split(marker, 1)[0].rstrip("/")
+        return base_url
 
     def transform_model_name(self, model_id: str) -> str:
         """Extract deployment name from model ID."""
