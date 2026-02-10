@@ -12,7 +12,7 @@ class BaseRanker(ABC):
     inclusion in the LLM context.
     """
 
-    def __init__(self, provider_name: str = "base", max_chunks_per_source: int = 5):
+    def __init__(self, provider_name: str = "base", max_chunks_per_source: int = 5) -> None:
         self.provider_name = provider_name
         self.max_chunks_per_source = max_chunks_per_source
 

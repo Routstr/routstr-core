@@ -9,7 +9,7 @@ AI context enhancement.
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
 from ..core.logging import get_logger
 from ..core.settings import settings
@@ -59,7 +59,7 @@ class BaseWebRAG(ABC):
             True if provider is available and functional, False otherwise
         """
 
-    async def _load_mock_data(self, file_name: str) -> Dict[str, Any]:
+    async def _load_mock_data(self, file_name: str) -> dict[str, Any]:
         """Load mock API response data from local JSON file for testing purposes.
 
         Args:
@@ -78,7 +78,7 @@ class BaseWebRAG(ABC):
             return json.load(file)
 
     async def _save_api_response(
-        self, response_data: Dict[str, Any], query: str, provider: str
+        self, response_data: dict[str, Any], query: str, provider: str
     ) -> None:
         """Save live API response to timestamped JSON file for debugging and testing.
 
@@ -112,6 +112,9 @@ class BaseWebRAG(ABC):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(response_data, f, indent=2, ensure_ascii=False)
-            logger.info(f"API response saved to {file_path}")
+            logger.info(f"API response saved to {file_path}", extra={"path": str(file_path)})
         except Exception as e:
-            logger.error(f"Failed to save API response: {e}")
+            logger.error(
+                f"Failed to save API response: {e}",
+                extra={"path": str(file_path), "error": str(e)},
+            )

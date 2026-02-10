@@ -1,8 +1,5 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Dict, List, Optional
-
-
 class RAGProvider(StrEnum):
     TAVILY = "tavily"
     EXA = "exa"
@@ -36,12 +33,12 @@ class WebPage:
     """
 
     url: str
-    title: Optional[str] = None
-    summary: Optional[str] = None
-    publication_date: Optional[str] = None
-    relevance_score: Optional[float] = None
-    content: Optional[str] = None  # Complete webpage content
-    chunks: Optional[List[str]] = None  # List of chunks.
+    title: str | None = None
+    summary: str | None = None
+    publication_date: str | None = None
+    relevance_score: float | None = None
+    content: str | None = None  # Complete webpage content
+    chunks: list[str] | None = None  # List of chunks.
 
 
 @dataclass(frozen=True)
@@ -53,10 +50,10 @@ class SearchResult:
     """
 
     query: str
-    webpages: List[WebPage]
-    summary: Optional[str] = None
-    timestamp: Optional[str] = None
-    time_ms: Optional[Dict[str, int]] = field(default_factory=dict)
+    webpages: list[WebPage]
+    summary: str | None = None
+    timestamp: str | None = None
+    time_ms: dict[str, int] | None = field(default_factory=dict)
 
 
 @dataclass
@@ -67,4 +64,4 @@ class WebSearchContext:
     """
 
     executed: bool = False
-    sources: Dict[str, str] = field(default_factory=dict)
+    sources: dict[str, str] = field(default_factory=dict)

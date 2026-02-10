@@ -1,7 +1,5 @@
 import string
 from dataclasses import replace
-from typing import Dict, List, Set
-
 from ..core.logging import get_logger
 from .base_ranker import BaseRanker
 from .types import SearchResult
@@ -58,7 +56,7 @@ class BM25Ranker(BaseRanker):
         )
 
         # Statistics Tracking
-        stats: Dict[str, Dict[str, int]] = {}
+        stats: dict[str, dict[str, int]] = {}
         for p in search_result.webpages:
             stats[p.url] = {"initial": len(p.chunks or [])}
 
@@ -77,7 +75,17 @@ class BM25Ranker(BaseRanker):
     def _rank_local(
         self, search_result: SearchResult, query: str, top_k: int
     ) -> SearchResult:
-        """Sorts and prunes chunks within each individual page."""
+        """
+        Sorts and prunes chunks within each individual page.
+
+        Args:
+            search_result: The SearchResult containing chunked pages.
+            query: The search query.
+            top_k: Number of chunks to keep per page.
+
+        Returns:
+            SearchResult with locally pruned chunks.
+        """
         updated_pages = []
         for page in search_result.webpages:
             if not page.chunks:
@@ -92,7 +100,17 @@ class BM25Ranker(BaseRanker):
     def _rank_global(
         self, search_result: SearchResult, query: str, total_k: int
     ) -> SearchResult:
-        """Pools all chunks from all pages and picks the top global winners."""
+        """
+        Pools all chunks from all pages and picks the top global winners.
+
+        Args:
+            search_result: The SearchResult containing locally pruned pages.
+            query: The search query.
+            total_k: Total number of chunks to keep across all pages.
+
+        Returns:
+            SearchResult with globally pruned chunks.
+        """
         all_candidates = []
         for page in search_result.webpages:
             if page.chunks:
@@ -102,7 +120,7 @@ class BM25Ranker(BaseRanker):
             return search_result
 
         global_winners = self._sort_chunks(query, all_candidates)[:total_k]
-        winners_set: Set[str] = set(global_winners)
+        winners_set: set[str] = set(global_winners)
 
         final_pages = []
         for page in search_result.webpages:
@@ -115,14 +133,21 @@ class BM25Ranker(BaseRanker):
 
         return replace(search_result, webpages=final_pages)
 
-    def _sort_chunks(self, query: str, chunks: List[str]) -> List[str]:
+    def _sort_chunks(self, query: str, chunks: list[str]) -> list[str]:
         """
         Uses the BM25 (Best Matching 25) algorithm to calculate relevance.
+
+        Args:
+            query: The search query.
+            chunks: List of text chunks to sort.
+
+        Returns:
+            Sorted list of chunks by relevance.
         """
         if not chunks:
             return []
 
-        def tokenize(text: str) -> List[str]:
+        def tokenize(text: str) -> list[str]:
             # Lowercase and remove punctuation
             return (
                 text.lower()
@@ -138,8 +163,14 @@ class BM25Ranker(BaseRanker):
             tokenized_query, chunks, n=len(chunks)
         )  # n=len(chunks) returns every chunk, but sorted by score
 
-    def _log_report(self, query: str, stats: Dict[str, Dict[str, int]]) -> None:
-        """Logs a funnel report showing chunk retention."""
+    def _log_report(self, query: str, stats: dict[str, dict[str, int]]) -> None:
+        """
+        Logs a funnel report showing chunk retention.
+
+        Args:
+            query: The search query.
+            stats: Dictionary containing chunk retention statistics.
+        """
         report_lines = [
             f"RANKING REPORT | Query: '{query}'",
             f"{'Source URL':<40} | {'Start':<5} | {'L-Keep':<6} | {'FINAL'}",

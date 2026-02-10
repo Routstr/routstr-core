@@ -6,7 +6,7 @@ to get search results and formats them into the standard WebSearchResponse.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any
 
 from ..core.logging import get_logger
 from .base_web_searcher import BaseWebSearcher
@@ -46,6 +46,13 @@ class SerperWebSearcher(BaseWebSearcher):
     async def search(self, query: str, max_results: int = 10) -> SearchResult:
         """
         Perform web search using the Serper API and return a SearchResponse.
+
+        Args:
+            query: The search query.
+            max_results: Maximum number of results to return.
+
+        Returns:
+            SearchResult object.
         """
         logger.info(f"Performing Serper API search for: '{query}'")
 
@@ -74,13 +81,23 @@ class SerperWebSearcher(BaseWebSearcher):
             logger.error(error_msg)
             raise Exception(error_msg)
 
-    async def _call_serper_api(self, query: str, max_results: int) -> Dict[str, Any]:
+    async def _call_serper_api(self, query: str, max_results: int) -> dict[str, Any]:
+        """
+        Make live API call to Serper.
+
+        Args:
+            query: The search query.
+            max_results: Maximum number of results.
+
+        Returns:
+            API response dictionary.
+        """
         return await self.client.post(
             url="/search", json_data={"q": query, "num": max_results}
         )
 
     def _map_to_search_result(
-        self, api_response: Dict[str, Any], query: str
+        self, api_response: dict[str, Any], query: str
     ) -> SearchResult:
         """
         Map Serper API response to a SearchResult object.

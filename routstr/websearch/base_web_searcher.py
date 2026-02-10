@@ -6,7 +6,7 @@ Base class for Web search for AI context enhancement using Retrieval Augmented G
 import json
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 from urllib.parse import urlparse
 
 from ..core.logging import get_logger
@@ -64,7 +64,7 @@ class BaseWebSearcher(ABC):
             domain = domain[4:]
         return domain in self.EXCLUDED_DOMAINS
 
-    async def _load_mock_data(self, file_name: str) -> Dict[str, Any]:
+    async def _load_mock_data(self, file_name: str) -> dict[str, Any]:
         """
         Load mock data from local JSON file for testing purposes.
 
@@ -80,7 +80,7 @@ class BaseWebSearcher(ABC):
             return json.load(file)
 
     async def _save_api_response(
-        self, response_data: Dict[str, Any], query: str, provider: str
+        self, response_data: dict[str, Any], query: str, provider: str
     ) -> None:
         """
         Save API response to a timestamped JSON file.
@@ -109,6 +109,9 @@ class BaseWebSearcher(ABC):
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(response_data, f, indent=2, ensure_ascii=False)
-            logger.info(f"API response saved to {file_path}")
+            logger.info(f"API response saved to {file_path}", extra={"path": str(file_path)})
         except Exception as e:
-            logger.error(f"Failed to save API response: {e}")
+            logger.error(
+                f"Failed to save API response: {e}",
+                extra={"path": str(file_path), "error": str(e)},
+            )

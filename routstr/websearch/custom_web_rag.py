@@ -8,8 +8,6 @@ Offers flexibility to use different providers for each pipeline stage.
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Dict
-
 from ..core.logging import get_logger
 from .base_chunker import BaseChunker
 from .base_ranker import BaseRanker
@@ -90,7 +88,7 @@ class CustomRAG(BaseWebRAG):
             Exception: If any pipeline stage fails
         """
         pipeline_start = datetime.now()
-        timings: Dict[str, int] = {}
+        timings: dict[str, int] = {}
         logger.info(
             f"Starting CustomRAG pipeline for query: '{query}'",
             extra={"query": query, "max_results": max_results},
@@ -157,7 +155,7 @@ class CustomRAG(BaseWebRAG):
 
         except Exception as e:
             error_msg = f"CustomRAG pipeline failed for query '{query}': {e}"
-            logger.error(error_msg)
+            logger.error(error_msg, extra={"query": query, "error": str(e)})
             raise Exception(error_msg)
 
     async def check_availability(self) -> bool:

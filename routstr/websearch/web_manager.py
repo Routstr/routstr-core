@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any, Optional, Tuple
+from typing import Any
 
 from ..core.logging import get_logger
 from ..core.settings import settings
@@ -30,11 +30,11 @@ class WebManager:
     """
 
     def __init__(self) -> None:
-        self._rag_provider: Optional[BaseWebRAG] = None
-        self._search_provider: Optional[BaseWebSearcher] = None
-        self._scraper_provider: Optional[BaseWebScraper] = None
-        self._chunker_provider: Optional[BaseChunker] = None
-        self._rank_provider: Optional[BaseRanker] = None
+        self._rag_provider: BaseWebRAG | None = None
+        self._search_provider: BaseWebSearcher | None = None
+        self._scraper_provider: BaseWebScraper | None = None
+        self._chunker_provider: BaseChunker | None = None
+        self._rank_provider: BaseRanker | None = None
 
     @staticmethod
     def is_rag_enabled() -> bool:
@@ -44,7 +44,7 @@ class WebManager:
         return settings.web_rag_provider.lower() != RAGProvider.DISABLED
 
     # TODO: How can we simplify the get_XXX_provider() logic
-    async def get_rag_provider(self) -> Optional[BaseWebRAG]:
+    async def get_rag_provider(self) -> BaseWebRAG | None:
         """
         Get RAG provider based on RAG_PROVIDER configuration.
         This only returns true all-in-one RAG providers (like Tavily).
@@ -152,7 +152,7 @@ class WebManager:
                     logger.error(f"Failed to initialize CustomRAG: {e}")
                     return None
 
-    async def get_web_search_provider(self) -> Optional[BaseWebSearcher]:
+    async def get_web_search_provider(self) -> BaseWebSearcher | None:
         """
         Get web search provider based on WEB_SEARCH_PROVIDER configuration.
         This only returns web search providers (like Serper)
@@ -185,7 +185,7 @@ class WebManager:
                     logger.error(f"Failed to initialize SerperWebSearch: {e}")
                     return None
 
-    async def get_web_scraper_provider(self) -> Optional[BaseWebScraper]:
+    async def get_web_scraper_provider(self) -> BaseWebScraper | None:
         """
         Get web scraper provider based on configuration.
 
@@ -221,7 +221,7 @@ class WebManager:
                     logger.error(f"Failed to initialize HTTPWebScrape: {e}")
                     return None
 
-    async def get_web_chunker_provider(self) -> Optional[BaseChunker]:
+    async def get_web_chunker_provider(self) -> BaseChunker | None:
         """
         Get chunker provider based on configuration.
 
@@ -270,10 +270,12 @@ class WebManager:
                     logger.error(f"Failed to initialize RecursiveChunker: {e}")
                     return None
 
-    async def get_web_ranker_provider(self) -> Optional[BaseRanker]:
+    async def get_web_ranker_provider(self) -> BaseRanker | None:
         """
         Get ranker provider based on configuration.
-        Returns: Ranker provider instance or None if not available
+
+        Returns:
+            BaseRanker instance or None if not available
         """
         if self._rank_provider:
             return self._rank_provider
@@ -383,7 +385,7 @@ class WebManager:
             return {"body": request_body, "websearchcontext": context}
 
     @staticmethod
-    def extract_web_search_parameter(body: bytes | None) -> Tuple[bytes | None, bool]:
+    def extract_web_search_parameter(body: bytes | None) -> tuple[bytes | None, bool]:
         """
         Extracts the 'enable_web_search' parameter from a JSON request body.
 

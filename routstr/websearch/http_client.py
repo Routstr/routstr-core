@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any
 
 import httpx
 
@@ -15,7 +15,7 @@ class HTTPClient:
     def __init__(
         self,
         base_url: str = "",
-        default_headers: Optional[Dict[str, str]] = None,
+        default_headers: dict[str, str] | None = None,
         timeout: float = 10.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
@@ -45,10 +45,22 @@ class HTTPClient:
     async def get(
         self,
         url: str,
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         return_json: bool = True,
     ) -> Any:
+        """
+        Perform a GET request.
+
+        Args:
+            url: Target URL.
+            params: Query parameters.
+            headers: Request-specific headers.
+            return_json: Whether to parse response as JSON.
+
+        Returns:
+            Parsed JSON or raw text.
+        """
         return await self._request(
             "GET", url, params=params, headers=headers, return_json=return_json
         )
@@ -56,10 +68,22 @@ class HTTPClient:
     async def post(
         self,
         url: str,
-        json_data: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         return_json: bool = True,
     ) -> Any:
+        """
+        Perform a POST request.
+
+        Args:
+            url: Target URL.
+            json_data: JSON payload.
+            headers: Request-specific headers.
+            return_json: Whether to parse response as JSON.
+
+        Returns:
+            Parsed JSON or raw text.
+        """
         return await self._request(
             "POST", url, json_data=json_data, headers=headers, return_json=return_json
         )
@@ -68,9 +92,9 @@ class HTTPClient:
         self,
         method: str,
         url: str,
-        json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
+        json_data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         return_json: bool = True,
     ) -> Any:
         """

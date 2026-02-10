@@ -12,8 +12,6 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import replace
 from datetime import datetime
-from typing import List
-
 from ..core.logging import get_logger
 from .types import SearchResult, WebPage
 
@@ -60,8 +58,8 @@ class BaseWebScraper(ABC):
         """
 
     async def scrape_webpages(
-        self, webpages: List[WebPage], max_concurrent: int = 10
-    ) -> List[WebPage]:
+        self, webpages: list[WebPage], max_concurrent: int = 10
+    ) -> list[WebPage]:
         """
         Orchestrates concurrent scraping of multiple webpages.
         """
@@ -72,7 +70,10 @@ class BaseWebScraper(ABC):
                 try:
                     return await self.scrape_url(page)
                 except Exception as e:
-                    logger.error(f"Critical error scraping {page.url}: {e}")
+                    logger.error(
+                        f"Critical error scraping {page.url}: {e}",
+                        extra={"url": page.url, "error": str(e)},
+                    )
                     return page
 
         tasks = [_bounded_scrape(page) for page in webpages]
@@ -84,7 +85,7 @@ class BaseWebScraper(ABC):
             if isinstance(res, WebPage):
                 valid_results.append(res)
             else:
-                logger.error(f"Task failed with exception: {res}")
+                logger.error(f"Task failed with exception: {res}", extra={"error": str(res)})
 
         return valid_results
 

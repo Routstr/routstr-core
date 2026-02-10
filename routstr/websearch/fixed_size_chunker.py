@@ -6,8 +6,6 @@ into chunks of a specified size with optional overlap. This is the simplest
 chunking approach and serves as a reliable fallback.
 """
 
-from typing import List
-
 from ..core.logging import get_logger
 from .base_chunker import BaseChunker
 
@@ -29,14 +27,14 @@ class FixedSizeChunker(BaseChunker):
         """
         # Chunks are exactly chunks_size long
         # 10% overlap is included in the this length
-        chunk_overlap = int(chunk_size * chunk_overlap_perc)
+        chunk_overlap: int = int(chunk_size * chunk_overlap_perc)
         super().__init__(chunk_size, chunk_overlap)
         
         logger.info(
             f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={self.chunk_overlap}"
         )
 
-    async def chunk_text(self, text: str) -> List[str]:
+    async def chunk_text(self, text: str) -> list[str]:
         """
         Chunk text into fixed-size pieces using a sliding window approach.
 

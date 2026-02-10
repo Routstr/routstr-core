@@ -25,15 +25,15 @@ class BaseChunker(ABC):
 
     chunker_name: str = "base"
 
-    def __init__(self, chunk_size: int, chunk_overlap: float) -> None:
+    def __init__(self, chunk_size: int, chunk_overlap: int) -> None:
         """
         Initialize the chunker.
 
         Args:
             chunk_size: Maximum size of each chunk in characters
         """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.chunk_size: int = chunk_size
+        self.chunk_overlap: int = chunk_overlap
 
     @abstractmethod
     async def chunk_text(self, text: str) -> list[str]:

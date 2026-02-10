@@ -1,6 +1,6 @@
 import logging
 from dataclasses import replace
-from typing import List, Optional, Any
+from typing import Any
 
 import httpx
 
@@ -41,17 +41,24 @@ class HTTPWebScraper(BaseWebScraper):
             "Accept": "text/html, text/plain, application/xhtml+xml",
         }
         self.max_response_size = 5_000_000  # 5MB
-        self._shared_client: Optional[httpx.AsyncClient] = None
+        self._shared_client: httpx.AsyncClient | None = None
 
     async def check_availability(self) -> bool:
         """Returns True if Trafilatura is installed and available."""
         return TRAFILATURA_AVAILABLE
 
     async def scrape_webpages(
-        self, webpages: List[WebPage], max_concurrent: int = 10
-    ) -> List[WebPage]:
+        self, webpages: list[WebPage], max_concurrent: int = 10
+    ) -> list[WebPage]:
         """
         Creates shared HTTP client, then calls the base class to handle the looping.
+
+        Args:
+            webpages: List of webpages to scrape.
+            max_concurrent: Maximum number of concurrent requests.
+
+        Returns:
+            List of scraped webpages.
         """
         async with httpx.AsyncClient(
             timeout=self.client_timeout,
@@ -68,6 +75,12 @@ class HTTPWebScraper(BaseWebScraper):
     async def scrape_url(self, webpage: WebPage) -> WebPage:
         """
         Concrete implementation of the scraping logic.
+
+        Args:
+            webpage: The webpage object containing the URL.
+
+        Returns:
+            Updated webpage object with content.
         """
         raw_html = await self._fetch_html(webpage.url)
 
@@ -76,8 +89,16 @@ class HTTPWebScraper(BaseWebScraper):
 
         return self._extract_data(webpage, raw_html)
 
-    async def _fetch_html(self, url: str) -> Optional[str]:
-        """Handles the low-level HTTP streaming and safety checks."""
+    async def _fetch_html(self, url: str) -> str | None:
+        """
+        Handles the low-level HTTP streaming and safety checks.
+
+        Args:
+            url: The URL to fetch.
+
+        Returns:
+            The raw HTML content or None if fetching failed.
+        """
         client = self._shared_client
 
         # Fallback: If scrape_url is called individually (not via scrape_webpages)
@@ -115,17 +136,23 @@ class HTTPWebScraper(BaseWebScraper):
                 )
 
         except Exception as e:
-            logger.debug(f"Fetch failed for {url}: {e}")
+            logger.debug(f"Fetch failed for {url}: {e}", extra={"url": url, "error": str(e)})
             return None
         finally:
             if local_client:
                 await local_client.aclose()
 
     def _extract_data(self, webpage: WebPage, html: str) -> WebPage:
-        """Uses Trafilatura to populate the WebPage object."""
+        """
+        Uses Trafilatura to populate the WebPage object.
 
-        # Debug write
-        # asyncio.create_task(self._write_debug_file(webpage.url, html, "raw_"))
+        Args:
+            webpage: The webpage object.
+            html: The raw HTML content.
+
+        Returns:
+            Updated webpage object with extracted metadata and content.
+        """
 
         if not TRAFILATURA_AVAILABLE:
             return replace(webpage, content=html)
@@ -159,5 +186,8 @@ class HTTPWebScraper(BaseWebScraper):
             )
 
         except Exception as e:
-            logger.error(f"Extraction failed for {webpage.url}: {e}")
+            logger.error(
+                f"Extraction failed for {webpage.url}: {e}",
+                extra={"url": webpage.url, "error": str(e)},
+            )
             return webpage

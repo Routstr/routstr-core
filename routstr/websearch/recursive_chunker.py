@@ -6,8 +6,6 @@ the logical flow of the document better than fixed-size chunking.
 """
 
 import re
-from typing import List
-
 from ..core.logging import get_logger
 from .base_chunker import BaseChunker
 
@@ -43,7 +41,7 @@ class RecursiveChunker(BaseChunker):
             f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={self.chunk_overlap}"
         )
 
-    async def chunk_text(self, text: str) -> List[str]:
+    async def chunk_text(self, text: str) -> list[str]:
         """Chunk text by recursively splitting on semantic boundaries.
 
         Note:
@@ -88,8 +86,17 @@ class RecursiveChunker(BaseChunker):
 
         return raw_chunks
 
-    def _split_recursive(self, text: str, separators: List[str]) -> List[str]:
-        """Recursively splits text and recombines pieces to fill chunk_size."""
+    def _split_recursive(self, text: str, separators: list[str]) -> list[str]:
+        """
+        Recursively splits text and recombines pieces to fill chunk_size.
+
+        Args:
+            text: The text to split.
+            separators: List of separators to use for splitting.
+
+        Returns:
+            List of text chunks.
+        """
 
         if len(text) <= self.chunk_size:
             return [text]
@@ -156,12 +163,21 @@ class RecursiveChunker(BaseChunker):
             return "\n".join(pieces)
         return " ".join(pieces)
 
-    def _apply_overlap(self, chunks: List[str]) -> List[str]:
+    def _apply_overlap(self, chunks: list[str]) -> list[str]:
+        """
+        Applies overlap to the chunks.
+
+        Args:
+            chunks: List of text chunks.
+
+        Returns:
+            List of chunks with overlap applied.
+        """
         merged_chunks = []
         num_chunks = len(chunks)
         
         # Calculate half-overlap to keep chunk size growth under control
-        half_overlap = self.chunk_overlap // 2
+        half_overlap = int(self.chunk_overlap // 2)
 
         # If overlap is too small to split across both sides, return as-is
         if half_overlap <= 0:

@@ -8,7 +8,7 @@ and highlight generation optimized for AI context enhancement.
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any
 
 from ..core.logging import get_logger
 from .base_web_rag import BaseWebRAG
@@ -87,17 +87,17 @@ class ExaWebRAG(BaseWebRAG):
 
         except json.JSONDecodeError as e:
             error_msg = f"Failed to parse Exa API response for query '{query}': {e}"
-            logger.error(error_msg)
+            logger.error(error_msg, extra={"query": query, "error": str(e)})
             raise Exception(error_msg)
         except Exception as e:
             error_msg = (
                 f"Failed to get or process Exa API response for query '{query}': {e}"
             )
-            logger.error(error_msg)
+            logger.error(error_msg, extra={"query": query, "error": str(e)})
             raise Exception(error_msg)
 
     def _map_to_search_result(
-        self, api_response: Dict[str, Any], query: str, total_ms: int
+        self, api_response: dict[str, Any], query: str, total_ms: int
     ) -> SearchResult:
         """
         Map Exa API response to a SearchResult object.
@@ -149,7 +149,7 @@ class ExaWebRAG(BaseWebRAG):
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
-    async def _call_exa_api(self, query: str, max_results: int = 10) -> Dict[str, Any]:
+    async def _call_exa_api(self, query: str, max_results: int = 10) -> dict[str, Any]:
         """
         Make live API call to Exa's neural search endpoint.
 
