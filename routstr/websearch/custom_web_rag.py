@@ -19,7 +19,7 @@ from .types import SearchResult
 logger = get_logger(__name__)
 
 
-class CustomRAG(BaseWebRAG):
+class CustomWebRAG(BaseWebRAG):
     """
     Manual RAG pipeline implementation using separate search, scraping, and chunking components.
 
@@ -37,7 +37,7 @@ class CustomRAG(BaseWebRAG):
         rank_provider: BaseRanker,
     ):
         """
-        Initialize CustomRAG with pipeline components.
+        Initialize CustomWebRAG with pipeline components.
 
         Args:
             search_provider: Web search provider (e.g., SerperWebSearch)
@@ -62,7 +62,7 @@ class CustomRAG(BaseWebRAG):
         self.rank_provider = rank_provider
 
         logger.info(
-            f"CustomRAG initialized with: {search_provider.__class__.__name__}, "
+            f"CustomWebRAG initialized with: {search_provider.__class__.__name__}, "
             f"{scrape_provider.__class__.__name__}, {chunk_provider.__class__.__name__}, "
             f"{rank_provider.__class__.__name__}"
         )
@@ -90,7 +90,7 @@ class CustomRAG(BaseWebRAG):
         pipeline_start = datetime.now()
         timings: dict[str, int] = {}
         logger.info(
-            f"Starting CustomRAG pipeline for query: '{query}'",
+            f"Starting CustomWebRAG pipeline for query: '{query}'",
             extra={"query": query, "max_results": max_results},
         )
 
@@ -138,7 +138,7 @@ class CustomRAG(BaseWebRAG):
             )
 
             logger.info(
-                f"CustomRAG pipeline completed: {len(search_response.webpages)} results in {timings['total']}ms",
+                f"CustomWebRAG pipeline completed: {len(search_response.webpages)} results in {timings['total']}ms",
                 extra={
                     "query": query,
                     "result_count": len(search_response.webpages),
@@ -154,7 +154,7 @@ class CustomRAG(BaseWebRAG):
             )
 
         except Exception as e:
-            error_msg = f"CustomRAG pipeline failed for query '{query}': {e}"
+            error_msg = f"CustomWebRAG pipeline failed for query '{query}': {e}"
             logger.error(error_msg, extra={"query": query, "error": str(e)})
             raise Exception(error_msg)
 
@@ -179,14 +179,14 @@ class CustomRAG(BaseWebRAG):
 
             if not all_available:
                 logger.warning(
-                    f"CustomRAG availability check failed: "
+                    f"CustomWebRAG availability check failed: "
                     f"search={search_available}, scraper={scraper_available}, chunker={chunker_available}"
                 )
             else:
-                logger.debug("CustomRAG all components available")
+                logger.debug("CustomWebRAG all components available")
 
             return all_available
 
         except Exception as e:
-            logger.error(f"CustomRAG availability check failed: {e}")
+            logger.error(f"CustomWebRAG availability check failed: {e}")
             return False

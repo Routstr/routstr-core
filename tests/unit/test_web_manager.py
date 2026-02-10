@@ -5,7 +5,7 @@ import pytest
 
 from routstr.core.settings import settings
 from routstr.websearch.bm25_ranker import BM25Ranker
-from routstr.websearch.custom_web_rag import CustomRAG
+from routstr.websearch.custom_web_rag import CustomWebRAG
 from routstr.websearch.exa_web_rag import ExaWebRAG
 from routstr.websearch.fixed_size_chunker import FixedSizeChunker
 from routstr.websearch.http_web_scraper import HTTPWebScraper
@@ -414,7 +414,7 @@ async def test_web_manager_custom_rag_factory_success() -> None:
     settings.web_chunker_provider = "recursive"
     settings.web_ranking_provider = "bm25"
 
-    with patch.object(CustomRAG, "check_availability", new_callable=AsyncMock) as mock:
+    with patch.object(CustomWebRAG, "check_availability", new_callable=AsyncMock) as mock:
         mock.return_value = True
         provider = await manager.get_rag_provider()
-        assert isinstance(provider, CustomRAG)
+        assert isinstance(provider, CustomWebRAG)

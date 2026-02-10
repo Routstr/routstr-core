@@ -1,6 +1,4 @@
 import math
-from typing import Optional
-
 from pydantic.v1 import BaseModel
 
 from ..core import get_logger
@@ -15,7 +13,7 @@ class CostData(BaseModel):
     input_msats: int
     output_msats: int
     total_msats: int
-    web_search_msats: Optional[int] = 0
+    web_search_msats: int | None = 0
 
 
 class MaxCostData(CostData):

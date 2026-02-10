@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from routstr.websearch.custom_web_rag import CustomRAG
+from routstr.websearch.custom_web_rag import CustomWebRAG
 from routstr.websearch.types import SearchResult, WebPage
 
 
@@ -25,7 +25,7 @@ async def test_custom_rag_pipeline_flow() -> None:
     mock_chunk.chunk_search_results.return_value = initial_res
     mock_rank.rank.return_value = initial_res
 
-    pipeline = CustomRAG(
+    pipeline = CustomWebRAG(
         search_provider=mock_search,
         scrape_provider=mock_scrape,
         chunk_provider=mock_chunk,
@@ -58,7 +58,7 @@ async def test_custom_rag_stop_on_no_results() -> None:
     # Search returns empty list
     mock_search.search.return_value = SearchResult(query="test", webpages=[])
 
-    pipeline = CustomRAG(
+    pipeline = CustomWebRAG(
         search_provider=mock_search,
         scrape_provider=mock_scrape,
         chunk_provider=AsyncMock(),
@@ -81,7 +81,7 @@ async def test_custom_rag_availability_check() -> None:
     mock_chunk = AsyncMock()  
     mock_rank = AsyncMock()  
 
-    pipeline = CustomRAG(mock_search, mock_scrape, mock_chunk, mock_rank)
+    pipeline = CustomWebRAG(mock_search, mock_scrape, mock_chunk, mock_rank)
 
     # Case 1: Scrape is down
     mock_search.check_availability.return_value = True

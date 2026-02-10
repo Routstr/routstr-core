@@ -9,7 +9,7 @@ from .base_ranker import BaseRanker
 from .base_web_rag import BaseWebRAG
 from .base_web_scraper import BaseWebScraper
 from .base_web_searcher import BaseWebSearcher
-from .custom_web_rag import CustomRAG
+from .custom_web_rag import CustomWebRAG
 from .types import (
     ChunkProvider,
     RAGProvider,
@@ -138,18 +138,18 @@ class WebManager:
 
                     # 3. Success: Mypy now knows these are not None
                     logger.info("Successfully initialized Custom RAG pipeline")
-                    custom_rag = CustomRAG(search, scrape, chunk, rank)
+                    custom_rag = CustomWebRAG(search, scrape, chunk, rank)
 
                     if not await custom_rag.check_availability():
                         logger.error(
-                            "CustomRAG initialized but some components are not available"
+                            "CustomWebRAG initialized but some components are not available"
                         )
                         return None
                     self._rag_provider = custom_rag
                     return self._rag_provider
 
                 except Exception as e:
-                    logger.error(f"Failed to initialize CustomRAG: {e}")
+                    logger.error(f"Failed to initialize CustomWebRAG: {e}")
                     return None
 
     async def get_web_search_provider(self) -> BaseWebSearcher | None:
