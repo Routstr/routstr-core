@@ -114,6 +114,8 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
 
         # Azure format: openai/deployments/{deployment-id}/chat/completions
         clean_path = path.lstrip("/")
+        if clean_path.startswith("v1/"):
+            clean_path = clean_path[3:]
         azure_path = f"openai/deployments/{deployment_id}/{clean_path}"
 
         # Temporary backup and restore base_url to use cleaned version

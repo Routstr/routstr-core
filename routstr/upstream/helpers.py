@@ -205,6 +205,9 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
 
             provider = _instantiate_provider(provider_row)
             if provider:
+                # Keep provider DB id on runtime instance so model mapping can
+                # bind DB overrides to the correct upstream.
+                setattr(provider, "db_id", provider_row.id)
                 await provider.refresh_models_cache()
                 logger.debug(
                     f"Initialized {provider_row.provider_type} provider",
