@@ -3030,7 +3030,7 @@ class BaseUpstreamProvider:
                 
                 # .first() returns the object or None if not found
                 provider = result.first()
-                if not provider:
+                if not provider or not provider.id:
                     raise HTTPException(status_code=404, detail="Provider not found")
 
                 db_models = await list_models(
