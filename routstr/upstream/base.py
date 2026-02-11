@@ -5,23 +5,18 @@ import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Mapping
+from typing import Mapping
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import select
-from ..payment.models import _row_to_model, list_models
 
 from ..auth import adjust_payment_for_tokens, revert_pay_for_request
 from ..core import get_logger
-from ..core.db import ApiKey, AsyncSession, create_session, UpstreamProviderRow
+from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow, create_session
 from ..core.exceptions import UpstreamError
-
-if TYPE_CHECKING:
-    from ..core.db import UpstreamProviderRow
-
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -34,6 +29,7 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    list_models,
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
@@ -3043,7 +3039,7 @@ class BaseUpstreamProvider:
                     include_disabled=True,
                     apply_fees=False,
                 )
-                db_model_ids: set[Unknown | str] = {model.id for model in db_models}
+                db_model_ids: set[str] = {model.id for model in db_models}
                 models = await self.fetch_models()
                 model_ids = [model.id for model in models]
                 diff = set(db_model_ids) - set(model_ids)
@@ -3070,7 +3066,6 @@ class BaseUpstreamProvider:
                 f"Failed to refresh models cache for {self.provider_type or self.base_url}",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
-
 
     def get_cached_models(self) -> list[Model]:
         """Get cached models for this provider.
