@@ -26,12 +26,24 @@ You bring the API keys, Routstr handles the billing, payments, and client manage
 
 ## 1. Start the Node
 
+You can run the pre-built image directly:
+
 ```bash
 docker run -d \
   --name routstr \
   -p 8000:8000 \
   -v routstr-data:/app/data \
   ghcr.io/routstr/proxy:latest
+```
+
+### Build from Source (Recommended)
+If you want to build the node and UI yourself from source, use the unified Dockerfile:
+
+```bash
+git clone https://github.com/routstr/routstr-core.git
+cd routstr-core
+docker build -f Dockerfile.full -t routstr-local .
+docker run -d -p 8000:8000 --name routstr routstr-local
 ```
 
 Verify it's running:
