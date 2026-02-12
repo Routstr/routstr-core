@@ -456,18 +456,18 @@ async def batch_override_provider_models(
     logger.info(
         f"BATCH_OVERRIDE called: provider_id={provider_id}, count={len(payload.models)}"
     )
-    
+
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
-            
+
         overridden_count = 0
-        
+
         for model_data in payload.models:
             # Try to get existing model regardless of whether it's enabled or not
             existing_row = await session.get(ModelRow, (model_data.id, provider_id))
-            
+
             if existing_row:
                 # Update existing
                 existing_row.name = model_data.name
@@ -483,7 +483,9 @@ async def batch_override_provider_models(
                     else None
                 )
                 existing_row.top_provider = (
-                    json.dumps(model_data.top_provider) if model_data.top_provider else None
+                    json.dumps(model_data.top_provider)
+                    if model_data.top_provider
+                    else None
                 )
                 existing_row.canonical_slug = model_data.canonical_slug
                 existing_row.alias_ids = (
@@ -508,23 +510,32 @@ async def batch_override_provider_models(
                         else None
                     ),
                     top_provider=(
-                        json.dumps(model_data.top_provider) if model_data.top_provider else None
+                        json.dumps(model_data.top_provider)
+                        if model_data.top_provider
+                        else None
                     ),
                     canonical_slug=model_data.canonical_slug,
                     alias_ids=(
-                        json.dumps(model_data.alias_ids) if model_data.alias_ids else None
+                        json.dumps(model_data.alias_ids)
+                        if model_data.alias_ids
+                        else None
                     ),
                     upstream_provider_id=provider_id,
                     enabled=model_data.enabled,
                 )
                 session.add(row)
-            
+
             overridden_count += 1
-            
+
         await session.commit()
 
     await refresh_model_maps()
-    return {"ok": True, "count": overridden_count, "message": f"Successfully batch overridden {overridden_count} models"}
+    return {
+        "ok": True,
+        "count": overridden_count,
+        "message": f"Successfully batch overridden {overridden_count} models",
+    }
+
 
 class UpstreamProviderCreate(BaseModel):
     provider_type: str
@@ -533,6 +544,7 @@ class UpstreamProviderCreate(BaseModel):
     api_version: str | None = None
     enabled: bool = True
     provider_fee: float = 1.01
+    provider_settings: dict | None = None
 
 
 class UpstreamProviderUpdate(BaseModel):
@@ -542,6 +554,7 @@ class UpstreamProviderUpdate(BaseModel):
     api_version: str | None = None
     enabled: bool | None = None
     provider_fee: float | None = None
+    provider_settings: dict | None = None
 
 
 @admin_router.get("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
@@ -558,6 +571,9 @@ async def get_upstream_providers() -> list[dict[str, object]]:
                 "api_version": p.api_version,
                 "enabled": p.enabled,
                 "provider_fee": p.provider_fee,
+                "provider_settings": json.loads(p.provider_settings)
+                if p.provider_settings
+                else None,
             }
             for p in providers
         ]
@@ -585,6 +601,9 @@ async def create_upstream_provider(
             api_version=payload.api_version,
             enabled=payload.enabled,
             provider_fee=payload.provider_fee,
+            provider_settings=json.dumps(payload.provider_settings)
+            if payload.provider_settings
+            else None,
         )
         session.add(provider)
         await session.commit()
@@ -600,6 +619,7 @@ async def create_upstream_provider(
         "api_version": provider.api_version,
         "enabled": provider.enabled,
         "provider_fee": provider.provider_fee,
+        "provider_settings": payload.provider_settings,
     }
 
 
@@ -619,6 +639,9 @@ async def get_upstream_provider(provider_id: int) -> dict[str, object]:
             "api_version": provider.api_version,
             "enabled": provider.enabled,
             "provider_fee": provider.provider_fee,
+            "provider_settings": json.loads(provider.provider_settings)
+            if provider.provider_settings
+            else None,
         }
 
 
@@ -645,6 +668,8 @@ async def update_upstream_provider(
             provider.enabled = payload.enabled
         if payload.provider_fee is not None:
             provider.provider_fee = payload.provider_fee
+        if payload.provider_settings is not None:
+            provider.provider_settings = json.dumps(payload.provider_settings)
 
         session.add(provider)
         await session.commit()
@@ -660,6 +685,9 @@ async def update_upstream_provider(
         "api_version": provider.api_version,
         "enabled": provider.enabled,
         "provider_fee": provider.provider_fee,
+        "provider_settings": json.loads(provider.provider_settings)
+        if provider.provider_settings
+        else None,
     }
 
 

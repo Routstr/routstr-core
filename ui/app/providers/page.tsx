@@ -417,6 +417,7 @@ export default function ProvidersPage() {
     api_version: null,
     enabled: true,
     provider_fee: 1.06,
+    provider_settings: {},
   });
 
   const getProviderFeePlaceholder = (type: string) => {
@@ -560,6 +561,7 @@ export default function ProvidersPage() {
       api_version: provider.api_version || null,
       enabled: provider.enabled,
       provider_fee: provider.provider_fee,
+      provider_settings: provider.provider_settings || {},
     });
     setIsEditDialogOpen(true);
   };
@@ -572,6 +574,7 @@ export default function ProvidersPage() {
       api_version: formData.api_version,
       enabled: formData.enabled,
       provider_fee: formData.provider_fee,
+      provider_settings: formData.provider_settings,
     };
     if (formData.api_key) {
       updateData.api_key = formData.api_key;
@@ -721,6 +724,152 @@ export default function ProvidersPage() {
                         </SelectContent>
                       </Select>
                     </div>
+                    {formData.provider_type === 'routstr' && (
+                      <div className='bg-muted/30 grid gap-4 rounded-lg border p-4'>
+                        <div className='flex items-center justify-between'>
+                          <Label className='text-sm font-semibold'>
+                            Routstr Node Settings
+                          </Label>
+                          <Badge variant='outline' className='text-[10px]'>
+                            JSONB Storage
+                          </Badge>
+                        </div>
+
+                        <div className='grid gap-3'>
+                          <div className='flex items-center justify-between'>
+                            <Label htmlFor='auto_topup' className='text-sm'>
+                              Enable Auto Top-up
+                            </Label>
+                            <Switch
+                              id='auto_topup'
+                              checked={!!formData.provider_settings?.auto_topup}
+                              onCheckedChange={(checked) =>
+                                setFormData({
+                                  ...formData,
+                                  provider_settings: {
+                                    ...formData.provider_settings,
+                                    auto_topup: checked,
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+
+                          {formData.provider_settings?.auto_topup && (
+                            <div className='border-primary/20 grid gap-4 border-l-2 pt-2 pl-4'>
+                              <div className='grid gap-2'>
+                                <Label
+                                  htmlFor='topup_threshold'
+                                  className='text-xs font-medium'
+                                >
+                                  When credits are below (Sats)
+                                </Label>
+                                <Input
+                                  id='topup_threshold'
+                                  type='number'
+                                  size='sm'
+                                  className='h-9'
+                                  placeholder='e.g. 1000'
+                                  value={
+                                    formData.provider_settings
+                                      ?.topup_threshold || ''
+                                  }
+                                  onChange={(e) =>
+                                    setFormData({
+                                      ...formData,
+                                      provider_settings: {
+                                        ...formData.provider_settings,
+                                        topup_threshold: parseInt(
+                                          e.target.value
+                                        ),
+                                      },
+                                    })
+                                  }
+                                />
+                              </div>
+
+                              <div className='grid gap-2'>
+                                <Label
+                                  htmlFor='topup_amount_limit'
+                                  className='text-xs font-medium'
+                                >
+                                  Purchase this amount (Sats)
+                                </Label>
+                                <Input
+                                  id='topup_amount_limit'
+                                  type='number'
+                                  size='sm'
+                                  className='h-9'
+                                  placeholder='e.g. 5000'
+                                  value={
+                                    formData.provider_settings
+                                      ?.topup_amount_limit || ''
+                                  }
+                                  onChange={(e) =>
+                                    setFormData({
+                                      ...formData,
+                                      provider_settings: {
+                                        ...formData.provider_settings,
+                                        topup_amount_limit: parseInt(
+                                          e.target.value
+                                        ),
+                                      },
+                                    })
+                                  }
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          <div className='flex items-center justify-between'>
+                            <Label
+                              htmlFor='refund_on_expiry'
+                              className='text-xs'
+                            >
+                              Auto-Refund Expired Keys
+                            </Label>
+                            <Switch
+                              id='refund_on_expiry'
+                              checked={
+                                !!formData.provider_settings?.refund_on_expiry
+                              }
+                              onCheckedChange={(checked) =>
+                                setFormData({
+                                  ...formData,
+                                  provider_settings: {
+                                    ...formData.provider_settings,
+                                    refund_on_expiry: checked,
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+
+                          <div className='grid gap-2'>
+                            <Label htmlFor='refund_address' className='text-xs'>
+                              Global Refund Address (LNURL/Address)
+                            </Label>
+                            <Input
+                              id='refund_address'
+                              className='h-8 text-xs'
+                              placeholder='lightning@address.com'
+                              value={
+                                formData.provider_settings?.refund_address || ''
+                              }
+                              onChange={(e) =>
+                                setFormData({
+                                  ...formData,
+                                  provider_settings: {
+                                    ...formData.provider_settings,
+                                    refund_address: e.target.value,
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <div className='grid gap-2'>
                       <Label htmlFor='base_url'>Base URL</Label>
                       <Input
@@ -903,12 +1052,19 @@ export default function ProvidersPage() {
                         <div className='flex flex-wrap items-center gap-2'>
                           {canShowBalance(provider.provider_type) &&
                             provider.api_key && (
-                              <ProviderBalance
-                                providerId={provider.id}
-                                platformUrl={getPlatformUrl(
-                                  provider.provider_type
+                              <div className='flex flex-col gap-1'>
+                                <ProviderBalance
+                                  providerId={provider.id}
+                                  platformUrl={getPlatformUrl(
+                                    provider.provider_type
+                                  )}
+                                />
+                                {provider.provider_type === 'routstr' && (
+                                  <div className='text-muted-foreground font-mono text-[10px]'>
+                                    sk-{provider.api_key.substring(0, 8)}...
+                                  </div>
                                 )}
-                              />
+                              </div>
                             )}
                           <Button
                             variant='outline'
@@ -1219,6 +1375,143 @@ export default function ProvidersPage() {
                   </SelectContent>
                 </Select>
               </div>
+              {formData.provider_type === 'routstr' && (
+                <div className='bg-muted/30 grid gap-4 rounded-lg border p-4'>
+                  <div className='flex items-center justify-between'>
+                    <Label className='text-sm font-semibold'>
+                      Routstr Node Settings
+                    </Label>
+                    <Badge variant='outline' className='text-[10px]'>
+                      JSONB Storage
+                    </Badge>
+                  </div>
+
+                  <div className='grid gap-3'>
+                    <div className='flex items-center justify-between'>
+                      <Label htmlFor='edit_auto_topup' className='text-sm'>
+                        Enable Auto Top-up
+                      </Label>
+                      <Switch
+                        id='edit_auto_topup'
+                        checked={!!formData.provider_settings?.auto_topup}
+                        onCheckedChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            provider_settings: {
+                              ...formData.provider_settings,
+                              auto_topup: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    {formData.provider_settings?.auto_topup && (
+                      <div className='border-primary/20 grid gap-4 border-l-2 pt-2 pl-4'>
+                        <div className='grid gap-2'>
+                          <Label
+                            htmlFor='edit_topup_threshold'
+                            className='text-xs font-medium'
+                          >
+                            When credits are below (Sats)
+                          </Label>
+                          <Input
+                            id='edit_topup_threshold'
+                            type='number'
+                            size='sm'
+                            className='h-9'
+                            placeholder='e.g. 1000'
+                            value={
+                              formData.provider_settings?.topup_threshold || ''
+                            }
+                            onChange={(e) =>
+                              setFormData({
+                                ...formData,
+                                provider_settings: {
+                                  ...formData.provider_settings,
+                                  topup_threshold: parseInt(e.target.value),
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className='grid gap-2'>
+                          <Label
+                            htmlFor='edit_topup_amount_limit'
+                            className='text-xs font-medium'
+                          >
+                            Purchase this amount (Sats)
+                          </Label>
+                          <Input
+                            id='edit_topup_amount_limit'
+                            type='number'
+                            size='sm'
+                            className='h-9'
+                            placeholder='e.g. 5000'
+                            value={
+                              formData.provider_settings?.topup_amount_limit ||
+                              ''
+                            }
+                            onChange={(e) =>
+                              setFormData({
+                                ...formData,
+                                provider_settings: {
+                                  ...formData.provider_settings,
+                                  topup_amount_limit: parseInt(e.target.value),
+                                },
+                              })
+                            }
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className='flex items-center justify-between'>
+                      <Label
+                        htmlFor='edit_refund_on_expiry'
+                        className='text-xs'
+                      >
+                        Auto-Refund Expired Keys
+                      </Label>
+                      <Switch
+                        id='edit_refund_on_expiry'
+                        checked={!!formData.provider_settings?.refund_on_expiry}
+                        onCheckedChange={(checked) =>
+                          setFormData({
+                            ...formData,
+                            provider_settings: {
+                              ...formData.provider_settings,
+                              refund_on_expiry: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className='grid gap-2'>
+                      <Label htmlFor='edit_refund_address' className='text-xs'>
+                        Global Refund Address (LNURL/Address)
+                      </Label>
+                      <Input
+                        id='edit_refund_address'
+                        className='h-8 text-xs'
+                        placeholder='lightning@address.com'
+                        value={formData.provider_settings?.refund_address || ''}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            provider_settings: {
+                              ...formData.provider_settings,
+                              refund_address: e.target.value,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className='grid gap-2'>
                 <Label htmlFor='edit_base_url'>Base URL</Label>
                 <Input
