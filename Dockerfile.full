@@ -1,0 +1,50 @@
+# Multi-stage Dockerfile for Routstr (includes UI build)
+# Stage 1: Build the UI
+FROM node:23-alpine AS ui-builder
+WORKDIR /app/ui
+
+# Install pnpm
+RUN corepack enable pnpm && corepack prepare pnpm@latest --activate
+
+# Copy UI source
+COPY ui/package.json ui/pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile
+
+COPY ui/ ./
+ENV NEXT_TELEMETRY_DISABLED=1
+# Next.js build produces a static export in 'out' directory
+RUN pnpm run build
+
+# Stage 2: Build the Routstr Node
+FROM ghcr.io/astral-sh/uv:python3.11-alpine AS runner
+
+# Install system dependencies
+RUN apk add --no-cache \
+    pkgconf \
+    build-base \
+    automake \
+    autoconf \
+    libtool \
+    m4 \
+    perl \
+    git
+
+WORKDIR /app
+
+# Copy the rest of the application (required for uv sync to find the package)
+COPY . .
+
+# Install dependencies including the specific secp256k1 branch
+RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
+RUN uv sync --no-dev
+
+# Copy the built UI from the ui-builder stage
+COPY --from=ui-builder /app/ui/out ./ui_out
+
+ENV PORT=8000
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# Run the application
+CMD ["/app/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
