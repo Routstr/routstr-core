@@ -13,7 +13,7 @@ A **Routstr Provider Node** acts as a gateway that:
 You bring the API keys, Routstr handles the billing, payments, and client management.
 
 !!! tip "Future: Node-to-Node Routing"
-    In future versions, you'll be able to run a node that connects to other Routstr nodes—eliminating the need to configure upstream providers yourself. For now, you'll need your own API credentials.
+In future versions, you'll be able to run a node that connects to other Routstr nodes—eliminating the need to configure upstream providers yourself. For now, you'll need your own API credentials.
 
 ---
 
@@ -32,9 +32,13 @@ Create a `.env` file in the root of the project to store your secrets:
 # Initial Admin Password
 ADMIN_PASSWORD=mysecretpassword
 
-# Your AI Provider Key
-UPSTREAM_BASE_URL=https://api.openai.com/v1
-UPSTREAM_API_KEY=sk-proj-...
+# Node Identity
+NAME="My AI Node"
+DESCRIPTION="Fast access to models"
+
+# Lightning Payouts
+RECEIVE_LN_ADDRESS=yourname@wallet.com
+
 ```
 
 ## 2. Start the Node
@@ -51,6 +55,7 @@ docker run -d \
 ```
 
 ### Build from Source (Recommended)
+
 If you want to build the node and UI yourself from source, use the unified Dockerfile:
 
 ```bash
@@ -58,7 +63,7 @@ git clone https://github.com/routstr/routstr-core.git
 cd routstr-core
 # Edit your .env with ADMIN_PASSWORD and API keys
 cp .env.example .env
-nano .env 
+nano .env
 
 docker build -f Dockerfile.full -t routstr-local .
 docker run -d -p 8000:8000 --env-file .env --name routstr routstr-local
@@ -77,7 +82,7 @@ curl http://localhost:8000/v1/info
 Open the **Admin Dashboard** at [http://localhost:8000/admin/](http://localhost:8000/admin/).
 
 !!! note "Login"
-    Use the `ADMIN_PASSWORD` you defined in your `.env` file to log in. If you didn't set one, the dashboard will prompt you to set one on first visit.
+Use the `ADMIN_PASSWORD` you defined in your `.env` file to log in. If you didn't set one, the dashboard will prompt you to set one on first visit.
 
 ### Connect Your AI Providers
 

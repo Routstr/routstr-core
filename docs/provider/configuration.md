@@ -13,16 +13,11 @@ Before running your node, you should create a `.env` file in the project root. T
 ### Example .env
 
 ```bash
-# Security (CRITICAL)
 ADMIN_PASSWORD=your-secure-password
 
 # Node Identity
 NAME="My AI Node"
 DESCRIPTION="Fast access to models"
-
-# Upstream AI Provider
-UPSTREAM_BASE_URL=https://openrouter.ai/api/v1
-UPSTREAM_API_KEY=sk-or-v1-...
 
 # Lightning Payouts
 RECEIVE_LN_ADDRESS=yourname@wallet.com
