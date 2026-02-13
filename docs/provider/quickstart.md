@@ -54,6 +54,8 @@ docker run -d \
   ghcr.io/routstr/proxy:latest
 ```
 
+*Note: The pre-built image does not contain the UI. For the all-in-one experience with the Admin Dashboard, use the Build from Source instructions below.*
+
 ### Build from Source (Recommended)
 
 If you want to build the node and UI yourself from source, use the unified Dockerfile:
