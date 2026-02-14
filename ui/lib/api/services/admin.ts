@@ -938,9 +938,17 @@ export class AdminService {
       ok: boolean;
       topup_data: Record<string, unknown>;
       message: string;
-    }>(`/admin/api/upstream-providers/${providerId}/topup`, {
-      amount: amount,
-    });
+    }>(`/admin/api/upstream-providers/${providerId}/topup`, { amount });
+  }
+
+  static async topupProviderWithToken(
+    providerId: number,
+    token: string
+  ): Promise<{ ok: boolean; message?: string }> {
+    return await apiClient.post<{ ok: boolean; message?: string }>(
+      `/admin/api/upstream-providers/${providerId}/topup-token`,
+      { token }
+    );
   }
 
   static async checkTopupStatus(

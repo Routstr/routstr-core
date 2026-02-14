@@ -1,6 +1,5 @@
 'use client';
 
-import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -17,6 +16,8 @@ import {
   ChevronDown,
   ChevronUp,
   RotateCcw,
+  AlertTriangle,
+  Key,
 } from 'lucide-react';
 import { UpstreamProvider } from '@/lib/api/services/admin';
 import { RoutstrProviderService } from '@/lib/api/services/routstr-provider';
@@ -28,6 +29,7 @@ interface RoutstrProviderCardProps {
   onToggleExpand: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onUpdateKey?: () => void;
   balanceComponent: React.ReactNode;
   children?: React.ReactNode;
 }
@@ -38,10 +40,13 @@ export function RoutstrProviderCard({
   onToggleExpand,
   onEdit,
   onDelete,
+  onUpdateKey,
   balanceComponent,
   children,
 }: RoutstrProviderCardProps) {
   const queryClient = useQueryClient();
+
+  const hasMint = !!provider.provider_settings?.topup_mint_url;
 
   const refundMutation = useMutation({
     mutationFn: () => RoutstrProviderService.refundBalance(provider.id),
@@ -84,6 +89,16 @@ export function RoutstrProviderCard({
               >
                 NIP-91
               </Badge>
+              {!hasMint && (
+                <Badge
+                  variant='outline'
+                  className='flex items-center gap-1 border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-400'
+                  title='Top-up is not possible because no top-up mint is selected in the provider settings. Please edit settings to select a mint from your node configuration.'
+                >
+                  <AlertTriangle className='h-3 w-3' />
+                  Top-up Disabled: No Mint Selected
+                </Badge>
+              )}
             </div>
             <CardDescription className='mt-1 break-all'>
               {provider.base_url}
@@ -91,6 +106,17 @@ export function RoutstrProviderCard({
           </div>
           <div className='flex flex-wrap items-center gap-2'>
             <div className='flex flex-col gap-1'>{balanceComponent}</div>
+
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={onUpdateKey}
+              className='text-blue-600 hover:text-blue-700 dark:text-blue-400'
+              title='Update or Create API Key'
+            >
+              <Key className='mr-1 h-4 w-4' />
+              <span className='hidden sm:inline'>Key</span>
+            </Button>
 
             <Button
               variant='outline'
