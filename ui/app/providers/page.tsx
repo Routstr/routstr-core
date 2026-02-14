@@ -32,6 +32,8 @@ import {
   Database,
   ChevronDown,
   ChevronUp,
+  Copy,
+  AlertTriangle,
 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
@@ -53,31 +55,29 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { RoutstrProviderCard } from '@/components/providers/RoutstrProviderCard';
-import { useState, useEffect } from 'react';
+import { SimpleLightningTopup } from '@/components/providers/SimpleLightningTopup';
+import { SimpleCashuTopup } from '@/components/providers/SimpleCashuTopup';
+import { CashuPaymentWorkflow } from '@/components/landing/cashu-payment-workflow';
+import { LightningPaymentWorkflow } from '@/components/landing/lightning-payment-workflow';
+import { useState } from 'react';
 import { toast } from 'sonner';
 
 function ProviderBalance({
   providerId,
   platformUrl,
   isRoutstr = false,
+  nodeUrl,
 }: {
   providerId: number;
   platformUrl?: string | null;
   isRoutstr?: boolean;
+  nodeUrl?: string;
 }) {
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
-  const [topupAmount, setTopupAmount] = useState('');
-  const [topupError, setTopupError] = useState('');
   const [isHovered, setIsHovered] = useState(false);
-  const [invoiceData, setInvoiceData] = useState<{
-    payment_request: string;
-    invoice_id: string;
-  } | null>(null);
-  const [paymentStatus, setPaymentStatus] = useState<'pending' | 'paid' | null>(
-    null
-  );
   const queryClient = useQueryClient();
 
   const {
@@ -92,102 +92,7 @@ function ProviderBalance({
     retry: 1,
   });
 
-  const { data: statusData } = useQuery({
-    queryKey: ['topup-status', providerId, invoiceData?.invoice_id],
-    queryFn: () =>
-      AdminService.checkTopupStatus(providerId, invoiceData!.invoice_id),
-    enabled: !!invoiceData && paymentStatus === 'pending',
-    refetchInterval: 2000,
-  });
-
-  useEffect(() => {
-    if (statusData?.paid === true) {
-      setPaymentStatus('paid');
-      queryClient.invalidateQueries({
-        queryKey: ['provider-balance', providerId],
-      });
-      toast.success('Payment received!', {
-        description: 'Your balance has been updated.',
-      });
-    }
-  }, [statusData, queryClient, providerId]);
-
-  const topupMutation = useMutation({
-    mutationFn: async (amount: number) => {
-      console.log('Calling top-up API with:', { providerId, amount });
-      try {
-        const result = await AdminService.initiateProviderTopup(
-          providerId,
-          amount
-        );
-        console.log('API returned:', result);
-        return result;
-      } catch (err) {
-        console.error('API call failed:', err);
-        throw err;
-      }
-    },
-    onSuccess: (data) => {
-      console.log('Top-up response:', data);
-      console.log('Type of data:', typeof data);
-      console.log('Keys in data:', Object.keys(data || {}));
-
-      if (data?.topup_data?.payment_request && data?.topup_data?.invoice_id) {
-        setInvoiceData({
-          payment_request: data.topup_data.payment_request as string,
-          invoice_id: data.topup_data.invoice_id as string,
-        });
-        setPaymentStatus('pending');
-      } else {
-        console.error('Missing invoice data:', data);
-        console.error('topup_data:', data?.topup_data);
-        toast.error('No invoice returned from provider');
-        setIsTopupDialogOpen(false);
-      }
-    },
-    onError: (error: Error) => {
-      console.error('Top-up mutation error:', error);
-      toast.error(`Failed to initiate top-up: ${error.message}`);
-    },
-  });
-
-  const handleTopup = () => {
-    // If no dialog open logic (which depends on API implementation),
-    // we check if we should redirect or open dialog based on available info
-    // But since this function is called inside the dialog, we might want to change
-    // how the "Top Up" button behaves instead.
-    const amount = parseFloat(topupAmount);
-
-    if (isNaN(amount)) {
-      setTopupError('Please enter a valid amount');
-      return;
-    }
-
-    if (amount < 1 || amount > 500) {
-      setTopupError('Amount must be between $1 and $500');
-      return;
-    }
-
-    topupMutation.mutate(amount);
-  };
-
   const handleTopUpClick = () => {
-    // Check if the provider supports direct topup (currently only PPQ.AI effectively)
-    // We can infer this if it's NOT OpenRouter or OpenAI, or strictly checking provider capability
-    // For now, we'll try to initiate topup for anyone, but if we know it fails (or isn't implemented),
-    // we should redirect.
-    // However, the prompt asks to redirect if topup is not implemented.
-    // The backend throws 500/400 if not implemented.
-    // A better approach is to check if we have a platform URL and maybe redirect there
-    // if we know it's not supported.
-
-    // BUT, we don't know for sure if it's supported without checking metadata or trying.
-    // Let's rely on the "can_topup" metadata if available, but currently we only have "can_show_balance".
-
-    // Simple heuristic: If platformUrl exists and we suspect no direct topup, redirect?
-    // Actually, let's try to open the dialog, but if it's OpenRouter/OpenAI, maybe we just redirect?
-    // The user specifically mentioned "like in openrouter".
-
     if (
       platformUrl &&
       (platformUrl.includes('openrouter.ai') ||
@@ -202,10 +107,9 @@ function ProviderBalance({
 
   const handleCloseDialog = () => {
     setIsTopupDialogOpen(false);
-    setTopupAmount('');
-    setTopupError('');
-    setInvoiceData(null);
-    setPaymentStatus(null);
+    queryClient.invalidateQueries({
+      queryKey: ['provider-balance', providerId],
+    });
   };
 
   if (isLoading) {
@@ -254,134 +158,58 @@ function ProviderBalance({
       </Button>
 
       <Dialog open={isTopupDialogOpen} onOpenChange={handleCloseDialog}>
-        <DialogContent className='sm:max-w-md'>
+        <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-md'>
           <DialogHeader>
-            <DialogTitle>
-              {paymentStatus === 'paid'
-                ? 'Payment Confirmed!'
-                : 'Top Up Balance'}
-            </DialogTitle>
+            <DialogTitle>Top Up Balance</DialogTitle>
             <DialogDescription>
-              {paymentStatus === 'paid'
-                ? 'Your account balance has been updated.'
-                : invoiceData
-                  ? 'Scan the QR code or copy the Lightning invoice to pay.'
-                  : 'Enter the amount you want to add to your account balance.'}
+              {isRoutstr
+                ? `Top up your balance on node ${nodeUrl}`
+                : 'Choose a payment method to top up your account balance.'}
             </DialogDescription>
           </DialogHeader>
 
-          {paymentStatus === 'paid' ? (
-            <div className='flex flex-col items-center gap-4 py-6'>
-              <div className='rounded-full bg-green-100 p-3 dark:bg-green-900'>
-                <svg
-                  className='h-12 w-12 text-green-600 dark:text-green-400'
-                  fill='none'
-                  strokeLinecap='round'
-                  strokeLinejoin='round'
-                  strokeWidth='2'
-                  viewBox='0 0 24 24'
-                  stroke='currentColor'
-                >
-                  <path d='M5 13l4 4L19 7'></path>
-                </svg>
-              </div>
-              <p className='text-center font-semibold'>Top-up successful!</p>
-            </div>
-          ) : invoiceData ? (
-            <div className='flex flex-col items-center gap-4 py-4'>
-              <div className='rounded-lg border-2 border-gray-200 p-2 dark:border-gray-800'>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(
-                    invoiceData.payment_request
-                  )}`}
-                  alt='Lightning Invoice QR Code'
-                  className='h-64 w-64'
-                />
-              </div>
-              <div className='w-full space-y-2'>
-                <Label htmlFor='invoice'>Lightning Invoice</Label>
-                <div className='flex gap-2'>
-                  <Input
-                    id='invoice'
-                    value={invoiceData.payment_request}
-                    readOnly
-                    className='font-mono text-xs'
-                  />
-                  <Button
-                    size='sm'
-                    variant='outline'
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        invoiceData.payment_request
-                      );
-                      toast.success('Invoice copied to clipboard!');
-                    }}
-                  >
-                    Copy
-                  </Button>
-                </div>
-              </div>
-              {paymentStatus === 'pending' && (
-                <p className='text-muted-foreground text-center text-sm'>
-                  Waiting for payment...
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className='grid gap-4 py-4'>
-              <div className='grid gap-2'>
-                <Label htmlFor='topup_amount'>Amount (USD)</Label>
-                <Input
-                  id='topup_amount'
-                  type='number'
-                  placeholder='Enter amount (1-500)'
-                  value={topupAmount}
-                  onChange={(e) => {
-                    setTopupAmount(e.target.value);
-                    setTopupError('');
-                  }}
-                  min='1'
-                  max='500'
-                  step='0.01'
-                />
-                {topupError && (
-                  <p className='text-sm text-red-600 dark:text-red-400'>
-                    {topupError}
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
+          <div className='space-y-6 py-4'>
+            <section className='space-y-2'>
+              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                Lightning Top-up
+              </Label>
+              <SimpleLightningTopup
+                providerId={providerId}
+                baseUrl={nodeUrl || ''}
+                onSuccess={() => {
+                  queryClient.invalidateQueries({
+                    queryKey: ['provider-balance', providerId],
+                  });
+                }}
+              />
+            </section>
+
+            <Separator />
+
+            <section className='space-y-2'>
+              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                Cashu Token Top-up
+              </Label>
+              <SimpleCashuTopup
+                providerId={providerId}
+                baseUrl={nodeUrl || ''}
+                onSuccess={() => {
+                  queryClient.invalidateQueries({
+                    queryKey: ['provider-balance', providerId],
+                  });
+                }}
+              />
+            </section>
+          </div>
 
           <DialogFooter>
-            {paymentStatus === 'paid' ? (
-              <Button onClick={handleCloseDialog} className='w-full'>
-                Done
-              </Button>
-            ) : invoiceData ? (
-              <Button
-                variant='outline'
-                onClick={handleCloseDialog}
-                className='w-full'
-              >
-                Cancel
-              </Button>
-            ) : (
-              <>
-                <Button variant='outline' onClick={handleCloseDialog}>
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleTopup}
-                  disabled={topupMutation.isPending || !topupAmount}
-                >
-                  {topupMutation.isPending
-                    ? 'Processing...'
-                    : 'Generate Invoice'}
-                </Button>
-              </>
-            )}
+            <Button
+              variant='outline'
+              onClick={handleCloseDialog}
+              className='w-full'
+            >
+              Close
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -432,6 +260,12 @@ export default function ProvidersPage() {
   const { data: providerTypes = [] } = useQuery({
     queryKey: ['provider-types'],
     queryFn: () => AdminService.getProviderTypes(),
+    refetchOnWindowFocus: false,
+  });
+
+  const { data: globalSettings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => AdminService.getSettings(),
     refetchOnWindowFocus: false,
   });
 
@@ -741,6 +575,65 @@ export default function ProvidersPage() {
                         </div>
 
                         <div className='grid gap-3'>
+                          <div className='grid gap-2'>
+                            <Label
+                              htmlFor='edit_topup_mint_url'
+                              className='text-xs'
+                            >
+                              Top-up Mint
+                            </Label>
+                            <Select
+                              value={
+                                formData.provider_settings?.topup_mint_url || ''
+                              }
+                              onValueChange={(value) =>
+                                setFormData({
+                                  ...formData,
+                                  provider_settings: {
+                                    ...formData.provider_settings,
+                                    topup_mint_url: value,
+                                  },
+                                })
+                              }
+                            >
+                              <SelectTrigger
+                                id='edit_topup_mint_url'
+                                className='h-8 text-xs'
+                              >
+                                <SelectValue placeholder='Select a mint from your node configuration' />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {(
+                                  globalSettings?.cashu_mints as
+                                    | string[]
+                                    | undefined
+                                )?.map((mint: string) => (
+                                  <SelectItem
+                                    key={mint}
+                                    value={mint}
+                                    className='text-xs'
+                                  >
+                                    {mint}
+                                  </SelectItem>
+                                ))}
+                                {(!(globalSettings?.cashu_mints as string[]) ||
+                                  (globalSettings?.cashu_mints as string[])
+                                    .length === 0) && (
+                                  <SelectItem
+                                    value='none'
+                                    disabled
+                                    className='text-xs'
+                                  >
+                                    No mints configured in global settings
+                                  </SelectItem>
+                                )}
+                              </SelectContent>
+                            </Select>
+                            <p className='text-muted-foreground text-[10px]'>
+                              The token for top-up will be created from this
+                              mint.
+                            </p>
+                          </div>
                           <div className='flex items-center justify-between'>
                             <Label htmlFor='auto_topup' className='text-sm'>
                               Enable Auto Top-up
@@ -981,6 +874,88 @@ export default function ProvidersPage() {
                         1.01 means +1% e.g. currency exchange, card fees, etc.
                       </p>
                     </div>
+                    {formData.provider_type === 'routstr' &&
+                      editingProvider && (
+                        <div className='bg-muted/30 mt-4 space-y-6 rounded-lg border p-4'>
+                          <div className='flex items-center justify-between'>
+                            <Label className='text-sm font-semibold'>
+                              Upstream Node Wallet Management
+                            </Label>
+                            <Badge variant='outline' className='text-[10px]'>
+                              External Node
+                            </Badge>
+                          </div>
+
+                          <div className='bg-muted/30 mt-4 space-y-6 rounded-lg border p-4'>
+                            <div className='flex items-center justify-between'>
+                              <Label className='text-sm font-semibold'>
+                                Upstream Node Wallet Management
+                              </Label>
+                              <Badge variant='outline' className='text-[10px]'>
+                                External Node
+                              </Badge>
+                            </div>
+
+                            <section className='space-y-2'>
+                              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                                Lightning
+                              </Label>
+                              <LightningPaymentWorkflow
+                                baseUrl={formData.base_url || ''}
+                                onApiKeyCreated={(newApiKey) => {
+                                  setFormData((prev) => ({
+                                    ...prev,
+                                    api_key: newApiKey,
+                                  }));
+                                  toast.success(
+                                    'New API key created and saved'
+                                  );
+                                }}
+                              />
+                            </section>
+
+                            <Separator />
+
+                            <section className='space-y-2'>
+                              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                                Cashu
+                              </Label>
+                              <CashuPaymentWorkflow
+                                baseUrl={formData.base_url || ''}
+                                apiKey={formData.api_key || ''}
+                                onApiKeyCreated={(newApiKey) => {
+                                  setFormData((prev) => ({
+                                    ...prev,
+                                    api_key: newApiKey,
+                                  }));
+                                  toast.success(
+                                    'New API key created and saved'
+                                  );
+                                }}
+                              />
+                            </section>
+                          </div>
+
+                          <Separator />
+
+                          <section className='space-y-2'>
+                            <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                              Cashu
+                            </Label>
+                            <CashuPaymentWorkflow
+                              baseUrl={formData.base_url || ''}
+                              apiKey={formData.api_key || ''}
+                              onApiKeyCreated={(newApiKey) => {
+                                setFormData({
+                                  ...formData,
+                                  api_key: newApiKey,
+                                });
+                                toast.success('New API key created and saved');
+                              }}
+                            />
+                          </section>
+                        </div>
+                      )}
                   </div>
                   <DialogFooter>
                     <Button
@@ -1240,16 +1215,56 @@ export default function ProvidersPage() {
                         }
                         onEdit={() => handleEdit(provider)}
                         onDelete={() => handleDelete(provider.id)}
+                        onUpdateKey={() => handleEdit(provider)}
                         balanceComponent={
                           <ProviderBalance
                             providerId={provider.id}
                             platformUrl={getPlatformUrl(provider.provider_type)}
                             isRoutstr={true}
+                            nodeUrl={provider.base_url}
                           />
                         }
                       >
                         <CardContent>
                           <div className='space-y-4'>
+                            {provider.api_key ? (
+                              <div className='bg-muted/50 rounded border p-3'>
+                                <div className='flex items-center justify-between'>
+                                  <div className='space-y-1'>
+                                    <Label className='text-muted-foreground text-[10px] uppercase'>
+                                      Active API Key
+                                    </Label>
+                                    <div className='max-w-[200px] truncate font-mono text-xs'>
+                                      {provider.api_key}
+                                    </div>
+                                  </div>
+                                  <Button
+                                    variant='ghost'
+                                    size='icon'
+                                    className='h-7 w-7'
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(
+                                        provider.api_key!
+                                      );
+                                      toast.success('API key copied');
+                                    }}
+                                  >
+                                    <Copy className='h-3 w-3' />
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className='rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-400'>
+                                <div className='mb-1 flex items-center gap-2'>
+                                  <AlertTriangle className='h-3 w-3' />
+                                  <span className='font-semibold'>
+                                    No API Key Configured
+                                  </span>
+                                </div>
+                                Click the &quot;Key&quot; button above to create
+                                a new key on the upstream node.
+                              </div>
+                            )}
                             <div className='space-y-2'>
                               {provider.api_version && (
                                 <div className='flex items-center justify-between text-sm'>
@@ -1409,6 +1424,57 @@ export default function ProvidersPage() {
                   </div>
 
                   <div className='grid gap-3'>
+                    <div className='grid gap-2'>
+                      <Label htmlFor='edit_topup_mint_url' className='text-xs'>
+                        Top-up Mint
+                      </Label>
+                      <Select
+                        value={formData.provider_settings?.topup_mint_url || ''}
+                        onValueChange={(value) =>
+                          setFormData({
+                            ...formData,
+                            provider_settings: {
+                              ...formData.provider_settings,
+                              topup_mint_url: value,
+                            },
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          id='edit_topup_mint_url'
+                          className='h-8 text-xs'
+                        >
+                          <SelectValue placeholder='Select a mint from your node configuration' />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(
+                            globalSettings?.cashu_mints as string[] | undefined
+                          )?.map((mint: string) => (
+                            <SelectItem
+                              key={mint}
+                              value={mint}
+                              className='text-xs'
+                            >
+                              {mint}
+                            </SelectItem>
+                          ))}
+                          {(!(globalSettings?.cashu_mints as string[]) ||
+                            (globalSettings?.cashu_mints as string[]).length ===
+                              0) && (
+                            <SelectItem
+                              value='none'
+                              disabled
+                              className='text-xs'
+                            >
+                              No mints configured in global settings
+                            </SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                      <p className='text-muted-foreground text-[10px]'>
+                        The token for top-up will be created from this mint.
+                      </p>
+                    </div>
                     <div className='flex items-center justify-between'>
                       <Label htmlFor='edit_auto_topup' className='text-sm'>
                         Enable Auto Top-up

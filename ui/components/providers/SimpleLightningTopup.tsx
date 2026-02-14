@@ -52,7 +52,7 @@ export function SimpleLightningTopup({
 
   const pollStatus = useCallback(
     async (invoiceId: string) => {
-      const maxAttempts = 60;
+      const maxAttempts = 60; // 5 minutes with 5 second intervals
       let attempts = 0;
 
       const poll = async () => {
@@ -61,6 +61,7 @@ export function SimpleLightningTopup({
             providerId,
             invoiceId
           );
+
           if (response.paid) {
             toast.success('Payment received!');
             setInvoice(null);
@@ -69,10 +70,23 @@ export function SimpleLightningTopup({
             onSuccess?.();
             return;
           }
+
           attempts++;
-          if (attempts < maxAttempts) setTimeout(poll, 5000);
+          if (attempts < maxAttempts) {
+            setTimeout(poll, 5000);
+          } else {
+            toast.error('Payment timeout - please check manually');
+            setIsWaiting(false);
+          }
         } catch (e) {
-          console.error(e);
+          console.error('Failed to poll topup status:', e);
+          attempts++;
+          if (attempts < maxAttempts) {
+            setTimeout(poll, 5000);
+          } else {
+            toast.error('Failed to check payment status');
+            setIsWaiting(false);
+          }
         }
       };
       poll();
