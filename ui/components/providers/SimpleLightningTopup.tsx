@@ -1,11 +1,30 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
+import Image from 'next/image';
 import { Copy, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import QRCode from 'qrcode';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AdminService } from '@/lib/api/services/admin';
+
+async function generateQRCodeSVG(text: string): Promise<string> {
+  try {
+    return await QRCode.toDataURL(text, {
+      type: 'image/png',
+      width: 200,
+      margin: 1,
+      color: {
+        dark: '#000000',
+        light: '#FFFFFF',
+      },
+    });
+  } catch (error) {
+    console.error('Failed to generate QR code:', error);
+    return '';
+  }
+}
 
 interface SimpleLightningTopupProps {
   providerId: number;
@@ -23,6 +42,7 @@ export function SimpleLightningTopup({
     bolt11: string;
     invoice_id: string;
   } | null>(null);
+  const [qrCode, setQrCode] = useState<string>('');
   const [isWaiting, setIsWaiting] = useState(false);
 
   const handleCopy = (text: string) => {
@@ -44,6 +64,7 @@ export function SimpleLightningTopup({
           if (response.paid) {
             toast.success('Payment received!');
             setInvoice(null);
+            setQrCode('');
             setIsWaiting(false);
             onSuccess?.();
             return;
@@ -74,10 +95,15 @@ export function SimpleLightningTopup({
       if (!response.ok || !response.topup_data)
         throw new Error('Failed to create invoice');
 
+      const bolt11 = response.topup_data.payment_request as string;
       setInvoice({
-        bolt11: response.topup_data.payment_request as string,
+        bolt11,
         invoice_id: response.topup_data.invoice_id as string,
       });
+
+      const qr = await generateQRCodeSVG(bolt11);
+      setQrCode(qr);
+
       setIsWaiting(true);
       pollStatus(response.topup_data.invoice_id as string);
     } catch (e) {
@@ -120,6 +146,18 @@ export function SimpleLightningTopup({
               <Copy className='h-3 w-3' />
             </Button>
           </div>
+          {qrCode && (
+            <div className='flex justify-center py-2'>
+              <Image
+                src={qrCode}
+                alt='Lightning Invoice QR Code'
+                className='h-40 w-40'
+                width={160}
+                height={160}
+                unoptimized
+              />
+            </div>
+          )}
           <div className='bg-muted rounded border p-2 font-mono text-[10px] break-all'>
             {invoice.bolt11}
           </div>
