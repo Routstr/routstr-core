@@ -83,12 +83,6 @@ export function RoutstrProviderCard({
               >
                 {provider.enabled ? 'Enabled' : 'Disabled'}
               </Badge>
-              <Badge
-                variant='outline'
-                className='bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400'
-              >
-                NIP-91
-              </Badge>
               {!hasMint && (
                 <Badge
                   variant='outline'

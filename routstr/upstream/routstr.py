@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -147,3 +147,24 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
                     extra={"url": url, "error": str(e)},
                 )
                 return []
+
+    async def refund_balance(self) -> dict[str, Any]:
+        """Request a refund from the upstream Routstr node.
+
+        Returns:
+            Dict containing refund result and token
+        """
+        url = f"{self.base_url}/v1/balance/refund"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, headers=headers, timeout=30.0)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(
+                    "Failed to request refund from upstream Routstr",
+                    extra={"url": url, "error": str(e)},
+                )
+                return {"error": str(e)}

@@ -138,11 +138,6 @@ async def proxy(
 ) -> Response | StreamingResponse:
     headers = dict(request.headers)
 
-    if "x-cashu" not in headers and "authorization" not in headers.keys():
-        return create_error_response(
-            "unauthorized", "Unauthorized", 401, request=request
-        )
-
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
     request_body_dict = parse_request_body_json(request_body, path)
@@ -153,6 +148,7 @@ async def proxy(
         model_id = request_body_dict.get("model", "unknown")
 
     model_obj = get_model_instance(model_id)
+
     if not model_obj:
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
