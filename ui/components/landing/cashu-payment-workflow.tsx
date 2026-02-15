@@ -9,14 +9,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
+import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
 
-type WalletSnapshot = {
-  apiKey: string;
-  balanceMsats: number;
-  reservedMsats: number;
-};
-
-type RefundReceipt = {
+export type RefundReceipt = {
   token?: string;
   recipient?: string;
   sats?: string;
@@ -54,12 +49,28 @@ async function fetchWalletInfo(
     api_key: string;
     balance: number;
     reserved?: number;
+    is_child: boolean;
+    parent_key: string | null;
+    total_requests: number;
+    total_spent: number;
+    balance_limit: number | null;
+    balance_limit_reset: string | null;
+    validity_date: number | null;
+    child_keys?: ChildKeyInfo[];
   };
 
   return {
     apiKey: payload.api_key || apiKey,
     balanceMsats: payload.balance ?? 0,
     reservedMsats: payload.reserved ?? 0,
+    isChild: payload.is_child,
+    parentKey: payload.parent_key,
+    totalRequests: payload.total_requests,
+    totalSpent: payload.total_spent,
+    balanceLimit: payload.balance_limit,
+    balanceLimitReset: payload.balance_limit_reset,
+    validityDate: payload.validity_date,
+    childKeys: payload.child_keys,
   };
 }
 
@@ -147,11 +158,25 @@ export function CashuPaymentWorkflow({
       const payload = (await response.json()) as {
         api_key: string;
         balance: number;
+        is_child: boolean;
+        parent_key: string | null;
+        total_requests: number;
+        total_spent: number;
+        balance_limit: number | null;
+        balance_limit_reset: string | null;
+        validity_date: number | null;
       };
       const snapshot: WalletSnapshot = {
         apiKey: payload.api_key,
         balanceMsats: payload.balance ?? 0,
         reservedMsats: 0,
+        isChild: payload.is_child ?? false,
+        parentKey: payload.parent_key ?? null,
+        totalRequests: payload.total_requests ?? 0,
+        totalSpent: payload.total_spent ?? 0,
+        balanceLimit: payload.balance_limit ?? null,
+        balanceLimitReset: payload.balance_limit_reset ?? null,
+        validityDate: payload.validity_date ?? null,
       };
 
       setApiKeyInput(snapshot.apiKey);
