@@ -14,26 +14,14 @@ import { ConfigurationService } from '@/lib/api/services/configuration';
 import { CashuPaymentWorkflow } from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
 import { ApiKeyManager } from './api-key-manager';
+import {
+  KeyInfoDetails,
+  type WalletSnapshot,
+  type ChildKeyInfo,
+} from './key-info-details';
 import { ChildKeyCreator } from '@/components/child-key-creator';
 
 type NodeInfo = {
-  name: string;
-  description: string;
-  version: string;
-  npub?: string | null;
-  mints: string[];
-  http_url?: string | null;
-  onion_url?: string | null;
-  child_key_cost_msats?: number;
-};
-
-type WalletSnapshot = {
-  apiKey: string;
-  balanceMsats: number;
-  reservedMsats: number;
-};
-
-type RefundReceipt = {
   token?: string;
   recipient?: string;
   sats?: string;
@@ -364,10 +352,11 @@ export function CheatSheet(): JSX.Element {
         </section>
 
         <Tabs defaultValue='cashu' className='w-full'>
-          <TabsList className='grid w-full grid-cols-4'>
-            <TabsTrigger value='cashu'>Cashu Payments</TabsTrigger>
-            <TabsTrigger value='lightning'>Lightning Payments</TabsTrigger>
+          <TabsList className='grid w-full grid-cols-5'>
+            <TabsTrigger value='cashu'>Cashu</TabsTrigger>
+            <TabsTrigger value='lightning'>Lightning</TabsTrigger>
             <TabsTrigger value='manage'>Manage Keys</TabsTrigger>
+            <TabsTrigger value='details'>Key Details</TabsTrigger>
             <TabsTrigger value='child-keys'>Child Keys</TabsTrigger>
           </TabsList>
 
@@ -424,6 +413,16 @@ export function CheatSheet(): JSX.Element {
                 </CardContent>
               </Card>
             )}
+          </TabsContent>
+
+          <TabsContent value='details' className='space-y-4'>
+            <KeyInfoDetails
+              baseUrl={normalizedBaseUrl}
+              apiKey={apiKeyInput}
+              walletInfo={walletInfo}
+              onApiKeyChanged={handleApiKeyChanged}
+              onWalletInfoUpdated={handleWalletInfoUpdated}
+            />
           </TabsContent>
 
           <TabsContent value='child-keys' className='space-y-4'>
