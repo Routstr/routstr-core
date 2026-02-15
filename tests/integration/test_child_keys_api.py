@@ -1,8 +1,7 @@
+from typing import Any
+
 import pytest
 from httpx import AsyncClient
-from typing import Any
-from sqlmodel import select
-from routstr.core.db import ApiKey
 
 
 @pytest.mark.integration
@@ -18,7 +17,7 @@ async def test_wallet_info_returns_child_keys(
     response = await authenticated_client.get("/v1/wallet/info")
     assert response.status_code == 200
     parent_data = response.json()
-    parent_api_key = parent_data["api_key"]
+    parent_data["api_key"]
 
     # 2. Create child keys for this parent
     # We need to use the parent's authentication for this
