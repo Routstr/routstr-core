@@ -200,7 +200,9 @@ class TestmintWallet:
         token_base64 = base64.urlsafe_b64encode(token_json.encode()).decode()
         return f"cashuA{token_base64}"
 
-    async def redeem_token(self, token: str) -> Tuple[int, str, str]:
+    async def redeem_token(
+        self, token: str, force_primary: bool = False
+    ) -> Tuple[int, str, str]:
         """Redeem a Cashu token - compatible with wallet.recieve_token"""
         if not self.wallet:
             await self.init()
@@ -522,6 +524,7 @@ async def integration_app(
         with (
             patch("routstr.core.db.engine", integration_engine),
             patch.object(_settings, "cashu_mints", [mint_url]),
+            patch.object(_settings, "primary_mint", mint_url),
             patch("routstr.wallet.credit_balance", testmint_wallet.credit_balance),
             patch("routstr.wallet.send_token", testmint_wallet.send_token),
             patch("routstr.wallet.send_to_lnurl", testmint_wallet.send_to_lnurl),
