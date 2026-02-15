@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import type { WalletSnapshot, ChildKeyInfo } from './key-info-details';
+import type { RefundReceipt } from './cashu-payment-workflow';
 
 interface ApiKeyManagerProps {
   baseUrl: string;
