@@ -11,12 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
-
-type WalletSnapshot = {
-  apiKey: string;
-  balanceMsats: number;
-  reservedMsats: number;
-};
+import type { WalletSnapshot } from './key-info-details';
 
 type LightningInvoice = {
   invoice_id: string;
@@ -215,6 +210,13 @@ export function LightningPaymentWorkflow({
             apiKey: status.api_key,
             balanceMsats: status.amount_sats * 1000,
             reservedMsats: 0,
+            isChild: false,
+            parentKey: null,
+            totalRequests: 0,
+            totalSpent: 0,
+            balanceLimit: null,
+            balanceLimitReset: null,
+            validityDate: null,
           };
           onApiKeyCreated?.(status.api_key, walletInfo);
           setCreatedApiKey(status.api_key);
@@ -289,6 +291,13 @@ export function LightningPaymentWorkflow({
             apiKey: status.api_key,
             balanceMsats: status.amount_sats * 1000,
             reservedMsats: 0,
+            isChild: false,
+            parentKey: null,
+            totalRequests: 0,
+            totalSpent: 0,
+            balanceLimit: null,
+            balanceLimitReset: null,
+            validityDate: null,
           };
           onApiKeyCreated?.(status.api_key, walletInfo);
           setTopupApiKeyResult(status.api_key);
@@ -343,6 +352,13 @@ export function LightningPaymentWorkflow({
           apiKey: status.api_key,
           balanceMsats: status.amount_sats * 1000,
           reservedMsats: 0,
+          isChild: false,
+          parentKey: null,
+          totalRequests: 0,
+          totalSpent: 0,
+          balanceLimit: null,
+          balanceLimitReset: null,
+          validityDate: null,
         };
         onApiKeyCreated?.(status.api_key, walletInfo);
         setRecoveredApiKey(status.api_key);
