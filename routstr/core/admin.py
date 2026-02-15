@@ -456,18 +456,18 @@ async def batch_override_provider_models(
     logger.info(
         f"BATCH_OVERRIDE called: provider_id={provider_id}, count={len(payload.models)}"
     )
-    
+
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
-            
+
         overridden_count = 0
-        
+
         for model_data in payload.models:
             # Try to get existing model regardless of whether it's enabled or not
             existing_row = await session.get(ModelRow, (model_data.id, provider_id))
-            
+
             if existing_row:
                 # Update existing
                 existing_row.name = model_data.name
@@ -483,7 +483,9 @@ async def batch_override_provider_models(
                     else None
                 )
                 existing_row.top_provider = (
-                    json.dumps(model_data.top_provider) if model_data.top_provider else None
+                    json.dumps(model_data.top_provider)
+                    if model_data.top_provider
+                    else None
                 )
                 existing_row.canonical_slug = model_data.canonical_slug
                 existing_row.alias_ids = (
@@ -508,23 +510,32 @@ async def batch_override_provider_models(
                         else None
                     ),
                     top_provider=(
-                        json.dumps(model_data.top_provider) if model_data.top_provider else None
+                        json.dumps(model_data.top_provider)
+                        if model_data.top_provider
+                        else None
                     ),
                     canonical_slug=model_data.canonical_slug,
                     alias_ids=(
-                        json.dumps(model_data.alias_ids) if model_data.alias_ids else None
+                        json.dumps(model_data.alias_ids)
+                        if model_data.alias_ids
+                        else None
                     ),
                     upstream_provider_id=provider_id,
                     enabled=model_data.enabled,
                 )
                 session.add(row)
-            
+
             overridden_count += 1
-            
+
         await session.commit()
 
     await refresh_model_maps()
-    return {"ok": True, "count": overridden_count, "message": f"Successfully batch overridden {overridden_count} models"}
+    return {
+        "ok": True,
+        "count": overridden_count,
+        "message": f"Successfully batch overridden {overridden_count} models",
+    }
+
 
 class UpstreamProviderCreate(BaseModel):
     provider_type: str
