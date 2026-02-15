@@ -67,9 +67,7 @@ export function KeyInfoDetails({
 
   // Sync internal state with props if they change
   useEffect(() => {
-    if (apiKey !== apiKeyInput) {
-      setApiKeyInput(apiKey);
-    }
+    setApiKeyInput(apiKey);
   }, [apiKey]);
 
   const fetchDetails = useCallback(

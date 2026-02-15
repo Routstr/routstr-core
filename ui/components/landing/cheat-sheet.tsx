@@ -14,11 +14,7 @@ import { ConfigurationService } from '@/lib/api/services/configuration';
 import { CashuPaymentWorkflow } from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
 import { ApiKeyManager } from './api-key-manager';
-import {
-  KeyInfoDetails,
-  type WalletSnapshot,
-  type ChildKeyInfo,
-} from './key-info-details';
+import { KeyInfoDetails, type WalletSnapshot } from './key-info-details';
 import { ChildKeyCreator } from '@/components/child-key-creator';
 
 type NodeInfo = {
