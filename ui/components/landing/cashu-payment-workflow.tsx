@@ -11,7 +11,7 @@ import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
 import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
 
-type RefundReceipt = {
+export type RefundReceipt = {
   token?: string;
   recipient?: string;
   sats?: string;
