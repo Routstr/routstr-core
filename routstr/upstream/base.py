@@ -3036,7 +3036,7 @@ class BaseUpstreamProvider:
                 db_models = await list_models(
                     session=session,
                     upstream_id=provider.id,
-                    include_disabled=True,
+                    include_disabled=False,
                     apply_fees=False,
                 )
                 db_model_ids: set[str] = {model.id for model in db_models}
