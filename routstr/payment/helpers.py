@@ -169,8 +169,31 @@ async def calculate_discounted_max_cost(
 
     tol = settings.tolerance_percentage
     tol_factor = max(0.0, 1 - float(tol) / 100.0)
+
     max_prompt_allowed_sats = model_pricing.max_prompt_cost * tol_factor
     max_completion_allowed_sats = model_pricing.max_completion_cost * tol_factor
+
+    if model_obj:
+        prompt_token_limit: int | None = None
+        if model_obj.top_provider and (
+            model_obj.top_provider.context_length
+            or model_obj.top_provider.max_completion_tokens
+        ):
+            cl = model_obj.top_provider.context_length
+            mct = model_obj.top_provider.max_completion_tokens
+            if cl and mct:
+                prompt_token_limit = max(0, cl - mct)
+            elif cl:
+                prompt_token_limit = cl
+            elif mct:
+                prompt_token_limit = 0
+        elif model_obj.context_length:
+            prompt_token_limit = model_obj.context_length
+
+        if prompt_token_limit is not None:
+            max_prompt_allowed_sats = (
+                prompt_token_limit * model_pricing.prompt * tol_factor
+            )
 
     adjusted = max_cost_for_model
 
