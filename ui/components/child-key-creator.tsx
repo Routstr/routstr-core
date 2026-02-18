@@ -251,7 +251,7 @@ export function ChildKeyCreator({
             )}
 
             <div className='flex flex-col gap-6'>
-              {configs.map((config, index) => (
+              {configs.map((config) => (
                 <div
                   key={config.id}
                   className='bg-muted/30 relative space-y-4 rounded-lg border p-4 pt-6'

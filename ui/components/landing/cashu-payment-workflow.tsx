@@ -9,9 +9,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
-import type { WalletSnapshot } from './key-info-details';
+import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
 
-type RefundReceipt = {
+export type RefundReceipt = {
   token?: string;
   recipient?: string;
   sats?: string;
@@ -56,7 +56,7 @@ async function fetchWalletInfo(
     balance_limit: number | null;
     balance_limit_reset: string | null;
     validity_date: number | null;
-    child_keys?: any[];
+    child_keys?: ChildKeyInfo[];
   };
 
   return {

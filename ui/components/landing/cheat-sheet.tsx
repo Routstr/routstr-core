@@ -11,17 +11,24 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ConfigurationService } from '@/lib/api/services/configuration';
-import { CashuPaymentWorkflow } from './cashu-payment-workflow';
+import {
+  CashuPaymentWorkflow,
+  type RefundReceipt,
+} from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
 import { ApiKeyManager } from './api-key-manager';
-import {
-  KeyInfoDetails,
-  type WalletSnapshot,
-  type ChildKeyInfo,
-} from './key-info-details';
+import { KeyInfoDetails, type WalletSnapshot } from './key-info-details';
 import { ChildKeyCreator } from '@/components/child-key-creator';
 
 type NodeInfo = {
+  name?: string;
+  description?: string;
+  version?: string;
+  http_url?: string;
+  onion_url?: string;
+  npub?: string;
+  mints?: string[];
+  child_key_cost_msats?: number;
   token?: string;
   recipient?: string;
   sats?: string;
@@ -273,7 +280,7 @@ export function CheatSheet(): JSX.Element {
                       Cashu mints
                     </p>
                     <div className='flex flex-wrap gap-2'>
-                      {nodeInfo.mints.length ? (
+                      {nodeInfo.mints?.length ? (
                         nodeInfo.mints.map((mint) => (
                           <Badge
                             key={mint}
