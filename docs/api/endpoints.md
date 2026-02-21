@@ -360,6 +360,42 @@ POST /v1/wallet/create
 }
 ```
 
+### Get Key Information
+
+Get current balance, consumption data, and child keys for an API key.
+
+```http
+GET /v1/balance/info
+Authorization: Bearer sk-...
+```
+
+**Response:**
+
+```json
+{
+  "api_key": "sk-abc...",
+  "balance": 8500000,
+  "reserved": 0,
+  "is_child": false,
+  "parent_key": null,
+  "total_requests": 42,
+  "total_spent": 1500000,
+  "balance_limit": null,
+  "balance_limit_reset": null,
+  "validity_date": null,
+  "child_keys": [
+    {
+      "api_key": "sk-child1...",
+      "total_requests": 10,
+      "total_spent": 500000,
+      "balance_limit": 1000000,
+      "balance_limit_reset": "daily",
+      "validity_date": 1738000000
+    }
+  ]
+}
+```
+
 ### Check Balance
 
 Get current wallet balance.

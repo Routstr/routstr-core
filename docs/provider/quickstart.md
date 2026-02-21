@@ -13,7 +13,7 @@ A **Routstr Provider Node** acts as a gateway that:
 You bring the API keys, Routstr handles the billing, payments, and client management.
 
 !!! tip "Future: Node-to-Node Routing"
-    In future versions, you'll be able to run a node that connects to other Routstr nodes—eliminating the need to configure upstream providers yourself. For now, you'll need your own API credentials.
+In future versions, you'll be able to run a node that connects to other Routstr nodes—eliminating the need to configure upstream providers yourself. For now, you'll need your own API credentials.
 
 ---
 
@@ -24,14 +24,51 @@ You bring the API keys, Routstr handles the billing, payments, and client manage
 
 ---
 
-## 1. Start the Node
+## 1. Prepare Configuration
+
+Create a `.env` file in the root of the project to store your secrets:
+
+```bash
+# Initial Admin Password
+ADMIN_PASSWORD=mysecretpassword
+
+# Node Identity
+NAME="My AI Node"
+DESCRIPTION="Fast access to models"
+
+# Lightning Payouts
+RECEIVE_LN_ADDRESS=yourname@wallet.com
+
+```
+
+## 2. Start the Node
+
+You can run the pre-built image directly:
 
 ```bash
 docker run -d \
   --name routstr \
   -p 8000:8000 \
+  --env-file .env \
   -v routstr-data:/app/data \
   ghcr.io/routstr/proxy:latest
+```
+
+*Note: The pre-built image does not contain the UI. For the all-in-one experience with the Admin Dashboard, use the Build from Source instructions below.*
+
+### Build from Source (Recommended)
+
+If you want to build the node and UI yourself from source, use the unified Dockerfile:
+
+```bash
+git clone https://github.com/routstr/routstr-core.git
+cd routstr-core
+# Edit your .env with ADMIN_PASSWORD and API keys
+cp .env.example .env
+nano .env
+
+docker build -f Dockerfile.full -t routstr-local .
+docker run -d -p 8000:8000 --env-file .env --name routstr routstr-local
 ```
 
 Verify it's running:
@@ -42,12 +79,12 @@ curl http://localhost:8000/v1/info
 
 ---
 
-## 2. Configure via Dashboard
+## 3. Configure via Dashboard
 
 Open the **Admin Dashboard** at [http://localhost:8000/admin/](http://localhost:8000/admin/).
 
-!!! note "Default Access"
-    The dashboard has no password by default. Set one immediately in Settings for production use.
+!!! note "Login"
+Use the `ADMIN_PASSWORD` you defined in your `.env` file to log in. If you didn't set one, the dashboard will prompt you to set one on first visit.
 
 ### Connect Your AI Providers
 

@@ -6,8 +6,9 @@ from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlmodel import select
 
-from .auth import validate_bearer_key
+from .auth import get_billing_key, validate_bearer_key
 from .core.db import ApiKey, AsyncSession, get_session
 from .core.logging import get_logger
 from .core.settings import settings
@@ -34,10 +35,8 @@ async def get_key_from_header(
 
 
 async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
-    from .auth import get_billing_key
-
     billing_key = await get_billing_key(key, session)
-    return {
+    info = {
         "api_key": "sk-" + key.hashed_key,
         "balance": billing_key.balance,
         "reserved": billing_key.reserved_balance,
@@ -49,6 +48,26 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "balance_limit_reset": key.balance_limit_reset,
         "validity_date": key.validity_date,
     }
+
+    if not key.parent_key_hash:
+        # Fetch child keys if this is a parent key
+        statement = select(ApiKey).where(ApiKey.parent_key_hash == key.hashed_key)
+        results = await session.exec(statement)
+        child_keys = results.all()
+        if child_keys:
+            info["child_keys"] = [
+                {
+                    "api_key": "sk-" + ck.hashed_key,
+                    "total_requests": ck.total_requests,
+                    "total_spent": ck.total_spent,
+                    "balance_limit": ck.balance_limit,
+                    "balance_limit_reset": ck.balance_limit_reset,
+                    "validity_date": ck.validity_date,
+                }
+                for ck in child_keys
+            ]
+
+    return info
 
 
 # TODO: remove this endpoint when frontend is updated
@@ -117,8 +136,6 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
-    from .auth import get_billing_key
-
     billing_key = await get_billing_key(key, session)
 
     if topup_request is not None:

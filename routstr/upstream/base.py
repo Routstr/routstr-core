@@ -5,21 +5,18 @@ import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Mapping
+from typing import Mapping
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from sqlmodel import select
 
 from ..auth import adjust_payment_for_tokens, revert_pay_for_request
 from ..core import get_logger
-from ..core.db import ApiKey, AsyncSession, create_session
+from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow, create_session
 from ..core.exceptions import UpstreamError
-
-if TYPE_CHECKING:
-    from ..core.db import UpstreamProviderRow
-
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -32,6 +29,7 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    list_models,
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
@@ -3089,18 +3087,45 @@ class BaseUpstreamProvider:
     async def refresh_models_cache(self) -> None:
         """Refresh the in-memory models cache from upstream API."""
         try:
-            models = await self.fetch_models()
-            models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
+            async with create_session() as session:
+                stmt = select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == self.base_url,
+                    UpstreamProviderRow.api_key == self.api_key
+                )
+                result = await session.exec(stmt)
+                
+                # .first() returns the object or None if not found
+                provider = result.first()
+                if not provider or not provider.id:
+                    raise HTTPException(status_code=404, detail="Provider not found")
 
-            try:
-                sats_to_usd = sats_usd_price()
-                self._models_cache = [
-                    _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
-                ]
-            except Exception:
-                self._models_cache = models_with_fees
+                db_models = await list_models(
+                    session=session,
+                    upstream_id=provider.id,
+                    include_disabled=False,
+                    apply_fees=False,
+                )
+                db_model_ids: set[str] = {model.id for model in db_models}
+                models = await self.fetch_models()
+                model_ids = [model.id for model in models]
+                diff = set(db_model_ids) - set(model_ids)
 
-            self._models_by_id = {m.id: m for m in self._models_cache}
+                for db_model_id in diff:
+                    found_db_model = next((model_obj for model_obj in db_models if model_obj.id == db_model_id))
+                    models.append(found_db_model)
+
+                models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
+                print([mode.id for mode in models_with_fees])
+
+                try:
+                    sats_to_usd = sats_usd_price()
+                    self._models_cache = [
+                        _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
+                    ]
+                except Exception:
+                    self._models_cache = models_with_fees
+
+                self._models_by_id = {m.id: m for m in self._models_cache}
 
         except Exception as e:
             logger.error(

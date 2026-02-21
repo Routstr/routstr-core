@@ -6,30 +6,25 @@ Production deployment guide for Routstr Provider nodes.
 
 For production, use Docker Compose with persistent storage and optional Tor support.
 
-### Basic Setup
+### Unified Setup (All-in-one)
+To build and run the node with the UI integrated in a single container using the multi-stage build:
 
-Create a `compose.yml`:
-
-```yaml
-services:
-  routstr:
-    image: ghcr.io/routstr/proxy:latest
-    container_name: routstr
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+```bash
+docker build -f Dockerfile.full -t routstr-full .
+docker run -d -p 8000:8000 --env-file .env routstr-full
 ```
 
-Start the node:
+### Advanced Setup (Separated UI & Node)
+Use the included `compose.yml` for a more flexible setup that separates the UI build process from the node execution. This is useful for development or when you want to manage Tor as a separate service.
 
 ```bash
 docker compose up -d
 ```
 
-Then configure everything via the [Admin Dashboard](http://localhost:8000/admin/).
+This will:
+1.  **Build the UI**: Compiles the frontend and copies it to a shared volume.
+2.  **Start Routstr**: Runs the Python node, mounting the built UI.
+3.  **Start Tor**: Provides anonymous access via a `.onion` address.
 
 ---
 
@@ -189,8 +184,20 @@ docker compose up -d
 
 ## Building from Source
 
+### Unified Image (UI + Node)
+The easiest way to build everything from source into a single production-ready image:
+
 ```bash
-git clone https://github.com/routstr/routstr-core.git
-cd routstr-core
-docker build -t routstr-local .
+docker build -f Dockerfile.full -t routstr-full .
+```
+
+### Individual Components
+If you prefer building them separately or using Docker Compose:
+
+```bash
+# Build using compose
+docker compose build
+
+# Or build the node only (requires manual UI build first)
+docker build -t routstr-node .
 ```
