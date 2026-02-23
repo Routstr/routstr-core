@@ -81,11 +81,7 @@ if [ "$LOCAL_HASH" != "$REMOTE_HASH" ]; then
     if git pull origin $(git branch --show-current) 2>&1 | tee -a "$LOG_FILE"; then
         log_message "Successfully pulled latest changes"
         
-        # Stop current containers
-        log_message "Stopping current containers..."
-        sudo $DOCKER_COMPOSE_CMD down 2>&1 | tee -a "$LOG_FILE"
-        
-        # Build and start updated containers
+        # Build and start updated containers (rolling update - no downtime)
         log_message "Building and starting updated containers..."
         if sudo $DOCKER_COMPOSE_CMD up -d --build 2>&1 | tee -a "$LOG_FILE"; then
             log_message "Successfully updated and restarted containers"
