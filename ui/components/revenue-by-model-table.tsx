@@ -76,7 +76,9 @@ export function RevenueByModelTable({
             ) : (
               models.map((model) => {
                 const share =
-                  totalRevenue > 0 ? (model.revenue_sats / totalRevenue) * 100 : 0;
+                  totalRevenue > 0
+                    ? (model.revenue_sats / totalRevenue) * 100
+                    : 0;
                 return (
                   <TableRow key={model.model}>
                     <TableCell className='font-medium'>{model.model}</TableCell>

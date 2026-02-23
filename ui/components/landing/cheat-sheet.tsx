@@ -167,7 +167,7 @@ export function CheatSheet(): JSX.Element {
   const refundToken = refundReceipt?.token ?? null;
 
   return (
-    <div className='min-h-screen bg-background'>
+    <div className='bg-background min-h-screen'>
       <main className='mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6 lg:px-8'>
         <section className='relative space-y-3 text-center md:text-left'>
           <div className='absolute top-0 right-0 hidden md:block'>
@@ -235,7 +235,7 @@ export function CheatSheet(): JSX.Element {
                     <div className='space-y-2 sm:col-span-2'>
                       <Skeleton className='h-3 w-10' />
                       <div className='flex items-center gap-2'>
-                        <Skeleton className='h-5 flex-1 max-w-[28rem]' />
+                        <Skeleton className='h-5 max-w-[28rem] flex-1' />
                         <Skeleton className='h-7 w-7 rounded-md' />
                       </div>
                     </div>

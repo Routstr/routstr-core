@@ -1,4 +1,9 @@
-import { useEffect, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+} from 'react';
 import { format } from 'date-fns';
 import { CalendarIcon, Filter, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -88,8 +93,12 @@ const ENDPOINT_OPTIONS = [
   '/embeddings/models',
 ];
 
-const STATUS_4XX_CODES = STATUS_CODE_OPTIONS.filter((code) => code.startsWith('4'));
-const STATUS_5XX_CODES = STATUS_CODE_OPTIONS.filter((code) => code.startsWith('5'));
+const STATUS_4XX_CODES = STATUS_CODE_OPTIONS.filter((code) =>
+  code.startsWith('4')
+);
+const STATUS_5XX_CODES = STATUS_CODE_OPTIONS.filter((code) =>
+  code.startsWith('5')
+);
 
 export function LogFilters({
   selectedDate,
@@ -194,7 +203,9 @@ export function LogFilters({
   const handleQuickStatusCode = (range: '4xx' | '5xx') => {
     const rangeCodes = range === '4xx' ? STATUS_4XX_CODES : STATUS_5XX_CODES;
     const nextSelection = new Set(selectedStatusCodes);
-    const allSelected = rangeCodes.every((code) => selectedStatusCodes.includes(code));
+    const allSelected = rangeCodes.every((code) =>
+      selectedStatusCodes.includes(code)
+    );
 
     if (allSelected) {
       rangeCodes.forEach((code) => nextSelection.delete(code));
@@ -414,7 +425,11 @@ export function LogFilters({
           </div>
 
           <div className='flex items-end sm:col-span-2 lg:col-span-1'>
-            <Button onClick={onClearFilters} variant='outline' className='w-full'>
+            <Button
+              onClick={onClearFilters}
+              variant='outline'
+              className='w-full'
+            >
               Clear Filters
             </Button>
           </div>

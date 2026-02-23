@@ -2,6 +2,7 @@ import json
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -46,7 +47,7 @@ def _cleanup_expired_admin_sessions(now_timestamp: int | None = None) -> None:
         admin_sessions.pop(token, None)
 
 
-def _raise_unauthorized(detail: str) -> None:
+def _raise_unauthorized(detail: str) -> NoReturn:
     raise HTTPException(
         status_code=401,
         detail=detail,

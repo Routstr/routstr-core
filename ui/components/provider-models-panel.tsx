@@ -42,7 +42,9 @@ export function ProviderModelsPanel({
 
   return (
     <Tabs
-      defaultValue={providerModels.remote_models.length > 0 ? 'provided' : 'custom'}
+      defaultValue={
+        providerModels.remote_models.length > 0 ? 'provided' : 'custom'
+      }
       className='w-full'
     >
       <TabsList className='grid w-full grid-cols-2'>

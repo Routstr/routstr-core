@@ -126,7 +126,7 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
             </span>
           </CardHeader>
           <CardContent className='pt-0'>
-            <div className='break-words text-lg font-semibold tracking-tight sm:text-2xl'>
+            <div className='text-lg font-semibold tracking-tight break-words sm:text-2xl'>
               {card.value}
             </div>
           </CardContent>

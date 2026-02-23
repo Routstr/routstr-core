@@ -1,9 +1,9 @@
-"use client";
+'use client';
 
-import { useMemo, useState } from "react";
-import { Check, ChevronsUpDown } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { useMemo, useState } from 'react';
+import { Check, ChevronsUpDown } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
 import {
   Command,
   CommandEmpty,
@@ -11,8 +11,12 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-} from "@/components/ui/command";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+} from '@/components/ui/command';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 
 export type SearchableSelectOption = {
   value: string;
@@ -35,9 +39,9 @@ export default function SearchableSelect({
   value,
   onValueChange,
   options,
-  placeholder = "Select option",
-  searchPlaceholder = "Search...",
-  emptyMessage = "No option found.",
+  placeholder = 'Select option',
+  searchPlaceholder = 'Search...',
+  emptyMessage = 'No option found.',
   disabled = false,
   className,
 }: SearchableSelectProps) {
@@ -53,22 +57,22 @@ export default function SearchableSelect({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
-          variant="outline"
-          role="combobox"
+          variant='outline'
+          role='combobox'
           aria-expanded={open}
           disabled={disabled}
           className={cn(
-            "w-full justify-between font-normal",
-            !selectedOption && !value ? "text-muted-foreground" : "",
+            'w-full justify-between font-normal',
+            !selectedOption && !value ? 'text-muted-foreground' : '',
             className
           )}
-          type="button"
+          type='button'
         >
-          <span className="truncate">{displayLabel}</span>
-          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          <span className='truncate'>{displayLabel}</span>
+          <ChevronsUpDown className='ml-2 h-4 w-4 shrink-0 opacity-50' />
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-(--radix-popover-trigger-width) p-0">
+      <PopoverContent className='w-(--radix-popover-trigger-width) p-0'>
         <Command>
           <CommandInput placeholder={searchPlaceholder} />
           <CommandList>
@@ -84,11 +88,11 @@ export default function SearchableSelect({
                     setOpen(false);
                   }}
                 >
-                  <span className="truncate">{option.label}</span>
+                  <span className='truncate'>{option.label}</span>
                   <Check
                     className={cn(
-                      "ml-auto h-4 w-4",
-                      value === option.value ? "opacity-100" : "opacity-0"
+                      'ml-auto h-4 w-4',
+                      value === option.value ? 'opacity-100' : 'opacity-0'
                     )}
                   />
                 </CommandItem>

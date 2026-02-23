@@ -51,7 +51,9 @@ interface ApiEndpointFormProps {
   setImageCount: Dispatch<SetStateAction<number>>;
   imageSize: '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
   setImageSize: Dispatch<
-    SetStateAction<'256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792'>
+    SetStateAction<
+      '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792'
+    >
   >;
   imageQuality: 'standard' | 'hd';
   setImageQuality: Dispatch<SetStateAction<'standard' | 'hd'>>;
@@ -167,7 +169,9 @@ export function ApiEndpointForm({
                 min={1}
                 max={4000}
                 value={maxTokens}
-                onChange={(event) => setMaxTokens(parseInt(event.target.value) || 150)}
+                onChange={(event) =>
+                  setMaxTokens(parseInt(event.target.value) || 150)
+                }
               />
             </div>
             <div className='space-y-2'>
@@ -244,7 +248,9 @@ export function ApiEndpointForm({
           </div>
 
           <div className='space-y-2'>
-            <Label htmlFor='vision-system-message'>System Message (Optional)</Label>
+            <Label htmlFor='vision-system-message'>
+              System Message (Optional)
+            </Label>
             <Textarea
               id='vision-system-message'
               placeholder='Enter system message...'
@@ -269,7 +275,9 @@ export function ApiEndpointForm({
             <Label htmlFor='image-detail'>Image Detail</Label>
             <Select
               value={imageDetail}
-              onValueChange={(value: 'low' | 'high' | 'auto') => setImageDetail(value)}
+              onValueChange={(value: 'low' | 'high' | 'auto') =>
+                setImageDetail(value)
+              }
             >
               <SelectTrigger>
                 <SelectValue />
@@ -284,7 +292,12 @@ export function ApiEndpointForm({
 
           <div className='space-y-2'>
             <Label htmlFor='image-upload'>Upload Image (Optional)</Label>
-            <Input type='file' accept='image/*' onChange={onImageUpload} className='cursor-pointer' />
+            <Input
+              type='file'
+              accept='image/*'
+              onChange={onImageUpload}
+              className='cursor-pointer'
+            />
             {selectedImage && (
               <div className='mt-2 flex flex-wrap items-center gap-2'>
                 <ImageIcon className='text-muted-foreground h-5 w-5' />
@@ -303,7 +316,12 @@ export function ApiEndpointForm({
             )}
             {imagePreviewUrl && (
               <div className='relative mt-2 aspect-square w-32 overflow-hidden rounded-md border'>
-                <Image src={imagePreviewUrl} alt='Image preview' fill className='object-cover' />
+                <Image
+                  src={imagePreviewUrl}
+                  alt='Image preview'
+                  fill
+                  className='object-cover'
+                />
               </div>
             )}
           </div>
@@ -317,7 +335,9 @@ export function ApiEndpointForm({
             <Label htmlFor='encoding-format'>Encoding Format</Label>
             <Select
               value={encodingFormat}
-              onValueChange={(value: 'float' | 'base64') => setEncodingFormat(value)}
+              onValueChange={(value: 'float' | 'base64') =>
+                setEncodingFormat(value)
+              }
             >
               <SelectTrigger>
                 <SelectValue />
@@ -354,7 +374,9 @@ export function ApiEndpointForm({
                 min={1}
                 max={10}
                 value={imageCount}
-                onChange={(event) => setImageCount(parseInt(event.target.value) || 1)}
+                onChange={(event) =>
+                  setImageCount(parseInt(event.target.value) || 1)
+                }
               />
             </div>
 
@@ -388,7 +410,9 @@ export function ApiEndpointForm({
               <Label htmlFor='image-quality'>Quality</Label>
               <Select
                 value={imageQuality}
-                onValueChange={(value: 'standard' | 'hd') => setImageQuality(value)}
+                onValueChange={(value: 'standard' | 'hd') =>
+                  setImageQuality(value)
+                }
               >
                 <SelectTrigger>
                   <SelectValue />
@@ -405,7 +429,9 @@ export function ApiEndpointForm({
             <Label htmlFor='image-style'>Style</Label>
             <Select
               value={imageStyle}
-              onValueChange={(value: 'vivid' | 'natural') => setImageStyle(value)}
+              onValueChange={(value: 'vivid' | 'natural') =>
+                setImageStyle(value)
+              }
             >
               <SelectTrigger>
                 <SelectValue />
@@ -439,7 +465,13 @@ export function ApiEndpointForm({
               <Select
                 value={speechVoice}
                 onValueChange={(
-                  value: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer'
+                  value:
+                    | 'alloy'
+                    | 'echo'
+                    | 'fable'
+                    | 'onyx'
+                    | 'nova'
+                    | 'shimmer'
                 ) => setSpeechVoice(value)}
               >
                 <SelectTrigger>
@@ -487,7 +519,9 @@ export function ApiEndpointForm({
                 max={4.0}
                 step={0.25}
                 value={speechSpeed}
-                onChange={(event) => setSpeechSpeed(parseFloat(event.target.value) || 1.0)}
+                onChange={(event) =>
+                  setSpeechSpeed(parseFloat(event.target.value) || 1.0)
+                }
               />
             </div>
           </div>
@@ -510,17 +544,23 @@ export function ApiEndpointForm({
         <div className='space-y-4'>
           <div className='grid grid-cols-1 gap-4 md:grid-cols-2'>
             <div className='space-y-2'>
-              <Label htmlFor='audio-transcription-prompt'>Prompt (Optional)</Label>
+              <Label htmlFor='audio-transcription-prompt'>
+                Prompt (Optional)
+              </Label>
               <Textarea
                 id='audio-transcription-prompt'
                 placeholder='Enter a prompt for the transcription...'
                 value={audioTranscriptionPrompt}
-                onChange={(event) => setAudioTranscriptionPrompt(event.target.value)}
+                onChange={(event) =>
+                  setAudioTranscriptionPrompt(event.target.value)
+                }
                 rows={2}
               />
             </div>
             <div className='space-y-2'>
-              <Label htmlFor='audio-transcription-temperature'>Temperature</Label>
+              <Label htmlFor='audio-transcription-temperature'>
+                Temperature
+              </Label>
               <Input
                 id='audio-transcription-temperature'
                 type='number'
@@ -536,7 +576,9 @@ export function ApiEndpointForm({
           </div>
 
           <div className='space-y-2'>
-            <Label htmlFor='audio-transcription-language'>Language (Optional)</Label>
+            <Label htmlFor='audio-transcription-language'>
+              Language (Optional)
+            </Label>
             <Input
               id='audio-transcription-language'
               placeholder='e.g., en-US, fr-FR'
@@ -546,7 +588,9 @@ export function ApiEndpointForm({
           </div>
 
           <div className='space-y-2'>
-            <Label htmlFor='audio-transcription-response-format'>Response Format</Label>
+            <Label htmlFor='audio-transcription-response-format'>
+              Response Format
+            </Label>
             <Select
               value={audioResponseFormat}
               onValueChange={(
@@ -599,8 +643,15 @@ export function ApiEndpointForm({
             </div>
 
             <div className='space-y-2'>
-              <Label htmlFor='audio-transcription-upload'>Or Upload Audio File</Label>
-              <Input type='file' accept='audio/*' onChange={onAudioUpload} className='cursor-pointer' />
+              <Label htmlFor='audio-transcription-upload'>
+                Or Upload Audio File
+              </Label>
+              <Input
+                type='file'
+                accept='audio/*'
+                onChange={onAudioUpload}
+                className='cursor-pointer'
+              />
               {recordedAudio && (
                 <div className='mt-2 flex flex-wrap items-center gap-2'>
                   <Volume2 className='text-muted-foreground h-5 w-5' />

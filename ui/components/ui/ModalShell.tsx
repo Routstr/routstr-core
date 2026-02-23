@@ -1,7 +1,7 @@
-"use client";
+'use client';
 
-import React from "react";
-import { cn } from "@/lib/utils";
+import React from 'react';
+import { cn } from '@/lib/utils';
 
 interface ModalShellProps {
   open: boolean;
@@ -27,7 +27,7 @@ export const ModalShell: React.FC<ModalShellProps> = ({
   closeOnOverlayClick = false,
   closeOnAnyClick = false,
   stopPropagation,
-  contentRole = "dialog",
+  contentRole = 'dialog',
   contentAriaLabel,
 }) => {
   if (!open) return null;
@@ -47,13 +47,16 @@ export const ModalShell: React.FC<ModalShellProps> = ({
 
   return (
     <div
-      className={cn("fixed inset-0 flex items-center justify-center", overlayClassName)}
+      className={cn(
+        'fixed inset-0 flex items-center justify-center',
+        overlayClassName
+      )}
       onMouseDown={handleOverlayMouseDown}
     >
       <div
         className={contentClassName}
         role={contentRole}
-        aria-modal="true"
+        aria-modal='true'
         aria-label={contentAriaLabel}
         style={contentStyle}
         onMouseDown={

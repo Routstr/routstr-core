@@ -176,9 +176,9 @@ export function EditGroupForm({
                   >
                     <span className='truncate'>{model.name}</span>
                     {model.api_key && <Key className='ml-1 h-3 w-3' />}
-                    {model.url && !model.url.startsWith('/') && model.api_key && (
-                      <Globe className='ml-1 h-3 w-3' />
-                    )}
+                    {model.url &&
+                      !model.url.startsWith('/') &&
+                      model.api_key && <Globe className='ml-1 h-3 w-3' />}
                   </Badge>
                 ))}
               </div>

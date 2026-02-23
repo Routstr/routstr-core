@@ -226,7 +226,10 @@ export default function LogsPage() {
             {isLoading ? (
               <div className='space-y-2'>
                 {Array.from({ length: 8 }).map((_, index) => (
-                  <Skeleton key={`logs-loading-${index}`} className='h-16 w-full rounded-lg' />
+                  <Skeleton
+                    key={`logs-loading-${index}`}
+                    className='h-16 w-full rounded-lg'
+                  />
                 ))}
               </div>
             ) : logsData?.logs && logsData.logs.length > 0 ? (

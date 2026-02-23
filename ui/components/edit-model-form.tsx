@@ -64,7 +64,9 @@ const toStringArray = (value: unknown, fallback: string[]): string[] => {
   if (!Array.isArray(value)) {
     return fallback;
   }
-  const filtered = value.filter((item): item is string => typeof item === 'string');
+  const filtered = value.filter(
+    (item): item is string => typeof item === 'string'
+  );
   return filtered.length > 0 ? filtered : fallback;
 };
 
@@ -125,7 +127,9 @@ const normalizeAdminModelData = (
     created: toNumber(adminModel.created, Math.floor(Date.now() / 1000)),
     context_length: Math.max(
       0,
-      Math.trunc(toNumber(adminModel.context_length, fallbackModel.contextLength || 4096))
+      Math.trunc(
+        toNumber(adminModel.context_length, fallbackModel.contextLength || 4096)
+      )
     ),
     architecture: {
       modality:
@@ -148,7 +152,9 @@ const normalizeAdminModelData = (
           : null,
     },
     pricing: {
-      prompt: roundToFiveDecimals(toNumber(pricingRecord.prompt, fallbackModel.input_cost)),
+      prompt: roundToFiveDecimals(
+        toNumber(pricingRecord.prompt, fallbackModel.input_cost)
+      ),
       completion: roundToFiveDecimals(
         toNumber(pricingRecord.completion, fallbackModel.output_cost)
       ),

@@ -40,7 +40,8 @@ export function NavSecondary({
                 isActive={
                   item.url === '/'
                     ? pathname === '/'
-                    : pathname === item.url || pathname.startsWith(`${item.url}/`)
+                    : pathname === item.url ||
+                      pathname.startsWith(`${item.url}/`)
                 }
               >
                 <Link href={item.url}>

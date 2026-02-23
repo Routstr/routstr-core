@@ -65,7 +65,9 @@ export function CurrencyToggle({
           size='sm'
           className={cn(
             'border-border/60 bg-background/65 text-muted-foreground hover:text-foreground rounded-md',
-            compact ? 'h-8 w-10 justify-center px-0' : 'h-8 justify-between gap-2',
+            compact
+              ? 'h-8 w-10 justify-center px-0'
+              : 'h-8 justify-between gap-2',
             className
           )}
         >

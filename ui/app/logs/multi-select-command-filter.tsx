@@ -44,7 +44,10 @@ interface MultiSelectCommandFilterProps {
 
 function FilterBadge({ value }: { value: string }) {
   return (
-    <Badge variant='secondary' className='flex items-center gap-1 px-1 font-normal'>
+    <Badge
+      variant='secondary'
+      className='flex items-center gap-1 px-1 font-normal'
+    >
       {value}
       <X className='h-3 w-3 opacity-70' aria-hidden='true' />
     </Badge>
@@ -93,7 +96,10 @@ export function MultiSelectCommandFilter({
       <Label>{label}</Label>
       <Popover>
         <PopoverTrigger asChild>
-          <Button variant='outline' className='w-full justify-start text-left font-normal'>
+          <Button
+            variant='outline'
+            className='w-full justify-start text-left font-normal'
+          >
             <div className='flex flex-wrap gap-1 overflow-hidden'>
               {selectedValues.length > 0 ? (
                 selectedValues.map((value) => (
@@ -158,7 +164,10 @@ export function MultiSelectCommandFilter({
                 {options
                   .filter((option) => !selectedValues.includes(option))
                   .map((option) => (
-                    <CommandItem key={option} onSelect={() => toggleSelection(option)}>
+                    <CommandItem
+                      key={option}
+                      onSelect={() => toggleSelection(option)}
+                    >
                       <Checkbox checked={false} className='mr-2' />
                       {option}
                     </CommandItem>

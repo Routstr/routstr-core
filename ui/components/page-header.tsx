@@ -27,11 +27,17 @@ export function PageHeader({
     >
       <div className='min-w-0 space-y-1'>
         <div className='flex items-center gap-2'>
-          {icon ? <span className='text-muted-foreground shrink-0'>{icon}</span> : null}
-          <h2 className='text-xl font-semibold tracking-tight sm:text-2xl'>{title}</h2>
+          {icon ? (
+            <span className='text-muted-foreground shrink-0'>{icon}</span>
+          ) : null}
+          <h2 className='text-xl font-semibold tracking-tight sm:text-2xl'>
+            {title}
+          </h2>
         </div>
         {description ? (
-          <p className='text-muted-foreground text-sm leading-relaxed'>{description}</p>
+          <p className='text-muted-foreground text-sm leading-relaxed'>
+            {description}
+          </p>
         ) : null}
       </div>
       {actions ? (

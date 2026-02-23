@@ -119,7 +119,11 @@ const isAudioTranscriptionResponse = (
   return 'text' in response;
 };
 
-export function ApiEndpointResponse({ response }: { response: ApiResponse | null }) {
+export function ApiEndpointResponse({
+  response,
+}: {
+  response: ApiResponse | null;
+}) {
   if (!response) {
     return null;
   }
@@ -164,7 +168,8 @@ export function ApiEndpointResponse({ response }: { response: ApiResponse | null
           <Label>Model Response</Label>
           <div className='bg-muted rounded-md p-4'>
             <p className='text-sm whitespace-pre-wrap'>
-              {response.choices?.[0]?.message?.content || 'No content in response'}
+              {response.choices?.[0]?.message?.content ||
+                'No content in response'}
             </p>
           </div>
         </div>
@@ -174,15 +179,21 @@ export function ApiEndpointResponse({ response }: { response: ApiResponse | null
             <Label>Usage Statistics</Label>
             <div className='grid grid-cols-1 gap-2 text-sm sm:grid-cols-3 sm:gap-4'>
               <div className='bg-muted rounded p-2 text-center'>
-                <div className='font-semibold'>{response.usage.prompt_tokens}</div>
+                <div className='font-semibold'>
+                  {response.usage.prompt_tokens}
+                </div>
                 <div className='text-muted-foreground'>Prompt Tokens</div>
               </div>
               <div className='bg-muted rounded p-2 text-center'>
-                <div className='font-semibold'>{response.usage.completion_tokens}</div>
+                <div className='font-semibold'>
+                  {response.usage.completion_tokens}
+                </div>
                 <div className='text-muted-foreground'>Completion Tokens</div>
               </div>
               <div className='bg-muted rounded p-2 text-center'>
-                <div className='font-semibold'>{response.usage.total_tokens}</div>
+                <div className='font-semibold'>
+                  {response.usage.total_tokens}
+                </div>
                 <div className='text-muted-foreground'>Total Tokens</div>
               </div>
             </div>
@@ -207,7 +218,11 @@ export function ApiEndpointResponse({ response }: { response: ApiResponse | null
                 Show first 10 values
               </summary>
               <pre className='mt-2 text-xs'>
-                {JSON.stringify(response.data?.[0]?.embedding?.slice(0, 10), null, 2)}
+                {JSON.stringify(
+                  response.data?.[0]?.embedding?.slice(0, 10),
+                  null,
+                  2
+                )}
                 ...
               </pre>
             </details>
@@ -274,7 +289,8 @@ export function ApiEndpointResponse({ response }: { response: ApiResponse | null
                   )}
                   {model.created && (
                     <div className='text-muted-foreground text-sm'>
-                      Created: {new Date(model.created * 1000).toLocaleDateString()}
+                      Created:{' '}
+                      {new Date(model.created * 1000).toLocaleDateString()}
                     </div>
                   )}
                 </div>

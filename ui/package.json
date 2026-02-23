@@ -8,8 +8,8 @@
     "export": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "format-check": "prettier --check --ignore-path .gitignore .",
-    "format-fix": "prettier --write --ignore-path .gitignore ."
+    "format-check": "prettier --check --ignore-path .prettierignore .",
+    "format-fix": "prettier --write --ignore-path .prettierignore ."
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
@@ -50,6 +50,7 @@
     "cmdk": "^1.1.1",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
+    "geist": "^1.7.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.575.0",
     "next": "16.1.6",
