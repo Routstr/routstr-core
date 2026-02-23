@@ -26,18 +26,53 @@ logger = get_logger(__name__)
 admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
 admin_sessions: dict[str, int] = {}
-ADMIN_SESSION_DURATION = 3600
+ADMIN_SESSION_DURATION = 12 * 60 * 60
+
+
+def _current_timestamp() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def _cleanup_expired_admin_sessions(now_timestamp: int | None = None) -> None:
+    current_timestamp = (
+        now_timestamp if now_timestamp is not None else _current_timestamp()
+    )
+    expired_tokens = [
+        token
+        for token, expiry_timestamp in admin_sessions.items()
+        if expiry_timestamp <= current_timestamp
+    ]
+    for token in expired_tokens:
+        admin_sessions.pop(token, None)
+
+
+def _raise_unauthorized(detail: str) -> None:
+    raise HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def require_admin_api(request: Request) -> None:
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1]
-        expiry = admin_sessions.get(token)
-        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
-            return
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        _raise_unauthorized("Missing bearer token")
 
-    raise HTTPException(status_code=403, detail="Unauthorized")
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        _raise_unauthorized("Missing bearer token")
+
+    now_timestamp = _current_timestamp()
+    expiry_timestamp = admin_sessions.get(token)
+    if expiry_timestamp is None:
+        _raise_unauthorized("Invalid session token")
+
+    if expiry_timestamp <= now_timestamp:
+        admin_sessions.pop(token, None)
+        _raise_unauthorized("Session expired")
+
+    _cleanup_expired_admin_sessions(now_timestamp)
 
 
 @admin_router.get("/api/temporary-balances", dependencies=[Depends(require_admin_api)])
@@ -206,18 +241,10 @@ async def admin_login(
         raise HTTPException(status_code=401, detail="Invalid password")
 
     token = secrets.token_urlsafe(32)
-    expiry_timestamp = (
-        int(datetime.now(timezone.utc).timestamp()) + ADMIN_SESSION_DURATION
-    )
+    expiry_timestamp = _current_timestamp() + ADMIN_SESSION_DURATION
     admin_sessions[token] = expiry_timestamp
 
-    expired_tokens = [
-        t
-        for t, exp in admin_sessions.items()
-        if exp <= int(datetime.now(timezone.utc).timestamp())
-    ]
-    for t in expired_tokens:
-        del admin_sessions[t]
+    _cleanup_expired_admin_sessions()
 
     return {"ok": True, "token": token, "expires_in": ADMIN_SESSION_DURATION}
 
@@ -941,7 +968,9 @@ async def get_usage_metrics(
         default=15, ge=1, le=1440, description="Time interval in minutes"
     ),
     hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
+        default=24,
+        ge=1,
+        description="Hours of history to analyze",
     ),
 ) -> dict:
     """Get usage metrics aggregated by time interval."""
@@ -952,7 +981,9 @@ async def get_usage_metrics(
 async def get_usage_summary(
     request: Request,
     hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
+        default=24,
+        ge=1,
+        description="Hours of history to analyze",
     ),
 ) -> dict:
     """Get summary statistics for the specified time period."""
@@ -963,7 +994,9 @@ async def get_usage_summary(
 async def get_error_details(
     request: Request,
     hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
+        default=24,
+        ge=1,
+        description="Hours of history to analyze",
     ),
     limit: int = Query(
         default=100, ge=1, le=1000, description="Maximum number of errors to return"
@@ -979,7 +1012,9 @@ async def get_error_details(
 async def get_revenue_by_model(
     request: Request,
     hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
+        default=24,
+        ge=1,
+        description="Hours of history to analyze",
     ),
     limit: int = Query(
         default=20, ge=1, le=100, description="Maximum number of models to return"

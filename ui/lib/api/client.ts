@@ -13,12 +13,12 @@ class ApiClient {
   private handleAuthError(error: unknown): void {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
-      if (
-        axiosError.response?.status === 401 ||
-        axiosError.response?.status === 403
-      ) {
+      if (axiosError.response?.status === 401) {
         ConfigurationService.clearToken();
-        if (typeof window !== 'undefined') {
+        if (
+          typeof window !== 'undefined' &&
+          window.location.pathname !== '/login'
+        ) {
           window.location.href = '/login';
         }
       }
@@ -36,7 +36,6 @@ class ApiClient {
     };
 
     try {
-      console.log(`Making GET request to ${this.getBaseUrl()}${endpoint}`);
       const response: AxiosResponse<T> = await axios.get<T>(
         `${this.getBaseUrl()}${endpoint}`,
         config
@@ -55,20 +54,11 @@ class ApiClient {
     };
 
     try {
-      console.log(
-        `Making POST request to ${this.getBaseUrl()}${endpoint}`,
-        data
-      );
       const response: AxiosResponse<T> = await axios.post<T>(
         `${this.getBaseUrl()}${endpoint}`,
         data,
         config
       );
-      console.log(`POST response from ${endpoint}:`, {
-        status: response.status,
-        data: response.data,
-        headers: response.headers,
-      });
       return response.data;
     } catch (error) {
       this.handleAuthError(error);
@@ -84,10 +74,6 @@ class ApiClient {
     };
 
     try {
-      console.log(
-        `Making PUT request to ${this.getBaseUrl()}${endpoint}`,
-        data
-      );
       const response: AxiosResponse<T> = await axios.put<T>(
         `${this.getBaseUrl()}${endpoint}`,
         data,
@@ -108,10 +94,6 @@ class ApiClient {
     };
 
     try {
-      console.log(
-        `Making PATCH request to ${this.getBaseUrl()}${endpoint}`,
-        data
-      );
       const response: AxiosResponse<T> = await axios.patch<T>(
         `${this.getBaseUrl()}${endpoint}`,
         data,
@@ -132,7 +114,6 @@ class ApiClient {
     };
 
     try {
-      console.log(`Making DELETE request to ${this.getBaseUrl()}${endpoint}`);
       const response: AxiosResponse<T> = await axios.delete<T>(
         `${this.getBaseUrl()}${endpoint}`,
         config

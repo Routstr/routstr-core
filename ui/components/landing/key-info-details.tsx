@@ -216,7 +216,7 @@ export function KeyInfoDetails({
                 </div>
                 {walletInfo.parentKey && (
                   <div className='space-y-1'>
-                    <span className='text-muted-foreground text-xs tracking-wider uppercase'>
+                    <span className='text-muted-foreground text-xs tracking-wider'>
                       Parent Key
                     </span>
                     <div className='flex items-center gap-2'>
@@ -359,7 +359,7 @@ export function KeyInfoDetails({
                         </div>
                         <div className='grid grid-cols-2 gap-4 text-xs sm:grid-cols-5'>
                           <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider uppercase'>
+                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
                               Requests
                             </p>
                             <p className='font-mono font-medium'>
@@ -367,7 +367,7 @@ export function KeyInfoDetails({
                             </p>
                           </div>
                           <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider uppercase'>
+                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
                               Spent
                             </p>
                             <p className='font-mono font-medium'>
@@ -375,7 +375,7 @@ export function KeyInfoDetails({
                             </p>
                           </div>
                           <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider uppercase'>
+                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
                               Limit
                             </p>
                             <p className='font-mono font-medium'>
@@ -385,7 +385,7 @@ export function KeyInfoDetails({
                             </p>
                           </div>
                           <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider uppercase'>
+                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
                               Policy
                             </p>
                             <p className='font-medium capitalize'>
@@ -393,7 +393,7 @@ export function KeyInfoDetails({
                             </p>
                           </div>
                           <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider uppercase'>
+                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
                               Expires
                             </p>
                             <p className='font-medium'>

@@ -2,6 +2,7 @@
 
 import * as React from 'react';
 import {
+  ExternalLinkIcon,
   FileTextIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
@@ -10,15 +11,18 @@ import {
   WalletIcon,
 } from 'lucide-react';
 import Image from 'next/image';
+import Link from 'next/link';
 
 import { NavSecondary } from '@/components/nav-secondary';
 import {
   Sidebar,
   SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuItem,
   SidebarMenuButton,
+  SidebarMenuItem,
 } from '@/components/ui/sidebar';
 
 const data = {
@@ -68,29 +72,51 @@ const data = {
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible='offcanvas' {...props}>
-      <SidebarHeader>
+      <SidebarHeader className='px-3 pb-3 pt-4'>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton
-              asChild
-              className='data-[slot=sidebar-menu-button]:!p-1.5'
-            >
-              <div className='flex items-center gap-2'>
-                <Image
-                  src='/icon.ico'
-                  alt='Routstr Node'
-                  width={24}
-                  height={24}
-                  className='rounded'
-                />
-                <span className='text-base font-semibold'>Routstr Node</span>
+            <div className='flex items-center gap-2 px-2 py-1'>
+              <Image
+                src='/icon.ico'
+                alt='Routstr Node'
+                width={24}
+                height={24}
+                className='rounded'
+              />
+              <div className='space-y-0.5'>
+                <p className='text-sm font-semibold tracking-tight'>Routstr Node</p>
+                <p className='text-muted-foreground text-[11px]'>
+                  Admin dashboard
+                </p>
               </div>
-            </SidebarMenuButton>
+            </div>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarContent className='flex-1 overflow-y-auto'>
-        <NavSecondary items={data.navSecondary} className='mt-auto' />
+      <SidebarContent className='flex-1 overflow-y-auto px-2 pb-2'>
+        <NavSecondary items={data.navSecondary} />
+        <SidebarGroup className='mt-auto px-0 pb-0 pt-2'>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild className='h-10 rounded-lg px-3'>
+                  <Link href='https://docs.routstr.com' target='_blank' rel='noreferrer'>
+                    <span>Docs</span>
+                    <ExternalLinkIcon className='ml-auto h-3.5 w-3.5' />
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton asChild className='h-10 rounded-lg px-3'>
+                  <Link href='https://chat.routstr.com' target='_blank' rel='noreferrer'>
+                    <span>Chat App</span>
+                    <ExternalLinkIcon className='ml-auto h-3.5 w-3.5' />
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
       </SidebarContent>
       {/*
       <SidebarFooter>

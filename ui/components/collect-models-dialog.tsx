@@ -218,11 +218,11 @@ export function CollectModelsDialog({
 
           {!isLoadingModels && selectedProvider && remoteModels.length > 0 && (
             <>
-              <div className='flex items-center justify-between'>
+              <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
                 <div className='text-sm font-medium'>
                   {remoteModels.length} models available
                 </div>
-                <div className='flex gap-2'>
+                <div className='flex flex-wrap gap-2'>
                   <Button
                     variant='outline'
                     size='sm'

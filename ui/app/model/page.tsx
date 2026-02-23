@@ -1,25 +1,34 @@
 'use client';
 
-import { ModelSelector } from '@/components/ModelSelector';
-import { ModelTester } from '@/components/ModelTester';
-import { ApiEndpointTester } from '@/components/ApiEndpointTester';
-import { ModelSearchFilter } from '@/components/ModelSearchFilter';
-import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
-import { AppSidebar } from '@/components/app-sidebar';
-import { SiteHeader } from '@/components/site-header';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useQuery } from '@tanstack/react-query';
-import { AdminService } from '@/lib/api/services/admin';
-import { Skeleton } from '@/components/ui/skeleton';
-import { AlertCircle, Users, Globe } from 'lucide-react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { AlertCircle } from 'lucide-react';
 import type { Model } from '@/lib/api/schemas/models';
-import { groupAndSortModelsByProvider } from '@/lib/utils/modelSort';
+import { AdminService } from '@/lib/api/services/admin';
+import { groupAndSortModelsByProvider } from '@/lib/utils/model-sort';
+import { AppPageShell } from '@/components/app-page-shell';
+import { PageHeader } from '@/components/page-header';
+import { ModelSelector } from '@/components/model-selector';
+import { ModelTester } from '@/components/model-tester';
+import { ApiEndpointTester } from '@/components/api-endpoint-tester';
+import { ModelSearchFilter } from '@/components/model-search-filter';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 export default function ModelsPage() {
-  const [filteredModels, setFilteredModels] = useState<Model[]>([]);
+  const [filteredModels, setFilteredModels] = useState<Model[] | undefined>(
+    undefined
+  );
+  const [selectedProviderScope, setSelectedProviderScope] =
+    useState<string>('all');
 
   const {
     data: modelsData,
@@ -33,297 +42,212 @@ export default function ModelsPage() {
 
   const { models = [], groups = [] } = modelsData || {};
 
-  const groupedModels = useMemo(() => {
-    return groupAndSortModelsByProvider(models);
-  }, [models]);
+  const groupedModels = useMemo(
+    () => groupAndSortModelsByProvider(models),
+    [models]
+  );
 
-  const groupDataMap = useMemo(() => {
-    return new Map(groups.map((group) => [group.provider, group]));
-  }, [groups]);
+  const groupDataMap = useMemo(
+    () => new Map(groups.map((group) => [group.provider, group])),
+    [groups]
+  );
 
   const providerInfo = useMemo(() => {
     const allProviders = new Set([
       ...Object.keys(groupedModels),
-      ...groups.map((g) => g.provider),
+      ...groups.map((group) => group.provider),
     ]);
-    console.log(allProviders);
 
-    return Array.from(allProviders).map((provider) => {
-      const providerModels = groupedModels[provider] || [];
-      const groupData = groupDataMap.get(provider);
-      const activeModels = providerModels.filter(
-        (m) => m.isEnabled && !m.soft_deleted
-      ).length;
-      const totalModels = providerModels.length;
+    return Array.from(allProviders)
+      .map((provider) => {
+        const providerModels = groupedModels[provider] || [];
+        const groupData = groupDataMap.get(provider);
 
-      return {
-        provider,
-        activeModels,
-        totalModels,
-        groupData,
-        hasGroupUrl: !!groupData?.group_url,
-        hasGroupApiKey: !!groupData?.group_api_key,
-      };
-    });
-  }, [groupedModels, groupDataMap, groups]);
+        return {
+          provider,
+          totalModels: providerModels.length,
+          disabledModels: providerModels.filter((model) => model.soft_deleted)
+            .length,
+          groupData,
+        };
+      })
+      .sort((a, b) => a.provider.localeCompare(b.provider));
+  }, [groupDataMap, groupedModels, groups]);
+
+  const activeProviderScope = useMemo(() => {
+    if (selectedProviderScope === 'all') {
+      return 'all';
+    }
+
+    const providerExists = providerInfo.some(
+      (provider) => provider.provider === selectedProviderScope
+    );
+
+    return providerExists ? selectedProviderScope : 'all';
+  }, [providerInfo, selectedProviderScope]);
+
+  const selectedProviderGroup =
+    activeProviderScope === 'all'
+      ? undefined
+      : groupDataMap.get(activeProviderScope);
+
+  const scopedModels = useMemo(() => {
+    if (activeProviderScope === 'all') {
+      return models;
+    }
+
+    return models.filter((model) => model.provider === activeProviderScope);
+  }, [activeProviderScope, models]);
 
   return (
-    <SidebarProvider>
-      <AppSidebar variant='inset' />
-      <SidebarInset>
-        <SiteHeader />
-        <div className='flex flex-1 flex-col'>
-          <div className='@container/main flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8'>
-            <div className='mb-6 flex items-center justify-between'>
-              <h1 className='text-2xl font-bold tracking-tight'>
-                Model Management & API Testing
-              </h1>
+    <AppPageShell contentClassName='mx-auto w-full max-w-5xl'>
+      <div className='space-y-3 sm:space-y-4'>
+        <PageHeader
+          title='Model Management'
+          description='Manage provider model catalogs and validate endpoints from one place.'
+        />
+
+        <Tabs defaultValue='manage' className='w-full gap-3 sm:gap-4'>
+          <TabsList
+            variant='line'
+            className='w-full snap-x snap-mandatory justify-start gap-0.5 overflow-x-auto whitespace-nowrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'
+          >
+            <TabsTrigger
+              value='manage'
+              className='h-9 snap-start px-2 text-[13px] sm:h-10 sm:px-2.5 sm:text-sm'
+            >
+              Manage Models
+            </TabsTrigger>
+            <TabsTrigger
+              value='test-basic'
+              className='h-9 snap-start px-2 text-[13px] sm:h-10 sm:px-2.5 sm:text-sm'
+            >
+              Basic Testing
+            </TabsTrigger>
+            <TabsTrigger
+              value='test-api'
+              className='h-9 snap-start px-2 text-[13px] sm:h-10 sm:px-2.5 sm:text-sm'
+            >
+              API Endpoints
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value='manage' className='mt-0'>
+            {isLoadingModels ? (
+              <div className='space-y-4'>
+                <Skeleton className='h-16 w-full' />
+                <Skeleton className='h-[420px] w-full' />
+              </div>
+            ) : modelsError ? (
+              <Alert variant='destructive'>
+                <AlertCircle className='h-4 w-4' />
+                <AlertDescription>
+                  Failed to load models. Please try refreshing the page.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <div className='space-y-3 sm:space-y-4'>
+                <div className='flex flex-col gap-2 sm:gap-2.5 md:flex-row md:items-center'>
+                  <Select
+                    value={activeProviderScope}
+                    onValueChange={(value) => {
+                      setSelectedProviderScope(value);
+                      setFilteredModels(undefined);
+                    }}
+                  >
+                    <SelectTrigger className='h-8 w-full md:w-[220px]'>
+                      <SelectValue placeholder='Provider scope' />
+                    </SelectTrigger>
+                    <SelectContent align='start'>
+                      <SelectItem value='all'>
+                        All providers ({models.length})
+                      </SelectItem>
+                      {providerInfo.map(({ provider, totalModels }) => (
+                        <SelectItem key={provider} value={provider}>
+                          {provider} ({totalModels})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  <ModelSearchFilter
+                    models={scopedModels}
+                    onFilteredModelsChange={setFilteredModels}
+                    className='w-full min-w-0 flex-1'
+                  />
+                </div>
+
+                <ModelSelector
+                  filterProvider={
+                    activeProviderScope === 'all'
+                      ? undefined
+                      : activeProviderScope
+                  }
+                  groupData={selectedProviderGroup}
+                  filteredModels={filteredModels}
+                  showDeleteAllButton={activeProviderScope === 'all'}
+                />
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value='test-basic' className='mt-0 space-y-3'>
+            <div className='space-y-1'>
+              <h3 className='text-base font-semibold'>
+                Basic Credential Testing
+              </h3>
+              <p className='text-muted-foreground text-sm'>
+                Run chat-completion checks through the secure proxy to validate
+                model credentials and endpoint connectivity.
+              </p>
             </div>
+            {isLoadingModels ? (
+              <div className='space-y-4'>
+                <Skeleton className='h-[220px] w-full' />
+                <Skeleton className='h-[120px] w-full' />
+              </div>
+            ) : modelsError ? (
+              <Alert variant='destructive'>
+                <AlertCircle className='h-4 w-4' />
+                <AlertDescription>
+                  Failed to load models for testing. Please try refreshing the
+                  page.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <ModelTester models={models} />
+            )}
+          </TabsContent>
 
-            <Tabs defaultValue='manage' className='w-full'>
-              <TabsList className='grid w-full grid-cols-3'>
-                <TabsTrigger value='manage'>Manage Models</TabsTrigger>
-                {/*<TabsTrigger value='test-basic'>Basic Testing</TabsTrigger>
-                <TabsTrigger value='test-api'>API Endpoints</TabsTrigger> */}
-              </TabsList>
-
-              <TabsContent value='manage' className='space-y-4'>
-                <div className='text-muted-foreground text-sm'>
-                  Manage your AI models organized by provider groups. Configure
-                  API keys, and organize models by provider groups.
-                </div>
-
-                {isLoadingModels ? (
-                  <div className='space-y-4'>
-                    <Skeleton className='h-[60px] w-full' />
-                    <Skeleton className='h-[400px] w-full' />
-                  </div>
-                ) : modelsError ? (
-                  <Alert variant='destructive'>
-                    <AlertCircle className='h-4 w-4' />
-                    <AlertDescription>
-                      Failed to load models. Please try refreshing the page.
-                    </AlertDescription>
-                  </Alert>
-                ) : (
-                  <Tabs defaultValue='all' className='w-full'>
-                    <div className='space-y-4'>
-                      {/* Provider Tabs Navigation */}
-                      <div className='overflow-x-auto rounded-lg border p-1'>
-                        <TabsList className='grid w-full max-w-full min-w-max auto-cols-fr grid-flow-col gap-1 sm:gap-2'>
-                          <TabsTrigger
-                            value='all'
-                            className='flex items-center gap-1 text-xs whitespace-nowrap sm:gap-2 sm:text-sm'
-                          >
-                            <Globe className='h-3 w-3 sm:h-4 sm:w-4' />
-                            <span className='hidden sm:inline'>All Models</span>
-                            <span className='sm:hidden'>All</span>
-                            <Badge variant='secondary' className='ml-1 text-xs'>
-                              {models.length}
-                            </Badge>
-                          </TabsTrigger>
-                          {providerInfo.map(
-                            ({ provider, activeModels, totalModels }) => (
-                              <TabsTrigger
-                                key={provider}
-                                value={provider}
-                                className='flex min-w-fit items-center gap-1 text-xs whitespace-nowrap sm:gap-2 sm:text-sm'
-                              >
-                                <Users className='h-3 w-3 sm:h-4 sm:w-4' />
-                                <span className='max-w-20 truncate sm:max-w-none'>
-                                  {provider}
-                                </span>
-                                <div className='flex items-center gap-1'>
-                                  <Badge
-                                    variant='secondary'
-                                    className='ml-1 text-xs'
-                                  >
-                                    {activeModels}/{totalModels}
-                                  </Badge>
-                                </div>
-                              </TabsTrigger>
-                            )
-                          )}
-                        </TabsList>
-                      </div>
-
-                      {/* All Models Tab */}
-                      <TabsContent value='all'>
-                        <div className='space-y-4'>
-                          <div className='text-muted-foreground text-sm'>
-                            Overview of all models across all provider groups.
-                          </div>
-                          <ModelSearchFilter
-                            models={models}
-                            onFilteredModelsChange={setFilteredModels}
-                          />
-                          <ModelSelector
-                            filteredModels={filteredModels}
-                            showDeleteAllButton={true}
-                          />
-                        </div>
-                      </TabsContent>
-
-                      {providerInfo.map(
-                        ({ provider, totalModels, groupData }) => {
-                          const providerModels = groupedModels[provider] || [];
-
-                          return (
-                            <TabsContent key={provider} value={provider}>
-                              <div className='space-y-4'>
-                                <div className='flex items-center justify-between'>
-                                  <div>
-                                    <h3 className='flex items-center gap-2 text-lg font-semibold'>
-                                      <Users className='h-5 w-5' />
-                                      {provider}
-                                    </h3>
-                                    <div className='text-muted-foreground flex items-center gap-4 text-sm'>
-                                      {providerModels.filter(
-                                        (m) => m.soft_deleted
-                                      ).length > 0 && (
-                                        <span className='text-orange-600'>
-                                          {
-                                            providerModels.filter(
-                                              (m) => m.soft_deleted
-                                            ).length
-                                          }{' '}
-                                          disabled
-                                        </span>
-                                      )}
-                                      {groupData?.group_url && (
-                                        <span className='flex items-center gap-1'>
-                                          <Globe className='h-3 w-3' />
-                                          {groupData.group_url}
-                                        </span>
-                                      )}
-                                      {totalModels === 0 && (
-                                        <span className='text-muted-foreground'>
-                                          No models configured
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                                {totalModels === 0 && (
-                                  <Alert className='mb-4'>
-                                    <AlertCircle className='h-4 w-4' />
-                                    <AlertDescription>
-                                      <div className='space-y-2'>
-                                        <p className='font-medium'>
-                                          No models found for this provider
-                                        </p>
-                                        <div className='space-y-1 text-sm'>
-                                          <p className='font-medium'>
-                                            Common issues:
-                                          </p>
-                                          <ul className='ml-2 list-inside list-disc space-y-1'>
-                                            <li>
-                                              <strong>API credentials:</strong>{' '}
-                                              Check if the API key is correct
-                                              and has the right permissions
-                                            </li>
-                                            <li>
-                                              <strong>Base URL:</strong> Verify
-                                              the base URL is correct for your
-                                              provider
-                                            </li>
-                                            <li>
-                                              <strong>Network access:</strong>{' '}
-                                              Ensure the server can reach the
-                                              provider&apos;s API endpoint
-                                            </li>
-                                            <li>
-                                              <strong>Provider status:</strong>{' '}
-                                              The upstream provider might be
-                                              temporarily unavailable
-                                            </li>
-                                          </ul>
-                                          {groupData?.group_url && (
-                                            <p className='text-muted-foreground mt-2 text-xs'>
-                                              Current endpoint:{' '}
-                                              <code className='bg-muted rounded px-1'>
-                                                {groupData.group_url}
-                                              </code>
-                                            </p>
-                                          )}
-                                        </div>
-                                      </div>
-                                    </AlertDescription>
-                                  </Alert>
-                                )}
-                                <ModelSelector
-                                  filterProvider={provider}
-                                  groupData={groupData}
-                                  showProviderActions={true}
-                                  showDeleteAllButton={false}
-                                />
-                              </div>
-                            </TabsContent>
-                          );
-                        }
-                      )}
-                    </div>
-                  </Tabs>
-                )}
-              </TabsContent>
-
-              <TabsContent value='test-basic' className='space-y-4'>
-                <div className='text-muted-foreground text-sm'>
-                  Test model credentials and connectivity with basic chat
-                  completion requests through the secure proxy (resolves CORS
-                  and Docker network issues). Models can be tested even without
-                  API keys configured (useful for free models or when
-                  authentication is handled elsewhere).
-                </div>
-
-                {isLoadingModels ? (
-                  <div className='space-y-4'>
-                    <Skeleton className='h-[200px] w-full' />
-                    <Skeleton className='h-[100px] w-full' />
-                  </div>
-                ) : modelsError ? (
-                  <Alert variant='destructive'>
-                    <AlertCircle className='h-4 w-4' />
-                    <AlertDescription>
-                      Failed to load models for testing. Please try refreshing
-                      the page.
-                    </AlertDescription>
-                  </Alert>
-                ) : (
-                  <ModelTester models={models} />
-                )}
-              </TabsContent>
-
-              <TabsContent value='test-api' className='space-y-4'>
-                <div className='text-muted-foreground text-sm'>
-                  Comprehensive testing of all OpenAI API endpoints including
-                  chat completions, embeddings, image generation, audio
-                  synthesis, and model listing through the secure proxy
-                  (resolves CORS and Docker network issues). Models can be
-                  tested with or without API keys configured.
-                </div>
-
-                {isLoadingModels ? (
-                  <div className='space-y-4'>
-                    <Skeleton className='h-[300px] w-full' />
-                    <Skeleton className='h-[200px] w-full' />
-                  </div>
-                ) : modelsError ? (
-                  <Alert variant='destructive'>
-                    <AlertCircle className='h-4 w-4' />
-                    <AlertDescription>
-                      Failed to load models for API testing. Please try
-                      refreshing the page.
-                    </AlertDescription>
-                  </Alert>
-                ) : (
-                  <ApiEndpointTester models={models} />
-                )}
-              </TabsContent>
-            </Tabs>
-          </div>
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+          <TabsContent value='test-api' className='mt-0 space-y-3'>
+            <div className='space-y-1'>
+              <h3 className='text-base font-semibold'>
+                OpenAI Endpoint Testing
+              </h3>
+              <p className='text-muted-foreground text-sm'>
+                Validate chat, embeddings, image, audio, and model-listing
+                endpoints through the secure proxy.
+              </p>
+            </div>
+            {isLoadingModels ? (
+              <div className='space-y-4'>
+                <Skeleton className='h-[320px] w-full' />
+                <Skeleton className='h-[220px] w-full' />
+              </div>
+            ) : modelsError ? (
+              <Alert variant='destructive'>
+                <AlertCircle className='h-4 w-4' />
+                <AlertDescription>
+                  Failed to load models for API testing. Please try refreshing
+                  the page.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <ApiEndpointTester models={models} />
+            )}
+          </TabsContent>
+        </Tabs>
+      </div>
+    </AppPageShell>
   );
 }

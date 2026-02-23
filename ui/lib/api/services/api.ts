@@ -20,11 +20,28 @@ interface NostrEvent {
   tags: string[][];
 }
 
-// Define the Nostr interface for the window object
-interface NostrWindow extends Window {
-  nostr: {
-    signEvent: (event: NostrEvent) => Promise<NostrEvent>;
-  };
+interface NostrProvider {
+  signEvent: (event: NostrEvent) => Promise<NostrEvent>;
+}
+
+type WindowWithNostr = Window & {
+  nostr?: NostrProvider;
+};
+
+function getNostrProvider(): NostrProvider {
+  if (typeof window === 'undefined') {
+    throw new Error('Nostr provider is unavailable on the server');
+  }
+
+  const windowWithNostr = window as WindowWithNostr;
+  if (
+    !windowWithNostr.nostr ||
+    typeof windowWithNostr.nostr.signEvent !== 'function'
+  ) {
+    throw new Error('Nostr provider is unavailable');
+  }
+
+  return windowWithNostr.nostr;
 }
 
 export default function api<Request, Response>({
@@ -42,9 +59,8 @@ export default function api<Request, Response>({
     requestSchema.parse(requestData);
 
     async function apiCall() {
-      const auth_event = await (
-        window as unknown as NostrWindow
-      ).nostr.signEvent({
+      const nostr = getNostrProvider();
+      const auth_event = await nostr.signEvent({
         kind: 27235,
         created_at: Math.floor(new Date().getTime() / 1000),
         content: 'application/json',
@@ -66,13 +82,6 @@ export default function api<Request, Response>({
       });
 
       if (process.env.NODE_ENV === PRODUCTION) {
-        responseSchema.safeParseAsync(response.data).then((result) => {
-          if (!result.success) {
-            console.log('failed to validate result', path);
-            // TODO: Send error to sentry or other error reporting service
-          }
-        });
-
         return response.data as Response;
       }
 

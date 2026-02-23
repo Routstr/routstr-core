@@ -27,6 +27,7 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Switch } from '@/components/ui/switch';
+import { Badge } from '@/components/ui/badge';
 import { Users, Key, Loader2, Globe, AlertTriangle, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -122,9 +123,9 @@ export function EditGroupForm({
             <div className='space-y-2 text-sm'>
               <div className='flex justify-between'>
                 <span>Models using group API key:</span>
-                <span className='font-medium text-blue-600'>
+                <Badge variant='secondary' className='tabular-nums'>
                   {modelsWithoutKeys}
-                </span>
+                </Badge>
               </div>
             </div>
           </div>
@@ -138,18 +139,18 @@ export function EditGroupForm({
             <div className='space-y-2 text-sm'>
               <div className='flex justify-between'>
                 <span>Models using group URL:</span>
-                <span className='font-medium text-blue-600'>
+                <Badge variant='secondary' className='tabular-nums'>
                   {modelsUsingGroupUrl}
-                </span>
+                </Badge>
               </div>
               <div className='flex justify-between'>
                 <span>Models with individual URLs:</span>
-                <span className='font-medium text-green-600'>
+                <Badge variant='outline' className='tabular-nums'>
                   {models.length - modelsUsingGroupUrl}
-                </span>
+                </Badge>
               </div>
               {groupSettings?.group_url && (
-                <div className='mt-2 rounded bg-blue-50 p-2 text-xs'>
+                <div className='bg-muted mt-2 rounded p-2 text-xs'>
                   <span className='font-medium'>Current group URL:</span>{' '}
                   {groupSettings.group_url}
                 </div>
@@ -163,26 +164,22 @@ export function EditGroupForm({
             <div className='max-h-32 overflow-y-auto'>
               <div className='flex flex-wrap gap-2'>
                 {models.map((model) => (
-                  <span
+                  <Badge
                     key={model.id}
-                    className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                      model.api_key
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-blue-100 text-blue-800'
-                    }`}
+                    variant={model.api_key ? 'default' : 'secondary'}
+                    className='max-w-full'
                     title={
                       model.api_key
                         ? 'Has individual API key and URL'
                         : 'Uses group API key and URL'
                     }
                   >
-                    {model.name}
-                    {model.api_key && ' 🔑'}
-                    {model.url &&
-                      !model.url.startsWith('/') &&
-                      model.api_key &&
-                      ' 🌐'}
-                  </span>
+                    <span className='truncate'>{model.name}</span>
+                    {model.api_key && <Key className='ml-1 h-3 w-3' />}
+                    {model.url && !model.url.startsWith('/') && model.api_key && (
+                      <Globe className='ml-1 h-3 w-3' />
+                    )}
+                  </Badge>
                 ))}
               </div>
             </div>
@@ -310,28 +307,30 @@ export function EditGroupForm({
               )}
             />
 
-            <div className='rounded-md border border-amber-200 bg-amber-50 p-4'>
-              <p className='text-sm text-amber-800'>
-                <strong>How group settings work:</strong>
-              </p>
-              <ul className='mt-2 list-inside list-disc space-y-1 text-sm text-amber-800'>
-                <li>
-                  Models with individual API keys and URLs will keep their
-                  specific settings
-                </li>
-                <li>
-                  Models without individual settings will use the group defaults
-                </li>
-                <li>
-                  Removing the group URL makes models fall back to the system
-                  default endpoint
-                </li>
-                <li>
-                  You can use &quot;Apply Group Settings&quot; to force models
-                  to use group configurations
-                </li>
-              </ul>
-            </div>
+            <Alert>
+              <Info className='h-4 w-4' />
+              <AlertDescription>
+                <p className='font-medium'>How group settings work:</p>
+                <ul className='mt-2 list-inside list-disc space-y-1 text-sm'>
+                  <li>
+                    Models with individual API keys and URLs will keep their
+                    specific settings
+                  </li>
+                  <li>
+                    Models without individual settings will use the group
+                    defaults
+                  </li>
+                  <li>
+                    Removing the group URL makes models fall back to the system
+                    default endpoint
+                  </li>
+                  <li>
+                    You can use &quot;Apply Group Settings&quot; to force models
+                    to use group configurations
+                  </li>
+                </ul>
+              </AlertDescription>
+            </Alert>
 
             <div className='flex justify-end gap-2 pt-4'>
               <Button

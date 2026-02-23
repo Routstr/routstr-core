@@ -63,7 +63,6 @@ export class ConfigurationService {
   static getLocalBaseUrl(): string {
     const envBaseUrl = process.env.NEXT_PUBLIC_API_URL;
 
-    console.log(envBaseUrl);
     if (envBaseUrl && envBaseUrl.trim()) {
       return envBaseUrl;
     }
@@ -138,18 +137,13 @@ export class ConfigurationService {
 
     try {
       if (typeof window !== 'undefined') {
-        const adminToken = localStorage.getItem('admin_token');
-        const tokenExpiry = localStorage.getItem('admin_token_expiry');
-
-        if (adminToken && tokenExpiry) {
-          const expiryTime = parseInt(tokenExpiry, 10);
-          if (Date.now() < expiryTime) {
-            headers['Authorization'] = `Bearer ${adminToken}`;
+        if (this.isTokenValid()) {
+          const adminToken = localStorage.getItem('admin_token');
+          if (!adminToken) {
             return headers;
-          } else {
-            localStorage.removeItem('admin_token');
-            localStorage.removeItem('admin_token_expiry');
           }
+          headers['Authorization'] = `Bearer ${adminToken}`;
+          return headers;
         }
       }
     } catch (error) {
@@ -169,15 +163,30 @@ export class ConfigurationService {
       return false;
     }
 
-    const adminToken = localStorage.getItem('admin_token');
-    const tokenExpiry = localStorage.getItem('admin_token_expiry');
+    try {
+      const adminToken = localStorage.getItem('admin_token');
+      if (!adminToken) {
+        return false;
+      }
 
-    if (!adminToken || !tokenExpiry) {
+      const expiryRaw = localStorage.getItem('admin_token_expiry');
+      if (!expiryRaw) {
+        this.clearToken();
+        return false;
+      }
+
+      const expiryTime = Number.parseInt(expiryRaw, 10);
+      if (!Number.isFinite(expiryTime) || Date.now() >= expiryTime) {
+        this.clearToken();
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.warn('Error validating admin token:', error);
+      this.clearToken();
       return false;
     }
-
-    const expiryTime = parseInt(tokenExpiry, 10);
-    return Date.now() < expiryTime;
   }
 
   static clearToken(): void {
@@ -194,7 +203,10 @@ export class ConfigurationService {
       return;
     }
 
-    const expiryTime = Date.now() + expiresIn * 1000;
+    const safeExpiresIn = Number.isFinite(expiresIn)
+      ? Math.max(0, Math.floor(expiresIn))
+      : 0;
+    const expiryTime = Date.now() + safeExpiresIn * 1000;
     localStorage.setItem('admin_token', token);
     localStorage.setItem('admin_token_expiry', String(expiryTime));
   }

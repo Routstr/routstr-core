@@ -63,10 +63,12 @@ export const AdminModelSchema = z.object({
   description: z.string(),
   created: z.number(),
   context_length: z.number(),
-  architecture: AdminModelArchitectureSchema.or(z.record(z.any())),
-  pricing: AdminModelPricingSchema.or(z.record(z.any())),
-  per_request_limits: z.record(z.any()).nullable().optional(),
-  top_provider: z.record(z.any()).nullable().optional(),
+  architecture: AdminModelArchitectureSchema.or(
+    z.record(z.string(), z.unknown())
+  ),
+  pricing: AdminModelPricingSchema.or(z.record(z.string(), z.unknown())),
+  per_request_limits: z.record(z.string(), z.unknown()).nullable().optional(),
+  top_provider: z.record(z.string(), z.unknown()).nullable().optional(),
   upstream_provider_id: z.union([z.string(), z.number()]).nullable().optional(),
   canonical_slug: z.string().nullable().optional(),
   alias_ids: z.array(z.string()).nullable().optional(),
@@ -327,10 +329,6 @@ export class AdminService {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
-    console.log('Creating provider model - pricing conversion:', {
-      original: data.pricing,
-      converted: payload.pricing,
-    });
     const model = await apiClient.post<AdminModel>(
       `/admin/api/upstream-providers/${providerId}/models`,
       payload
@@ -390,14 +388,11 @@ export class AdminService {
     modelId: string,
     data: AdminModel
   ): Promise<AdminModel> {
+    void modelId;
     const payload = {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
-    console.log('Updating provider model - pricing conversion:', {
-      original: data.pricing,
-      converted: payload.pricing,
-    });
     // Use the same POST endpoint for both create and update (upsert)
     const model = await apiClient.post<AdminModel>(
       `/admin/api/upstream-providers/${providerId}/models`,
@@ -415,14 +410,6 @@ export class AdminService {
   ): Promise<{ ok: boolean; deleted_id: string }> {
     return await apiClient.delete<{ ok: boolean; deleted_id: string }>(
       `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`
-    );
-  }
-
-  static async deleteAllProviderModels(
-    providerId: number
-  ): Promise<{ ok: boolean; deleted: number }> {
-    return await apiClient.delete<{ ok: boolean; deleted: number }>(
-      `/admin/api/upstream-providers/${providerId}/models`
     );
   }
 
@@ -718,12 +705,11 @@ export class AdminService {
     if (!providerId) {
       throw new Error('provider_id is required for bulk updates');
     }
+    void updates;
 
     const errors: string[] = [];
     let updated_count = 0;
     const providerIdNum = parseInt(providerId);
-
-    console.log('Bulk update not implemented, ignoring updates:', updates);
 
     for (const id of modelIds) {
       try {
@@ -742,34 +728,6 @@ export class AdminService {
       total_count: modelIds.length,
       message: 'Bulk update completed',
       errors,
-    };
-  }
-
-  static async deleteAllModels(): Promise<{
-    deleted_count: number;
-    message: string;
-  }> {
-    const providers = await this.getUpstreamProviders();
-    let totalDeleted = 0;
-
-    for (const provider of providers) {
-      const result = await this.deleteAllProviderModels(provider.id);
-      totalDeleted += result.deleted;
-    }
-
-    return {
-      deleted_count: totalDeleted,
-      message: 'All models deleted successfully',
-    };
-  }
-
-  static async deleteModelsByProvider(
-    providerId: string
-  ): Promise<{ deleted_count: number; message: string }> {
-    const result = await this.deleteAllProviderModels(parseInt(providerId));
-    return {
-      deleted_count: result.deleted,
-      message: 'Provider models deleted successfully',
     };
   }
 
@@ -801,10 +759,7 @@ export class AdminService {
   static async refreshModels(data: {
     provider_id: string;
   }): Promise<{ message: string }> {
-    console.log(
-      'Refresh models not implemented for admin API, ignoring data:',
-      data
-    );
+    void data;
     return { message: 'Refresh not implemented for admin API' };
   }
 

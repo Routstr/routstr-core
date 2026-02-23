@@ -2,8 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { AppSidebar } from '@/components/app-sidebar';
-import { SiteHeader } from '@/components/site-header';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -14,9 +12,18 @@ import {
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import { Skeleton } from '@/components/ui/skeleton';
 import { FileText, RefreshCw } from 'lucide-react';
 import { apiClient } from '@/lib/api/client';
-import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
+import { AppPageShell } from '@/components/app-page-shell';
+import { PageHeader } from '@/components/page-header';
 import { LogEntry, LogsResponse } from './types';
 import { LogFilters } from './log-filters';
 import { LogEntryCard } from './log-entry-card';
@@ -135,126 +142,127 @@ export default function LogsPage() {
     setIsDialogOpen(true);
   };
 
+  const hasActiveFilters =
+    selectedDate !== 'all' ||
+    selectedLevel !== 'all' ||
+    Boolean(requestId) ||
+    Boolean(searchText) ||
+    selectedStatusCodes.length > 0 ||
+    selectedMethods.length > 0 ||
+    selectedEndpoints.length > 0;
+
+  const activeFilterDescription = [
+    selectedDate !== 'all' ? `date ${selectedDate}` : null,
+    selectedLevel !== 'all' ? `level ${selectedLevel}` : null,
+    requestId ? `request ID ${requestId}` : null,
+    searchText ? `text "${searchText}"` : null,
+    selectedStatusCodes.length > 0
+      ? `status ${selectedStatusCodes.join(', ')}`
+      : null,
+    selectedMethods.length > 0 ? `method ${selectedMethods.join(', ')}` : null,
+    selectedEndpoints.length > 0
+      ? `endpoint ${selectedEndpoints.join(', ')}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(' • ');
+
   return (
-    <SidebarProvider>
-      <AppSidebar variant='inset' />
-      <SidebarInset className='overflow-x-hidden p-0'>
-        <SiteHeader />
-        <div className='container max-w-6xl overflow-x-hidden px-3 py-4 sm:px-4 sm:py-8 md:px-6 lg:px-8'>
-          <div className='mb-6 flex flex-col gap-3 sm:mb-8 sm:gap-4 lg:flex-row lg:items-start lg:justify-between'>
-            <div>
-              <h1 className='flex items-center gap-2 text-2xl font-bold tracking-tight sm:text-3xl'>
-                <FileText className='h-6 w-6 sm:h-8 sm:w-8' />
-                System Logs
-              </h1>
-              <p className='text-muted-foreground mt-1 text-sm sm:mt-2 sm:text-base'>
-                View and filter application logs
-              </p>
-            </div>
+    <AppPageShell contentClassName='mx-auto w-full max-w-5xl overflow-x-hidden'>
+      <div className='space-y-6'>
+        <PageHeader
+          title='System Logs'
+          description='View and filter application logs.'
+          actions={
             <Button
               onClick={() => refetchLogs()}
               variant='outline'
               size='sm'
-              className='self-start'
+              className='w-full sm:w-auto'
             >
               <RefreshCw className='mr-2 h-4 w-4' />
               Refresh
             </Button>
-          </div>
+          }
+        />
 
-          <LogFilters
-            selectedDate={selectedDate}
-            selectedLevel={selectedLevel}
-            requestId={requestId}
-            searchText={searchText}
-            selectedStatusCodes={selectedStatusCodes}
-            selectedMethods={selectedMethods}
-            selectedEndpoints={selectedEndpoints}
-            limit={limit}
-            onDateChange={setSelectedDate}
-            onLevelChange={setSelectedLevel}
-            onRequestIdChange={setRequestId}
-            onSearchTextChange={setSearchText}
-            onStatusCodesChange={setSelectedStatusCodes}
-            onMethodsChange={setSelectedMethods}
-            onEndpointsChange={setSelectedEndpoints}
-            onLimitChange={setLimit}
-            onClearFilters={handleClearFilters}
-          />
+        <LogFilters
+          selectedDate={selectedDate}
+          selectedLevel={selectedLevel}
+          requestId={requestId}
+          searchText={searchText}
+          selectedStatusCodes={selectedStatusCodes}
+          selectedMethods={selectedMethods}
+          selectedEndpoints={selectedEndpoints}
+          limit={limit}
+          onDateChange={setSelectedDate}
+          onLevelChange={setSelectedLevel}
+          onRequestIdChange={setRequestId}
+          onSearchTextChange={setSearchText}
+          onStatusCodesChange={setSelectedStatusCodes}
+          onMethodsChange={setSelectedMethods}
+          onEndpointsChange={setSelectedEndpoints}
+          onLimitChange={setLimit}
+          onClearFilters={handleClearFilters}
+        />
 
-          <Card>
-            <CardHeader>
-              <CardTitle className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                <span className='text-lg sm:text-xl'>Log Entries</span>
-                {logsData && (
-                  <Badge variant='secondary' className='text-xs sm:text-sm'>
-                    {logsData.logs.length} entries
-                  </Badge>
-                )}
-              </CardTitle>
-              {(selectedDate !== 'all' ||
-                selectedLevel !== 'all' ||
-                requestId ||
-                searchText ||
-                selectedStatusCodes.length > 0 ||
-                selectedMethods.length > 0 ||
-                selectedEndpoints.length > 0) && (
-                <CardDescription className='text-xs sm:text-sm'>
-                  Showing logs
-                  {selectedDate !== 'all' && ` for ${selectedDate}`}
-                  {selectedLevel !== 'all' && ` with level ${selectedLevel}`}
-                  {requestId && ` with request ID ${requestId}`}
-                  {searchText && ` matching "${searchText}"`}
-                  {selectedStatusCodes.length > 0 &&
-                    ` with status ${selectedStatusCodes.join(', ')}`}
-                  {selectedMethods.length > 0 &&
-                    ` with method ${selectedMethods.join(', ')}`}
-                  {selectedEndpoints.length > 0 &&
-                    ` with endpoint ${selectedEndpoints.join(', ')}`}
-                </CardDescription>
+        <Card>
+          <CardHeader>
+            <CardTitle className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+              <span className='text-lg sm:text-xl'>Log Entries</span>
+              {logsData && (
+                <Badge variant='secondary' className='text-xs sm:text-sm'>
+                  {logsData.logs.length} entries
+                </Badge>
               )}
-            </CardHeader>
-            <CardContent className='overflow-hidden p-3 sm:p-6'>
-              {isLoading ? (
-                <div className='flex items-center justify-center py-8'>
-                  <RefreshCw className='h-6 w-6 animate-spin' />
-                  <span className='ml-2 text-sm sm:text-base'>
-                    Loading logs...
-                  </span>
+            </CardTitle>
+            {hasActiveFilters && (
+              <CardDescription className='text-xs sm:text-sm'>
+                Showing logs filtered by {activeFilterDescription}
+              </CardDescription>
+            )}
+          </CardHeader>
+          <CardContent className='overflow-hidden p-3 sm:p-6'>
+            {isLoading ? (
+              <div className='space-y-2'>
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton key={`logs-loading-${index}`} className='h-16 w-full rounded-lg' />
+                ))}
+              </div>
+            ) : logsData?.logs && logsData.logs.length > 0 ? (
+              <ScrollArea className='h-[55svh] min-h-[420px] w-full sm:h-[600px]'>
+                <div className='space-y-2 pr-3'>
+                  {logsData.logs.map((entry, index) => (
+                    <LogEntryCard
+                      key={`${entry.request_id}-${entry.asctime}-${entry.lineno}-${index}`}
+                      entry={entry}
+                      onClick={handleLogClick}
+                    />
+                  ))}
                 </div>
-              ) : logsData?.logs && logsData.logs.length > 0 ? (
-                <>
-                  <ScrollArea className='h-[500px] w-full sm:h-[600px]'>
-                    <div className='space-y-2 pr-3'>
-                      {logsData.logs.map((entry, index) => (
-                        <LogEntryCard
-                          key={`${entry.request_id}-${entry.asctime}-${entry.lineno}-${index}`}
-                          entry={entry}
-                          onClick={handleLogClick}
-                        />
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </>
-              ) : (
-                <div className='text-muted-foreground py-8 text-center'>
-                  <FileText className='mx-auto mb-4 h-10 w-10 opacity-50 sm:h-12 sm:w-12' />
-                  <p className='text-sm sm:text-base'>No log entries found</p>
-                  <p className='text-xs sm:text-sm'>
-                    Try adjusting your filters or check back later
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+              </ScrollArea>
+            ) : (
+              <Empty className='py-8'>
+                <EmptyHeader>
+                  <EmptyMedia variant='icon'>
+                    <FileText className='h-4 w-4' />
+                  </EmptyMedia>
+                  <EmptyTitle>No log entries found</EmptyTitle>
+                  <EmptyDescription>
+                    Try adjusting your filters or check back later.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </CardContent>
+        </Card>
 
-          <LogDetailsDialog
-            log={selectedLog}
-            isOpen={isDialogOpen}
-            onClose={() => setIsDialogOpen(false)}
-          />
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+        <LogDetailsDialog
+          log={selectedLog}
+          isOpen={isDialogOpen}
+          onClose={() => setIsDialogOpen(false)}
+        />
+      </div>
+    </AppPageShell>
   );
 }
