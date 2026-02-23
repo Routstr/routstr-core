@@ -6,6 +6,7 @@ import { type Model } from '@/lib/api/schemas/models';
 import { ModelService } from '@/lib/api/services/models';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
   Card,
@@ -131,13 +132,10 @@ export function ModelTester({ models }: ModelTesterProps) {
       setResponse(null);
 
       try {
-        console.log(`Testing model via proxy: ${selectedModel.name}`);
-        console.log('Request payload:', request);
-
         const response = await ModelService.testModel(
           selectedModel.id,
           'chat-completions',
-          request as unknown as Record<string, unknown>
+          request
         );
 
         if (!response.success) {
@@ -245,7 +243,7 @@ export function ModelTester({ models }: ModelTesterProps) {
             <div className='text-muted-foreground bg-muted space-y-2 rounded-md p-3 text-sm'>
               <div className='flex items-center gap-2'>
                 <Globe className='h-4 w-4' />
-                <span>
+                <span className='break-all'>
                   <strong>Endpoint:</strong> {credentials.endpointUrl}
                 </span>
               </div>
@@ -301,19 +299,19 @@ export function ModelTester({ models }: ModelTesterProps) {
         <div className='grid grid-cols-1 gap-4 md:grid-cols-2'>
           <div className='space-y-2'>
             <Label htmlFor='max-tokens'>Max Tokens</Label>
-            <input
+            <Input
               id='max-tokens'
               type='number'
               min={1}
               max={4000}
               value={maxTokens}
               onChange={(e) => setMaxTokens(parseInt(e.target.value) || 150)}
-              className='border-input bg-background w-full rounded-md border px-3 py-2 text-sm'
+              name='max_tokens'
             />
           </div>
           <div className='space-y-2'>
             <Label htmlFor='temperature'>Temperature</Label>
-            <input
+            <Input
               id='temperature'
               type='number'
               min={0}
@@ -323,7 +321,7 @@ export function ModelTester({ models }: ModelTesterProps) {
               onChange={(e) =>
                 setTemperature(parseFloat(e.target.value) || 0.7)
               }
-              className='border-input bg-background w-full rounded-md border px-3 py-2 text-sm'
+              name='temperature'
             />
           </div>
         </div>
@@ -406,7 +404,7 @@ export function ModelTester({ models }: ModelTesterProps) {
             {response.usage && (
               <div className='space-y-2'>
                 <Label>Usage Statistics</Label>
-                <div className='grid grid-cols-3 gap-4 text-sm'>
+                <div className='grid grid-cols-1 gap-2 text-sm sm:grid-cols-3 sm:gap-4'>
                   <div className='bg-muted rounded p-2 text-center'>
                     <div className='font-semibold'>
                       {response.usage.prompt_tokens}

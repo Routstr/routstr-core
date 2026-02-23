@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { type Model } from '@/lib/api/schemas/models';
-import { CostCalculator } from '@/components/CostCalculator';
+import { CostCalculator } from '@/components/cost-calculator';
 import {
   Dialog,
   DialogContent,

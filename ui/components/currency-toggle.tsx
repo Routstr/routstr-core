@@ -1,20 +1,45 @@
 'use client';
 
-import { useCurrencyStore } from '@/lib/stores/currency';
-import { useQuery } from '@tanstack/react-query';
-import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
 import { useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { ChevronsUpDownIcon, CoinsIcon } from 'lucide-react';
+import { useCurrencyStore } from '@/lib/stores/currency';
+import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
 import type { DisplayUnit } from '@/lib/types/units';
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
-import { Coins } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
-export function CurrencyToggle() {
+interface CurrencyToggleProps {
+  className?: string;
+  compact?: boolean;
+  menuSide?: 'top' | 'right' | 'bottom' | 'left';
+  menuAlign?: 'start' | 'center' | 'end';
+}
+
+const UNIT_OPTIONS: Array<{ value: DisplayUnit; label: string }> = [
+  { value: 'msat', label: 'mSAT' },
+  { value: 'sat', label: 'sat' },
+  { value: 'usd', label: 'USD' },
+];
+
+function getLabel(unit: DisplayUnit): string {
+  const option = UNIT_OPTIONS.find((item) => item.value === unit);
+  return option?.label ?? unit;
+}
+
+export function CurrencyToggle({
+  className,
+  compact = false,
+  menuSide = 'bottom',
+  menuAlign = 'end',
+}: CurrencyToggleProps) {
   const { displayUnit, setDisplayUnit } = useCurrencyStore();
 
   const { data: btcUsdPrice } = useQuery({
@@ -32,47 +57,53 @@ export function CurrencyToggle() {
     }
   }, [displayUnit, usdPerSat, setDisplayUnit]);
 
-  const getLabel = (unit: DisplayUnit) => {
-    switch (unit) {
-      case 'msat':
-        return 'mSAT';
-      case 'sat':
-        return 'sat';
-      case 'usd':
-        return 'USD';
-      default:
-        return unit;
-    }
-  };
-
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant='ghost'
+          variant='outline'
           size='sm'
-          className='h-9 w-9 w-auto gap-2 px-0 px-3 font-normal'
+          className={cn(
+            'border-border/60 bg-background/65 text-muted-foreground hover:text-foreground rounded-md',
+            compact ? 'h-8 w-10 justify-center px-0' : 'h-8 justify-between gap-2',
+            className
+          )}
         >
-          <Coins className='h-4 w-4' />
-          <span className='hidden sm:inline-block'>
-            {getLabel(displayUnit)}
+          <span className='inline-flex min-w-0 items-center gap-1.5'>
+            <CoinsIcon className='h-3.5 w-3.5 shrink-0' />
+            {compact ? null : (
+              <span className='truncate text-[11px] font-medium uppercase'>
+                {getLabel(displayUnit)}
+              </span>
+            )}
           </span>
-          <span className='uppercase sm:hidden'>{displayUnit}</span>
+          {compact ? (
+            <span className='sr-only'>Currency: {getLabel(displayUnit)}</span>
+          ) : (
+            <ChevronsUpDownIcon className='h-3.5 w-3.5 opacity-70' />
+          )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align='end'>
-        <DropdownMenuItem onClick={() => setDisplayUnit('msat')}>
-          Millisatoshis (mSAT)
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => setDisplayUnit('sat')}>
-          Satoshis (sat)
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onClick={() => setDisplayUnit('usd')}
-          disabled={!usdPerSat}
+      <DropdownMenuContent side={menuSide} align={menuAlign}>
+        <DropdownMenuRadioGroup
+          value={displayUnit}
+          onValueChange={(value) => {
+            if (value !== 'msat' && value !== 'sat' && value !== 'usd') return;
+            if (value === 'usd' && !usdPerSat) return;
+            setDisplayUnit(value);
+          }}
         >
-          US Dollar (USD)
-        </DropdownMenuItem>
+          {UNIT_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem
+              key={option.value}
+              value={option.value}
+              disabled={option.value === 'usd' && !usdPerSat}
+              className='uppercase'
+            >
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   );

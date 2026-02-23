@@ -12,6 +12,8 @@ import {
 } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
 import {
   Key,
   Copy,
@@ -224,7 +226,7 @@ export function ChildKeyCreator({
             </div>
             {costPerKeyMsats !== undefined && (
               <div className='text-right'>
-                <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
+                <p className='text-muted-foreground text-[0.65rem] tracking-wide'>
                   Unit Cost
                 </p>
                 <p className='text-primary text-sm font-bold'>
@@ -238,9 +240,9 @@ export function ChildKeyCreator({
           <div className='space-y-4'>
             {baseUrl && (
               <div className='space-y-2'>
-                <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
                   Parent API Key
-                </label>
+                </Label>
                 <Input
                   value={activeApiKey}
                   onChange={(e) => handleApiKeyChange(e.target.value)}
@@ -268,9 +270,9 @@ export function ChildKeyCreator({
                   )}
                   <div className='flex flex-col gap-4 sm:flex-row sm:items-end'>
                     <div className='w-full space-y-2 sm:w-32'>
-                      <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                      <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
                         Number of keys
-                      </label>
+                      </Label>
                       <Input
                         type='number'
                         min={1}
@@ -368,12 +370,12 @@ export function ChildKeyCreator({
 
             {newKeys.length > 0 && (
               <div className='mt-6 space-y-4'>
-                <Alert className='border-green-200 bg-green-50 dark:border-green-900/20 dark:bg-green-900/10'>
-                  <AlertTitle className='text-green-800 dark:text-green-400'>
+                <Alert>
+                  <AlertTitle>
                     {newKeys.length} New API Key{newKeys.length > 1 ? 's' : ''}{' '}
                     Generated
                   </AlertTitle>
-                  <AlertDescription className='text-green-700 dark:text-green-500'>
+                  <AlertDescription>
                     Copy {newKeys.length > 1 ? 'these keys' : 'this key'} now.
                     You won&apos;t be able to see them again.
                     {resultInfo && (
@@ -387,14 +389,14 @@ export function ChildKeyCreator({
 
                 <div className='space-y-2'>
                   <div className='flex items-center justify-between'>
-                    <span className='text-muted-foreground text-xs font-medium uppercase'>
+                    <span className='text-muted-foreground text-xs font-medium'>
                       Generated Keys ({newKeys.length})
                     </span>
                     {newKeys.length > 1 && (
                       <Button
                         variant='ghost'
                         size='sm'
-                        className='h-7 text-[10px] uppercase'
+                        className='h-7 text-[10px]'
                         onClick={copyAllToClipboard}
                       >
                         <Copy className='mr-1 h-3 w-3' />
@@ -418,7 +420,7 @@ export function ChildKeyCreator({
                           onClick={() => copyToClipboard(key)}
                         >
                           {copiedKey === key ? (
-                            <Check className='h-3.5 w-3.5 text-green-500' />
+                            <Check className='h-3.5 w-3.5' />
                           ) : (
                             <Copy className='h-3.5 w-3.5 opacity-50 group-hover:opacity-100' />
                           )}
@@ -430,15 +432,15 @@ export function ChildKeyCreator({
 
                 {newKeys.length > 3 && (
                   <div className='space-y-2'>
-                    <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+                    <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
                       Bulk Export (All Keys)
-                    </label>
+                    </Label>
                     <div className='relative'>
-                      <textarea
+                      <Textarea
                         readOnly
                         value={newKeys.join('\n')}
                         rows={Math.min(newKeys.length, 6)}
-                        className='bg-muted/30 w-full rounded-md border p-3 font-mono text-[10px] focus:outline-none'
+                        className='bg-muted/30 font-mono text-[10px] leading-relaxed'
                       />
                       <Button
                         size='sm'
@@ -468,9 +470,9 @@ export function ChildKeyCreator({
         <CardContent>
           <div className='space-y-4'>
             <div className='space-y-2'>
-              <label className='text-muted-foreground text-[0.7rem] tracking-wider uppercase'>
+              <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
                 Child API Key
-              </label>
+              </Label>
               <Input
                 value={childKeyToCheck}
                 onChange={(e) => setChildKeyToCheck(e.target.value)}
@@ -531,9 +533,7 @@ export function ChildKeyCreator({
                     <Badge variant='destructive'>Expired</Badge>
                   )}
                   {!keyStatus.is_drained && !keyStatus.is_expired && (
-                    <Badge className='bg-green-600 hover:bg-green-700'>
-                      Active
-                    </Badge>
+                    <Badge>Active</Badge>
                   )}
                 </div>
               </div>

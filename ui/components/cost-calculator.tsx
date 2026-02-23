@@ -6,7 +6,7 @@ import {
   calculateRequestCost,
   estimateMinimumTokensForCost,
   formatCost,
-} from '@/lib/services/costValidation';
+} from '@/lib/services/cost-validation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -109,17 +109,11 @@ export function CostCalculator({ model }: CostCalculatorProps) {
 
       {/* Minimum Cost Alert */}
       {hasMinimumCost && (
-        <Alert
-          className={
-            costCalculation.isMinimumApplied
-              ? 'border-amber-200 bg-amber-50'
-              : 'border-green-200 bg-green-50'
-          }
-        >
+        <Alert variant={costCalculation.isMinimumApplied ? 'destructive' : 'default'}>
           {costCalculation.isMinimumApplied ? (
-            <AlertTriangle className='h-4 w-4 text-amber-600' />
+            <AlertTriangle className='h-4 w-4' />
           ) : (
-            <CheckCircle className='h-4 w-4 text-green-600' />
+            <CheckCircle className='h-4 w-4' />
           )}
           <AlertTitle>
             {costCalculation.isMinimumApplied

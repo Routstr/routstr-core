@@ -49,7 +49,7 @@ export function RevenueByModelTable({
         </p>
       </CardHeader>
       <CardContent>
-        <Table>
+        <Table className='min-w-[680px] sm:min-w-[860px]'>
           <TableHeader>
             <TableRow>
               <TableHead>Model</TableHead>
@@ -57,7 +57,7 @@ export function RevenueByModelTable({
               <TableHead className='text-right'>Successful</TableHead>
               <TableHead className='text-right'>Failed</TableHead>
               <TableHead className='text-right'>Revenue</TableHead>
-              <TableHead className='w-[100px]'>Share</TableHead>
+              <TableHead className='w-[140px]'>Share</TableHead>
               <TableHead className='text-right'>Refunds</TableHead>
               <TableHead className='text-right'>Net Revenue</TableHead>
               <TableHead className='text-right'>Avg/Request</TableHead>
@@ -76,19 +76,17 @@ export function RevenueByModelTable({
             ) : (
               models.map((model) => {
                 const share =
-                  totalRevenue > 0
-                    ? (model.revenue_sats / totalRevenue) * 100
-                    : 0;
+                  totalRevenue > 0 ? (model.revenue_sats / totalRevenue) * 100 : 0;
                 return (
                   <TableRow key={model.model}>
                     <TableCell className='font-medium'>{model.model}</TableCell>
                     <TableCell className='text-right font-mono'>
                       {model.requests}
                     </TableCell>
-                    <TableCell className='text-right font-mono text-green-600'>
+                    <TableCell className='text-right font-mono tabular-nums'>
                       {model.successful}
                     </TableCell>
-                    <TableCell className='text-right font-mono text-red-600'>
+                    <TableCell className='text-destructive text-right font-mono tabular-nums'>
                       {model.failed}
                     </TableCell>
                     <TableCell className='text-right font-mono'>
@@ -102,13 +100,13 @@ export function RevenueByModelTable({
                         </span>
                       </div>
                     </TableCell>
-                    <TableCell className='text-right font-mono text-red-500'>
+                    <TableCell className='text-destructive text-right font-mono tabular-nums'>
                       {formatAmount(model.refunds_sats)}
                     </TableCell>
-                    <TableCell className='text-right font-mono font-semibold'>
+                    <TableCell className='text-right font-mono font-semibold tabular-nums'>
                       {formatAmount(model.net_revenue_sats)}
                     </TableCell>
-                    <TableCell className='text-muted-foreground text-right font-mono'>
+                    <TableCell className='text-muted-foreground text-right font-mono tabular-nums'>
                       {formatAmount(model.avg_revenue_per_request)}
                     </TableCell>
                   </TableRow>

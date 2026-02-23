@@ -36,7 +36,7 @@ export const ModelSchema = z.object({
 
 // Schema for a model with additional provider-specific settings
 export const ModelWithSettingsSchema = ModelSchema.extend({
-  settings: z.record(z.unknown()).optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
   pricing: z
     .object({
       inputCostPer1kTokens: z.number().optional(),
@@ -54,7 +54,7 @@ export const CreateModelSchema = ModelSchema.omit({
   has_own_api_key: true,
   api_key_type: true,
 }).extend({
-  settings: z.record(z.unknown()).optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
 });
 
 // Schema for updating an existing model
@@ -85,10 +85,7 @@ export const ManualModelSchema = z
       .min(0)
       .optional()
       .transform((val) => (val === 0 ? undefined : val)),
-  })
-  .transform((data) => ({
-    ...data,
-  }));
+  });
 
 // Schema for group settings
 export const GroupSettingsSchema = z.object({
@@ -119,7 +116,7 @@ export const ModelListResponseSchema = z.object({
 export const ModelTestRequestSchema = z.object({
   modelId: z.string(),
   input: z.string(),
-  parameters: z.record(z.unknown()).optional(),
+  parameters: z.record(z.string(), z.unknown()).optional(),
 });
 
 // Schema for model testing response

@@ -1,3 +1,6 @@
+import { useEffect, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { format } from 'date-fns';
+import { CalendarIcon, Filter, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -21,20 +24,8 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
-import { Badge } from '@/components/ui/badge';
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
-import { Checkbox } from '@/components/ui/checkbox';
-import { CalendarIcon, Filter, X, Plus } from 'lucide-react';
-import { useState, useEffect } from 'react';
-import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
+import { MultiSelectCommandFilter } from './multi-select-command-filter';
 
 interface LogFiltersProps {
   selectedDate: string;
@@ -97,32 +88,8 @@ const ENDPOINT_OPTIONS = [
   '/embeddings/models',
 ];
 
-interface FilterBadgeProps {
-  value: string;
-  onRemove: (value: string) => void;
-}
-
-function FilterBadge({ value, onRemove }: FilterBadgeProps) {
-  return (
-    <Badge
-      variant='secondary'
-      className='flex items-center gap-1 px-1 font-normal'
-    >
-      {value}
-      <button
-        type='button'
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onRemove(value);
-        }}
-        className='hover:bg-muted-foreground/20 rounded-full'
-      >
-        <X className='h-3 w-3' />
-      </button>
-    </Badge>
-  );
-}
+const STATUS_4XX_CODES = STATUS_CODE_OPTIONS.filter((code) => code.startsWith('4'));
+const STATUS_5XX_CODES = STATUS_CODE_OPTIONS.filter((code) => code.startsWith('5'));
 
 export function LogFilters({
   selectedDate,
@@ -151,7 +118,7 @@ export function LogFilters({
   const [isCustom, setIsCustom] = useState<boolean>(!isPreset);
   const [date, setDate] = useState<Date | undefined>(
     selectedDate && selectedDate !== 'all'
-      ? new Date(selectedDate + 'T00:00:00')
+      ? new Date(`${selectedDate}T00:00:00`)
       : undefined
   );
 
@@ -162,6 +129,7 @@ export function LogFilters({
   useEffect(() => {
     const currentIsPreset = PRESET_LIMITS.includes(limit.toString());
     setIsCustom(!currentIsPreset);
+
     if (!currentIsPreset) {
       setCustomLimit(limit.toString());
     }
@@ -170,79 +138,71 @@ export function LogFilters({
   useEffect(() => {
     if (selectedDate === 'all' || !selectedDate) {
       setDate(undefined);
-    } else {
-      const d = new Date(selectedDate + 'T00:00:00');
-      setDate(isNaN(d.getTime()) ? undefined : d);
+      return;
     }
+
+    const parsedDate = new Date(`${selectedDate}T00:00:00`);
+    setDate(Number.isNaN(parsedDate.getTime()) ? undefined : parsedDate);
   }, [selectedDate]);
 
   const handleLimitChange = (value: string) => {
     if (value === 'custom') {
       setIsCustom(true);
       setCustomLimit(limit.toString());
-    } else {
-      setIsCustom(false);
-      setCustomLimit('');
-      onLimitChange(Number(value));
+      return;
     }
+
+    setIsCustom(false);
+    setCustomLimit('');
+    onLimitChange(Number(value));
   };
 
-  const handleCustomLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    setCustomLimit(value);
+  const handleCustomLimitChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setCustomLimit(event.target.value);
   };
 
   const handleCustomLimitApply = () => {
-    const numValue = parseInt(customLimit);
-    if (!isNaN(numValue) && numValue > 0) {
-      onLimitChange(numValue);
-    } else {
-      setIsCustom(false);
-      setCustomLimit('');
-      onLimitChange(100);
+    const numericValue = Number.parseInt(customLimit, 10);
+
+    if (!Number.isNaN(numericValue) && numericValue > 0) {
+      onLimitChange(numericValue);
+      return;
     }
+
+    setIsCustom(false);
+    setCustomLimit('');
+    onLimitChange(100);
   };
 
-  const handleCustomLimitKeyDown = (
-    e: React.KeyboardEvent<HTMLInputElement>
-  ) => {
-    if (e.key === 'Enter') {
+  const handleCustomLimitKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
       handleCustomLimitApply();
     }
   };
 
-  const handleDateSelect = (selectedDate: Date | undefined) => {
-    setDate(selectedDate);
-    if (selectedDate) {
-      onDateChange(format(selectedDate, 'yyyy-MM-dd'));
-    } else {
-      onDateChange('all');
-    }
-  };
+  const handleDateSelect = (nextDate: Date | undefined) => {
+    setDate(nextDate);
 
-  const toggleSelection = (
-    current: string[],
-    value: string,
-    onChange: (val: string[]) => void
-  ) => {
-    if (current.includes(value)) {
-      onChange(current.filter((v) => v !== value));
-    } else {
-      onChange([...current, value]);
+    if (nextDate) {
+      onDateChange(format(nextDate, 'yyyy-MM-dd'));
+      return;
     }
+
+    onDateChange('all');
   };
 
   const handleQuickStatusCode = (range: '4xx' | '5xx') => {
-    const codes = STATUS_CODE_OPTIONS.filter((c) => c.startsWith(range[0]));
-    const newSelection = new Set([...selectedStatusCodes]);
-    const allIncluded = codes.every((c) => selectedStatusCodes.includes(c));
+    const rangeCodes = range === '4xx' ? STATUS_4XX_CODES : STATUS_5XX_CODES;
+    const nextSelection = new Set(selectedStatusCodes);
+    const allSelected = rangeCodes.every((code) => selectedStatusCodes.includes(code));
 
-    if (allIncluded) {
-      codes.forEach((c) => newSelection.delete(c));
+    if (allSelected) {
+      rangeCodes.forEach((code) => nextSelection.delete(code));
     } else {
-      codes.forEach((c) => newSelection.add(c));
+      rangeCodes.forEach((code) => nextSelection.add(code));
     }
-    onStatusCodesChange(Array.from(newSelection));
+
+    onStatusCodesChange(Array.from(nextSelection));
   };
 
   return (
@@ -314,336 +274,62 @@ export function LogFilters({
             </Select>
           </div>
 
-          <div className='space-y-2'>
-            <Label>Status Codes</Label>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant='outline'
-                  className='w-full justify-start text-left font-normal'
-                >
-                  <div className='flex flex-wrap gap-1'>
-                    {selectedStatusCodes.length > 0 ? (
-                      selectedStatusCodes.map((code) => (
-                        <FilterBadge
-                          key={code}
-                          value={code}
-                          onRemove={(val) =>
-                            toggleSelection(
-                              selectedStatusCodes,
-                              val,
-                              onStatusCodesChange
-                            )
-                          }
-                        />
-                      ))
-                    ) : (
-                      <span className='text-muted-foreground'>All codes</span>
-                    )}
-                  </div>
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className='w-64 p-0' align='start'>
-                <Command>
-                  <CommandInput
-                    placeholder='Search or add status code...'
-                    value={statusSearch}
-                    onValueChange={setStatusSearch}
-                  />
-                  <CommandList>
-                    {selectedStatusCodes.length > 0 && (
-                      <CommandGroup heading='Selected'>
-                        {selectedStatusCodes.map((code) => (
-                          <CommandItem
-                            key={`selected-${code}`}
-                            onSelect={() =>
-                              toggleSelection(
-                                selectedStatusCodes,
-                                code,
-                                onStatusCodesChange
-                              )
-                            }
-                          >
-                            <Checkbox checked={true} className='mr-2' />
-                            {code}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    )}
-                    {statusSearch &&
-                      !STATUS_CODE_OPTIONS.includes(statusSearch) &&
-                      !selectedStatusCodes.includes(statusSearch) && (
-                        <CommandGroup heading='Custom'>
-                          <CommandItem
-                            onSelect={() => {
-                              if (/^\d+$/.test(statusSearch)) {
-                                toggleSelection(
-                                  selectedStatusCodes,
-                                  statusSearch,
-                                  onStatusCodesChange
-                                );
-                                setStatusSearch('');
-                              }
-                            }}
-                          >
-                            <Plus className='mr-2 h-4 w-4' />
-                            Add &quot;{statusSearch}&quot;
-                          </CommandItem>
-                        </CommandGroup>
-                      )}
-                    <CommandEmpty>No results found.</CommandEmpty>
-                    <CommandGroup heading='Quick Filters'>
-                      <CommandItem
-                        onSelect={() => handleQuickStatusCode('4xx')}
-                      >
-                        <Checkbox
-                          checked={STATUS_CODE_OPTIONS.filter((c) =>
-                            c.startsWith('4')
-                          ).every((c) => selectedStatusCodes.includes(c))}
-                          className='mr-2'
-                        />
-                        4xx Errors
-                      </CommandItem>
-                      <CommandItem
-                        onSelect={() => handleQuickStatusCode('5xx')}
-                      >
-                        <Checkbox
-                          checked={STATUS_CODE_OPTIONS.filter((c) =>
-                            c.startsWith('5')
-                          ).every((c) => selectedStatusCodes.includes(c))}
-                          className='mr-2'
-                        />
-                        5xx Errors
-                      </CommandItem>
-                    </CommandGroup>
-                    <CommandGroup heading='Common Codes'>
-                      {STATUS_CODE_OPTIONS.filter(
-                        (code) => !selectedStatusCodes.includes(code)
-                      ).map((code) => (
-                        <CommandItem
-                          key={code}
-                          onSelect={() =>
-                            toggleSelection(
-                              selectedStatusCodes,
-                              code,
-                              onStatusCodesChange
-                            )
-                          }
-                        >
-                          <Checkbox checked={false} className='mr-2' />
-                          {code}
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  </CommandList>
-                </Command>
-              </PopoverContent>
-            </Popover>
-          </div>
+          <MultiSelectCommandFilter
+            label='Status Codes'
+            emptyLabel='All codes'
+            selectedValues={selectedStatusCodes}
+            onSelectedValuesChange={onStatusCodesChange}
+            options={STATUS_CODE_OPTIONS}
+            searchValue={statusSearch}
+            onSearchValueChange={setStatusSearch}
+            searchPlaceholder='Search or add status code...'
+            popoverClassName='w-[min(16rem,calc(100vw-2rem))] p-0'
+            optionsGroupLabel='Common Codes'
+            canAddCustom={(value) => /^\d+$/.test(value)}
+            quickFilters={[
+              {
+                label: '4xx Errors',
+                checked: STATUS_4XX_CODES.every((code) =>
+                  selectedStatusCodes.includes(code)
+                ),
+                onSelect: () => handleQuickStatusCode('4xx'),
+              },
+              {
+                label: '5xx Errors',
+                checked: STATUS_5XX_CODES.every((code) =>
+                  selectedStatusCodes.includes(code)
+                ),
+                onSelect: () => handleQuickStatusCode('5xx'),
+              },
+            ]}
+          />
 
-          <div className='space-y-2'>
-            <Label>HTTP Methods</Label>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant='outline'
-                  className='w-full justify-start text-left font-normal'
-                >
-                  <div className='flex flex-wrap gap-1'>
-                    {selectedMethods.length > 0 ? (
-                      selectedMethods.map((method) => (
-                        <FilterBadge
-                          key={method}
-                          value={method}
-                          onRemove={(val) =>
-                            toggleSelection(
-                              selectedMethods,
-                              val,
-                              onMethodsChange
-                            )
-                          }
-                        />
-                      ))
-                    ) : (
-                      <span className='text-muted-foreground'>All methods</span>
-                    )}
-                  </div>
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className='w-64 p-0' align='start'>
-                <Command>
-                  <CommandInput
-                    placeholder='Search or add method...'
-                    value={methodSearch}
-                    onValueChange={setMethodSearch}
-                  />
-                  <CommandList>
-                    {selectedMethods.length > 0 && (
-                      <CommandGroup heading='Selected'>
-                        {selectedMethods.map((method) => (
-                          <CommandItem
-                            key={`selected-${method}`}
-                            onSelect={() =>
-                              toggleSelection(
-                                selectedMethods,
-                                method,
-                                onMethodsChange
-                              )
-                            }
-                          >
-                            <Checkbox checked={true} className='mr-2' />
-                            {method}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    )}
-                    {methodSearch &&
-                      !METHOD_OPTIONS.includes(methodSearch.toUpperCase()) &&
-                      !selectedMethods.includes(methodSearch.toUpperCase()) && (
-                        <CommandGroup heading='Custom'>
-                          <CommandItem
-                            onSelect={() => {
-                              toggleSelection(
-                                selectedMethods,
-                                methodSearch.toUpperCase(),
-                                onMethodsChange
-                              );
-                              setMethodSearch('');
-                            }}
-                          >
-                            <Plus className='mr-2 h-4 w-4' />
-                            Add &quot;{methodSearch.toUpperCase()}&quot;
-                          </CommandItem>
-                        </CommandGroup>
-                      )}
-                    <CommandEmpty>No results found.</CommandEmpty>
-                    <CommandGroup>
-                      {METHOD_OPTIONS.filter(
-                        (method) => !selectedMethods.includes(method)
-                      ).map((method) => (
-                        <CommandItem
-                          key={method}
-                          onSelect={() =>
-                            toggleSelection(
-                              selectedMethods,
-                              method,
-                              onMethodsChange
-                            )
-                          }
-                        >
-                          <Checkbox checked={false} className='mr-2' />
-                          {method}
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  </CommandList>
-                </Command>
-              </PopoverContent>
-            </Popover>
-          </div>
+          <MultiSelectCommandFilter
+            label='HTTP Methods'
+            emptyLabel='All methods'
+            selectedValues={selectedMethods}
+            onSelectedValuesChange={onMethodsChange}
+            options={METHOD_OPTIONS}
+            searchValue={methodSearch}
+            onSearchValueChange={setMethodSearch}
+            searchPlaceholder='Search or add method...'
+            popoverClassName='w-[min(16rem,calc(100vw-2rem))] p-0'
+            optionsGroupLabel='Methods'
+            normalizeCustomValue={(value) => value.toUpperCase()}
+          />
 
-          <div className='space-y-2'>
-            <Label>Endpoints</Label>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant='outline'
-                  className='w-full justify-start text-left font-normal'
-                >
-                  <div className='flex flex-wrap gap-1 overflow-hidden'>
-                    {selectedEndpoints.length > 0 ? (
-                      selectedEndpoints.map((endpoint) => (
-                        <FilterBadge
-                          key={endpoint}
-                          value={endpoint}
-                          onRemove={(val) =>
-                            toggleSelection(
-                              selectedEndpoints,
-                              val,
-                              onEndpointsChange
-                            )
-                          }
-                        />
-                      ))
-                    ) : (
-                      <span className='text-muted-foreground'>
-                        All endpoints
-                      </span>
-                    )}
-                  </div>
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className='w-80 p-0' align='start'>
-                <Command>
-                  <CommandInput
-                    placeholder='Search or add endpoint pattern...'
-                    value={endpointSearch}
-                    onValueChange={setEndpointSearch}
-                  />
-                  <CommandList>
-                    {selectedEndpoints.length > 0 && (
-                      <CommandGroup heading='Selected'>
-                        {selectedEndpoints.map((endpoint) => (
-                          <CommandItem
-                            key={`selected-${endpoint}`}
-                            onSelect={() =>
-                              toggleSelection(
-                                selectedEndpoints,
-                                endpoint,
-                                onEndpointsChange
-                              )
-                            }
-                          >
-                            <Checkbox checked={true} className='mr-2' />
-                            {endpoint}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    )}
-                    {endpointSearch &&
-                      !ENDPOINT_OPTIONS.includes(endpointSearch) &&
-                      !selectedEndpoints.includes(endpointSearch) && (
-                        <CommandGroup heading='Custom'>
-                          <CommandItem
-                            onSelect={() => {
-                              toggleSelection(
-                                selectedEndpoints,
-                                endpointSearch,
-                                onEndpointsChange
-                              );
-                              setEndpointSearch('');
-                            }}
-                          >
-                            <Plus className='mr-2 h-4 w-4' />
-                            Add &quot;{endpointSearch}&quot;
-                          </CommandItem>
-                        </CommandGroup>
-                      )}
-                    <CommandEmpty>No results found.</CommandEmpty>
-                    <CommandGroup heading='Common Endpoints'>
-                      {ENDPOINT_OPTIONS.filter(
-                        (endpoint) => !selectedEndpoints.includes(endpoint)
-                      ).map((endpoint) => (
-                        <CommandItem
-                          key={endpoint}
-                          onSelect={() =>
-                            toggleSelection(
-                              selectedEndpoints,
-                              endpoint,
-                              onEndpointsChange
-                            )
-                          }
-                        >
-                          <Checkbox checked={false} className='mr-2' />
-                          {endpoint}
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  </CommandList>
-                </Command>
-              </PopoverContent>
-            </Popover>
-          </div>
+          <MultiSelectCommandFilter
+            label='Endpoints'
+            emptyLabel='All endpoints'
+            selectedValues={selectedEndpoints}
+            onSelectedValuesChange={onEndpointsChange}
+            options={ENDPOINT_OPTIONS}
+            searchValue={endpointSearch}
+            onSearchValueChange={setEndpointSearch}
+            searchPlaceholder='Search or add endpoint pattern...'
+            popoverClassName='w-[min(20rem,calc(100vw-2rem))] p-0'
+            optionsGroupLabel='Common Endpoints'
+          />
 
           <div className='space-y-2'>
             <Label htmlFor='request-id'>Request ID</Label>
@@ -652,7 +338,7 @@ export function LogFilters({
               type='text'
               placeholder='Search by request ID'
               value={requestId}
-              onChange={(e) => onRequestIdChange(e.target.value)}
+              onChange={(event) => onRequestIdChange(event.target.value)}
             />
           </div>
 
@@ -668,14 +354,14 @@ export function LogFilters({
               type='text'
               placeholder='Search in message and name'
               value={searchText}
-              onChange={(e) => onSearchTextChange(e.target.value)}
+              onChange={(event) => onSearchTextChange(event.target.value)}
             />
           </div>
 
           <div className='space-y-2'>
             <Label htmlFor='limit'>Limit</Label>
             {isCustom ? (
-              <div className='flex gap-2'>
+              <div className='flex flex-col gap-2 sm:flex-row'>
                 <Input
                   id='limit'
                   type='number'
@@ -686,7 +372,7 @@ export function LogFilters({
                   onKeyDown={handleCustomLimitKeyDown}
                   onBlur={handleCustomLimitApply}
                   autoFocus
-                  className='flex-1'
+                  className='flex-1 sm:flex-auto'
                 />
                 <Button
                   type='button'
@@ -695,6 +381,7 @@ export function LogFilters({
                   onClick={() => {
                     setIsCustom(false);
                     setCustomLimit('');
+
                     if (!isPreset) {
                       onLimitChange(100);
                     }
@@ -712,12 +399,11 @@ export function LogFilters({
                   <SelectValue placeholder='Select limit' />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value='25'>25</SelectItem>
-                  <SelectItem value='50'>50</SelectItem>
-                  <SelectItem value='100'>100</SelectItem>
-                  <SelectItem value='200'>200</SelectItem>
-                  <SelectItem value='500'>500</SelectItem>
-                  <SelectItem value='1000'>1000</SelectItem>
+                  {PRESET_LIMITS.map((preset) => (
+                    <SelectItem key={preset} value={preset}>
+                      {preset}
+                    </SelectItem>
+                  ))}
                   <SelectItem value='custom'>Custom...</SelectItem>
                 </SelectContent>
               </Select>
@@ -727,13 +413,8 @@ export function LogFilters({
             )}
           </div>
 
-          <div className='space-y-2'>
-            <Label>&nbsp;</Label>
-            <Button
-              onClick={onClearFilters}
-              variant='outline'
-              className='w-full'
-            >
+          <div className='flex items-end sm:col-span-2 lg:col-span-1'>
+            <Button onClick={onClearFilters} variant='outline' className='w-full'>
               Clear Filters
             </Button>
           </div>

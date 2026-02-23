@@ -453,7 +453,17 @@ class LogManager:
         self, entries: list[dict], interval_minutes: int, hours_back: int
     ) -> dict:
         time_buckets: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"requests": 0, "errors": 0, "revenue_msats": 0.0}
+            lambda: {
+                "total_requests": 0,
+                "successful_chat_completions": 0,
+                "failed_requests": 0,
+                "errors": 0,
+                "warnings": 0,
+                "payment_processed": 0,
+                "upstream_errors": 0,
+                "revenue_msats": 0.0,
+                "refunds_msats": 0.0,
+            }
         )
 
         for entry in entries:
@@ -479,10 +489,26 @@ class LogManager:
                 level = entry.get("levelname", "").upper()
 
                 if "received proxy request" in message:
-                    bucket["requests"] += 1
+                    bucket["total_requests"] += 1
+
+                if (
+                    "completed for streaming" in message
+                    or "completed for non-streaming" in message
+                ):
+                    bucket["successful_chat_completions"] += 1
 
                 if level == "ERROR":
                     bucket["errors"] += 1
+                    if "upstream" in message:
+                        bucket["upstream_errors"] += 1
+                elif level == "WARNING":
+                    bucket["warnings"] += 1
+
+                if "upstream request failed" in message or "revert payment" in message:
+                    bucket["failed_requests"] += 1
+
+                if "payment processed successfully" in message:
+                    bucket["payment_processed"] += 1
 
                 if (
                     "completed for streaming" in message
@@ -493,12 +519,20 @@ class LogManager:
                         actual_cost = cost_data.get("total_msats", 0)
                         if isinstance(actual_cost, (int, float)) and actual_cost > 0:
                             bucket["revenue_msats"] += float(actual_cost)
+
+                if "revert payment" in message:
+                    max_cost = entry.get("max_cost_for_model", 0)
+                    if isinstance(max_cost, (int, float)) and max_cost > 0:
+                        bucket["refunds_msats"] += float(max_cost)
             except Exception:
                 continue
 
         result = []
         for bucket_key in sorted(time_buckets.keys()):
-            result.append({"timestamp": bucket_key, **time_buckets[bucket_key]})
+            bucket = dict(time_buckets[bucket_key])
+            # Backward-compatible alias for any callers still reading "requests".
+            bucket["requests"] = bucket["total_requests"]
+            result.append({"timestamp": bucket_key, **bucket})
 
         return {
             "metrics": result,
