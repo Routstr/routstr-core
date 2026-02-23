@@ -1,10 +1,7 @@
 import json
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Lock
-from time import monotonic
 from typing import Any, Iterator
 
 from .logging import get_logger
@@ -12,112 +9,9 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 
-@dataclass(frozen=True)
-class _UsageEntriesCacheItem:
-    created_at: float
-    file_snapshot: tuple[tuple[str, int, int], ...]
-    entries: list[dict[str, Any]]
-
-
 class LogManager:
-    def __init__(
-        self,
-        logs_dir: Path = Path("logs"),
-        usage_cache_ttl_seconds: float = 30.0,
-    ):
+    def __init__(self, logs_dir: Path = Path("logs")):
         self.logs_dir = logs_dir
-        self._usage_cache_ttl_seconds = usage_cache_ttl_seconds
-        self._usage_entries_cache: dict[int, _UsageEntriesCacheItem] = {}
-        self._usage_cache_lock = Lock()
-
-    def _collect_log_files(
-        self,
-        hours_back: int | None = None,
-        specific_date: str | None = None,
-        reverse_files: bool = False,
-        max_files: int | None = None,
-    ) -> tuple[list[Path], datetime | None]:
-        if not self.logs_dir.exists():
-            return [], None
-
-        log_files: list[Path] = []
-        cutoff_date: datetime | None = None
-
-        if specific_date:
-            log_file = self.logs_dir / f"app_{specific_date}.log"
-            if log_file.exists():
-                log_files.append(log_file)
-            return log_files, None
-
-        log_files = sorted(self.logs_dir.glob("app_*.log"))
-        if reverse_files:
-            log_files.reverse()
-
-        if hours_back is not None:
-            cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-            cutoff_day = cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            filtered_files = []
-            for log_path in log_files:
-                try:
-                    file_date_str = log_path.stem.split("_")[1]
-                    file_date = datetime.strptime(file_date_str, "%Y-%m-%d").replace(
-                        tzinfo=timezone.utc
-                    )
-                    if file_date >= cutoff_day:
-                        filtered_files.append(log_path)
-                except Exception:
-                    continue
-            log_files = filtered_files
-
-        if max_files is not None and len(log_files) > max_files:
-            log_files = log_files[:max_files]
-
-        return log_files, cutoff_date
-
-    def _build_usage_file_snapshot(
-        self, hours_back: int
-    ) -> tuple[tuple[str, int, int], ...]:
-        log_files, _ = self._collect_log_files(hours_back=hours_back)
-        snapshot: list[tuple[str, int, int]] = []
-        for log_file in log_files:
-            try:
-                stat = log_file.stat()
-                snapshot.append(
-                    (log_file.as_posix(), int(stat.st_mtime_ns), int(stat.st_size))
-                )
-            except OSError:
-                continue
-        return tuple(snapshot)
-
-    def _get_usage_entries(self, hours_back: int) -> list[dict[str, Any]]:
-        now = monotonic()
-        file_snapshot = self._build_usage_file_snapshot(hours_back)
-
-        with self._usage_cache_lock:
-            cached = self._usage_entries_cache.get(hours_back)
-            if (
-                cached is not None
-                and now - cached.created_at <= self._usage_cache_ttl_seconds
-                and cached.file_snapshot == file_snapshot
-            ):
-                return cached.entries
-
-        entries = list(self._yield_log_entries(hours_back=hours_back))
-
-        with self._usage_cache_lock:
-            self._usage_entries_cache[hours_back] = _UsageEntriesCacheItem(
-                created_at=now,
-                file_snapshot=file_snapshot,
-                entries=entries,
-            )
-            if len(self._usage_entries_cache) > 8:
-                oldest_key = min(
-                    self._usage_entries_cache,
-                    key=lambda key: self._usage_entries_cache[key].created_at,
-                )
-                self._usage_entries_cache.pop(oldest_key, None)
-
-        return entries
 
     def _yield_log_entries(
         self,
@@ -135,12 +29,42 @@ class LogManager:
             reverse_files: if True, process files in reverse order (newest first).
             max_files: maximum number of log files to process (most recent if reverse_files is True).
         """
-        log_files, cutoff_date = self._collect_log_files(
-            hours_back=hours_back,
-            specific_date=specific_date,
-            reverse_files=reverse_files,
-            max_files=max_files,
-        )
+        if not self.logs_dir.exists():
+            return
+
+        log_files = []
+        cutoff_date = None
+
+        if specific_date:
+            log_file = self.logs_dir / f"app_{specific_date}.log"
+            if log_file.exists():
+                log_files.append(log_file)
+        else:
+            log_files = sorted(self.logs_dir.glob("app_*.log"))
+            if reverse_files:
+                log_files.reverse()
+
+            # If we only care about hours back, we can optimize file selection
+            if hours_back is not None:
+                cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+                filtered_files = []
+                for log_path in log_files:
+                    try:
+                        file_date_str = log_path.stem.split("_")[1]
+                        file_date = datetime.strptime(
+                            file_date_str, "%Y-%m-%d"
+                        ).replace(tzinfo=timezone.utc)
+                        # Include file if it's from the same day or after the cutoff day
+                        if file_date >= cutoff_date.replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        ):
+                            filtered_files.append(log_path)
+                    except Exception:
+                        continue
+                log_files = filtered_files
+
+            if max_files is not None and len(log_files) > max_files:
+                log_files = log_files[:max_files]
 
         for log_file in log_files:
             try:
@@ -293,11 +217,11 @@ class LogManager:
         return True
 
     def get_usage_summary(self, hours: int = 24) -> dict:
-        entries = self._get_usage_entries(hours)
+        entries = list(self._yield_log_entries(hours_back=hours))
         return self._calculate_summary_stats(entries)
 
     def get_usage_metrics(self, interval: int = 15, hours: int = 24) -> dict:
-        entries = self._get_usage_entries(hours)
+        entries = list(self._yield_log_entries(hours_back=hours))
         return self._aggregate_metrics_by_time(entries, interval, hours)
 
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
@@ -312,7 +236,7 @@ class LogManager:
 
         # Let's just stick to PR 229 logic which filters 'ERROR' level.
 
-        entries = self._get_usage_entries(hours)
+        entries = self._yield_log_entries(hours_back=hours)  # oldest to newest
 
         for entry in entries:
             if entry.get("levelname", "").upper() == "ERROR":
@@ -333,7 +257,7 @@ class LogManager:
         return {"errors": errors[:limit], "total_count": len(errors)}
 
     def get_revenue_by_model(self, hours: int = 24, limit: int = 20) -> dict:
-        entries = self._get_usage_entries(hours)
+        entries = list(self._yield_log_entries(hours_back=hours))
 
         model_stats: dict[str, dict[str, int | float]] = defaultdict(
             lambda: {
