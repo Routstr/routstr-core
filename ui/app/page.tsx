@@ -16,12 +16,7 @@ import {
   type UsageSummary,
 } from '@/lib/api/services/admin';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Calendar } from '@/components/ui/calendar';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -179,8 +174,9 @@ function getAutoIntervalMinutes(hours: number): number {
   const allowedIntervals = [5, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440];
 
   return (
-    allowedIntervals.find((intervalMinutes) => intervalMinutes >= idealInterval) ??
-    allowedIntervals[allowedIntervals.length - 1]
+    allowedIntervals.find(
+      (intervalMinutes) => intervalMinutes >= idealInterval
+    ) ?? allowedIntervals[allowedIntervals.length - 1]
   );
 }
 
@@ -480,7 +476,9 @@ export default function DashboardPage() {
     DEFAULT_TIME_RANGE_PRESET;
   const customRangeHours = getRangeHours(customRange);
   const queryHours =
-    isCustomRangeActive && customRangeHours ? customRangeHours : activePreset.hours;
+    isCustomRangeActive && customRangeHours
+      ? customRangeHours
+      : activePreset.hours;
   const autoInterval = getAutoIntervalMinutes(queryHours);
 
   const {
@@ -537,12 +535,14 @@ export default function DashboardPage() {
     }
 
     const metricPoints = metricsData.metrics as ChartDatum[];
-    const revenuePoints = metricsData.metrics.map((metric: UsageMetricData) => ({
-      ...metric,
-      revenue_sats: metric.revenue_msats / 1000,
-      refunds_sats: metric.refunds_msats / 1000,
-      net_revenue_sats: (metric.revenue_msats - metric.refunds_msats) / 1000,
-    })) as ChartDatum[];
+    const revenuePoints = metricsData.metrics.map(
+      (metric: UsageMetricData) => ({
+        ...metric,
+        revenue_sats: metric.revenue_msats / 1000,
+        refunds_sats: metric.refunds_msats / 1000,
+        net_revenue_sats: (metric.revenue_msats - metric.refunds_msats) / 1000,
+      })
+    ) as ChartDatum[];
 
     return [
       {
@@ -731,7 +731,8 @@ export default function DashboardPage() {
   };
 
   const activeChartConfig =
-    chartConfigs.find((config) => config.id === activeChartId) ?? chartConfigs[0];
+    chartConfigs.find((config) => config.id === activeChartId) ??
+    chartConfigs[0];
   const selectedRangeValue =
     isCustomRangeActive && customRange?.from && customRange?.to
       ? 'custom'
@@ -746,22 +747,28 @@ export default function DashboardPage() {
     <AppPageShell contentClassName='mx-auto w-full max-w-5xl'>
       <div className='min-w-0 space-y-4 sm:space-y-6'>
         <section className='space-y-1 px-1'>
-          <h1 className='text-lg font-semibold tracking-tight sm:text-2xl'>Dashboard</h1>
+          <h1 className='text-lg font-semibold tracking-tight sm:text-2xl'>
+            Dashboard
+          </h1>
           <p className='text-muted-foreground text-sm leading-relaxed'>
             Node balances, request health, and revenue trends.
           </p>
         </section>
 
-        <DashboardBalanceSummary displayUnit={displayUnit} usdPerSat={usdPerSat} />
+        <DashboardBalanceSummary
+          displayUnit={displayUnit}
+          usdPerSat={usdPerSat}
+        />
 
-        <section className='space-y-3 rounded-xl border border-border/60 bg-card/35 p-3 sm:p-4'>
+        <section className='border-border/60 bg-card/35 space-y-3 rounded-xl border p-3 sm:p-4'>
           <div className='space-y-1'>
             <div className='min-w-0'>
               <h2 className='text-base leading-snug font-semibold tracking-tight sm:text-lg'>
                 Usage Analytics
               </h2>
               <p className='text-muted-foreground text-xs sm:text-sm'>
-                Select a preset or custom date range to analyze traffic and revenue.
+                Select a preset or custom date range to analyze traffic and
+                revenue.
               </p>
               <p className='text-muted-foreground text-[11px] sm:text-xs'>
                 Showing {activeRangeLabel}.
@@ -792,7 +799,10 @@ export default function DashboardPage() {
                         <CalendarIcon className='h-3.5 w-3.5' />
                       </Button>
                     </PopoverTrigger>
-                    <PopoverContent align='start' className='w-auto overflow-hidden p-0'>
+                    <PopoverContent
+                      align='start'
+                      className='w-auto overflow-hidden p-0'
+                    >
                       <Calendar
                         mode='range'
                         selected={pendingCustomRange}
@@ -806,13 +816,21 @@ export default function DashboardPage() {
 
                   <div className='bg-border/70 w-px' />
 
-                  <Select value={selectedRangeValue} onValueChange={handleRangeSelectChange}>
-                    <SelectTrigger className='h-full w-full min-h-0 rounded-none border-0 !bg-transparent px-3 py-0 text-sm font-normal shadow-none ring-0 hover:!bg-transparent data-[state=open]:!bg-transparent focus-visible:border-transparent focus-visible:ring-0 dark:!bg-transparent dark:hover:!bg-transparent'>
-                      <SelectValue placeholder='Select range' className='text-left' />
+                  <Select
+                    value={selectedRangeValue}
+                    onValueChange={handleRangeSelectChange}
+                  >
+                    <SelectTrigger className='h-full min-h-0 w-full rounded-none border-0 !bg-transparent px-3 py-0 text-sm font-normal shadow-none ring-0 hover:!bg-transparent focus-visible:border-transparent focus-visible:ring-0 data-[state=open]:!bg-transparent dark:!bg-transparent dark:hover:!bg-transparent'>
+                      <SelectValue
+                        placeholder='Select range'
+                        className='text-left'
+                      />
                     </SelectTrigger>
                     <SelectContent align='start'>
                       {customRange?.from && customRange?.to && (
-                        <SelectItem value='custom'>{compactCustomRangeLabel}</SelectItem>
+                        <SelectItem value='custom'>
+                          {compactCustomRangeLabel}
+                        </SelectItem>
                       )}
                       {TIME_RANGE_PRESETS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
@@ -831,7 +849,10 @@ export default function DashboardPage() {
                 className='h-8 w-full px-2.5 text-xs sm:ml-auto sm:w-auto'
               >
                 <RefreshCw
-                  className={cn('mr-1 h-3 w-3', isManualRefreshing && 'animate-spin')}
+                  className={cn(
+                    'mr-1 h-3 w-3',
+                    isManualRefreshing && 'animate-spin'
+                  )}
                 />
                 {isManualRefreshing ? 'Refreshing...' : 'Refresh'}
               </Button>
@@ -850,7 +871,9 @@ export default function DashboardPage() {
             metricType={activeChartConfig.metricType}
             tabs={chartConfigs.map((config) => ({
               id: config.id,
-              label: isMobile ? config.mobileTitle ?? config.title : config.title,
+              label: isMobile
+                ? (config.mobileTitle ?? config.title)
+                : config.title,
             }))}
             activeTabId={activeChartId}
             onTabChange={setActiveChartId}
@@ -865,7 +888,8 @@ export default function DashboardPage() {
                   </EmptyMedia>
                   <EmptyTitle>No data available</EmptyTitle>
                   <EmptyDescription>
-                    No metrics data exists for this range yet. Try a broader range.
+                    No metrics data exists for this range yet. Try a broader
+                    range.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>

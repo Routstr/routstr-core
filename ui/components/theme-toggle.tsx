@@ -22,7 +22,11 @@ interface ThemeToggleProps {
 
 type ThemeMode = 'light' | 'dark' | 'system';
 
-const THEME_OPTIONS: Array<{ value: ThemeMode; label: string; icon: typeof Sun }> = [
+const THEME_OPTIONS: Array<{
+  value: ThemeMode;
+  label: string;
+  icon: typeof Sun;
+}> = [
   { value: 'dark', label: 'Dark', icon: Moon },
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'system', label: 'System', icon: Monitor },
@@ -33,7 +37,9 @@ function isThemeMode(value: string | undefined): value is ThemeMode {
 }
 
 function getThemeOption(theme: ThemeMode) {
-  return THEME_OPTIONS.find((option) => option.value === theme) ?? THEME_OPTIONS[2];
+  return (
+    THEME_OPTIONS.find((option) => option.value === theme) ?? THEME_OPTIONS[2]
+  );
 }
 
 export function ThemeToggle({
@@ -68,7 +74,9 @@ export function ThemeToggle({
           size='sm'
           className={cn(
             'border-border/60 bg-background/65 text-muted-foreground hover:text-foreground rounded-md',
-            compact ? 'h-8 w-10 justify-center px-0' : 'h-8 justify-between gap-2',
+            compact
+              ? 'h-8 w-10 justify-center px-0'
+              : 'h-8 justify-between gap-2',
             className
           )}
           disabled={!mounted}
@@ -76,7 +84,9 @@ export function ThemeToggle({
           <span className='inline-flex min-w-0 items-center gap-1.5'>
             <ActiveIcon className='h-3.5 w-3.5 shrink-0' />
             {compact ? null : (
-              <span className='truncate text-[11px] font-medium'>{activeOption.label}</span>
+              <span className='truncate text-[11px] font-medium'>
+                {activeOption.label}
+              </span>
             )}
           </span>
           {compact ? (

@@ -25,7 +25,10 @@ interface ProviderBalanceProps {
   platformUrl?: string | null;
 }
 
-export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProps) {
+export function ProviderBalance({
+  providerId,
+  platformUrl,
+}: ProviderBalanceProps) {
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
   const [topupAmount, setTopupAmount] = useState('');
   const [topupError, setTopupError] = useState('');
@@ -73,7 +76,10 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
 
   const topupMutation = useMutation({
     mutationFn: async (amount: number) => {
-      const result = await AdminService.initiateProviderTopup(providerId, amount);
+      const result = await AdminService.initiateProviderTopup(
+        providerId,
+        amount
+      );
       return result;
     },
     onSuccess: (data) => {
@@ -112,7 +118,8 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
   const handleTopUpClick = () => {
     if (
       platformUrl &&
-      (platformUrl.includes('openrouter.ai') || platformUrl.includes('openai.com'))
+      (platformUrl.includes('openrouter.ai') ||
+        platformUrl.includes('openai.com'))
     ) {
       window.open(platformUrl, '_blank');
       return;
@@ -175,7 +182,9 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
         <DialogContent className='sm:max-w-md'>
           <DialogHeader>
             <DialogTitle>
-              {paymentStatus === 'paid' ? 'Payment Confirmed!' : 'Top Up Balance'}
+              {paymentStatus === 'paid'
+                ? 'Payment Confirmed!'
+                : 'Top Up Balance'}
             </DialogTitle>
             <DialogDescription>
               {paymentStatus === 'paid'
@@ -223,7 +232,9 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
                     size='sm'
                     variant='outline'
                     onClick={() => {
-                      navigator.clipboard.writeText(invoiceData.payment_request);
+                      navigator.clipboard.writeText(
+                        invoiceData.payment_request
+                      );
                       toast.success('Invoice copied to clipboard!');
                     }}
                     className='w-full sm:w-auto'
@@ -255,7 +266,9 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
                   max='500'
                   step='0.01'
                 />
-                {topupError && <p className='text-destructive text-sm'>{topupError}</p>}
+                {topupError && (
+                  <p className='text-destructive text-sm'>{topupError}</p>
+                )}
               </div>
             </div>
           )}
@@ -266,12 +279,20 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
                 Done
               </Button>
             ) : invoiceData ? (
-              <Button variant='outline' onClick={handleCloseDialog} className='w-full'>
+              <Button
+                variant='outline'
+                onClick={handleCloseDialog}
+                className='w-full'
+              >
                 Cancel
               </Button>
             ) : (
               <>
-                <Button variant='outline' onClick={handleCloseDialog} className='w-full sm:w-auto'>
+                <Button
+                  variant='outline'
+                  onClick={handleCloseDialog}
+                  className='w-full sm:w-auto'
+                >
                   Cancel
                 </Button>
                 <Button
@@ -279,7 +300,9 @@ export function ProviderBalance({ providerId, platformUrl }: ProviderBalanceProp
                   disabled={topupMutation.isPending || !topupAmount}
                   className='w-full sm:w-auto'
                 >
-                  {topupMutation.isPending ? 'Processing...' : 'Generate Invoice'}
+                  {topupMutation.isPending
+                    ? 'Processing...'
+                    : 'Generate Invoice'}
                 </Button>
               </>
             )}

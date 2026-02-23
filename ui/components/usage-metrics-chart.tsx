@@ -5,13 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ExpandIcon, Minimize2Icon } from 'lucide-react';
-import {
-  Area,
-  AreaChart,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-} from 'recharts';
+import { Area, AreaChart, XAxis, YAxis, CartesianGrid } from 'recharts';
 import {
   ChartConfig,
   ChartContainer,
@@ -95,7 +89,8 @@ export function UsageMetricsChart({
   const metricChips = dataKeys.map((dataKey) => {
     const numericValue = data.reduce((sum, point) => {
       const rawValue = point?.[dataKey.key];
-      const value = typeof rawValue === 'number' ? rawValue : Number(rawValue || 0);
+      const value =
+        typeof rawValue === 'number' ? rawValue : Number(rawValue || 0);
       return Number.isFinite(value) ? sum + value : sum;
     }, 0);
 
@@ -159,13 +154,19 @@ export function UsageMetricsChart({
 
   return (
     <div ref={containerRef}>
-      <Card className={cn(isFullscreen && 'h-full rounded-none border-0 ring-0')}>
+      <Card
+        className={cn(isFullscreen && 'h-full rounded-none border-0 ring-0')}
+      >
         <CardHeader className='space-y-3 sm:space-y-4'>
           {tabs && activeTabId && onTabChange ? (
-            <Tabs value={activeTabId} onValueChange={onTabChange} className='w-full'>
+            <Tabs
+              value={activeTabId}
+              onValueChange={onTabChange}
+              className='w-full'
+            >
               <TabsList
                 variant='line'
-                className='max-w-full overflow-x-auto whitespace-nowrap border-b-0 pb-1'
+                className='max-w-full overflow-x-auto border-b-0 pb-1 whitespace-nowrap'
               >
                 {tabs.map((tab) => (
                   <TabsTrigger key={tab.id} value={tab.id}>
@@ -197,7 +198,9 @@ export function UsageMetricsChart({
                 <ExpandIcon className='h-4 w-4' />
               )}
               <span className='sr-only'>
-                {isFullscreen ? 'Exit fullscreen chart' : 'Enter fullscreen chart'}
+                {isFullscreen
+                  ? 'Exit fullscreen chart'
+                  : 'Enter fullscreen chart'}
               </span>
             </Button>
           </div>
@@ -222,7 +225,10 @@ export function UsageMetricsChart({
                   onClick={() => toggleSeries(metric.key)}
                 >
                   <span
-                    className={cn('size-2 rounded-full', hidden && 'opacity-35')}
+                    className={cn(
+                      'size-2 rounded-full',
+                      hidden && 'opacity-35'
+                    )}
                     style={{ backgroundColor: metric.color }}
                   />
                   <span className='max-w-[9rem] truncate sm:max-w-none'>
@@ -231,7 +237,9 @@ export function UsageMetricsChart({
                   <span
                     className={cn(
                       'text-xs',
-                      hidden ? 'text-muted-foreground/45' : 'text-muted-foreground'
+                      hidden
+                        ? 'text-muted-foreground/45'
+                        : 'text-muted-foreground'
                     )}
                   >
                     {formatMetricValue(metric.value)}

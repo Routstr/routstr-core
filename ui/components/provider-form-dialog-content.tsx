@@ -1,5 +1,8 @@
 import type { Dispatch, SetStateAction } from 'react';
-import type { CreateUpstreamProvider, ProviderType } from '@/lib/api/services/admin';
+import type {
+  CreateUpstreamProvider,
+  ProviderType,
+} from '@/lib/api/services/admin';
 import { Button } from '@/components/ui/button';
 import {
   DialogContent,
@@ -65,10 +68,18 @@ export function ProviderFormDialogContent({
         onCreateAccount={onCreateAccount}
       />
       <DialogFooter>
-        <Button variant='outline' onClick={onCancel} className='w-full sm:w-auto'>
+        <Button
+          variant='outline'
+          onClick={onCancel}
+          className='w-full sm:w-auto'
+        >
           Cancel
         </Button>
-        <Button onClick={onSubmit} disabled={isSubmitting} className='w-full sm:w-auto'>
+        <Button
+          onClick={onSubmit}
+          disabled={isSubmitting}
+          className='w-full sm:w-auto'
+        >
           {isSubmitting ? submittingLabel : submitLabel}
         </Button>
       </DialogFooter>

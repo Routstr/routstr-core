@@ -142,7 +142,11 @@ export function WithdrawModal({
                   </>
                 )}
               </Button>
-              <Button onClick={() => onOpenChange(false)} variant='outline' className='w-full sm:w-auto'>
+              <Button
+                onClick={() => onOpenChange(false)}
+                variant='outline'
+                className='w-full sm:w-auto'
+              >
                 Close
               </Button>
             </div>
@@ -220,8 +224,7 @@ export function WithdrawModal({
             <Alert variant='destructive'>
               <AlertCircle className='h-5 w-5' />
               <AlertDescription>
-                Warning: Withdrawing more than your balance will use user
-                funds.
+                Warning: Withdrawing more than your balance will use user funds.
               </AlertDescription>
             </Alert>
           )}

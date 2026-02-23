@@ -67,25 +67,24 @@ export const UpdateModelSchema = ModelSchema.partial().omit({
 });
 
 // Schema for manual model addition form
-export const ManualModelSchema = z
-  .object({
-    name: z.string().min(1, 'Name is required'),
-    full_name: z.string().optional(),
-    input_cost: z.number().min(0, 'Input cost must be non-negative'),
-    output_cost: z.number().min(0, 'Output cost must be non-negative'),
-    provider: z.string().min(1, 'Provider is required'),
-    modelType: z.enum(['text', 'embedding', 'image', 'audio', 'multimodal']),
-    description: z
-      .string()
-      .optional()
-      .transform((val) => (val === '' ? undefined : val)),
-    contextLength: z
-      .number()
-      .int()
-      .min(0)
-      .optional()
-      .transform((val) => (val === 0 ? undefined : val)),
-  });
+export const ManualModelSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  full_name: z.string().optional(),
+  input_cost: z.number().min(0, 'Input cost must be non-negative'),
+  output_cost: z.number().min(0, 'Output cost must be non-negative'),
+  provider: z.string().min(1, 'Provider is required'),
+  modelType: z.enum(['text', 'embedding', 'image', 'audio', 'multimodal']),
+  description: z
+    .string()
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
+  contextLength: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .transform((val) => (val === 0 ? undefined : val)),
+});
 
 // Schema for group settings
 export const GroupSettingsSchema = z.object({

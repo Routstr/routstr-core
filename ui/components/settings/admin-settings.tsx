@@ -357,9 +357,12 @@ export function AdminSettings() {
   const hasFieldChanged = (key: string): boolean =>
     !areValuesEqual(settings[key], initialSettings[key]);
 
-  const basicInfoChanged = ['name', 'description', 'http_url', 'onion_url'].some(
-    hasFieldChanged
-  );
+  const basicInfoChanged = [
+    'name',
+    'description',
+    'http_url',
+    'onion_url',
+  ].some(hasFieldChanged);
   const nostrChanged = ['npub', 'nsec'].some(hasFieldChanged);
   const cashuMintsChanged = hasFieldChanged('cashu_mints');
   const relaysChanged = hasFieldChanged('relays');
@@ -369,8 +372,8 @@ export function AdminSettings() {
   const advancedChanged = advancedKeys.some(hasFieldChanged);
   const hasPasswordChanges = Boolean(
     passwordData.current_password ||
-      passwordData.new_password ||
-      passwordData.confirm_password
+    passwordData.new_password ||
+    passwordData.confirm_password
   );
 
   const resetFields = (keys: string[]) => {
@@ -561,7 +564,11 @@ export function AdminSettings() {
                   onChange={(e) => setNewMint(e.target.value)}
                   placeholder='https://mint.example.com'
                 />
-                <Button onClick={addMint} disabled={!newMint.trim()} className='sm:w-auto'>
+                <Button
+                  onClick={addMint}
+                  disabled={!newMint.trim()}
+                  className='sm:w-auto'
+                >
                   Add Mint
                 </Button>
               </div>
@@ -627,7 +634,11 @@ export function AdminSettings() {
                   onChange={(e) => setNewRelay(e.target.value)}
                   placeholder='wss://relay.example.com'
                 />
-                <Button onClick={addRelay} disabled={!newRelay.trim()} className='sm:w-auto'>
+                <Button
+                  onClick={addRelay}
+                  disabled={!newRelay.trim()}
+                  className='sm:w-auto'
+                >
                   Add Relay
                 </Button>
               </div>

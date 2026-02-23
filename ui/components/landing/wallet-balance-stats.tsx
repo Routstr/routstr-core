@@ -1,6 +1,11 @@
 'use client';
 
-import { Card, CardContent, CardDescription, CardHeader } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+} from '@/components/ui/card';
 
 interface WalletBalanceStatsProps {
   balanceMsats?: number;
@@ -31,7 +36,7 @@ function WalletMetricCard({
           {label}
         </CardDescription>
       </CardHeader>
-      <CardContent className='px-3 pb-3 pt-0'>
+      <CardContent className='px-3 pt-0 pb-3'>
         <p className='text-xl font-semibold tabular-nums'>
           {hasValue ? `${formatSats(valueMsats)} sats` : '-'}
         </p>

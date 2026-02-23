@@ -1,7 +1,10 @@
 'use client';
 
 import type { Dispatch, SetStateAction } from 'react';
-import type { CreateUpstreamProvider, ProviderType } from '@/lib/api/services/admin';
+import type {
+  CreateUpstreamProvider,
+  ProviderType,
+} from '@/lib/api/services/admin';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -39,10 +42,13 @@ export function ProviderFormFields({
   onCreateAccount,
 }: ProviderFormFieldsProps) {
   const idPrefix = mode === 'edit' ? 'edit_' : '';
-  const providerType = providerTypes.find((pt) => pt.id === formData.provider_type);
+  const providerType = providerTypes.find(
+    (pt) => pt.id === formData.provider_type
+  );
   const hasFixedBaseUrl = providerType?.fixed_base_url || false;
   const platformUrl = providerType?.platform_url || null;
-  const isGenericType = (type: ProviderType) => type.id.toLowerCase() === 'generic';
+  const isGenericType = (type: ProviderType) =>
+    type.id.toLowerCase() === 'generic';
   const nonGenericTypes = providerTypes.filter((type) => !isGenericType(type));
   const genericType = providerTypes.find((type) => isGenericType(type));
   const apiKeyLabel =
@@ -170,7 +176,9 @@ export function ProviderFormFields({
       </div>
 
       <div className='grid gap-2'>
-        <Label htmlFor={`${idPrefix}provider_fee`}>Provider Fee (Multiplier)</Label>
+        <Label htmlFor={`${idPrefix}provider_fee`}>
+          Provider Fee (Multiplier)
+        </Label>
         <Input
           id={`${idPrefix}provider_fee`}
           type='number'
@@ -180,7 +188,9 @@ export function ProviderFormFields({
           onChange={(e) =>
             setFormData((prev) => ({
               ...prev,
-              provider_fee: e.target.value ? parseFloat(e.target.value) : undefined,
+              provider_fee: e.target.value
+                ? parseFloat(e.target.value)
+                : undefined,
             }))
           }
           placeholder={providerFeePlaceholder}

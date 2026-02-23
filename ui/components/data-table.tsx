@@ -190,11 +190,7 @@ const columns: ColumnDef<z.infer<typeof schema>>[] = [
         variant='outline'
         className='text-muted-foreground flex gap-1 px-1.5 [&_svg]:size-3'
       >
-        {row.original.status === 'Done' ? (
-          <CheckCircle2Icon />
-        ) : (
-          <LoaderIcon />
-        )}
+        {row.original.status === 'Done' ? <CheckCircle2Icon /> : <LoaderIcon />}
         {row.original.status}
       </Badge>
     ),

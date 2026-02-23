@@ -109,7 +109,9 @@ export function CostCalculator({ model }: CostCalculatorProps) {
 
       {/* Minimum Cost Alert */}
       {hasMinimumCost && (
-        <Alert variant={costCalculation.isMinimumApplied ? 'destructive' : 'default'}>
+        <Alert
+          variant={costCalculation.isMinimumApplied ? 'destructive' : 'default'}
+        >
           {costCalculation.isMinimumApplied ? (
             <AlertTriangle className='h-4 w-4' />
           ) : (

@@ -104,17 +104,16 @@ export default function ProvidersPage() {
     refetchOnWindowFocus: false,
   });
 
-  const { data: providerModels, isLoading: isLoadingModels } = useQuery<
-    ProviderModels | null
-  >({
-    queryKey: ['provider-models', viewingModels],
-    queryFn: () =>
-      viewingModels
-        ? AdminService.getProviderModels(viewingModels)
-        : Promise.resolve(null),
-    enabled: !!viewingModels,
-    refetchOnWindowFocus: false,
-  });
+  const { data: providerModels, isLoading: isLoadingModels } =
+    useQuery<ProviderModels | null>({
+      queryKey: ['provider-models', viewingModels],
+      queryFn: () =>
+        viewingModels
+          ? AdminService.getProviderModels(viewingModels)
+          : Promise.resolve(null),
+      enabled: !!viewingModels,
+      refetchOnWindowFocus: false,
+    });
 
   const createMutation = useMutation({
     mutationFn: (data: CreateUpstreamProvider) =>
@@ -379,7 +378,9 @@ export default function ProvidersPage() {
           <Card>
             <CardContent className='flex flex-col items-center justify-center py-12'>
               <Server className='text-muted-foreground mb-4 h-12 w-12' />
-              <h3 className='mb-2 text-lg font-semibold'>No providers configured</h3>
+              <h3 className='mb-2 text-lg font-semibold'>
+                No providers configured
+              </h3>
               <p className='text-muted-foreground mb-4 text-sm'>
                 Get started by adding your first upstream provider
               </p>
@@ -398,9 +399,13 @@ export default function ProvidersPage() {
                 isExpanded={expandedProviders.has(provider.id)}
                 canShowBalance={canShowBalance(provider.provider_type)}
                 platformUrl={getPlatformUrl(provider.provider_type)}
-                isModelsLoading={isLoadingModels && viewingModels === provider.id}
+                isModelsLoading={
+                  isLoadingModels && viewingModels === provider.id
+                }
                 providerModels={
-                  viewingModels === provider.id ? providerModels ?? null : null
+                  viewingModels === provider.id
+                    ? (providerModels ?? null)
+                    : null
                 }
                 isDeletingModel={deleteModelMutation.isPending}
                 onToggleExpansion={() => toggleProviderExpansion(provider.id)}

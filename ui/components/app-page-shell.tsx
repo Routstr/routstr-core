@@ -79,7 +79,7 @@ export function AppPageShell({
 
   return (
     <div className='bg-background text-foreground min-h-dvh overflow-x-clip md:h-screen md:overflow-hidden'>
-      <div className='flex min-h-dvh min-w-0 w-full overflow-x-clip md:h-full'>
+      <div className='flex min-h-dvh w-full min-w-0 overflow-x-clip md:h-full'>
         <aside
           className={cn(
             'border-border/60 hidden shrink-0 border-r py-5 transition-[width,padding] duration-200 md:flex md:h-full md:flex-col md:overflow-y-auto',
@@ -102,7 +102,9 @@ export function AppPageShell({
                     height={24}
                     className='rounded-sm'
                   />
-                  <h1 className='text-lg font-semibold tracking-tight'>Routstr Node</h1>
+                  <h1 className='text-lg font-semibold tracking-tight'>
+                    Routstr Node
+                  </h1>
                 </div>
               )}
               <Button
@@ -110,7 +112,7 @@ export function AppPageShell({
                 size='icon'
                 className={cn(
                   'text-muted-foreground hover:text-foreground h-8 w-8',
-                  isSidebarCollapsed ? 'mx-auto' : 'ml-auto -mr-1'
+                  isSidebarCollapsed ? 'mx-auto' : '-mr-1 ml-auto'
                 )}
                 onClick={() => setIsSidebarCollapsed((current) => !current)}
               >
@@ -196,16 +198,16 @@ export function AppPageShell({
                 </Button>
               </>
             ) : (
-              <div className='space-y-1 rounded-lg border border-border/60 bg-card/30 p-1'>
+              <div className='border-border/60 bg-card/30 space-y-1 rounded-lg border p-1'>
                 <CurrencyToggle
                   menuSide='right'
                   menuAlign='start'
-                  className='text-foreground/90 hover:bg-accent/35 h-8 w-full justify-between rounded-md border-border/60 bg-background/25 px-2.5 text-[11px]'
+                  className='text-foreground/90 hover:bg-accent/35 border-border/60 bg-background/25 h-8 w-full justify-between rounded-md px-2.5 text-[11px]'
                 />
                 <ThemeToggle
                   menuSide='right'
                   menuAlign='start'
-                  className='text-foreground/90 hover:bg-accent/35 h-8 w-full justify-between rounded-md border-border/60 bg-background/25 px-2.5 text-[11px]'
+                  className='text-foreground/90 hover:bg-accent/35 border-border/60 bg-background/25 h-8 w-full justify-between rounded-md px-2.5 text-[11px]'
                 />
                 <Button
                   variant='ghost'
@@ -221,10 +223,10 @@ export function AppPageShell({
           </div>
         </aside>
 
-        <section className='relative flex min-w-0 w-full flex-1 flex-col overflow-x-clip md:h-full md:min-h-0'>
+        <section className='relative flex w-full min-w-0 flex-1 flex-col overflow-x-clip md:h-full md:min-h-0'>
           <main
             className={cn(
-              'pb-mobile-nav min-w-0 w-full flex-1 overflow-x-clip p-3 sm:p-4 md:min-h-0 md:overflow-y-auto md:p-6 md:pb-6',
+              'pb-mobile-nav w-full min-w-0 flex-1 overflow-x-clip p-3 sm:p-4 md:min-h-0 md:overflow-y-auto md:p-6 md:pb-6',
               contentClassName,
               className
             )}
@@ -235,7 +237,7 @@ export function AppPageShell({
       </div>
 
       <div className='pointer-events-none fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(0.35rem+env(safe-area-inset-bottom))] md:hidden'>
-        <nav className='pointer-events-auto mx-auto w-full max-w-[34rem] overflow-x-auto overscroll-x-contain rounded-[1.5rem] border border-border/65 bg-background/80 shadow-[0_-16px_36px_-22px_rgba(0,0,0,0.9)] backdrop-blur-2xl [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden supports-[backdrop-filter]:bg-background/72'>
+        <nav className='border-border/65 bg-background/80 supports-[backdrop-filter]:bg-background/72 pointer-events-auto mx-auto w-full max-w-[34rem] overflow-x-auto overscroll-x-contain rounded-[1.5rem] border shadow-[0_-16px_36px_-22px_rgba(0,0,0,0.9)] backdrop-blur-2xl [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'>
           <div
             className={cn(
               'grid min-w-full snap-x snap-mandatory grid-flow-col gap-2 p-2.5',
@@ -280,12 +282,14 @@ export function AppPageShell({
         <DrawerContent className='md:hidden'>
           <DrawerHeader className='px-4 pb-2 text-left'>
             <DrawerTitle>More</DrawerTitle>
-            <DrawerDescription>Account and appearance settings.</DrawerDescription>
+            <DrawerDescription>
+              Account and appearance settings.
+            </DrawerDescription>
           </DrawerHeader>
 
           <div className='space-y-4 px-4 pb-4'>
             <div className='space-y-2'>
-              <p className='text-muted-foreground text-xs font-semibold uppercase tracking-[0.08em]'>
+              <p className='text-muted-foreground text-xs font-semibold tracking-[0.08em] uppercase'>
                 Preferences
               </p>
               <div className='grid grid-cols-2 gap-2'>
@@ -303,7 +307,7 @@ export function AppPageShell({
             </div>
 
             <div className='space-y-2'>
-              <p className='text-muted-foreground text-xs font-semibold uppercase tracking-[0.08em]'>
+              <p className='text-muted-foreground text-xs font-semibold tracking-[0.08em] uppercase'>
                 Account
               </p>
               <Button

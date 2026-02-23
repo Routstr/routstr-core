@@ -68,7 +68,9 @@ function TemporaryBalanceStat({
         </span>
       </CardHeader>
       <CardContent>
-        <p className='text-2xl font-bold tracking-tight tabular-nums'>{value}</p>
+        <p className='text-2xl font-bold tracking-tight tabular-nums'>
+          {value}
+        </p>
       </CardContent>
     </Card>
   );
@@ -111,7 +113,8 @@ function buildHierarchicalData(
 
   const orphans = filteredBalances.filter(
     (item) =>
-      item.parent_key_hash && !result.some((r) => r.hashed_key === item.hashed_key)
+      item.parent_key_hash &&
+      !result.some((r) => r.hashed_key === item.hashed_key)
   );
 
   result.push(...orphans.map((item) => ({ ...item, isChild: true })));
@@ -182,7 +185,10 @@ export function TemporaryBalances({
               className='h-8 w-full sm:w-8'
             >
               <RefreshCw
-                className={cn('h-4 w-4', (isFetching || isLoading) && 'animate-spin')}
+                className={cn(
+                  'h-4 w-4',
+                  (isFetching || isLoading) && 'animate-spin'
+                )}
               />
               <span className='sr-only'>Refresh temporary balances</span>
             </Button>
@@ -197,7 +203,10 @@ export function TemporaryBalances({
           <div className='space-y-4'>
             <div className='grid gap-3 md:grid-cols-3'>
               {Array.from({ length: 3 }).map((_, index) => (
-                <Card key={`temp-stat-skeleton-${index}`} className='shadow-none'>
+                <Card
+                  key={`temp-stat-skeleton-${index}`}
+                  className='shadow-none'
+                >
                   <CardHeader className='space-y-2 pb-1'>
                     <Skeleton className='h-3.5 w-24' />
                     <Skeleton className='h-3 w-8' />
@@ -210,7 +219,10 @@ export function TemporaryBalances({
             </div>
             <div className='space-y-2'>
               {Array.from({ length: 6 }).map((_, index) => (
-                <Skeleton key={`temp-row-skeleton-${index}`} className='h-11 w-full' />
+                <Skeleton
+                  key={`temp-row-skeleton-${index}`}
+                  className='h-11 w-full'
+                />
               ))}
             </div>
           </div>
@@ -252,10 +264,16 @@ export function TemporaryBalances({
                       <TableRow>
                         <TableHead>Hashed Key</TableHead>
                         <TableHead className='text-right'>Balance</TableHead>
-                        <TableHead className='text-right'>Total Spent</TableHead>
-                        <TableHead className='text-right'>Total Requests</TableHead>
+                        <TableHead className='text-right'>
+                          Total Spent
+                        </TableHead>
+                        <TableHead className='text-right'>
+                          Total Requests
+                        </TableHead>
                         <TableHead>Refund Address</TableHead>
-                        <TableHead className='text-right'>Expiry Time</TableHead>
+                        <TableHead className='text-right'>
+                          Expiry Time
+                        </TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -263,14 +281,19 @@ export function TemporaryBalances({
                         <TableRow
                           key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-${index}`}
                           className={cn(
-                            balance.balance === 0 && !balance.isChild && 'opacity-60',
+                            balance.balance === 0 &&
+                              !balance.isChild &&
+                              'opacity-60',
                             balance.isChild && 'bg-muted/30'
                           )}
                         >
                           <TableCell className='max-w-[16rem] font-mono text-xs break-all whitespace-normal'>
                             <div className='flex items-center gap-2'>
                               {balance.isChild && (
-                                <Badge variant='outline' className='h-4 px-1 text-[10px] uppercase'>
+                                <Badge
+                                  variant='outline'
+                                  className='h-4 px-1 text-[10px] uppercase'
+                                >
                                   Child
                                 </Badge>
                               )}
@@ -279,7 +302,9 @@ export function TemporaryBalances({
                           </TableCell>
                           <TableCell className='text-right font-mono'>
                             {balance.isChild ? (
-                              <span className='text-muted-foreground italic'>(Parent)</span>
+                              <span className='text-muted-foreground italic'>
+                                (Parent)
+                              </span>
                             ) : (
                               formatBalance(balance.balance)
                             )}
@@ -298,7 +323,9 @@ export function TemporaryBalances({
                               <div className='inline-flex items-center justify-end gap-1'>
                                 <Clock className='h-3 w-3' />
                                 <span>
-                                  {new Date(balance.key_expiry_time * 1000).toLocaleDateString()}
+                                  {new Date(
+                                    balance.key_expiry_time * 1000
+                                  ).toLocaleDateString()}
                                 </span>
                               </div>
                             ) : (
@@ -317,7 +344,9 @@ export function TemporaryBalances({
                       key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
                       className={cn(
                         'shadow-none',
-                        balance.balance === 0 && !balance.isChild && 'opacity-80',
+                        balance.balance === 0 &&
+                          !balance.isChild &&
+                          'opacity-80',
                         balance.isChild && 'bg-muted/30'
                       )}
                     >
@@ -327,7 +356,10 @@ export function TemporaryBalances({
                             {balance.hashed_key}
                           </CardDescription>
                           {balance.isChild && (
-                            <Badge variant='outline' className='h-4 px-1.5 text-[10px] uppercase'>
+                            <Badge
+                              variant='outline'
+                              className='h-4 px-1.5 text-[10px] uppercase'
+                            >
                               Child
                             </Badge>
                           )}
@@ -335,9 +367,13 @@ export function TemporaryBalances({
                       </CardHeader>
                       <CardContent className='grid grid-cols-2 gap-3 p-4 pt-0'>
                         <div>
-                          <p className='text-muted-foreground text-xs'>Balance</p>
+                          <p className='text-muted-foreground text-xs'>
+                            Balance
+                          </p>
                           <p className='font-mono text-sm'>
-                            {balance.isChild ? '(Uses Parent)' : formatBalance(balance.balance)}
+                            {balance.isChild
+                              ? '(Uses Parent)'
+                              : formatBalance(balance.balance)}
                           </p>
                         </div>
                         <div>
@@ -347,18 +383,24 @@ export function TemporaryBalances({
                           </p>
                         </div>
                         <div>
-                          <p className='text-muted-foreground text-xs'>Requests</p>
+                          <p className='text-muted-foreground text-xs'>
+                            Requests
+                          </p>
                           <p className='font-mono text-sm'>
                             {balance.total_requests.toLocaleString()}
                           </p>
                         </div>
                         <div>
-                          <p className='text-muted-foreground text-xs'>Expires</p>
+                          <p className='text-muted-foreground text-xs'>
+                            Expires
+                          </p>
                           <p className='font-mono text-xs'>
                             {balance.key_expiry_time ? (
                               <span className='inline-flex items-center gap-1'>
                                 <Clock className='h-3 w-3' />
-                                {new Date(balance.key_expiry_time * 1000).toLocaleDateString()}
+                                {new Date(
+                                  balance.key_expiry_time * 1000
+                                ).toLocaleDateString()}
                               </span>
                             ) : (
                               '-'
@@ -367,7 +409,9 @@ export function TemporaryBalances({
                         </div>
                         {balance.refund_address && (
                           <div className='col-span-2'>
-                            <p className='text-muted-foreground text-xs'>Refund Address</p>
+                            <p className='text-muted-foreground text-xs'>
+                              Refund Address
+                            </p>
                             <p className='font-mono text-xs break-all'>
                               {balance.refund_address}
                             </p>
@@ -404,7 +448,8 @@ export function TemporaryBalances({
 
             {data && data.length > 0 && (
               <p className='text-muted-foreground text-xs'>
-                Showing {filteredData.length} of {data.length} temporary balances
+                Showing {filteredData.length} of {data.length} temporary
+                balances
               </p>
             )}
           </div>

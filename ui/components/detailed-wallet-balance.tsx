@@ -85,7 +85,8 @@ export function DetailedWalletBalance({
 
   const rows = (data ?? [])
     .filter(
-      (detail) => (detail.wallet_balance && detail.wallet_balance > 0) || detail.error
+      (detail) =>
+        (detail.wallet_balance && detail.wallet_balance > 0) || detail.error
     )
     .map((detail, index) => {
       const walletMsat = convertToMsat(detail.wallet_balance || 0, detail.unit);
@@ -147,7 +148,10 @@ export function DetailedWalletBalance({
             <div className='space-y-4'>
               <div className='grid gap-3 md:grid-cols-3'>
                 {Array.from({ length: 3 }).map((_, index) => (
-                  <Card key={`wallet-stat-skeleton-${index}`} className='shadow-none'>
+                  <Card
+                    key={`wallet-stat-skeleton-${index}`}
+                    className='shadow-none'
+                  >
                     <CardHeader className='space-y-2 pb-1'>
                       <Skeleton className='h-3.5 w-28' />
                       <Skeleton className='h-3 w-8' />
@@ -161,7 +165,10 @@ export function DetailedWalletBalance({
               <Skeleton className='h-3 w-52' />
               <div className='space-y-2'>
                 {Array.from({ length: 5 }).map((_, index) => (
-                  <Skeleton key={`wallet-row-skeleton-${index}`} className='h-11 w-full' />
+                  <Skeleton
+                    key={`wallet-row-skeleton-${index}`}
+                    className='h-11 w-full'
+                  />
                 ))}
               </div>
             </div>
@@ -177,7 +184,9 @@ export function DetailedWalletBalance({
               <div className='grid gap-3 md:grid-cols-3'>
                 <Card className='shadow-none'>
                   <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                    <CardTitle className='text-sm font-medium'>Your Balance (Total)</CardTitle>
+                    <CardTitle className='text-sm font-medium'>
+                      Your Balance (Total)
+                    </CardTitle>
                     <span className='inline-flex size-8 items-center justify-center text-green-600 dark:text-green-300'>
                       <Coins className='h-4 w-4' />
                     </span>
@@ -190,7 +199,9 @@ export function DetailedWalletBalance({
                 </Card>
                 <Card className='shadow-none'>
                   <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                    <CardTitle className='text-sm font-medium'>Total Wallet</CardTitle>
+                    <CardTitle className='text-sm font-medium'>
+                      Total Wallet
+                    </CardTitle>
                     <span className='inline-flex size-8 items-center justify-center text-blue-600 dark:text-blue-300'>
                       <Wallet className='h-4 w-4' />
                     </span>
@@ -203,7 +214,9 @@ export function DetailedWalletBalance({
                 </Card>
                 <Card className='shadow-none'>
                   <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                    <CardTitle className='text-sm font-medium'>User Balance</CardTitle>
+                    <CardTitle className='text-sm font-medium'>
+                      User Balance
+                    </CardTitle>
                     <span className='inline-flex size-8 items-center justify-center text-purple-600 dark:text-purple-300'>
                       <User className='h-4 w-4' />
                     </span>
@@ -233,76 +246,102 @@ export function DetailedWalletBalance({
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {rows.map(({ key, detail, walletMsat, userMsat, ownerMsat }) => (
-                          <TableRow
-                            key={key}
-                            className={cn(
-                              detail.error && 'bg-destructive/10 text-destructive'
-                            )}
-                          >
-                            <TableCell className='max-w-md font-mono text-xs break-all whitespace-normal'>
-                              {formatMintLabel(detail)}
-                            </TableCell>
-                            <TableCell className='text-right font-mono'>
-                              {detail.error ? 'error' : formatAmount(walletMsat)}
-                            </TableCell>
-                            <TableCell className='text-right font-mono'>
-                              {detail.error ? '-' : formatAmount(userMsat)}
-                            </TableCell>
-                            <TableCell
+                        {rows.map(
+                          ({
+                            key,
+                            detail,
+                            walletMsat,
+                            userMsat,
+                            ownerMsat,
+                          }) => (
+                            <TableRow
+                              key={key}
                               className={cn(
-                                'text-right font-mono',
-                                !detail.error && ownerMsat > 0 && 'text-primary font-semibold'
+                                detail.error &&
+                                  'bg-destructive/10 text-destructive'
                               )}
                             >
-                              {detail.error ? '-' : formatAmount(ownerMsat)}
-                            </TableCell>
-                          </TableRow>
-                        ))}
+                              <TableCell className='max-w-md font-mono text-xs break-all whitespace-normal'>
+                                {formatMintLabel(detail)}
+                              </TableCell>
+                              <TableCell className='text-right font-mono'>
+                                {detail.error
+                                  ? 'error'
+                                  : formatAmount(walletMsat)}
+                              </TableCell>
+                              <TableCell className='text-right font-mono'>
+                                {detail.error ? '-' : formatAmount(userMsat)}
+                              </TableCell>
+                              <TableCell
+                                className={cn(
+                                  'text-right font-mono',
+                                  !detail.error &&
+                                    ownerMsat > 0 &&
+                                    'text-primary font-semibold'
+                                )}
+                              >
+                                {detail.error ? '-' : formatAmount(ownerMsat)}
+                              </TableCell>
+                            </TableRow>
+                          )
+                        )}
                       </TableBody>
                     </Table>
                   </div>
                   <div className='space-y-2 md:hidden'>
-                    {rows.map(({ key, detail, walletMsat, userMsat, ownerMsat }) => (
-                      <Card
-                        key={`${key}-mobile`}
-                        className={cn(
-                          'shadow-none',
-                          detail.error && 'border-destructive/40 bg-destructive/5'
-                        )}
-                      >
-                        <CardHeader className='p-4 pb-2'>
-                          <CardDescription className='font-mono text-xs break-all'>
-                            {formatMintLabel(detail)}
-                          </CardDescription>
-                        </CardHeader>
-                        <CardContent className='grid grid-cols-1 gap-2 p-4 pt-0 sm:grid-cols-3 sm:gap-3'>
-                          <div>
-                            <p className='text-muted-foreground text-xs'>Wallet</p>
-                            <p className='font-mono text-sm'>
-                              {detail.error ? 'error' : formatAmount(walletMsat)}
-                            </p>
-                          </div>
-                          <div>
-                            <p className='text-muted-foreground text-xs'>Users</p>
-                            <p className='font-mono text-sm'>
-                              {detail.error ? '-' : formatAmount(userMsat)}
-                            </p>
-                          </div>
-                          <div>
-                            <p className='text-muted-foreground text-xs'>Owner</p>
-                            <p
-                              className={cn(
-                                'font-mono text-sm',
-                                !detail.error && ownerMsat > 0 && 'text-primary font-semibold'
-                              )}
-                            >
-                              {detail.error ? '-' : formatAmount(ownerMsat)}
-                            </p>
-                          </div>
-                        </CardContent>
-                      </Card>
-                    ))}
+                    {rows.map(
+                      ({ key, detail, walletMsat, userMsat, ownerMsat }) => (
+                        <Card
+                          key={`${key}-mobile`}
+                          className={cn(
+                            'shadow-none',
+                            detail.error &&
+                              'border-destructive/40 bg-destructive/5'
+                          )}
+                        >
+                          <CardHeader className='p-4 pb-2'>
+                            <CardDescription className='font-mono text-xs break-all'>
+                              {formatMintLabel(detail)}
+                            </CardDescription>
+                          </CardHeader>
+                          <CardContent className='grid grid-cols-1 gap-2 p-4 pt-0 sm:grid-cols-3 sm:gap-3'>
+                            <div>
+                              <p className='text-muted-foreground text-xs'>
+                                Wallet
+                              </p>
+                              <p className='font-mono text-sm'>
+                                {detail.error
+                                  ? 'error'
+                                  : formatAmount(walletMsat)}
+                              </p>
+                            </div>
+                            <div>
+                              <p className='text-muted-foreground text-xs'>
+                                Users
+                              </p>
+                              <p className='font-mono text-sm'>
+                                {detail.error ? '-' : formatAmount(userMsat)}
+                              </p>
+                            </div>
+                            <div>
+                              <p className='text-muted-foreground text-xs'>
+                                Owner
+                              </p>
+                              <p
+                                className={cn(
+                                  'font-mono text-sm',
+                                  !detail.error &&
+                                    ownerMsat > 0 &&
+                                    'text-primary font-semibold'
+                                )}
+                              >
+                                {detail.error ? '-' : formatAmount(ownerMsat)}
+                              </p>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )
+                    )}
                   </div>
                 </>
               ) : (
@@ -313,7 +352,8 @@ export function DetailedWalletBalance({
                     </EmptyMedia>
                     <EmptyTitle>No balances to display</EmptyTitle>
                     <EmptyDescription>
-                      Wallet balances will appear here after funds are available.
+                      Wallet balances will appear here after funds are
+                      available.
                     </EmptyDescription>
                   </EmptyHeader>
                 </Empty>

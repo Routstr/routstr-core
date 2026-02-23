@@ -22,7 +22,11 @@ export default function UnauthorizedPage() {
           <Button onClick={() => router.push('/')} className='w-full sm:w-auto'>
             Go to Dashboard
           </Button>
-          <Button variant='outline' onClick={() => router.back()} className='w-full sm:w-auto'>
+          <Button
+            variant='outline'
+            onClick={() => router.back()}
+            className='w-full sm:w-auto'
+          >
             Go Back
           </Button>
         </div>

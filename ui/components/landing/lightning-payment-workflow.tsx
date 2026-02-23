@@ -91,7 +91,12 @@ function InvoiceDetailsCard({
           <span>
             {label} ({amountSats} sats)
           </span>
-          <Button variant='outline' size='sm' className='gap-1 text-xs' onClick={onCopy}>
+          <Button
+            variant='outline'
+            size='sm'
+            className='gap-1 text-xs'
+            onClick={onCopy}
+          >
             <Copy className='h-3 w-3' />
             Copy
           </Button>
@@ -117,9 +122,16 @@ function InvoiceDetailsCard({
           </div>
         )}
 
-        <Textarea value={bolt11} readOnly rows={4} className='font-mono text-xs' />
+        <Textarea
+          value={bolt11}
+          readOnly
+          rows={4}
+          className='font-mono text-xs'
+        />
 
-        <p className='text-muted-foreground text-center text-xs'>{helperText}</p>
+        <p className='text-muted-foreground text-center text-xs'>
+          {helperText}
+        </p>
       </CardContent>
     </Card>
   );
@@ -137,16 +149,31 @@ function ApiKeyResultAlert({
       <CheckCircle className='h-4 w-4' />
       <AlertTitle className='flex items-center justify-between gap-2'>
         <span>{title}</span>
-        <Button variant='outline' size='sm' className='gap-1 text-xs' onClick={onCopy}>
+        <Button
+          variant='outline'
+          size='sm'
+          className='gap-1 text-xs'
+          onClick={onCopy}
+        >
           <Copy className='h-3 w-3' />
           Copy
         </Button>
       </AlertTitle>
       <AlertDescription className='space-y-3'>
-        <Textarea value={apiKey} readOnly rows={2} className='font-mono text-xs' />
+        <Textarea
+          value={apiKey}
+          readOnly
+          rows={2}
+          className='font-mono text-xs'
+        />
         <div className='flex items-center justify-between gap-2'>
           <span>{description}</span>
-          <Button variant='ghost' size='sm' className='h-6 px-2 text-xs' onClick={onDismiss}>
+          <Button
+            variant='ghost'
+            size='sm'
+            className='h-6 px-2 text-xs'
+            onClick={onDismiss}
+          >
             Dismiss
           </Button>
         </div>

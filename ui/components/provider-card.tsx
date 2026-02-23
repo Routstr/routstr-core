@@ -69,7 +69,7 @@ export function ProviderCard({
                 {provider.enabled ? 'Enabled' : 'Disabled'}
               </Badge>
             </div>
-            <CardDescription className='mt-1 break-all text-xs sm:text-sm'>
+            <CardDescription className='mt-1 text-xs break-all sm:text-sm'>
               {provider.base_url}
             </CardDescription>
           </div>
@@ -77,7 +77,10 @@ export function ProviderCard({
           <div className='grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end'>
             {canShowBalance && provider.api_key && (
               <div className='col-span-2 sm:col-auto'>
-                <ProviderBalance providerId={provider.id} platformUrl={platformUrl} />
+                <ProviderBalance
+                  providerId={provider.id}
+                  platformUrl={platformUrl}
+                />
               </div>
             )}
 
@@ -127,7 +130,9 @@ export function ProviderCard({
             {provider.api_version && (
               <div className='flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:justify-between'>
                 <span className='text-muted-foreground'>API Version:</span>
-                <span className='font-mono break-all'>{provider.api_version}</span>
+                <span className='font-mono break-all'>
+                  {provider.api_version}
+                </span>
               </div>
             )}
 
