@@ -303,128 +303,132 @@ class LogManager:
         return 0
 
     def get_usage_summary(self, hours: int = 24) -> dict:
-        entries = list(
-            self._yield_log_entries(
-                hours_back=hours, window_center=datetime.now(timezone.utc)
-            )
+        return self._cache_call(
+            ("usage_summary", hours),
+            lambda: self._calculate_summary_stats(self._get_cached_entries(hours)),
         )
-        return self._calculate_summary_stats(entries)
 
     def get_usage_metrics(self, interval: int = 15, hours: int = 24) -> dict:
-        entries = list(
-            self._yield_log_entries(
-                hours_back=hours, window_center=datetime.now(timezone.utc)
-            )
+        return self._cache_call(
+            ("usage_metrics", interval, hours),
+            lambda: self._aggregate_metrics_by_time(
+                self._get_cached_entries(hours), interval, hours
+            ),
         )
-        return self._aggregate_metrics_by_time(entries, interval, hours)
 
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
-        errors: list[dict[str, Any]] = []
+        def compute() -> dict:
+            errors: list[dict[str, Any]] = []
 
-        for entry in self._yield_log_entries(hours_back=hours):
-            if str(entry.get("levelname", "")).upper() != "ERROR":
-                continue
+            for entry in self._get_cached_entries(hours):
+                if str(entry.get("levelname", "")).upper() != "ERROR":
+                    continue
 
-            errors.append(
-                {
-                    "timestamp": entry.get("asctime", ""),
-                    "message": entry.get("message", ""),
-                    "error_type": entry.get("error_type", "unknown"),
-                    "pathname": entry.get("pathname", ""),
-                    "lineno": entry.get("lineno", 0),
-                    "request_id": entry.get("request_id", ""),
-                }
-            )
+                errors.append(
+                    {
+                        "timestamp": entry.get("asctime", ""),
+                        "message": entry.get("message", ""),
+                        "error_type": entry.get("error_type", "unknown"),
+                        "pathname": entry.get("pathname", ""),
+                        "lineno": entry.get("lineno", 0),
+                        "request_id": entry.get("request_id", ""),
+                    }
+                )
 
-        errors.sort(key=lambda x: str(x["timestamp"]), reverse=True)
-        return {"errors": errors[:limit], "total_count": len(errors)}
+            errors.sort(key=lambda x: str(x["timestamp"]), reverse=True)
+            return {"errors": errors[:limit], "total_count": len(errors)}
+
+        return self._cache_call(("error_details", hours, limit), compute)
 
     def get_revenue_by_model(self, hours: int = 24, limit: int = 20) -> dict:
-        entries = list(
-            self._yield_log_entries(
-                hours_back=hours, window_center=datetime.now(timezone.utc)
-            )
-        )
+        def compute() -> dict:
+            entries = self._get_cached_entries(hours)
 
-        model_stats: dict[str, dict[str, int | float]] = defaultdict(
-            lambda: {
-                "revenue_msats": 0,
-                "refunds_msats": 0,
-                "requests": 0,
-                "successful": 0,
-                "failed": 0,
-            }
-        )
-
-        for entry in entries:
-            try:
-                model = entry.get("model", "unknown")
-                if not isinstance(model, str):
-                    model = "unknown"
-
-                message = str(entry.get("message", "")).lower()
-
-                completed, revenue_msats, _, _ = self._extract_success_metrics(
-                    entry, message
-                )
-                if completed:
-                    model_stats[model]["requests"] += 1
-                    model_stats[model]["successful"] += 1
-                    if revenue_msats > 0:
-                        model_stats[model]["revenue_msats"] += revenue_msats
-
-                failed = (
-                    "revert payment" in message or "upstream request failed" in message
-                )
-                if failed:
-                    model_stats[model]["requests"] += 1
-                    model_stats[model]["failed"] += 1
-                    if "revert payment" in message:
-                        max_cost = entry.get("max_cost_for_model", 0)
-                        if isinstance(max_cost, (int, float)) and max_cost > 0:
-                            model_stats[model]["refunds_msats"] += max_cost
-
-            except Exception:
-                continue
-
-        models: list[dict[str, Any]] = []
-        total_revenue = 0.0
-
-        for model, stats in model_stats.items():
-            revenue_msats = float(stats["revenue_msats"])
-            refunds_msats = float(stats["refunds_msats"])
-
-            revenue_sats = revenue_msats / 1000
-            refunds_sats = refunds_msats / 1000
-            net_revenue_sats = revenue_sats - refunds_sats
-
-            total_revenue += net_revenue_sats
-
-            requests = int(stats["requests"])
-            successful = int(stats["successful"])
-
-            models.append(
-                {
-                    "model": model,
-                    "revenue_sats": revenue_sats,
-                    "refunds_sats": refunds_sats,
-                    "net_revenue_sats": net_revenue_sats,
-                    "requests": requests,
-                    "successful": successful,
-                    "failed": int(stats["failed"]),
-                    "avg_revenue_per_request": (
-                        revenue_sats / successful if successful > 0 else 0
-                    ),
+            model_stats: dict[str, dict[str, int | float]] = defaultdict(
+                lambda: {
+                    "revenue_msats": 0,
+                    "refunds_msats": 0,
+                    "requests": 0,
+                    "successful": 0,
+                    "failed": 0,
                 }
             )
 
-        models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
+            for entry in entries:
+                try:
+                    model = entry.get("model", "unknown")
+                    if not isinstance(model, str):
+                        model = "unknown"
 
-        return {
-            "models": models[:limit],
-            "total_revenue_sats": total_revenue,
-            "total_models": len(models),
-        }
+                    message = str(entry.get("message", "")).lower()
+
+                    completed, revenue_msats, _, _ = self._extract_success_metrics(
+                        entry, message
+                    )
+                    if completed:
+                        model_stats[model]["requests"] += 1
+                        model_stats[model]["successful"] += 1
+                        if revenue_msats > 0:
+                            model_stats[model]["revenue_msats"] += revenue_msats
+
+                    failed = (
+                        "revert payment" in message
+                        or "upstream request failed" in message
+                    )
+                    if failed:
+                        model_stats[model]["requests"] += 1
+                        model_stats[model]["failed"] += 1
+                        if "revert payment" in message:
+                            max_cost = entry.get("max_cost_for_model", 0)
+                            if (
+                                isinstance(max_cost, (int, float))
+                                and max_cost > 0
+                            ):
+                                model_stats[model]["refunds_msats"] += max_cost
+
+                except Exception:
+                    continue
+
+            models: list[dict[str, Any]] = []
+            total_revenue = 0.0
+
+            for model, stats in model_stats.items():
+                revenue_msats = float(stats["revenue_msats"])
+                refunds_msats = float(stats["refunds_msats"])
+
+                revenue_sats = revenue_msats / 1000
+                refunds_sats = refunds_msats / 1000
+                net_revenue_sats = revenue_sats - refunds_sats
+
+                total_revenue += net_revenue_sats
+
+                requests = int(stats["requests"])
+                successful = int(stats["successful"])
+
+                models.append(
+                    {
+                        "model": model,
+                        "revenue_sats": revenue_sats,
+                        "refunds_sats": refunds_sats,
+                        "net_revenue_sats": net_revenue_sats,
+                        "requests": requests,
+                        "successful": successful,
+                        "failed": int(stats["failed"]),
+                        "avg_revenue_per_request": (
+                            revenue_sats / successful if successful > 0 else 0
+                        ),
+                    }
+                )
+
+            models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
+
+            return {
+                "models": models[:limit],
+                "total_revenue_sats": total_revenue,
+                "total_models": len(models),
+            }
+
+        return self._cache_call(("revenue_by_model", hours, limit), compute)
 
     def _build_summary_response(self, stats: dict[str, Any]) -> dict[str, Any]:
         revenue_sats = stats["revenue_msats"] / 1000
