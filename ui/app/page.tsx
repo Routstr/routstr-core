@@ -423,12 +423,8 @@ export default function DashboardPage() {
   const [activeChartId, setActiveChartId] = useState('revenue');
   const isMobile = useIsMobile();
   const { displayUnit } = useCurrencyStore();
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    if (typeof window === 'undefined') {
-      return false;
-    }
-    return ConfigurationService.isTokenValid();
-  });
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthResolved, setIsAuthResolved] = useState(false);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -437,6 +433,7 @@ export default function DashboardPage() {
 
     const syncAuthState = (): void => {
       setIsAuthenticated(ConfigurationService.isTokenValid());
+      setIsAuthResolved(true);
     };
 
     syncAuthState();
@@ -656,6 +653,17 @@ export default function DashboardPage() {
       setActiveChartId(chartConfigs[0].id);
     }
   }, [chartConfigs, activeChartId]);
+
+  if (!isAuthResolved) {
+    return (
+      <div className='bg-background min-h-screen'>
+        <main className='mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-10 sm:px-6 lg:px-8'>
+          <SectionLoading label='summary' />
+          <SectionLoading label='metrics' />
+        </main>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     return <CheatSheet />;

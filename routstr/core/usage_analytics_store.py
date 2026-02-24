@@ -21,7 +21,7 @@ class UsageAnalyticsStore:
     bytes.
     """
 
-    SCHEMA_VERSION = "2"
+    SCHEMA_VERSION = "3"
 
     def __init__(self, logs_dir: Path, db_path: Path | None = None):
         self.logs_dir = logs_dir
@@ -473,10 +473,7 @@ class UsageAnalyticsStore:
                 elif level == "WARNING":
                     bucket["warnings"] += 1
 
-                completed = (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                )
+                completed, revenue_msats = self._extract_success_metrics(entry, message)
                 if completed:
                     bucket["total_requests"] += 1
                     bucket["successful_chat_completions"] += 1
@@ -484,13 +481,9 @@ class UsageAnalyticsStore:
                     model_bucket["requests"] += 1
                     model_bucket["successful"] += 1
 
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            cost_float = float(actual_cost)
-                            bucket["revenue_msats"] += cost_float
-                            model_bucket["revenue_msats"] += cost_float
+                    if revenue_msats > 0:
+                        bucket["revenue_msats"] += revenue_msats
+                        model_bucket["revenue_msats"] += revenue_msats
 
                 failed = (
                     "upstream request failed" in message
@@ -987,6 +980,29 @@ class UsageAnalyticsStore:
         if timestamp[10] != " ":
             return None
         return f"{timestamp[:16]}:00"
+
+    def _extract_success_metrics(
+        self, entry: dict[str, Any], message: str
+    ) -> tuple[bool, float]:
+        # These auth logs are emitted once per successful settlement across providers
+        # and avoid duplicate counting from provider-specific completion logs.
+        logger_name = str(entry.get("name", ""))
+        if not logger_name.startswith("routstr.auth"):
+            return False, 0.0
+
+        if "calculated token-based cost" in message:
+            token_cost = entry.get("token_cost", 0)
+            if isinstance(token_cost, (int, float)) and token_cost > 0:
+                return True, float(token_cost)
+            return True, 0.0
+
+        if "max cost payment finalized" in message:
+            charged_amount = entry.get("charged_amount", 0)
+            if isinstance(charged_amount, (int, float)) and charged_amount > 0:
+                return True, float(charged_amount)
+            return True, 0.0
+
+        return False, 0.0
 
     def _new_minute_stats(self) -> dict[str, float]:
         return {

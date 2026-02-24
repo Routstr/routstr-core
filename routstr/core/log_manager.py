@@ -287,6 +287,28 @@ class LogManager:
         rounded_minute = rounded_minutes % 60
         return f"{timestamp_str[:10]} {rounded_hour:02d}:{rounded_minute:02d}:00"
 
+    def _extract_success_metrics(
+        self, entry: dict[str, Any], message: str
+    ) -> tuple[bool, float]:
+        # Use auth settlement logs as the canonical successful request signal.
+        logger_name = str(entry.get("name", ""))
+        if not logger_name.startswith("routstr.auth"):
+            return False, 0.0
+
+        if "calculated token-based cost" in message:
+            token_cost = entry.get("token_cost", 0)
+            if isinstance(token_cost, (int, float)) and token_cost > 0:
+                return True, float(token_cost)
+            return True, 0.0
+
+        if "max cost payment finalized" in message:
+            charged_amount = entry.get("charged_amount", 0)
+            if isinstance(charged_amount, (int, float)) and charged_amount > 0:
+                return True, float(charged_amount)
+            return True, 0.0
+
+        return False, 0.0
+
     def get_usage_summary(self, hours: int = 24) -> dict:
         def compute() -> dict:
             try:
@@ -426,21 +448,14 @@ class LogManager:
 
                     message = str(entry.get("message", "")).lower()
 
-                    completed = (
-                        "completed for streaming" in message
-                        or "completed for non-streaming" in message
+                    completed, revenue_msats = self._extract_success_metrics(
+                        entry, message
                     )
                     if completed:
                         model_stats[model]["requests"] += 1
                         model_stats[model]["successful"] += 1
-                        cost_data = entry.get("cost_data")
-                        if isinstance(cost_data, dict):
-                            actual_cost = cost_data.get("total_msats", 0)
-                            if (
-                                isinstance(actual_cost, (int, float))
-                                and actual_cost > 0
-                            ):
-                                model_stats[model]["revenue_msats"] += actual_cost
+                        if revenue_msats > 0:
+                            model_stats[model]["revenue_msats"] += revenue_msats
 
                     failed = (
                         "revert payment" in message
@@ -567,9 +582,8 @@ class LogManager:
                 elif level == "WARNING":
                     stats["total_warnings"] += 1
 
-                completed = (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
+                completed, revenue_msats = self._extract_success_metrics(
+                    entry, message
                 )
                 if completed:
                     stats["total_requests"] += 1
@@ -594,12 +608,8 @@ class LogManager:
                     if isinstance(model, str) and model != "unknown":
                         stats["unique_models"].add(model)
 
-                if completed:
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            stats["revenue_msats"] += float(actual_cost)
+                if completed and revenue_msats > 0:
+                    stats["revenue_msats"] += revenue_msats
 
                 if "revert payment" in message:
                     max_cost = entry.get("max_cost_for_model", 0)
@@ -700,10 +710,7 @@ class LogManager:
                     if bucket:
                         bucket["warnings"] += 1
 
-                completed = (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                )
+                completed, revenue_msats = self._extract_success_metrics(entry, message)
                 if completed:
                     summary_stats["total_requests"] += 1
                     summary_stats["successful_chat_completions"] += 1
@@ -713,15 +720,11 @@ class LogManager:
                         bucket["total_requests"] += 1
                         bucket["successful_chat_completions"] += 1
 
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            actual_cost_float = float(actual_cost)
-                            summary_stats["revenue_msats"] += actual_cost_float
-                            model_stats[model]["revenue_msats"] += actual_cost_float
-                            if bucket:
-                                bucket["revenue_msats"] += actual_cost_float
+                    if revenue_msats > 0:
+                        summary_stats["revenue_msats"] += revenue_msats
+                        model_stats[model]["revenue_msats"] += revenue_msats
+                        if bucket:
+                            bucket["revenue_msats"] += revenue_msats
 
                 failed = (
                     "upstream request failed" in message
@@ -852,10 +855,7 @@ class LogManager:
                 message = str(entry.get("message", "")).lower()
                 level = str(entry.get("levelname", "")).upper()
 
-                completed = (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                )
+                completed, revenue_msats = self._extract_success_metrics(entry, message)
                 if completed:
                     bucket["total_requests"] += 1
                     bucket["successful_chat_completions"] += 1
@@ -878,12 +878,8 @@ class LogManager:
                 if "payment processed successfully" in message:
                     bucket["payment_processed"] += 1
 
-                if completed:
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            bucket["revenue_msats"] += float(actual_cost)
+                if completed and revenue_msats > 0:
+                    bucket["revenue_msats"] += revenue_msats
 
                 if "revert payment" in message:
                     max_cost = entry.get("max_cost_for_model", 0)
