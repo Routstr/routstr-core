@@ -36,7 +36,6 @@ class UsageAnalyticsStore:
         hours_back: int,
         error_limit: int,
         model_limit: int,
-        max_points: int | None,
     ) -> dict[str, Any]:
         with self._lock:
             conn = self._get_connection_locked()
@@ -49,7 +48,6 @@ class UsageAnalyticsStore:
                 cutoff_timestamp=cutoff_timestamp,
                 interval_minutes=interval_minutes,
                 hours_back=hours_back,
-                max_points=max_points,
             )
             error_details = self._query_error_details_locked(
                 conn,
@@ -92,7 +90,6 @@ class UsageAnalyticsStore:
                 cutoff_timestamp=cutoff_timestamp,
                 interval_minutes=interval_minutes,
                 hours_back=hours_back,
-                max_points=None,
             )
 
     def get_error_details(self, *, hours_back: int, limit: int) -> dict[str, Any]:
@@ -687,7 +684,6 @@ class UsageAnalyticsStore:
         cutoff_timestamp: str,
         interval_minutes: int,
         hours_back: int,
-        max_points: int | None,
     ) -> dict[str, Any]:
         bucket_seconds = max(60, int(interval_minutes) * 60)
         rows = conn.execute(
@@ -763,8 +759,6 @@ class UsageAnalyticsStore:
                     "requests": total_requests,
                 }
             )
-
-        points = self._downsample_metric_points(points, max_points)
 
         normalized_totals: dict[str, int | float] = {
             "total_requests": int(totals["total_requests"]),
@@ -1016,28 +1010,3 @@ class UsageAnalyticsStore:
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
         }
-
-    def _downsample_metric_points(
-        self, points: list[dict[str, Any]], max_points: int | None
-    ) -> list[dict[str, Any]]:
-        if max_points is None or max_points <= 0:
-            return points
-        if len(points) <= max_points:
-            return points
-        if max_points == 1:
-            return [points[-1]]
-
-        step = (len(points) - 1) / (max_points - 1)
-        sampled: list[dict[str, Any]] = []
-        last_index = -1
-
-        for i in range(max_points):
-            index = int(round(i * step))
-            if index <= last_index:
-                index = min(last_index + 1, len(points) - 1)
-            sampled.append(points[index])
-            last_index = index
-
-        sampled[0] = points[0]
-        sampled[-1] = points[-1]
-        return sampled

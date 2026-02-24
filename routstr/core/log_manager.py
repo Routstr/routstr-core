@@ -328,7 +328,6 @@ class LogManager:
         hours: int = 24,
         error_limit: int = 100,
         model_limit: int = 20,
-        max_points: int | None = None,
     ) -> dict:
         # Large ranges are expensive to scan; keep cached longer.
         if hours <= 24:
@@ -349,7 +348,6 @@ class LogManager:
                     hours_back=hours,
                     error_limit=error_limit,
                     model_limit=model_limit,
-                    max_points=max_points,
                 )
             except Exception as e:
                 logger.error(
@@ -360,11 +358,10 @@ class LogManager:
                     hours_back=hours,
                     error_limit=error_limit,
                     model_limit=model_limit,
-                    max_points=max_points,
                 )
 
         return self._cache_call(
-            ("usage_dashboard", interval, hours, error_limit, model_limit, max_points),
+            ("usage_dashboard", interval, hours, error_limit, model_limit),
             compute,
             ttl_seconds=cache_ttl,
         )
@@ -620,7 +617,6 @@ class LogManager:
         hours_back: int,
         error_limit: int,
         model_limit: int,
-        max_points: int | None,
     ) -> dict[str, Any]:
         time_buckets: dict[str, dict[str, Any]] = defaultdict(
             lambda: {
@@ -804,14 +800,12 @@ class LogManager:
             )
         ]
 
-        metrics_points = self._downsample_metric_points(metrics_result, max_points)
-
         return {
             "metrics": {
-                "metrics": metrics_points,
+                "metrics": metrics_result,
                 "interval_minutes": interval_minutes,
                 "hours_back": hours_back,
-                "total_buckets": len(metrics_points),
+                "total_buckets": len(metrics_result),
             },
             "summary": self._build_summary_response(summary_stats),
             "error_details": {
@@ -824,31 +818,6 @@ class LogManager:
                 "total_models": len(models),
             },
         }
-
-    def _downsample_metric_points(
-        self, points: list[dict[str, Any]], max_points: int | None
-    ) -> list[dict[str, Any]]:
-        if max_points is None or max_points <= 0:
-            return points
-        if len(points) <= max_points:
-            return points
-        if max_points == 1:
-            return [points[-1]]
-
-        step = (len(points) - 1) / (max_points - 1)
-        sampled: list[dict[str, Any]] = []
-        last_index = -1
-
-        for i in range(max_points):
-            index = int(round(i * step))
-            if index <= last_index:
-                index = min(last_index + 1, len(points) - 1)
-            sampled.append(points[index])
-            last_index = index
-
-        sampled[0] = points[0]
-        sampled[-1] = points[-1]
-        return sampled
 
     def _aggregate_metrics_by_time(
         self, entries: list[dict], interval_minutes: int, hours_back: int

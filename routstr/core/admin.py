@@ -1001,12 +1001,6 @@ async def get_usage_dashboard(
     model_limit: int = Query(
         default=20, ge=1, le=100, description="Maximum number of models to return"
     ),
-    max_points: int = Query(
-        default=0,
-        ge=0,
-        le=1000,
-        description="Maximum number of metric points to return (0 disables downsampling)",
-    ),
 ) -> dict:
     """
     Get all dashboard analytics in one request.
@@ -1017,7 +1011,6 @@ async def get_usage_dashboard(
         hours=hours,
         error_limit=error_limit,
         model_limit=model_limit,
-        max_points=max_points or None,
     )
 
 

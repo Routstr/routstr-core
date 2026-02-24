@@ -844,15 +844,13 @@ export class AdminService {
     hours: number = 24,
     interval: number = 15,
     errorLimit: number = 100,
-    modelLimit: number = 20,
-    maxPoints: number = 0
+    modelLimit: number = 20
   ): Promise<UsageDashboardResponse> {
     const params = new URLSearchParams();
     params.set('interval', String(interval));
     params.set('hours', String(hours));
     params.set('error_limit', String(errorLimit));
     params.set('model_limit', String(modelLimit));
-    params.set('max_points', String(maxPoints));
 
     return await apiClient.get<UsageDashboardResponse>(
       `/admin/api/usage/dashboard?${params.toString()}`

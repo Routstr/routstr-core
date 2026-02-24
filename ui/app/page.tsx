@@ -496,7 +496,7 @@ export default function DashboardPage() {
   } = useQuery({
     queryKey: ['usage-dashboard', autoInterval, safeQueryHours],
     queryFn: () =>
-      AdminService.getUsageDashboard(safeQueryHours, autoInterval, 100, 20, 0),
+      AdminService.getUsageDashboard(safeQueryHours, autoInterval, 100, 20),
     enabled: isAuthenticated,
     refetchInterval: usageRefetchIntervalMs,
     staleTime: 30_000,
