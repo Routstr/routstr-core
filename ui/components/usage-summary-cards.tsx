@@ -35,6 +35,10 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
 
   const formatAmount = (msat: number) =>
     formatFromMsat(msat, displayUnit, usdPerSat);
+  const totalTokens = Number(summary.total_tokens ?? 0);
+  const avgTotalTokensPerCompletion = Number(
+    summary.avg_total_tokens_per_completion ?? 0
+  );
 
   const cards = [
     {
@@ -48,6 +52,20 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
       value: summary.successful_chat_completions.toLocaleString(),
       icon: CheckCircle2,
       iconClassName: 'text-emerald-600 dark:text-emerald-300',
+    },
+    {
+      title: 'Total Tokens',
+      value: totalTokens.toLocaleString(),
+      icon: Database,
+      iconClassName: 'text-cyan-600 dark:text-cyan-300',
+    },
+    {
+      title: 'Avg Tokens/Completion',
+      value: avgTotalTokensPerCompletion.toLocaleString(undefined, {
+        maximumFractionDigits: 1,
+      }),
+      icon: Activity,
+      iconClassName: 'text-indigo-600 dark:text-indigo-300',
     },
     {
       title: 'Revenue',

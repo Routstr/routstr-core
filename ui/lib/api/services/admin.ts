@@ -956,6 +956,9 @@ export interface UsageMetricData {
   upstream_errors: number;
   revenue_msats: number;
   refunds_msats: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
   [key: string]: unknown;
 }
 
@@ -974,6 +977,9 @@ export interface UsageMetrics {
     upstream_errors: number;
     revenue_msats: number;
     refunds_msats: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
   };
 }
 
@@ -989,6 +995,12 @@ export interface UsageSummary {
   unique_models_count: number;
   unique_models: string[];
   error_types: Record<string, number>;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  avg_input_tokens_per_completion: number;
+  avg_output_tokens_per_completion: number;
+  avg_total_tokens_per_completion: number;
   success_rate: number;
   revenue_msats: number;
   refunds_msats: number;
@@ -1031,11 +1043,33 @@ export interface RevenueByModel {
   total_models: number;
 }
 
+export interface ModelUsageMixMetric {
+  timestamp: string;
+  total_successful: number;
+  total_revenue_msats: number;
+  total_tokens: number;
+  others: number;
+  others_revenue_msats: number;
+  others_tokens: number;
+  model_counts: Record<string, number>;
+  model_revenue_msats: Record<string, number>;
+  model_tokens: Record<string, number>;
+}
+
+export interface ModelUsageMix {
+  top_models: string[];
+  metrics: ModelUsageMixMetric[];
+  interval_minutes: number;
+  hours_back: number;
+  total_buckets: number;
+}
+
 export interface UsageDashboardResponse {
   metrics: UsageMetrics;
   summary: UsageSummary;
   error_details: ErrorDetails;
   revenue_by_model: RevenueByModel;
+  model_usage_mix?: ModelUsageMix;
 }
 
 export interface LogEntry {

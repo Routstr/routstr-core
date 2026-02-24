@@ -21,7 +21,7 @@ class UsageAnalyticsStore:
     bytes.
     """
 
-    SCHEMA_VERSION = "3"
+    SCHEMA_VERSION = "4"
 
     def __init__(self, logs_dir: Path, db_path: Path | None = None):
         self.logs_dir = logs_dir
@@ -60,12 +60,20 @@ class UsageAnalyticsStore:
                 cutoff_timestamp=cutoff_timestamp,
                 limit=model_limit,
             )
+            model_usage_mix = self._query_model_usage_mix_locked(
+                conn,
+                cutoff_timestamp=cutoff_timestamp,
+                interval_minutes=interval_minutes,
+                hours_back=hours_back,
+                limit=model_limit,
+            )
 
             return {
                 "metrics": metrics,
                 "summary": summary,
                 "error_details": error_details,
                 "revenue_by_model": revenue_by_model,
+                "model_usage_mix": model_usage_mix,
             }
 
     def get_summary(self, *, hours_back: int) -> dict[str, Any]:
@@ -147,15 +155,6 @@ class UsageAnalyticsStore:
             "SELECT value FROM analytics_meta WHERE key = 'schema_version'"
         ).fetchone()
         current_version = current_version_row[0] if current_version_row else None
-        if current_version != self.SCHEMA_VERSION:
-            self._drop_index_tables_locked(conn)
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO analytics_meta (key, value)
-                VALUES ('schema_version', ?)
-                """,
-                (self.SCHEMA_VERSION,),
-            )
 
         conn.execute(
             """
@@ -181,7 +180,10 @@ class UsageAnalyticsStore:
                 payment_processed INTEGER NOT NULL DEFAULT 0,
                 upstream_errors INTEGER NOT NULL DEFAULT 0,
                 revenue_msats REAL NOT NULL DEFAULT 0,
-                refunds_msats REAL NOT NULL DEFAULT 0
+                refunds_msats REAL NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -195,6 +197,9 @@ class UsageAnalyticsStore:
                 failed INTEGER NOT NULL DEFAULT 0,
                 revenue_msats REAL NOT NULL DEFAULT 0,
                 refunds_msats REAL NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (minute_ts, model)
             )
             """
@@ -235,6 +240,9 @@ class UsageAnalyticsStore:
             "CREATE INDEX IF NOT EXISTS idx_analytics_model_minute_ts ON analytics_model_minute (minute_ts)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analytics_model_minute_model_ts ON analytics_model_minute (model, minute_ts)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_analytics_model_presence_ts ON analytics_model_presence_minute (minute_ts)"
         )
         conn.execute(
@@ -243,7 +251,73 @@ class UsageAnalyticsStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_analytics_error_events_ts ON analytics_error_events (timestamp DESC)"
         )
+        self._migrate_schema_locked(conn)
+        if current_version != self.SCHEMA_VERSION:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO analytics_meta (key, value)
+                VALUES ('schema_version', ?)
+                """,
+                (self.SCHEMA_VERSION,),
+            )
         conn.commit()
+
+    def _migrate_schema_locked(self, conn: sqlite3.Connection) -> None:
+        self._ensure_column_locked(
+            conn,
+            "analytics_minute",
+            "input_tokens",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column_locked(
+            conn,
+            "analytics_minute",
+            "output_tokens",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column_locked(
+            conn,
+            "analytics_minute",
+            "total_tokens",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column_locked(
+            conn,
+            "analytics_model_minute",
+            "input_tokens",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column_locked(
+            conn,
+            "analytics_model_minute",
+            "output_tokens",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._ensure_column_locked(
+            conn,
+            "analytics_model_minute",
+            "total_tokens",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+
+    def _ensure_column_locked(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        column_definition: str,
+    ) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column in existing_columns:
+            return
+
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {column_definition}"
+        )
+        logger.info(f"Migrated analytics schema: added {table}.{column}")
 
     def _drop_index_tables_locked(self, conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE IF EXISTS analytics_file_state")
@@ -473,13 +547,21 @@ class UsageAnalyticsStore:
                 elif level == "WARNING":
                     bucket["warnings"] += 1
 
-                completed, revenue_msats = self._extract_success_metrics(entry, message)
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
+                )
                 if completed:
                     bucket["total_requests"] += 1
                     bucket["successful_chat_completions"] += 1
                     model_bucket = model_updates[(minute_key, model)]
                     model_bucket["requests"] += 1
                     model_bucket["successful"] += 1
+                    bucket["input_tokens"] += input_tokens
+                    bucket["output_tokens"] += output_tokens
+                    bucket["total_tokens"] += input_tokens + output_tokens
+                    model_bucket["input_tokens"] += input_tokens
+                    model_bucket["output_tokens"] += output_tokens
+                    model_bucket["total_tokens"] += input_tokens + output_tokens
 
                     if revenue_msats > 0:
                         bucket["revenue_msats"] += revenue_msats
@@ -547,6 +629,9 @@ class UsageAnalyticsStore:
                     int(stats["upstream_errors"]),
                     float(stats["revenue_msats"]),
                     float(stats["refunds_msats"]),
+                    int(stats["input_tokens"]),
+                    int(stats["output_tokens"]),
+                    int(stats["total_tokens"]),
                 )
                 for minute_ts, stats in minute_updates.items()
             ]
@@ -563,9 +648,12 @@ class UsageAnalyticsStore:
                     payment_processed,
                     upstream_errors,
                     revenue_msats,
-                    refunds_msats
+                    refunds_msats,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(minute_ts) DO UPDATE SET
                     total_entries = total_entries + excluded.total_entries,
                     total_requests = total_requests + excluded.total_requests,
@@ -576,7 +664,10 @@ class UsageAnalyticsStore:
                     payment_processed = payment_processed + excluded.payment_processed,
                     upstream_errors = upstream_errors + excluded.upstream_errors,
                     revenue_msats = revenue_msats + excluded.revenue_msats,
-                    refunds_msats = refunds_msats + excluded.refunds_msats
+                    refunds_msats = refunds_msats + excluded.refunds_msats,
+                    input_tokens = input_tokens + excluded.input_tokens,
+                    output_tokens = output_tokens + excluded.output_tokens,
+                    total_tokens = total_tokens + excluded.total_tokens
                 """,
                 rows,
             )
@@ -591,6 +682,9 @@ class UsageAnalyticsStore:
                     int(stats["failed"]),
                     float(stats["revenue_msats"]),
                     float(stats["refunds_msats"]),
+                    int(stats["input_tokens"]),
+                    int(stats["output_tokens"]),
+                    int(stats["total_tokens"]),
                 )
                 for (minute_ts, model), stats in model_updates.items()
             ]
@@ -603,15 +697,21 @@ class UsageAnalyticsStore:
                     successful,
                     failed,
                     revenue_msats,
-                    refunds_msats
+                    refunds_msats,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(minute_ts, model) DO UPDATE SET
                     requests = requests + excluded.requests,
                     successful = successful + excluded.successful,
                     failed = failed + excluded.failed,
                     revenue_msats = revenue_msats + excluded.revenue_msats,
-                    refunds_msats = refunds_msats + excluded.refunds_msats
+                    refunds_msats = refunds_msats + excluded.refunds_msats,
+                    input_tokens = input_tokens + excluded.input_tokens,
+                    output_tokens = output_tokens + excluded.output_tokens,
+                    total_tokens = total_tokens + excluded.total_tokens
                 """,
                 rows,
             )
@@ -694,7 +794,10 @@ class UsageAnalyticsStore:
                 COALESCE(SUM(payment_processed), 0) AS payment_processed,
                 COALESCE(SUM(upstream_errors), 0) AS upstream_errors,
                 COALESCE(SUM(revenue_msats), 0) AS revenue_msats,
-                COALESCE(SUM(refunds_msats), 0) AS refunds_msats
+                COALESCE(SUM(refunds_msats), 0) AS refunds_msats,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
             FROM analytics_minute
             WHERE minute_ts >= ?
             GROUP BY bucket_ts
@@ -713,6 +816,9 @@ class UsageAnalyticsStore:
             "upstream_errors": 0.0,
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
+            "input_tokens": 0.0,
+            "output_tokens": 0.0,
+            "total_tokens": 0.0,
         }
 
         points: list[dict[str, Any]] = []
@@ -726,6 +832,9 @@ class UsageAnalyticsStore:
             upstream_errors = int(row["upstream_errors"])
             revenue_msats = float(row["revenue_msats"])
             refunds_msats = float(row["refunds_msats"])
+            input_tokens = int(row["input_tokens"])
+            output_tokens = int(row["output_tokens"])
+            total_tokens = int(row["total_tokens"])
 
             totals["total_requests"] += total_requests
             totals["successful_chat_completions"] += successful
@@ -736,6 +845,9 @@ class UsageAnalyticsStore:
             totals["upstream_errors"] += upstream_errors
             totals["revenue_msats"] += revenue_msats
             totals["refunds_msats"] += refunds_msats
+            totals["input_tokens"] += input_tokens
+            totals["output_tokens"] += output_tokens
+            totals["total_tokens"] += total_tokens
 
             points.append(
                 {
@@ -749,6 +861,9 @@ class UsageAnalyticsStore:
                     "upstream_errors": upstream_errors,
                     "revenue_msats": revenue_msats,
                     "refunds_msats": refunds_msats,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens,
                     "requests": total_requests,
                 }
             )
@@ -763,6 +878,9 @@ class UsageAnalyticsStore:
             "upstream_errors": int(totals["upstream_errors"]),
             "revenue_msats": float(totals["revenue_msats"]),
             "refunds_msats": float(totals["refunds_msats"]),
+            "input_tokens": int(totals["input_tokens"]),
+            "output_tokens": int(totals["output_tokens"]),
+            "total_tokens": int(totals["total_tokens"]),
         }
 
         return {
@@ -788,7 +906,10 @@ class UsageAnalyticsStore:
                 COALESCE(SUM(payment_processed), 0) AS payment_processed,
                 COALESCE(SUM(upstream_errors), 0) AS upstream_errors,
                 COALESCE(SUM(revenue_msats), 0) AS revenue_msats,
-                COALESCE(SUM(refunds_msats), 0) AS refunds_msats
+                COALESCE(SUM(refunds_msats), 0) AS refunds_msats,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
             FROM analytics_minute
             WHERE minute_ts >= ?
             """,
@@ -824,6 +945,9 @@ class UsageAnalyticsStore:
         total_requests = int(totals["total_requests"])
         successful = int(totals["successful_chat_completions"])
         failed_requests = int(totals["failed_requests"])
+        input_tokens = int(totals["input_tokens"])
+        output_tokens = int(totals["output_tokens"])
+        total_tokens = int(totals["total_tokens"])
 
         revenue_msats = float(totals["revenue_msats"])
         refunds_msats = float(totals["refunds_msats"])
@@ -845,6 +969,18 @@ class UsageAnalyticsStore:
             "unique_models_count": len(unique_models),
             "unique_models": unique_models,
             "error_types": error_types,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "avg_input_tokens_per_completion": (input_tokens / successful)
+            if successful > 0
+            else 0,
+            "avg_output_tokens_per_completion": (output_tokens / successful)
+            if successful > 0
+            else 0,
+            "avg_total_tokens_per_completion": (total_tokens / successful)
+            if successful > 0
+            else 0,
             "success_rate": (successful / total_requests * 100)
             if total_requests > 0
             else 0,
@@ -970,6 +1106,151 @@ class UsageAnalyticsStore:
             "total_models": len(models),
         }
 
+    def _query_model_usage_mix_locked(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        cutoff_timestamp: str,
+        interval_minutes: int,
+        hours_back: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        top_limit = max(1, min(int(limit), 10))
+        top_rows = conn.execute(
+            """
+            SELECT
+                model,
+                COALESCE(SUM(successful), 0) AS total_successful
+            FROM analytics_model_minute
+            WHERE minute_ts >= ?
+              AND model != 'unknown'
+            GROUP BY model
+            ORDER BY total_successful DESC
+            LIMIT ?
+            """,
+            (cutoff_timestamp, top_limit),
+        ).fetchall()
+
+        top_models = [
+            str(row["model"])
+            for row in top_rows
+            if int(row["total_successful"] or 0) > 0
+        ]
+
+        bucket_seconds = max(60, int(interval_minutes) * 60)
+        total_rows = conn.execute(
+            """
+            SELECT
+                datetime(
+                    (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                    'unixepoch'
+                ) AS bucket_ts,
+                COALESCE(SUM(successful), 0) AS total_successful,
+                COALESCE(SUM(revenue_msats), 0) AS total_revenue_msats,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
+            FROM analytics_model_minute
+            WHERE minute_ts >= ?
+            GROUP BY bucket_ts
+            ORDER BY bucket_ts
+            """,
+            (bucket_seconds, bucket_seconds, cutoff_timestamp),
+        ).fetchall()
+
+        bucket_index: dict[str, dict[str, Any]] = {}
+        for row in total_rows:
+            total_successful = int(row["total_successful"])
+            total_revenue_msats = float(row["total_revenue_msats"])
+            total_tokens = int(row["total_tokens"])
+            if (
+                total_successful <= 0
+                and total_revenue_msats <= 0
+                and total_tokens <= 0
+            ):
+                continue
+
+            bucket_ts = str(row["bucket_ts"])
+            bucket = bucket_index.setdefault(
+                bucket_ts,
+                {
+                    "timestamp": bucket_ts,
+                    "total_successful": 0,
+                    "total_revenue_msats": 0.0,
+                    "total_tokens": 0,
+                    "others": 0,
+                    "others_revenue_msats": 0.0,
+                    "others_tokens": 0,
+                    "model_counts": {},
+                    "model_revenue_msats": {},
+                    "model_tokens": {},
+                },
+            )
+            bucket["total_successful"] = total_successful
+            bucket["total_revenue_msats"] = total_revenue_msats
+            bucket["total_tokens"] = total_tokens
+            bucket["others"] = total_successful
+            bucket["others_revenue_msats"] = total_revenue_msats
+            bucket["others_tokens"] = total_tokens
+
+        if top_models and bucket_index:
+            placeholders = ",".join("?" for _ in top_models)
+            top_model_rows = conn.execute(
+                f"""
+                SELECT
+                    datetime(
+                        (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
+                        'unixepoch'
+                    ) AS bucket_ts,
+                    model,
+                    COALESCE(SUM(successful), 0) AS successful,
+                    COALESCE(SUM(revenue_msats), 0) AS revenue_msats,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM analytics_model_minute
+                WHERE minute_ts >= ?
+                  AND model IN ({placeholders})
+                GROUP BY bucket_ts, model
+                ORDER BY bucket_ts
+                """,
+                (bucket_seconds, bucket_seconds, cutoff_timestamp, *top_models),
+            ).fetchall()
+
+            for row in top_model_rows:
+                bucket_ts = str(row["bucket_ts"])
+                bucket = bucket_index.get(bucket_ts)
+                if bucket is None:
+                    continue
+
+                model = str(row["model"])
+                successful = int(row["successful"])
+                revenue_msats = float(row["revenue_msats"])
+                total_tokens = int(row["total_tokens"])
+
+                model_counts = bucket["model_counts"]
+                model_counts[model] = successful
+                model_revenue_msats = bucket["model_revenue_msats"]
+                model_revenue_msats[model] = revenue_msats
+                model_tokens = bucket["model_tokens"]
+                model_tokens[model] = total_tokens
+
+                bucket["others"] = max(0, int(bucket["others"]) - successful)
+                bucket["others_revenue_msats"] = max(
+                    0.0,
+                    float(bucket["others_revenue_msats"]) - revenue_msats,
+                )
+                bucket["others_tokens"] = max(
+                    0,
+                    int(bucket["others_tokens"]) - total_tokens,
+                )
+
+        metrics = sorted(bucket_index.values(), key=lambda item: str(item["timestamp"]))
+
+        return {
+            "top_models": top_models,
+            "metrics": metrics,
+            "hours_back": hours_back,
+            "interval_minutes": interval_minutes,
+            "total_buckets": len(metrics),
+        }
+
     def _cutoff_timestamp(self, hours_back: int) -> str:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
         return cutoff.strftime("%Y-%m-%d %H:%M:%S")
@@ -983,26 +1264,43 @@ class UsageAnalyticsStore:
 
     def _extract_success_metrics(
         self, entry: dict[str, Any], message: str
-    ) -> tuple[bool, float]:
+    ) -> tuple[bool, float, int, int]:
         # These auth logs are emitted once per successful settlement across providers
         # and avoid duplicate counting from provider-specific completion logs.
         logger_name = str(entry.get("name", ""))
         if not logger_name.startswith("routstr.auth"):
-            return False, 0.0
+            return False, 0.0, 0, 0
+
+        input_tokens = self._parse_token_count(entry.get("input_tokens", 0))
+        output_tokens = self._parse_token_count(entry.get("output_tokens", 0))
 
         if "calculated token-based cost" in message:
             token_cost = entry.get("token_cost", 0)
             if isinstance(token_cost, (int, float)) and token_cost > 0:
-                return True, float(token_cost)
-            return True, 0.0
+                return True, float(token_cost), input_tokens, output_tokens
+            return True, 0.0, input_tokens, output_tokens
 
         if "max cost payment finalized" in message:
             charged_amount = entry.get("charged_amount", 0)
             if isinstance(charged_amount, (int, float)) and charged_amount > 0:
-                return True, float(charged_amount)
-            return True, 0.0
+                return True, float(charged_amount), input_tokens, output_tokens
+            return True, 0.0, input_tokens, output_tokens
 
-        return False, 0.0
+        return False, 0.0, 0, 0
+
+    def _parse_token_count(self, value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            return max(0, int(value))
+        if isinstance(value, str):
+            try:
+                return max(0, int(float(value)))
+            except ValueError:
+                return 0
+        return 0
 
     def _new_minute_stats(self) -> dict[str, float]:
         return {
@@ -1016,6 +1314,9 @@ class UsageAnalyticsStore:
             "upstream_errors": 0.0,
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
+            "input_tokens": 0.0,
+            "output_tokens": 0.0,
+            "total_tokens": 0.0,
         }
 
     def _new_model_stats(self) -> dict[str, float]:
@@ -1025,4 +1326,7 @@ class UsageAnalyticsStore:
             "failed": 0.0,
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
+            "input_tokens": 0.0,
+            "output_tokens": 0.0,
+            "total_tokens": 0.0,
         }

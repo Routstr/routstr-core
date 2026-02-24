@@ -39,7 +39,7 @@ export function UsageMetricsChart({
   dataKeys,
   totals,
   metricType = 'count',
-  currencyUnitLabel = 'sat',
+  currencyUnitLabel = 'sats',
   tabs,
   activeTabId,
   onTabChange,

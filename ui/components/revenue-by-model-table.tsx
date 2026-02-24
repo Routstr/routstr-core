@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -51,15 +51,18 @@ export function RevenueByModelTable({
     []
   );
 
-  const convertSatsToDisplay = (sats: number): number => {
-    if (revenueDisplayUnit === 'msat') {
-      return sats * 1000;
-    }
-    if (revenueDisplayUnit === 'usd') {
-      return sats * (usdPerSat ?? 0);
-    }
-    return sats;
-  };
+  const convertSatsToDisplay = useCallback(
+    (sats: number): number => {
+      if (revenueDisplayUnit === 'msat') {
+        return sats * 1000;
+      }
+      if (revenueDisplayUnit === 'usd') {
+        return sats * (usdPerSat ?? 0);
+      }
+      return sats;
+    },
+    [revenueDisplayUnit, usdPerSat]
+  );
 
   const formatAmount = (sats: number) =>
     formatFromMsat(convertToMsat(sats, 'sat'), revenueDisplayUnit, usdPerSat);
@@ -91,7 +94,7 @@ export function RevenueByModelTable({
           modelLabel: truncateModelName(model.model, isMobile ? 16 : 28),
           revenueDisplay: convertSatsToDisplay(model.revenue_sats),
         })),
-    [models, isMobile, revenueDisplayUnit, usdPerSat]
+    [models, isMobile, convertSatsToDisplay]
   );
 
   const chartConfig: ChartConfig = {

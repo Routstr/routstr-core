@@ -289,25 +289,42 @@ class LogManager:
 
     def _extract_success_metrics(
         self, entry: dict[str, Any], message: str
-    ) -> tuple[bool, float]:
+    ) -> tuple[bool, float, int, int]:
         # Use auth settlement logs as the canonical successful request signal.
         logger_name = str(entry.get("name", ""))
         if not logger_name.startswith("routstr.auth"):
-            return False, 0.0
+            return False, 0.0, 0, 0
+
+        input_tokens = self._parse_token_count(entry.get("input_tokens", 0))
+        output_tokens = self._parse_token_count(entry.get("output_tokens", 0))
 
         if "calculated token-based cost" in message:
             token_cost = entry.get("token_cost", 0)
             if isinstance(token_cost, (int, float)) and token_cost > 0:
-                return True, float(token_cost)
-            return True, 0.0
+                return True, float(token_cost), input_tokens, output_tokens
+            return True, 0.0, input_tokens, output_tokens
 
         if "max cost payment finalized" in message:
             charged_amount = entry.get("charged_amount", 0)
             if isinstance(charged_amount, (int, float)) and charged_amount > 0:
-                return True, float(charged_amount)
-            return True, 0.0
+                return True, float(charged_amount), input_tokens, output_tokens
+            return True, 0.0, input_tokens, output_tokens
 
-        return False, 0.0
+        return False, 0.0, 0, 0
+
+    def _parse_token_count(self, value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            return max(0, int(value))
+        if isinstance(value, str):
+            try:
+                return max(0, int(float(value)))
+            except ValueError:
+                return 0
+        return 0
 
     def get_usage_summary(self, hours: int = 24) -> dict:
         def compute() -> dict:
@@ -448,7 +465,7 @@ class LogManager:
 
                     message = str(entry.get("message", "")).lower()
 
-                    completed, revenue_msats = self._extract_success_metrics(
+                    completed, revenue_msats, _, _ = self._extract_success_metrics(
                         entry, message
                     )
                     if completed:
@@ -520,6 +537,9 @@ class LogManager:
 
         total_requests = stats["total_requests"]
         successful = stats["successful_chat_completions"]
+        input_tokens = stats["input_tokens"]
+        output_tokens = stats["output_tokens"]
+        total_tokens = stats["total_tokens"]
 
         return {
             "total_entries": stats["total_entries"],
@@ -533,6 +553,18 @@ class LogManager:
             "unique_models_count": len(stats["unique_models"]),
             "unique_models": sorted(list(stats["unique_models"])),
             "error_types": dict(stats["error_types"]),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "avg_input_tokens_per_completion": (
+                input_tokens / successful if successful > 0 else 0
+            ),
+            "avg_output_tokens_per_completion": (
+                output_tokens / successful if successful > 0 else 0
+            ),
+            "avg_total_tokens_per_completion": (
+                total_tokens / successful if successful > 0 else 0
+            ),
             "success_rate": (successful / total_requests * 100)
             if total_requests > 0
             else 0,
@@ -566,6 +598,9 @@ class LogManager:
             "error_types": defaultdict(int),
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
         }
 
         for entry in entries:
@@ -582,12 +617,15 @@ class LogManager:
                 elif level == "WARNING":
                     stats["total_warnings"] += 1
 
-                completed, revenue_msats = self._extract_success_metrics(
-                    entry, message
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
                 )
                 if completed:
                     stats["total_requests"] += 1
                     stats["successful_chat_completions"] += 1
+                    stats["input_tokens"] += input_tokens
+                    stats["output_tokens"] += output_tokens
+                    stats["total_tokens"] += input_tokens + output_tokens
 
                 failed = (
                     "upstream request failed" in message
@@ -639,6 +677,9 @@ class LogManager:
                 "upstream_errors": 0,
                 "revenue_msats": 0.0,
                 "refunds_msats": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
             }
         )
         summary_stats: dict[str, Any] = {
@@ -654,6 +695,9 @@ class LogManager:
             "error_types": defaultdict(int),
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
         }
         model_stats: dict[str, dict[str, int | float]] = defaultdict(
             lambda: {
@@ -664,6 +708,16 @@ class LogManager:
                 "failed": 0,
             }
         )
+        model_mix_buckets: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        model_mix_revenue_buckets: dict[str, dict[str, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+        model_mix_token_buckets: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        model_mix_totals: dict[str, int] = defaultdict(int)
         latest_errors_heap: list[tuple[str, dict[str, Any]]] = []
         total_error_count = 0
 
@@ -710,15 +764,32 @@ class LogManager:
                     if bucket:
                         bucket["warnings"] += 1
 
-                completed, revenue_msats = self._extract_success_metrics(entry, message)
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
+                )
                 if completed:
                     summary_stats["total_requests"] += 1
                     summary_stats["successful_chat_completions"] += 1
+                    summary_stats["input_tokens"] += input_tokens
+                    summary_stats["output_tokens"] += output_tokens
+                    summary_stats["total_tokens"] += input_tokens + output_tokens
                     model_stats[model]["requests"] += 1
                     model_stats[model]["successful"] += 1
+                    model_mix_totals[model] += 1
                     if bucket:
                         bucket["total_requests"] += 1
                         bucket["successful_chat_completions"] += 1
+                        bucket["input_tokens"] += input_tokens
+                        bucket["output_tokens"] += output_tokens
+                        bucket["total_tokens"] += input_tokens + output_tokens
+                    if bucket_key:
+                        model_mix_buckets[bucket_key][model] += 1
+                        if revenue_msats > 0:
+                            model_mix_revenue_buckets[bucket_key][model] += revenue_msats
+                        if input_tokens > 0 or output_tokens > 0:
+                            model_mix_token_buckets[bucket_key][model] += (
+                                input_tokens + output_tokens
+                            )
 
                     if revenue_msats > 0:
                         summary_stats["revenue_msats"] += revenue_msats
@@ -802,6 +873,67 @@ class LogManager:
                 latest_errors_heap, key=lambda x: x[0], reverse=True
             )
         ]
+        top_model_limit = max(1, min(model_limit, 10))
+        top_models = [
+            model_name
+            for model_name, _ in sorted(
+                (
+                    (name, count)
+                    for name, count in model_mix_totals.items()
+                    if name != "unknown"
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:top_model_limit]
+        ]
+        top_model_set = set(top_models)
+
+        model_usage_mix_metrics: list[dict[str, Any]] = []
+        mix_bucket_keys = sorted(
+            set(model_mix_buckets.keys())
+            | set(model_mix_revenue_buckets.keys())
+            | set(model_mix_token_buckets.keys())
+        )
+        for bucket_key in mix_bucket_keys:
+            counts = model_mix_buckets.get(bucket_key, {})
+            revenue_counts = model_mix_revenue_buckets.get(bucket_key, {})
+            token_counts = model_mix_token_buckets.get(bucket_key, {})
+            others = 0
+            others_revenue_msats = 0.0
+            others_tokens = 0
+            model_counts: dict[str, int] = {}
+            model_revenue_msats: dict[str, float] = {}
+            model_tokens: dict[str, int] = {}
+            for model_name, successful_count in counts.items():
+                if model_name in top_model_set:
+                    model_counts[model_name] = int(successful_count)
+                else:
+                    others += int(successful_count)
+            for model_name, revenue_value in revenue_counts.items():
+                if model_name in top_model_set:
+                    model_revenue_msats[model_name] = float(revenue_value)
+                else:
+                    others_revenue_msats += float(revenue_value)
+            for model_name, token_value in token_counts.items():
+                if model_name in top_model_set:
+                    model_tokens[model_name] = int(token_value)
+                else:
+                    others_tokens += int(token_value)
+
+            model_usage_mix_metrics.append(
+                {
+                    "timestamp": bucket_key,
+                    "total_successful": int(sum(counts.values())),
+                    "total_revenue_msats": float(sum(revenue_counts.values())),
+                    "total_tokens": int(sum(token_counts.values())),
+                    "others": others,
+                    "others_revenue_msats": others_revenue_msats,
+                    "others_tokens": others_tokens,
+                    "model_counts": model_counts,
+                    "model_revenue_msats": model_revenue_msats,
+                    "model_tokens": model_tokens,
+                }
+            )
 
         return {
             "metrics": {
@@ -820,6 +952,13 @@ class LogManager:
                 "total_revenue_sats": total_revenue,
                 "total_models": len(models),
             },
+            "model_usage_mix": {
+                "top_models": top_models,
+                "metrics": model_usage_mix_metrics,
+                "interval_minutes": interval_minutes,
+                "hours_back": hours_back,
+                "total_buckets": len(model_usage_mix_metrics),
+            },
         }
 
     def _aggregate_metrics_by_time(
@@ -836,6 +975,9 @@ class LogManager:
                 "upstream_errors": 0,
                 "revenue_msats": 0.0,
                 "refunds_msats": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
             }
         )
 
@@ -855,10 +997,15 @@ class LogManager:
                 message = str(entry.get("message", "")).lower()
                 level = str(entry.get("levelname", "")).upper()
 
-                completed, revenue_msats = self._extract_success_metrics(entry, message)
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
+                )
                 if completed:
                     bucket["total_requests"] += 1
                     bucket["successful_chat_completions"] += 1
+                    bucket["input_tokens"] += input_tokens
+                    bucket["output_tokens"] += output_tokens
+                    bucket["total_tokens"] += input_tokens + output_tokens
 
                 if level == "ERROR":
                     bucket["errors"] += 1
@@ -905,6 +1052,9 @@ class LogManager:
             "upstream_errors": 0,
             "revenue_msats": 0.0,
             "refunds_msats": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
         }
         for bucket in result:
             totals["total_requests"] += int(bucket["total_requests"])
@@ -918,6 +1068,9 @@ class LogManager:
             totals["upstream_errors"] += int(bucket["upstream_errors"])
             totals["revenue_msats"] += float(bucket["revenue_msats"])
             totals["refunds_msats"] += float(bucket["refunds_msats"])
+            totals["input_tokens"] += int(bucket["input_tokens"])
+            totals["output_tokens"] += int(bucket["output_tokens"])
+            totals["total_tokens"] += int(bucket["total_tokens"])
 
         return {
             "metrics": result,
