@@ -9,6 +9,7 @@ import type { DateRange } from 'react-day-picker';
 import { UsageMetricsChart } from '@/components/usage-metrics-chart';
 import { UsageSummaryCards } from '@/components/usage-summary-cards';
 import { ErrorDetailsTable } from '@/components/error-details-table';
+import { TopModelsUsageChart } from '@/components/top-models-usage-chart';
 import { DashboardBalanceSummary } from '@/components/dashboard-balance-summary';
 import {
   AdminService,
@@ -79,6 +80,7 @@ const TIME_RANGE_PRESETS = [
   { value: '3m', label: 'Last 3 Months', hours: 90 * 24 },
   { value: '12m', label: 'Last 12 Months', hours: 365 * 24 },
 ] as const;
+const MAX_USAGE_RANGE_HOURS = 365 * 24;
 
 type TimeRangePresetValue = (typeof TIME_RANGE_PRESETS)[number]['value'];
 
@@ -157,20 +159,6 @@ function getAutoIntervalMinutes(hours: number): number {
       (intervalMinutes) => intervalMinutes >= idealInterval
     ) ?? allowedIntervals[allowedIntervals.length - 1]
   );
-}
-
-function getQueryErrorMessage(error: unknown): string {
-  if (
-    error &&
-    typeof error === 'object' &&
-    'message' in error &&
-    typeof error.message === 'string' &&
-    error.message.trim().length > 0
-  ) {
-    return error.message;
-  }
-
-  return 'The analytics request failed. Refresh and try again.';
 }
 
 function SectionLoading({ label }: { label: string }) {
@@ -554,19 +542,21 @@ export default function DashboardPage() {
     isCustomRangeActive && customRangeHours
       ? customRangeHours
       : activePreset.hours;
-  const autoInterval = getAutoIntervalMinutes(queryHours);
+  const safeQueryHours = Math.min(queryHours, MAX_USAGE_RANGE_HOURS);
+  const isUsageRangeCapped = safeQueryHours < queryHours;
+  const autoInterval = getAutoIntervalMinutes(safeQueryHours);
   const usageRefetchIntervalMs = useMemo(() => {
-    if (queryHours > 90 * 24) {
+    if (safeQueryHours > 90 * 24) {
       return 4 * 60 * 60_000;
     }
-    if (queryHours > 30 * 24) {
+    if (safeQueryHours > 30 * 24) {
       return 2 * 60 * 60_000;
     }
-    if (queryHours > 7 * 24) {
+    if (safeQueryHours > 7 * 24) {
       return 30 * 60_000;
     }
     return 60_000;
-  }, [queryHours]);
+  }, [safeQueryHours]);
   const revenueDisplayUnit: DisplayUnit = useMemo(() => {
     if (displayUnit === 'usd' && usdPerSat === null) {
       // Keep revenue charts meaningful while the USD rate is unavailable.
@@ -584,43 +574,30 @@ export default function DashboardPage() {
           : revenueDisplayUnit;
 
   const {
-    data: metricsData,
-    isLoading: metricsLoading,
-    error: metricsError,
-    refetch: refetchMetrics,
+    data: usageDashboardData,
+    isLoading: usageDashboardLoading,
+    refetch: refetchUsageDashboard,
   } = useQuery({
-    queryKey: ['usage-metrics', autoInterval, queryHours],
-    queryFn: () => AdminService.getUsageMetrics(autoInterval, queryHours),
+    queryKey: ['usage-dashboard', autoInterval, safeQueryHours],
+    queryFn: () =>
+      AdminService.getUsageDashboard(safeQueryHours, autoInterval, 100, 20),
     enabled: isAuthenticated,
     refetchInterval: usageRefetchIntervalMs,
     staleTime: 30_000,
   });
 
-  const {
-    data: summaryData,
-    isLoading: summaryLoading,
-    error: summaryError,
-    refetch: refetchSummary,
-  } = useQuery({
-    queryKey: ['usage-summary', queryHours],
-    queryFn: () => AdminService.getUsageSummary(queryHours),
-    enabled: isAuthenticated,
-    refetchInterval: usageRefetchIntervalMs,
-    staleTime: 30_000,
-  });
+  const metricsData = usageDashboardData?.metrics;
+  const summaryData = usageDashboardData?.summary;
+  const errorData = usageDashboardData?.error_details;
+  const modelUsageMixData = usageDashboardData?.model_usage_mix;
+  const hasModelUsageMixMetrics =
+    Array.isArray(modelUsageMixData?.metrics) &&
+    modelUsageMixData.metrics.length > 0;
 
-  const {
-    data: errorData,
-    isLoading: errorLoading,
-    error: errorDetailsError,
-    refetch: refetchErrors,
-  } = useQuery({
-    queryKey: ['usage-errors', queryHours],
-    queryFn: () => AdminService.getErrorDetails(queryHours, 100),
-    enabled: isAuthenticated,
-    refetchInterval: usageRefetchIntervalMs,
-    staleTime: 30_000,
-  });
+  const metricsLoading = usageDashboardLoading;
+  const summaryLoading = usageDashboardLoading;
+  const errorLoading = usageDashboardLoading;
+  const metricsTotals = metricsData?.totals;
 
   const chartConfigs = useMemo<ChartConfig[]>(() => {
     if (!metricsData || metricsData.metrics.length === 0) {
@@ -647,12 +624,6 @@ export default function DashboardPage() {
       })
     ) as ChartDatum[];
 
-    const hasTokenMetrics = metricPoints.some((metric) =>
-      ['input_tokens', 'output_tokens', 'total_tokens'].some(
-        (key) => typeof metric[key] === 'number'
-      )
-    );
-
     return [
       {
         id: 'revenue',
@@ -661,6 +632,11 @@ export default function DashboardPage() {
         description: 'Track collected revenue trends over time.',
         data: revenuePoints,
         metricType: 'currency',
+        totals: metricsTotals
+          ? {
+              revenue_display: convertRevenueMsats(metricsTotals.revenue_msats),
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'revenue_display',
@@ -676,6 +652,14 @@ export default function DashboardPage() {
         description: 'Understand traffic and completion reliability over time.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              total_requests: metricsTotals.total_requests,
+              successful_chat_completions:
+                metricsTotals.successful_chat_completions,
+              failed_requests: metricsTotals.failed_requests,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'total_requests',
@@ -701,6 +685,13 @@ export default function DashboardPage() {
         description: 'Monitor warnings, handled errors, and upstream failures.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              errors: metricsTotals.errors,
+              warnings: metricsTotals.warnings,
+              upstream_errors: metricsTotals.upstream_errors,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'errors',
@@ -726,6 +717,11 @@ export default function DashboardPage() {
         description: 'Follow payment processing activity by interval.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              payment_processed: metricsTotals.payment_processed,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'payment_processed',
@@ -734,38 +730,41 @@ export default function DashboardPage() {
           },
         ],
       },
-      ...(hasTokenMetrics
-        ? [
-            {
-              id: 'tokens',
-              title: 'Token Usage',
-              mobileTitle: 'Tokens',
-              description:
-                'Track input, output, and total token throughput over time.',
-              data: metricPoints,
-              metricType: 'count' as const,
-              dataKeys: [
-                {
-                  key: 'total_tokens',
-                  name: 'Total Tokens',
-                  color: 'var(--chart-1)',
-                },
-                {
-                  key: 'input_tokens',
-                  name: 'Input Tokens',
-                  color: 'var(--chart-2)',
-                },
-                {
-                  key: 'output_tokens',
-                  name: 'Output Tokens',
-                  color: 'var(--chart-3)',
-                },
-              ],
-            },
-          ]
-        : []),
+      {
+        id: 'tokens',
+        title: 'Token Usage',
+        mobileTitle: 'Tokens',
+        description:
+          'Track input, output, and total token throughput over time.',
+        data: metricPoints,
+        metricType: 'count',
+        totals: metricsTotals
+          ? {
+              input_tokens: metricsTotals.input_tokens,
+              output_tokens: metricsTotals.output_tokens,
+              total_tokens: metricsTotals.total_tokens,
+            }
+          : undefined,
+        dataKeys: [
+          {
+            key: 'total_tokens',
+            name: 'Total Tokens',
+            color: 'var(--chart-1)',
+          },
+          {
+            key: 'input_tokens',
+            name: 'Input Tokens',
+            color: 'var(--chart-2)',
+          },
+          {
+            key: 'output_tokens',
+            name: 'Output Tokens',
+            color: 'var(--chart-3)',
+          },
+        ],
+      },
     ];
-  }, [metricsData, revenueDisplayUnit, usdPerSat]);
+  }, [metricsData, metricsTotals, revenueDisplayUnit, usdPerSat]);
 
   useEffect(() => {
     if (chartConfigs.length === 0) {
@@ -803,11 +802,7 @@ export default function DashboardPage() {
 
     setIsManualRefreshing(true);
     try {
-      await Promise.allSettled([
-        refetchMetrics(),
-        refetchSummary(),
-        refetchErrors(),
-      ]);
+      await refetchUsageDashboard();
     } finally {
       setIsManualRefreshing(false);
     }
@@ -913,10 +908,16 @@ export default function DashboardPage() {
               All cards and charts in this section update from the selected
               range.
             </p>
+            {isUsageRangeCapped ? (
+              <p className='text-muted-foreground text-[11px] sm:text-xs'>
+                Usage analytics are capped to the last{' '}
+                {MAX_USAGE_RANGE_HOURS / 24} days for server safety.
+              </p>
+            ) : null}
           </div>
 
-          <div className='flex items-center gap-2'>
-            <div className='min-w-0 flex-1 sm:max-w-[22rem]'>
+          <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
+            <div className='w-full max-w-[20rem] sm:max-w-[22rem]'>
               <div className='border-input bg-card/30 dark:bg-input/30 flex h-8 w-full min-w-0 items-stretch overflow-hidden rounded-lg border sm:h-9'>
                 <Popover
                   open={isCustomRangePickerOpen}
@@ -981,39 +982,20 @@ export default function DashboardPage() {
               onClick={handleRefresh}
               variant='outline'
               disabled={isManualRefreshing}
-              aria-label='Refresh analytics'
-              className='h-8 w-8 shrink-0 rounded-lg p-0 sm:h-9 sm:w-auto sm:px-3'
+              className='h-8 w-full px-2.5 text-xs sm:ml-auto sm:w-auto'
             >
               <RefreshCw
                 className={cn(
-                  'h-3.5 w-3.5 sm:mr-1',
+                  'mr-1 h-3 w-3',
                   isManualRefreshing && 'animate-spin'
                 )}
               />
-              <span className='hidden sm:inline'>
-                {isManualRefreshing ? 'Refreshing...' : 'Refresh'}
-              </span>
+              {isManualRefreshing ? 'Refreshing...' : 'Refresh'}
             </Button>
           </div>
 
           {metricsLoading ? (
             <SectionLoading label='metrics' />
-          ) : metricsError ? (
-            <Card>
-              <CardContent>
-                <Empty className='border-none py-8'>
-                  <EmptyHeader>
-                    <EmptyMedia variant='icon'>
-                      <RefreshCw className='h-4 w-4' />
-                    </EmptyMedia>
-                    <EmptyTitle>Unable to load analytics</EmptyTitle>
-                    <EmptyDescription>
-                      {getQueryErrorMessage(metricsError)}
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              </CardContent>
-            </Card>
           ) : activeChartConfig ? (
             <UsageMetricsChart
               data={activeChartConfig.data}
@@ -1051,21 +1033,16 @@ export default function DashboardPage() {
             </Card>
           )}
 
+          {!metricsLoading && modelUsageMixData && hasModelUsageMixMetrics ? (
+            <TopModelsUsageChart
+              mix={modelUsageMixData}
+              displayUnit={displayUnit}
+              usdPerSat={usdPerSat}
+            />
+          ) : null}
+
           {summaryLoading ? (
             <SectionLoading label='summary' />
-          ) : summaryError ? (
-            <Card>
-              <CardContent>
-                <Empty className='border-none py-8'>
-                  <EmptyHeader>
-                    <EmptyTitle>Usage summary unavailable</EmptyTitle>
-                    <EmptyDescription>
-                      {getQueryErrorMessage(summaryError)}
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              </CardContent>
-            </Card>
           ) : summaryData ? (
             <UsageSummaryCards summary={summaryData} />
           ) : null}
@@ -1074,19 +1051,6 @@ export default function DashboardPage() {
 
           {errorLoading ? (
             <SectionLoading label='errors' />
-          ) : errorDetailsError ? (
-            <Card>
-              <CardContent>
-                <Empty className='border-none py-8'>
-                  <EmptyHeader>
-                    <EmptyTitle>Error details unavailable</EmptyTitle>
-                    <EmptyDescription>
-                      {getQueryErrorMessage(errorDetailsError)}
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              </CardContent>
-            </Card>
           ) : errorData ? (
             <ErrorDetailsTable errors={errorData.errors} />
           ) : null}
