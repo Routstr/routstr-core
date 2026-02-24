@@ -13,11 +13,11 @@ DO NOT modify or remove these messages without updating the usage tracking logic
 
 2. "Calculated token-based cost" (INFO) - routstr/auth.py
    - Used to track successful completions and revenue
-   - The 'token_cost' and 'model' fields are extracted for dashboard metrics
+   - The 'token_cost', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
 
 3. "Max cost payment finalized" (INFO) - routstr/auth.py
    - Used as the successful completion fallback when token usage is unavailable
-   - The 'charged_amount' and 'model' fields are extracted for dashboard metrics
+   - The 'charged_amount', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
 
 4. "Payment processed successfully" (INFO) - routstr/auth.py
    - Used to count successful payment processing events
