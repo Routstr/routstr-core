@@ -66,9 +66,7 @@ function normalizeBaseUrl(url: string): string {
 }
 
 export function CheatSheet(): JSX.Element {
-  const [baseUrl, setBaseUrl] = useState(() =>
-    typeof window === 'undefined' ? '' : ConfigurationService.getLocalBaseUrl()
-  );
+  const [baseUrl, setBaseUrl] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [walletInfo, setWalletInfo] = useState<WalletSnapshot | null>(null);
   const [refundReceipt, setRefundReceipt] = useState<RefundReceipt | null>(
