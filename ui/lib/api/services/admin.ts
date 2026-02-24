@@ -840,6 +840,25 @@ export class AdminService {
     );
   }
 
+  static async getUsageDashboard(
+    hours: number = 24,
+    interval: number = 15,
+    errorLimit: number = 100,
+    modelLimit: number = 20,
+    maxPoints: number = 0
+  ): Promise<UsageDashboardResponse> {
+    const params = new URLSearchParams();
+    params.set('interval', String(interval));
+    params.set('hours', String(hours));
+    params.set('error_limit', String(errorLimit));
+    params.set('model_limit', String(modelLimit));
+    params.set('max_points', String(maxPoints));
+
+    return await apiClient.get<UsageDashboardResponse>(
+      `/admin/api/usage/dashboard?${params.toString()}`
+    );
+  }
+
   static async getUsageSummary(hours: number = 24): Promise<UsageSummary> {
     return await apiClient.get<UsageSummary>(
       `/admin/api/usage/summary?hours=${hours}`
@@ -947,6 +966,17 @@ export interface UsageMetrics {
   interval_minutes: number;
   hours_back: number;
   total_buckets: number;
+  totals?: {
+    total_requests: number;
+    successful_chat_completions: number;
+    failed_requests: number;
+    errors: number;
+    warnings: number;
+    payment_processed: number;
+    upstream_errors: number;
+    revenue_msats: number;
+    refunds_msats: number;
+  };
 }
 
 export interface UsageSummary {
@@ -1001,6 +1031,13 @@ export interface RevenueByModel {
   models: ModelRevenueData[];
   total_revenue_sats: number;
   total_models: number;
+}
+
+export interface UsageDashboardResponse {
+  metrics: UsageMetrics;
+  summary: UsageSummary;
+  error_details: ErrorDetails;
+  revenue_by_model: RevenueByModel;
 }
 
 export interface LogEntry {

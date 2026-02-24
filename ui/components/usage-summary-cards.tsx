@@ -56,13 +56,13 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
       iconClassName: 'text-amber-600 dark:text-amber-300',
     },
     {
-      title: 'Net Revenue',
+      title: 'Operational Net',
       value: formatAmount(summary.net_revenue_msats),
       icon: DollarSign,
       iconClassName: 'text-lime-600 dark:text-lime-300',
     },
     {
-      title: 'Refunds',
+      title: 'Reverted Holds',
       value: formatAmount(summary.refunds_msats),
       icon: TrendingDown,
       iconClassName: 'text-rose-600 dark:text-rose-300',

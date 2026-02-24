@@ -21,7 +21,8 @@ export function DashboardBalanceSummary({
     queryFn: async () => {
       return WalletService.getDetailedBalances();
     },
-    refetchInterval: 30000,
+    refetchInterval: 900000,
+    staleTime: 300000,
   });
 
   const calculateTotals = (balances: BalanceDetail[]) => {

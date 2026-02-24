@@ -24,7 +24,9 @@ interface UsageMetricsChartProps {
     name: string;
     color: string;
   }>;
+  totals?: Partial<Record<string, number>>;
   metricType?: 'currency' | 'count';
+  currencyUnitLabel?: string;
   tabs?: Array<{ id: string; label: string }>;
   activeTabId?: string;
   onTabChange?: (tabId: string) => void;
@@ -35,7 +37,9 @@ export function UsageMetricsChart({
   title,
   description,
   dataKeys,
+  totals,
   metricType = 'count',
+  currencyUnitLabel = 'sat',
   tabs,
   activeTabId,
   onTabChange,
@@ -83,14 +87,19 @@ export function UsageMetricsChart({
 
   const formatMetricValue = (value: number): string => {
     const formatted = compactNumber.format(value);
-    return metricType === 'currency' ? `${formatted} sats` : formatted;
+    return metricType === 'currency'
+      ? `${formatted} ${currencyUnitLabel}`
+      : formatted;
   };
 
   const metricTotals = useMemo(() => {
-    const totals = dataKeys.reduce<Record<string, number>>((acc, dataKey) => {
-      acc[dataKey.key] = 0;
-      return acc;
-    }, {});
+    const fallbackTotals = dataKeys.reduce<Record<string, number>>(
+      (acc, dataKey) => {
+        acc[dataKey.key] = 0;
+        return acc;
+      },
+      {}
+    );
 
     for (const point of data) {
       for (const dataKey of dataKeys) {
@@ -98,13 +107,25 @@ export function UsageMetricsChart({
         const value =
           typeof rawValue === 'number' ? rawValue : Number(rawValue || 0);
         if (Number.isFinite(value)) {
-          totals[dataKey.key] += value;
+          fallbackTotals[dataKey.key] += value;
         }
       }
     }
 
-    return totals;
-  }, [data, dataKeys]);
+    if (!totals) {
+      return fallbackTotals;
+    }
+
+    const mergedTotals = { ...fallbackTotals };
+    for (const dataKey of dataKeys) {
+      const rawTotal = totals[dataKey.key];
+      if (typeof rawTotal === 'number' && Number.isFinite(rawTotal)) {
+        mergedTotals[dataKey.key] = rawTotal;
+      }
+    }
+
+    return mergedTotals;
+  }, [data, dataKeys, totals]);
 
   const metricChips = useMemo(
     () =>

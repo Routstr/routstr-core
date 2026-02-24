@@ -18,7 +18,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Calendar } from '@/components/ui/calendar';
-import { Badge } from '@/components/ui/badge';
 import {
   Empty,
   EmptyDescription,
@@ -45,6 +44,7 @@ import { CheatSheet } from '@/components/landing/cheat-sheet';
 import { ConfigurationService } from '@/lib/api/services/configuration';
 import { AppPageShell } from '@/components/app-page-shell';
 import { useIsMobile } from '@/hooks/use-mobile';
+import type { DisplayUnit } from '@/lib/types/units';
 import { cn } from '@/lib/utils';
 
 type ChartDatum = Record<string, unknown> & { timestamp: string };
@@ -62,6 +62,7 @@ type ChartConfig = {
   description: string;
   data: ChartDatum[];
   dataKeys: ChartKeyConfig[];
+  totals?: Partial<Record<string, number>>;
   metricType: 'currency' | 'count';
 };
 
@@ -72,6 +73,7 @@ const TIME_RANGE_PRESETS = [
   { value: '3m', label: 'Last 3 Months', hours: 90 * 24 },
   { value: '12m', label: 'Last 12 Months', hours: 365 * 24 },
 ] as const;
+const MAX_USAGE_RANGE_HOURS = 365 * 24;
 
 type TimeRangePresetValue = (typeof TIME_RANGE_PRESETS)[number]['value'];
 
@@ -383,31 +385,14 @@ function DashboardInsights({ summary }: { summary?: UsageSummary }) {
     ([, a], [, b]) => b - a
   );
 
-  const hasModels = summary.unique_models.length > 0;
   const hasErrorTypes = errorTypes.length > 0;
 
-  if (!hasModels && !hasErrorTypes) {
+  if (!hasErrorTypes) {
     return null;
   }
 
   return (
-    <div className='grid gap-6 lg:grid-cols-2'>
-      {hasModels && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Active Models</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className='flex flex-wrap gap-2'>
-              {summary.unique_models.map((model) => (
-                <Badge key={model} variant='secondary'>
-                  {model}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+    <div className='grid gap-6'>
       {hasErrorTypes && (
         <Card>
           <CardHeader>
@@ -479,55 +464,54 @@ export default function DashboardPage() {
     isCustomRangeActive && customRangeHours
       ? customRangeHours
       : activePreset.hours;
-  const autoInterval = getAutoIntervalMinutes(queryHours);
+  const safeQueryHours = Math.min(queryHours, MAX_USAGE_RANGE_HOURS);
+  const isUsageRangeCapped = safeQueryHours < queryHours;
+  const autoInterval = getAutoIntervalMinutes(safeQueryHours);
+  const usageRefetchIntervalMs = useMemo(() => {
+    if (safeQueryHours > 90 * 24) {
+      return 4 * 60 * 60_000;
+    }
+    if (safeQueryHours > 30 * 24) {
+      return 2 * 60 * 60_000;
+    }
+    if (safeQueryHours > 7 * 24) {
+      return 30 * 60_000;
+    }
+    return 60_000;
+  }, [safeQueryHours]);
+  const revenueDisplayUnit: DisplayUnit = useMemo(() => {
+    if (displayUnit === 'usd' && usdPerSat === null) {
+      // Keep revenue charts meaningful while the USD rate is unavailable.
+      return 'sat';
+    }
+    return displayUnit;
+  }, [displayUnit, usdPerSat]);
+  const revenueUnitLabel =
+    revenueDisplayUnit === 'usd' ? 'USD' : revenueDisplayUnit;
 
   const {
-    data: metricsData,
-    isLoading: metricsLoading,
-    refetch: refetchMetrics,
+    data: usageDashboardData,
+    isLoading: usageDashboardLoading,
+    refetch: refetchUsageDashboard,
   } = useQuery({
-    queryKey: ['usage-metrics', autoInterval, queryHours],
-    queryFn: () => AdminService.getUsageMetrics(autoInterval, queryHours),
+    queryKey: ['usage-dashboard', autoInterval, safeQueryHours],
+    queryFn: () =>
+      AdminService.getUsageDashboard(safeQueryHours, autoInterval, 100, 20, 0),
     enabled: isAuthenticated,
-    refetchInterval: 60_000,
+    refetchInterval: usageRefetchIntervalMs,
     staleTime: 30_000,
   });
 
-  const {
-    data: summaryData,
-    isLoading: summaryLoading,
-    refetch: refetchSummary,
-  } = useQuery({
-    queryKey: ['usage-summary', queryHours],
-    queryFn: () => AdminService.getUsageSummary(queryHours),
-    enabled: isAuthenticated,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
+  const metricsData = usageDashboardData?.metrics;
+  const summaryData = usageDashboardData?.summary;
+  const errorData = usageDashboardData?.error_details;
+  const revenueByModelData = usageDashboardData?.revenue_by_model;
 
-  const {
-    data: errorData,
-    isLoading: errorLoading,
-    refetch: refetchErrors,
-  } = useQuery({
-    queryKey: ['usage-errors', queryHours],
-    queryFn: () => AdminService.getErrorDetails(queryHours, 100),
-    enabled: isAuthenticated,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-
-  const {
-    data: revenueByModelData,
-    isLoading: revenueByModelLoading,
-    refetch: refetchRevenueByModel,
-  } = useQuery({
-    queryKey: ['revenue-by-model', queryHours],
-    queryFn: () => AdminService.getRevenueByModel(queryHours, 20),
-    enabled: isAuthenticated,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
+  const metricsLoading = usageDashboardLoading;
+  const summaryLoading = usageDashboardLoading;
+  const errorLoading = usageDashboardLoading;
+  const revenueByModelLoading = usageDashboardLoading;
+  const metricsTotals = metricsData?.totals;
 
   const chartConfigs = useMemo<ChartConfig[]>(() => {
     if (!metricsData || metricsData.metrics.length === 0) {
@@ -535,38 +519,43 @@ export default function DashboardPage() {
     }
 
     const metricPoints = metricsData.metrics as ChartDatum[];
+    const convertRevenueMsats = (amountMsats: number): number => {
+      if (revenueDisplayUnit === 'msat') {
+        return amountMsats;
+      }
+
+      const sats = amountMsats / 1000;
+      if (revenueDisplayUnit === 'usd') {
+        return sats * (usdPerSat ?? 0);
+      }
+
+      return sats;
+    };
     const revenuePoints = metricsData.metrics.map(
       (metric: UsageMetricData) => ({
         ...metric,
-        revenue_sats: metric.revenue_msats / 1000,
-        refunds_sats: metric.refunds_msats / 1000,
-        net_revenue_sats: (metric.revenue_msats - metric.refunds_msats) / 1000,
+        revenue_display: convertRevenueMsats(metric.revenue_msats),
       })
     ) as ChartDatum[];
 
     return [
       {
         id: 'revenue',
-        title: 'Revenue Over Time (sats)',
+        title: 'Revenue Over Time',
         mobileTitle: 'Revenue',
-        description: 'Track gross revenue, refunds, and net revenue trends.',
+        description: 'Track collected revenue trends over time.',
         data: revenuePoints,
         metricType: 'currency',
+        totals: metricsTotals
+          ? {
+              revenue_display: convertRevenueMsats(metricsTotals.revenue_msats),
+            }
+          : undefined,
         dataKeys: [
           {
-            key: 'revenue_sats',
+            key: 'revenue_display',
             name: 'Revenue',
             color: 'var(--chart-1)',
-          },
-          {
-            key: 'net_revenue_sats',
-            name: 'Net Revenue',
-            color: 'var(--chart-2)',
-          },
-          {
-            key: 'refunds_sats',
-            name: 'Refunds',
-            color: 'var(--chart-5)',
           },
         ],
       },
@@ -577,6 +566,14 @@ export default function DashboardPage() {
         description: 'Understand traffic and completion reliability over time.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              total_requests: metricsTotals.total_requests,
+              successful_chat_completions:
+                metricsTotals.successful_chat_completions,
+              failed_requests: metricsTotals.failed_requests,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'total_requests',
@@ -602,6 +599,13 @@ export default function DashboardPage() {
         description: 'Monitor warnings, handled errors, and upstream failures.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              errors: metricsTotals.errors,
+              warnings: metricsTotals.warnings,
+              upstream_errors: metricsTotals.upstream_errors,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'errors',
@@ -627,6 +631,11 @@ export default function DashboardPage() {
         description: 'Follow payment processing activity by interval.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              payment_processed: metricsTotals.payment_processed,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'payment_processed',
@@ -636,7 +645,7 @@ export default function DashboardPage() {
         ],
       },
     ];
-  }, [metricsData]);
+  }, [metricsData, metricsTotals, revenueDisplayUnit, usdPerSat]);
 
   useEffect(() => {
     if (chartConfigs.length === 0) {
@@ -658,13 +667,11 @@ export default function DashboardPage() {
     }
 
     setIsManualRefreshing(true);
-    await Promise.allSettled([
-      refetchMetrics(),
-      refetchSummary(),
-      refetchErrors(),
-      refetchRevenueByModel(),
-    ]);
-    setIsManualRefreshing(false);
+    try {
+      await refetchUsageDashboard();
+    } finally {
+      setIsManualRefreshing(false);
+    }
   };
 
   const openRangePicker = () => {
@@ -773,6 +780,12 @@ export default function DashboardPage() {
               <p className='text-muted-foreground text-[11px] sm:text-xs'>
                 Showing {activeRangeLabel}.
               </p>
+              {isUsageRangeCapped ? (
+                <p className='text-muted-foreground text-[11px] sm:text-xs'>
+                  Usage analytics are capped to the last{' '}
+                  {MAX_USAGE_RANGE_HOURS / 24} days for server safety.
+                </p>
+              ) : null}
             </div>
           </div>
 
@@ -868,7 +881,9 @@ export default function DashboardPage() {
             title={activeChartConfig.title}
             description={activeChartConfig.description}
             dataKeys={activeChartConfig.dataKeys}
+            totals={activeChartConfig.totals}
             metricType={activeChartConfig.metricType}
+            currencyUnitLabel={revenueUnitLabel}
             tabs={chartConfigs.map((config) => ({
               id: config.id,
               label: isMobile
@@ -897,6 +912,16 @@ export default function DashboardPage() {
           </Card>
         )}
 
+        {revenueByModelLoading ? (
+          <SectionLoading label='revenue by model' />
+        ) : revenueByModelData && revenueByModelData.models.length > 0 ? (
+          <RevenueByModelTable
+            models={revenueByModelData.models}
+            displayUnit={displayUnit}
+            usdPerSat={usdPerSat}
+          />
+        ) : null}
+
         {summaryLoading ? (
           <SectionLoading label='summary' />
         ) : summaryData ? (
@@ -904,15 +929,6 @@ export default function DashboardPage() {
         ) : null}
 
         <DashboardInsights summary={summaryData} />
-
-        {revenueByModelLoading ? (
-          <SectionLoading label='revenue by model' />
-        ) : revenueByModelData && revenueByModelData.models.length > 0 ? (
-          <RevenueByModelTable
-            models={revenueByModelData.models}
-            totalRevenue={revenueByModelData.total_revenue_sats}
-          />
-        ) : null}
 
         {errorLoading ? (
           <SectionLoading label='errors' />
