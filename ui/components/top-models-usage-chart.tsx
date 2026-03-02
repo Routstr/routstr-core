@@ -218,11 +218,11 @@ export function TopModelsUsageChart({
   );
 
   const chartModels = useMemo(
-    () => mixTopModels.slice(0, 10),
+    () => mixTopModels.slice(0, 20),
     [mixTopModels]
   );
   const leaderboardModels = useMemo(
-    () => mixTopModels.slice(0, 10),
+    () => mixTopModels.slice(0, 20),
     [mixTopModels]
   );
   const revenueDisplayUnit: DisplayUnit = useMemo(() => {
@@ -496,7 +496,7 @@ export function TopModelsUsageChart({
       })
       .filter((row) => row.totalRaw > 0)
       .sort((a, b) => b.totalRaw - a.totalRaw)
-      .slice(0, 10)
+      .slice(0, 20)
       .map((row, index) => ({
         ...row,
         rank: index + 1,

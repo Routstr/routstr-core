@@ -92,6 +92,20 @@ class Settings(BaseSettings):
 
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
+    enable_analytics_sharing: bool = Field(
+        default=True, env="ENABLE_ANALYTICS_SHARING"
+    )
+
+def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Discard unknown keys from persisted settings."""
+    normalized: dict[str, Any] = {}
+    known_fields = Settings.__fields__
+
+    for key, value in data.items():
+        if key in known_fields:
+            normalized[key] = value
+
+    return normalized
 
 
 def _compute_primary_mint(cashu_mints: list[str]) -> str:
@@ -231,16 +245,20 @@ class SettingsService:
 
             db_id, db_data, _updated_at = row
             try:
-                db_json = (
+                db_json_raw = (
                     json.loads(db_data) if isinstance(db_data, str) else dict(db_data)
                 )
+                if not isinstance(db_json_raw, dict):
+                    db_json_raw = {}
             except Exception:
-                db_json = {}
+                db_json_raw = {}
+            db_json = _normalize_settings_data(db_json_raw)
 
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
                 {k: v for k, v in db_json.items() if v not in (None, "", [], {})}
             )
+            merged_dict = Settings(**merged_dict).dict()
 
             # Ensure primary_mint is consistent with cashu_mints if not explicitly set
             if not merged_dict.get("primary_mint"):
@@ -248,7 +266,7 @@ class SettingsService:
                     merged_dict.get("cashu_mints", [])
                 )
 
-            if any(k not in db_json for k in merged_dict.keys()):
+            if db_json_raw != merged_dict:
                 await db_session.exec(  # type: ignore
                     text(
                         "UPDATE settings SET data = :data, updated_at = :updated_at WHERE id = 1"
@@ -271,7 +289,7 @@ class SettingsService:
     ) -> Settings:
         async with cls._lock:
             current = cls.get()
-            candidate_dict = {**current.dict(), **partial}
+            candidate_dict = {**current.dict(), **_normalize_settings_data(partial)}
             candidate = Settings(**candidate_dict)
             from sqlmodel import text
 
@@ -304,7 +322,12 @@ class SettingsService:
             if row is None:
                 raise RuntimeError("Settings row missing")
             (data_str,) = row
-            data = json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
+            data_raw = (
+                json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
+            )
+            if not isinstance(data_raw, dict):
+                data_raw = {}
+            data = _normalize_settings_data(data_raw)
             # Update in-place
             for k, v in data.items():
                 setattr(settings, k, v)
