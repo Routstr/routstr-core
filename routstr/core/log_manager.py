@@ -873,7 +873,7 @@ class LogManager:
                 latest_errors_heap, key=lambda x: x[0], reverse=True
             )
         ]
-        top_model_limit = max(1, min(model_limit, 10))
+        top_model_limit = max(1, min(model_limit, 20))
         top_models = [
             model_name
             for model_name, _ in sorted(

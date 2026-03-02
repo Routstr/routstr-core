@@ -12,7 +12,11 @@ from starlette.exceptions import HTTPException
 
 from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
-from ..nostr import announce_provider, providers_cache_refresher
+from ..nostr import (
+    announce_provider,
+    providers_cache_refresher,
+    publish_usage_analytics,
+)
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
@@ -44,6 +48,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     pricing_task = None
     payout_task = None
     nip91_task = None
+    analytics_task = None
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
@@ -101,6 +106,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         payout_task = asyncio.create_task(periodic_payout())
         if global_settings.nsec:
             nip91_task = asyncio.create_task(announce_provider())
+            analytics_task = asyncio.create_task(publish_usage_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         key_reset_task = asyncio.create_task(periodic_key_reset())
@@ -127,6 +133,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             payout_task.cancel()
         if nip91_task is not None:
             nip91_task.cancel()
+        if analytics_task is not None:
+            analytics_task.cancel()
         if providers_task is not None:
             providers_task.cancel()
         if models_refresh_task is not None:
@@ -146,6 +154,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(payout_task)
             if nip91_task is not None:
                 tasks_to_wait.append(nip91_task)
+            if analytics_task is not None:
+                tasks_to_wait.append(analytics_task)
             if providers_task is not None:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:

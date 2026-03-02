@@ -1115,7 +1115,7 @@ class UsageAnalyticsStore:
         hours_back: int,
         limit: int,
     ) -> dict[str, Any]:
-        top_limit = max(1, min(int(limit), 10))
+        top_limit = max(1, min(int(limit), 20))
         top_rows = conn.execute(
             """
             SELECT

@@ -152,6 +152,7 @@ Manage which mints you accept payments from:
 |-------|-------------|
 | **Nsec** | Private key for signing announcements |
 | **Relays** | Where to publish your node advertisement |
+| **Share Analytics** | Toggle publishing aggregate usage stats to Nostr |
 
 ### Security
 
