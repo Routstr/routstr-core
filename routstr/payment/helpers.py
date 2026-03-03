@@ -29,7 +29,8 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
             },
         )
     elif auth := headers.get("authorization", None):
-        cashu_token = auth.split(" ")[1] if len(auth.split(" ")) > 1 else ""
+        parts = auth.split()
+        cashu_token = parts[1] if len(parts) > 1 else ""
         logger.debug(
             "Using Authorization header token",
             extra={

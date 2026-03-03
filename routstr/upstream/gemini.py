@@ -259,7 +259,15 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
                 cost_data = await adjust_payment_for_tokens(
                     key, openai_format_response, session, max_cost_for_model
                 )
+                await session.refresh(key)
+                remaining_balance_msats = key.balance
                 openai_format_response["cost"] = cost_data
+                openai_format_response["cost"]["sats_cost"] = (
+                    cost_data.get("total_msats", 0) // 1000
+                )
+                openai_format_response["cost"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
                 logger.info(
                     "Gemini non-streaming payment completed",
