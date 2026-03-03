@@ -198,7 +198,11 @@ function detectProviderFromModel(model: string): string {
   if (value.includes('claude')) return 'anthropic';
   if (value.includes('gpt') || value.includes('openai')) return 'openai';
   if (value.includes('gemini')) return 'google';
-  if (value.includes('grok') || value.includes('x-ai') || value.includes('xai')) {
+  if (
+    value.includes('grok') ||
+    value.includes('x-ai') ||
+    value.includes('xai')
+  ) {
     return 'x-ai';
   }
   if (value.includes('deepseek')) return 'deepseek';
@@ -206,15 +210,20 @@ function detectProviderFromModel(model: string): string {
   if (value.includes('kimi') || value.includes('moonshot')) return 'moonshot';
   if (value.includes('mistral')) return 'mistral';
   if (value.includes('qwen') || value.includes('alibaba')) return 'alibaba';
-  if (value.includes('glm') || value.includes('z-ai') || value.includes('z ai')) {
+  if (
+    value.includes('glm') ||
+    value.includes('z-ai') ||
+    value.includes('z ai')
+  ) {
     return 'z-ai';
   }
   return 'unknown';
 }
 
-function getModelPresentation(
-  model: string
-): { displayName: string; provider: string } {
+function getModelPresentation(model: string): {
+  displayName: string;
+  provider: string;
+} {
   const trimmed = model.trim();
   const slashIndex = trimmed.indexOf('/');
   if (slashIndex > 0 && slashIndex < trimmed.length - 1) {
@@ -257,10 +266,7 @@ export function TopModelsUsageChart({
     [mix.metrics]
   );
 
-  const chartModels = useMemo(
-    () => mixTopModels.slice(0, 20),
-    [mixTopModels]
-  );
+  const chartModels = useMemo(() => mixTopModels.slice(0, 20), [mixTopModels]);
   const leaderboardModels = useMemo(
     () => mixTopModels.slice(0, 20),
     [mixTopModels]
@@ -472,9 +478,7 @@ export function TopModelsUsageChart({
 
     const windowSize = Math.floor(mixMetrics.length / 2);
     const previousMetrics =
-      windowSize > 0
-        ? mixMetrics.slice(-windowSize * 2, -windowSize)
-        : [];
+      windowSize > 0 ? mixMetrics.slice(-windowSize * 2, -windowSize) : [];
     const currentMetrics =
       windowSize > 0 ? mixMetrics.slice(-windowSize) : mixMetrics;
 
@@ -482,10 +486,10 @@ export function TopModelsUsageChart({
       .map((model) => {
         const readMetric = (metric: (typeof mixMetrics)[number]): number =>
           mode === 'requests'
-            ? (metric.model_counts ?? {})[model] ?? 0
+            ? ((metric.model_counts ?? {})[model] ?? 0)
             : mode === 'revenue'
-              ? (metric.model_revenue_msats ?? {})[model] ?? 0
-              : (metric.model_tokens ?? {})[model] ?? 0;
+              ? ((metric.model_revenue_msats ?? {})[model] ?? 0)
+              : ((metric.model_tokens ?? {})[model] ?? 0);
 
         const totalRaw = mixMetrics.reduce(
           (sum, metric) => sum + readMetric(metric),
@@ -557,7 +561,9 @@ export function TopModelsUsageChart({
         <CardHeader className='space-y-3 sm:space-y-4'>
           <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
             <div className='min-w-0'>
-              <CardTitle className='text-base sm:text-lg'>Model Usage</CardTitle>
+              <CardTitle className='text-base sm:text-lg'>
+                Model Usage
+              </CardTitle>
               <p className='text-muted-foreground mt-1 text-xs sm:text-sm'>
                 Stacked requests, revenue, or tokens by model (
                 {mix.interval_minutes}m buckets).
@@ -689,7 +695,9 @@ export function TopModelsUsageChart({
                         value,
                       } satisfies TooltipRow;
                     })
-                    .filter((row) => Number.isFinite(row.value) && row.value > 0)
+                    .filter(
+                      (row) => Number.isFinite(row.value) && row.value > 0
+                    )
                     .sort((a, b) => b.value - a.value);
 
                   const total = rows.reduce((sum, row) => sum + row.value, 0);
@@ -814,7 +822,7 @@ export function TopModelsUsageChart({
                       className={cn(
                         'grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-md px-2 py-2 text-xs',
                         rowIsLinked &&
-                          'cursor-pointer transition hover:bg-muted/25',
+                          'hover:bg-muted/25 cursor-pointer transition',
                         rowIsActive && 'bg-muted/30',
                         rowIsDimmed && 'opacity-45'
                       )}
