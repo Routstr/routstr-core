@@ -348,6 +348,8 @@ async def validate_bearer_key(
             )
 
             return new_key
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(
                 "Cashu token redemption failed",
@@ -997,18 +999,8 @@ async def adjust_payment_for_tokens(
                     }
                 },
             )
-    # Fallback: should not reach here, but release reservation just in case
-    logger.error(
-        "Unexpected fallback in adjust_payment_for_tokens - releasing reservation",
-        extra={"key_hash": key.hashed_key[:8] + "...", "model": model},
-    )
-    await release_reservation_only()
-    return {
-        "base_msats": deducted_max_cost,
-        "input_msats": 0,
-        "output_msats": 0,
-        "total_msats": deducted_max_cost,
-    }
+    # All calculate_cost variants are handled above.
+    raise AssertionError("Unreachable: unhandled calculate_cost result")
 
 
 async def periodic_key_reset() -> None:
