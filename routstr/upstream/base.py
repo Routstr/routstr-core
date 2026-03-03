@@ -3093,7 +3093,7 @@ class BaseUpstreamProvider:
                     UpstreamProviderRow.api_key == self.api_key
                 )
                 result = await session.exec(stmt)
-                
+
                 # .first() returns the object or None if not found
                 provider = result.first()
                 if not provider or not provider.id:
@@ -3115,7 +3115,6 @@ class BaseUpstreamProvider:
                     models.append(found_db_model)
 
                 models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
-                print([mode.id for mode in models_with_fees])
 
                 try:
                     sats_to_usd = sats_usd_price()
