@@ -1,4 +1,6 @@
 import os
+import pathlib
+import sqlite3
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -184,11 +186,53 @@ async def create_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+def fix_cashu_migrations() -> None:
+    """
+    Fixes Cashu wallet migrations that are not idempotent.
+    This specifically addresses the 'duplicate column name: public_keys' error
+    in the keysets table of Cashu's internal SQLite databases.
+    """
+    project_root = pathlib.Path(__file__).resolve().parents[2]
+    wallet_dir = project_root / ".wallet"
+
+    if not wallet_dir.exists() or not wallet_dir.is_dir():
+        return
+
+    logger.info("Checking Cashu wallet databases for migration idempotency")
+
+    for db_file in wallet_dir.glob("*.sqlite3"):
+        try:
+            conn = sqlite3.connect(db_file)
+            cursor = conn.cursor()
+
+            # Check if keysets table exists
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='keysets'"
+            )
+            if not cursor.fetchone():
+                conn.close()
+                continue
+
+            # Check if public_keys column exists
+            cursor.execute("PRAGMA table_info(keysets)")
+            columns = [info[1] for info in cursor.fetchall()]
+
+            if "public_keys" not in columns:
+                logger.info(f"Adding missing public_keys column to {db_file.name}")
+                cursor.execute("ALTER TABLE keysets ADD COLUMN public_keys TEXT")
+                conn.commit()
+
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Could not check/fix Cashu database {db_file}: {e}")
+
+
 def run_migrations() -> None:
     """Run Alembic migrations programmatically."""
-    import pathlib
-
     try:
+        # Run Cashu migration fix first
+        fix_cashu_migrations()
+
         # Get the path to the alembic.ini file
         project_root = pathlib.Path(__file__).resolve().parents[2]
         alembic_ini_path = project_root / "alembic.ini"

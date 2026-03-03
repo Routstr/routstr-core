@@ -586,12 +586,14 @@ async def create_upstream_provider(
     async with create_session() as session:
         result = await session.exec(
             select(UpstreamProviderRow).where(
-                UpstreamProviderRow.base_url == payload.base_url
+                UpstreamProviderRow.base_url == payload.base_url,
+                UpstreamProviderRow.api_key == payload.api_key,
             )
         )
         if result.first():
             raise HTTPException(
-                status_code=409, detail="Provider with this base URL already exists"
+                status_code=409,
+                detail="Provider with this base URL and API key already exists",
             )
 
         provider = UpstreamProviderRow(

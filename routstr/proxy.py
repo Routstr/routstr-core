@@ -386,7 +386,8 @@ async def get_bearer_token_key(
     headers: dict, path: str, session: AsyncSession, auth: str, min_cost: int = 0
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
-    bearer_key = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
+    parts = auth.split()
+    bearer_key = parts[1] if len(parts) > 1 and parts[0].lower() == "bearer" else ""
     refund_address = headers.get("Refund-LNURL", None)
     key_expiry_time = headers.get("Key-Expiry-Time", None)
 

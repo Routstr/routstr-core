@@ -29,15 +29,13 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
             },
         )
     elif auth := headers.get("authorization", None):
-        cashu_token = auth.split(" ")[1] if len(auth.split(" ")) > 1 else ""
         logger.debug(
-            "Using Authorization header token",
+            "Skipping preflight token balance check for Authorization header",
             extra={
-                "token_preview": cashu_token[:20] + "..."
-                if len(cashu_token) > 20
-                else cashu_token
+                "auth_preview": auth[:20] + "..." if len(auth) > 20 else auth,
             },
         )
+        return
     else:
         logger.error("No authentication token provided")
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -75,7 +73,7 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
 
     if max_cost_for_model > amount_msat:
         raise HTTPException(
-            status_code=413,
+            status_code=402,
             detail={
                 "reason": "Insufficient balance",
                 "amount_required_msat": max_cost_for_model,
