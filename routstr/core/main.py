@@ -35,9 +35,9 @@ setup_logging()
 logger = get_logger(__name__)
 
 if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.3.0-{os.getenv('VERSION_SUFFIX')}"
+    __version__ = f"0.4.0-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.3.0"
+    __version__ = "0.4.0"
 
 
 @asynccontextmanager
