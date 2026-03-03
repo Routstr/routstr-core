@@ -523,9 +523,16 @@ class BaseUpstreamProvider:
                                     session,
                                     max_cost_for_model,
                                 )
+                                remaining_balance_msats = fresh_key.balance
                                 # Merge cost into usage
                                 usage_chunk_data["usage"]["cost"] = cost_data.get(
                                     "total_usd", 0.0
+                                )
+                                usage_chunk_data["usage"]["cost_sats"] = (
+                                    cost_data.get("total_msats", 0) // 1000
+                                )
+                                usage_chunk_data["usage"]["remaining_balance_msats"] = (
+                                    remaining_balance_msats
                                 )
                                 # Keep detailed cost in metadata
                                 usage_chunk_data["metadata"] = usage_chunk_data.get(
@@ -534,6 +541,12 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["metadata"]["routstr"] = {
                                     "cost": cost_data
                                 }
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "sats_cost"
+                                ] = cost_data.get("total_msats", 0) // 1000
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "remaining_balance_msats"
+                                ] = remaining_balance_msats
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
                             except Exception as e:
@@ -624,14 +637,31 @@ class BaseUpstreamProvider:
                 key, response_json, session, deducted_max_cost
             )
 
+            await session.refresh(key)
+            remaining_balance_msats = key.balance
+
             # Merge cost into usage for OpenCode
             if "usage" in response_json:
                 response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+                response_json["usage"]["cost_sats"] = (
+                    cost_data.get("total_msats", 0) // 1000
+                )
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
             response_json["metadata"]["routstr"] = {"cost": cost_data}
+            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
+                cost_data.get("total_msats", 0) // 1000
+            )
+            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
+                remaining_balance_msats
+            )
             response_json["cost"] = cost_data
+            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
+            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
 
             logger.info(
                 "Payment adjustment completed for non-streaming",
@@ -801,6 +831,7 @@ class BaseUpstreamProvider:
                                     session,
                                     max_cost_for_model,
                                 )
+                                remaining_balance_msats = fresh_key.balance
                                 # Merge cost into usage chunk
                                 if (
                                     "response" in usage_chunk_data
@@ -809,10 +840,22 @@ class BaseUpstreamProvider:
                                     usage_chunk_data["response"]["usage"]["cost"] = (
                                         cost_data.get("total_usd", 0.0)
                                     )
+                                    usage_chunk_data["response"]["usage"][
+                                        "cost_sats"
+                                    ] = cost_data.get("total_msats", 0) // 1000
+                                    usage_chunk_data["response"]["usage"][
+                                        "remaining_balance_msats"
+                                    ] = remaining_balance_msats
                                 elif "usage" in usage_chunk_data:
                                     usage_chunk_data["usage"]["cost"] = cost_data.get(
                                         "total_usd", 0.0
                                     )
+                                    usage_chunk_data["usage"]["cost_sats"] = (
+                                        cost_data.get("total_msats", 0) // 1000
+                                    )
+                                    usage_chunk_data["usage"][
+                                        "remaining_balance_msats"
+                                    ] = remaining_balance_msats
 
                                 # Keep detailed cost in metadata
                                 usage_chunk_data["metadata"] = usage_chunk_data.get(
@@ -821,6 +864,12 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["metadata"]["routstr"] = {
                                     "cost": cost_data
                                 }
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "sats_cost"
+                                ] = cost_data.get("total_msats", 0) // 1000
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "remaining_balance_msats"
+                                ] = remaining_balance_msats
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
                             except Exception:
@@ -905,14 +954,31 @@ class BaseUpstreamProvider:
                 key, response_json, session, deducted_max_cost
             )
 
+            await session.refresh(key)
+            remaining_balance_msats = key.balance
+
             # Merge cost into usage for OpenCode
             if "usage" in response_json:
                 response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+                response_json["usage"]["cost_sats"] = (
+                    cost_data.get("total_msats", 0) // 1000
+                )
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
             response_json["metadata"]["routstr"] = {"cost": cost_data}
+            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
+                cost_data.get("total_msats", 0) // 1000
+            )
+            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
+                remaining_balance_msats
+            )
             response_json["cost"] = cost_data
+            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
+            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
 
             logger.info(
                 "Payment adjustment completed for non-streaming Responses API",
