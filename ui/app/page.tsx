@@ -493,8 +493,9 @@ function DashboardInsights({
 }
 
 export default function DashboardPage() {
-  const [selectedPreset, setSelectedPreset] =
-    useState<TimeRangePresetValue>(DEFAULT_TIME_RANGE_PRESET.value);
+  const [selectedPreset, setSelectedPreset] = useState<TimeRangePresetValue>(
+    DEFAULT_TIME_RANGE_PRESET.value
+  );
   const [customRange, setCustomRange] = useState<DateRange>();
   const [pendingCustomRange, setPendingCustomRange] = useState<DateRange>();
   const [isCustomRangeActive, setIsCustomRangeActive] = useState(false);
@@ -570,7 +571,7 @@ export default function DashboardPage() {
         ? 'sats'
         : revenueDisplayUnit === 'msat'
           ? 'msats'
-        : revenueDisplayUnit;
+          : revenueDisplayUnit;
 
   const {
     data: usageDashboardData,
@@ -733,7 +734,8 @@ export default function DashboardPage() {
         id: 'tokens',
         title: 'Token Usage',
         mobileTitle: 'Tokens',
-        description: 'Track input, output, and total token throughput over time.',
+        description:
+          'Track input, output, and total token throughput over time.',
         data: metricPoints,
         metricType: 'count',
         totals: metricsTotals

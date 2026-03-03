@@ -12,7 +12,7 @@ import json
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypedDict
 
 from nostr.event import Event
 from nostr.key import PrivateKey
@@ -44,6 +44,13 @@ WINDOW_DEFINITIONS: tuple[tuple[str, int, int], ...] = (
     ("7d", 7 * 24, 6 * 60),
     ("30d", 30 * 24, 24 * 60),
 )
+
+
+class PayloadSpec(TypedDict):
+    period_type: str
+    period_key: str
+    d_tag: str
+    payload: dict[str, Any]
 
 
 def _event_to_dict(ev: Event) -> dict[str, Any]:
@@ -197,7 +204,10 @@ def _aggregate_top_model_usage(
         }
         for model, values in model_totals.items()
     ]
-    model_rows.sort(key=lambda row: row["successful_requests"], reverse=True)
+    model_rows.sort(
+        key=lambda row: _to_int(row.get("successful_requests", 0)),
+        reverse=True,
+    )
 
     return model_rows, others
 
@@ -600,7 +610,7 @@ async def publish_usage_analytics() -> None:
                 generated_at=now_ts,
             )
 
-            payload_specs = [
+            payload_specs: list[PayloadSpec] = [
                 {
                     "period_type": "latest",
                     "period_key": "latest",
@@ -624,7 +634,7 @@ async def publish_usage_analytics() -> None:
             to_publish: list[dict[str, Any]] = []
             refs: dict[str, dict[str, str]] = {}
             for spec in payload_specs:
-                payload = spec["payload"]
+                payload: dict[str, Any] = spec["payload"]
                 payload_hash = _fingerprint_payload(payload)
                 d_tag = str(spec["d_tag"])
                 period_type = str(spec["period_type"])

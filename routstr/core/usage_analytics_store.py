@@ -673,7 +673,7 @@ class UsageAnalyticsStore:
             )
 
         if model_updates:
-            rows = [
+            model_rows = [
                 (
                     minute_ts,
                     model,
@@ -713,11 +713,11 @@ class UsageAnalyticsStore:
                     output_tokens = output_tokens + excluded.output_tokens,
                     total_tokens = total_tokens + excluded.total_tokens
                 """,
-                rows,
+                model_rows,
             )
 
         if model_presence_updates:
-            rows = [
+            presence_rows = [
                 (minute_ts, model, count)
                 for (minute_ts, model), count in model_presence_updates.items()
             ]
@@ -732,11 +732,11 @@ class UsageAnalyticsStore:
                 ON CONFLICT(minute_ts, model) DO UPDATE SET
                     count = count + excluded.count
                 """,
-                rows,
+                presence_rows,
             )
 
         if error_type_updates:
-            rows = [
+            error_type_rows = [
                 (minute_ts, error_type, count)
                 for (minute_ts, error_type), count in error_type_updates.items()
             ]
@@ -751,7 +751,7 @@ class UsageAnalyticsStore:
                 ON CONFLICT(minute_ts, error_type) DO UPDATE SET
                     count = count + excluded.count
                 """,
-                rows,
+                error_type_rows,
             )
 
         if error_events:
@@ -1215,9 +1215,9 @@ class UsageAnalyticsStore:
 
             for row in top_model_rows:
                 bucket_ts = str(row["bucket_ts"])
-                bucket = bucket_index.get(bucket_ts)
-                if bucket is None:
+                if bucket_ts not in bucket_index:
                     continue
+                bucket = bucket_index[bucket_ts]
 
                 model = str(row["model"])
                 successful = int(row["successful"])
