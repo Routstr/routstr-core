@@ -6,12 +6,13 @@ Publishes routstr analytics snapshots for latest/day/month plus daily checkpoint
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, TypedDict
 
 from nostr.event import Event
@@ -269,6 +270,19 @@ def _build_window_payload(
         error_limit=1,
         model_limit=model_limit,
     )
+    return _build_window_payload_from_dashboard(
+        dashboard=dashboard,
+        hours=hours,
+        interval=interval,
+    )
+
+
+def _build_window_payload_from_dashboard(
+    *,
+    dashboard: dict[str, Any],
+    hours: int,
+    interval: int,
+) -> dict[str, Any]:
     summary = dashboard.get("summary", {})
     revenue_by_model = dashboard.get("revenue_by_model", {})
     model_usage_mix = dashboard.get("model_usage_mix", {})
@@ -289,6 +303,41 @@ def _build_window_payload(
         "others_usage": others_usage,
         "model_usage_mix": usage_mix_payload,
     }
+
+
+def _build_window_payload_for_range(
+    *,
+    start_unix: int,
+    end_unix: int,
+    interval: int,
+    model_limit: int,
+) -> dict[str, Any]:
+    safe_start = max(0, int(start_unix))
+    safe_end = max(safe_start + 60, int(end_unix))
+    hours = _hours_since(safe_start, safe_end)
+
+    # Prefer exact range query when supported.
+    try:
+        dashboard = log_manager.get_usage_dashboard_range(
+            interval=interval,
+            start_unix=safe_start,
+            end_unix=safe_end,
+            error_limit=1,
+            model_limit=model_limit,
+        )
+    except Exception:
+        dashboard = log_manager.get_usage_dashboard(
+            interval=interval,
+            hours=hours,
+            error_limit=1,
+            model_limit=model_limit,
+        )
+
+    return _build_window_payload_from_dashboard(
+        dashboard=dashboard,
+        hours=hours,
+        interval=interval,
+    )
 
 
 def build_latest_usage_analytics_payload(
@@ -408,6 +457,50 @@ def build_month_usage_analytics_payload(
         model_limit=model_limit,
     )
     payload["month"] = month_key
+    return payload
+
+
+def _build_period_payload_for_range(
+    provider_id: str,
+    *,
+    public_key_hex: str,
+    generated_at: int,
+    period_type: str,
+    period_key: str,
+    period_start_unix: int,
+    period_end_unix: int,
+    interval_minutes: int,
+    model_limit: int = MODEL_LIMIT,
+) -> dict[str, Any]:
+    window = _build_window_payload_for_range(
+        start_unix=period_start_unix,
+        end_unix=period_end_unix,
+        interval=interval_minutes,
+        model_limit=model_limit,
+    )
+    payload = {
+        "schema": ANALYTICS_SCHEMA,
+        "generated_at": int(generated_at),
+        "provider_id": provider_id,
+        "pubkey": public_key_hex,
+        "npub": settings.npub or "",
+        "endpoint_urls": _resolve_endpoint_urls(),
+        "period_type": period_type,
+        "period_key": period_key,
+        "period_start_unix": int(period_start_unix),
+        "period_end_unix": int(period_end_unix),
+        "window_hours": window.get("window_hours", _hours_since(period_start_unix, period_end_unix)),
+        "interval_minutes": window.get("interval_minutes", interval_minutes),
+        "summary": window.get("summary", {}),
+        "model_revenue": window.get("model_revenue", []),
+        "top_model_usage": window.get("top_model_usage", []),
+        "others_usage": window.get("others_usage", {}),
+        "model_usage_mix": window.get("model_usage_mix", {}),
+    }
+    if period_type == "day":
+        payload["day"] = period_key
+    elif period_type == "month":
+        payload["month"] = period_key
     return payload
 
 
@@ -532,6 +625,311 @@ def create_analytics_checkpoint_event(
     )
     private_key.sign_event(event)
     return _event_to_dict(event)
+
+
+def _utc_day_start_unix(day_value: date) -> int:
+    return int(
+        datetime(
+            day_value.year,
+            day_value.month,
+            day_value.day,
+            tzinfo=timezone.utc,
+        ).timestamp()
+    )
+
+
+def _first_day_of_month(day_value: date) -> date:
+    return date(day_value.year, day_value.month, 1)
+
+
+def _next_month(day_value: date) -> date:
+    if day_value.month == 12:
+        return date(day_value.year + 1, 1, 1)
+    return date(day_value.year, day_value.month + 1, 1)
+
+
+def _iter_days(start_day: date, end_day: date) -> list[date]:
+    days: list[date] = []
+    cursor = start_day
+    while cursor <= end_day:
+        days.append(cursor)
+        cursor += timedelta(days=1)
+    return days
+
+
+def _iter_month_starts(start_day: date, end_day: date) -> list[date]:
+    months: list[date] = []
+    cursor = _first_day_of_month(start_day)
+    limit = _first_day_of_month(end_day)
+    while cursor <= limit:
+        months.append(cursor)
+        cursor = _next_month(cursor)
+    return months
+
+
+def _parse_day_arg(value: str, *, field_name: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field_name}: {value}. Use YYYY-MM-DD.") from exc
+
+
+def _resolve_backfill_range(
+    start_day: str | None,
+    end_day: str | None,
+) -> tuple[date, date]:
+    bounds = log_manager.get_usage_time_bounds()
+    min_unix = bounds.get("min_unix")
+    max_unix = bounds.get("max_unix")
+    inferred_start = (
+        datetime.fromtimestamp(int(min_unix), tz=timezone.utc).date()
+        if isinstance(min_unix, int)
+        else None
+    )
+    inferred_end = (
+        datetime.fromtimestamp(int(max_unix), tz=timezone.utc).date()
+        if isinstance(max_unix, int)
+        else None
+    )
+
+    resolved_start = (
+        _parse_day_arg(start_day, field_name="start-day")
+        if start_day
+        else inferred_start
+    )
+    resolved_end = (
+        _parse_day_arg(end_day, field_name="end-day") if end_day else inferred_end
+    )
+    if resolved_start is None or resolved_end is None:
+        raise ValueError(
+            "Could not infer backfill range from analytics index. "
+            "Pass --start-day and --end-day explicitly."
+        )
+    if resolved_end < resolved_start:
+        raise ValueError("end-day must be on or after start-day.")
+    return (resolved_start, resolved_end)
+
+
+async def publish_usage_analytics_backfill(
+    *,
+    start_day: date,
+    end_day: date,
+    publish_days: bool = True,
+    publish_months: bool = True,
+    model_limit: int = MODEL_LIMIT,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    nsec = (settings.nsec or "").strip()
+    if not nsec:
+        raise ValueError("NSEC is not configured.")
+    keypair = nsec_to_keypair(nsec)
+    if not keypair:
+        raise ValueError("Invalid NSEC.")
+
+    private_key_hex, public_key_hex = keypair
+    provider_id = _resolve_provider_id(public_key_hex)
+    relay_urls = _resolve_relays()
+    if not relay_urls:
+        raise ValueError("No Nostr relays configured.")
+
+    day_specs: list[PayloadSpec] = []
+    if publish_days:
+        for day_value in _iter_days(start_day, end_day):
+            day_key = day_value.isoformat()
+            day_start_unix = _utc_day_start_unix(day_value)
+            day_end_unix = day_start_unix + 24 * 3600
+            payload = _build_period_payload_for_range(
+                provider_id,
+                public_key_hex=public_key_hex,
+                generated_at=day_end_unix,
+                period_type="day",
+                period_key=day_key,
+                period_start_unix=day_start_unix,
+                period_end_unix=day_end_unix,
+                interval_minutes=60,
+                model_limit=model_limit,
+            )
+            day_specs.append(
+                {
+                    "period_type": "day",
+                    "period_key": day_key,
+                    "d_tag": f"{provider_id}:usage:day:{day_key}",
+                    "payload": payload,
+                }
+            )
+
+    month_specs: list[PayloadSpec] = []
+    if publish_months:
+        end_exclusive_unix = _utc_day_start_unix(end_day + timedelta(days=1))
+        for month_start in _iter_month_starts(start_day, end_day):
+            month_key = month_start.strftime("%Y-%m")
+            month_start_unix = _utc_day_start_unix(month_start)
+            month_end_unix = _utc_day_start_unix(_next_month(month_start))
+            period_end_unix = min(month_end_unix, end_exclusive_unix)
+            if period_end_unix <= month_start_unix:
+                continue
+            payload = _build_period_payload_for_range(
+                provider_id,
+                public_key_hex=public_key_hex,
+                generated_at=period_end_unix,
+                period_type="month",
+                period_key=month_key,
+                period_start_unix=month_start_unix,
+                period_end_unix=period_end_unix,
+                interval_minutes=24 * 60,
+                model_limit=model_limit,
+            )
+            month_specs.append(
+                {
+                    "period_type": "month",
+                    "period_key": month_key,
+                    "d_tag": f"{provider_id}:usage:month:{month_key}",
+                    "payload": payload,
+                }
+            )
+
+    specs = [*day_specs, *month_specs]
+    if not specs:
+        return {
+            "provider_id": provider_id,
+            "relay_total": len(relay_urls),
+            "published": 0,
+            "failed": 0,
+            "day_events": 0,
+            "month_events": 0,
+            "dry_run": dry_run,
+        }
+
+    published = 0
+    failed = 0
+    for spec in specs:
+        payload_json = json.dumps(spec["payload"], separators=(",", ":"), sort_keys=True)
+        if dry_run:
+            logger.info(
+                "Backfill dry-run prepared %s %s (%s)",
+                spec["period_type"],
+                spec["period_key"],
+                spec["d_tag"],
+            )
+            published += 1
+            continue
+
+        event = create_usage_analytics_event(
+            private_key_hex,
+            provider_id,
+            payload_json,
+            period_type=spec["period_type"],
+            period_key=spec["period_key"],
+            d_tag=spec["d_tag"],
+        )
+        success_count = 0
+        for relay_url in relay_urls:
+            if await publish_to_relay(relay_url, event):
+                success_count += 1
+        if success_count > 0:
+            published += 1
+        else:
+            failed += 1
+
+    return {
+        "provider_id": provider_id,
+        "relay_total": len(relay_urls),
+        "published": published,
+        "failed": failed,
+        "day_events": len(day_specs),
+        "month_events": len(month_specs),
+        "dry_run": dry_run,
+        "start_day": start_day.isoformat(),
+        "end_day": end_day.isoformat(),
+    }
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m routstr.nostr.analytics",
+        description="Routstr analytics publisher utilities.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    backfill = subparsers.add_parser(
+        "backfill",
+        help="Publish historical day/month analytics events from local log index.",
+    )
+    backfill.add_argument(
+        "--start-day",
+        type=str,
+        default=None,
+        help="UTC start day (YYYY-MM-DD). Default: earliest indexed day.",
+    )
+    backfill.add_argument(
+        "--end-day",
+        type=str,
+        default=None,
+        help="UTC end day (YYYY-MM-DD). Default: latest indexed day.",
+    )
+    backfill.add_argument(
+        "--skip-days",
+        action="store_true",
+        help="Skip day event backfill.",
+    )
+    backfill.add_argument(
+        "--skip-months",
+        action="store_true",
+        help="Skip month event backfill.",
+    )
+    backfill.add_argument(
+        "--model-limit",
+        type=int,
+        default=MODEL_LIMIT,
+        help=f"Top models to include per payload (default: {MODEL_LIMIT}).",
+    )
+    backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build payloads and print summary without publishing.",
+    )
+    return parser
+
+
+async def _run_cli_async(args: argparse.Namespace) -> int:
+    if args.command != "backfill":
+        return 1
+
+    start_day, end_day = _resolve_backfill_range(args.start_day, args.end_day)
+    result = await publish_usage_analytics_backfill(
+        start_day=start_day,
+        end_day=end_day,
+        publish_days=not bool(args.skip_days),
+        publish_months=not bool(args.skip_months),
+        model_limit=max(1, int(args.model_limit)),
+        dry_run=bool(args.dry_run),
+    )
+    logger.info(
+        "Backfill finished (provider=%s published=%s failed=%s day_events=%s month_events=%s relays=%s dry_run=%s range=%s..%s)",
+        result.get("provider_id"),
+        result.get("published"),
+        result.get("failed"),
+        result.get("day_events"),
+        result.get("month_events"),
+        result.get("relay_total"),
+        result.get("dry_run"),
+        result.get("start_day"),
+        result.get("end_day"),
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_cli_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        return 1
+    try:
+        return asyncio.run(_run_cli_async(args))
+    except ValueError as exc:
+        logger.error(str(exc))
+        return 2
 
 
 async def publish_usage_analytics() -> None:
@@ -779,3 +1177,7 @@ async def publish_usage_analytics() -> None:
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
             await asyncio.sleep(DISABLED_POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
