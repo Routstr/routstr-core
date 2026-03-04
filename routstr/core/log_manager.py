@@ -405,63 +405,6 @@ class LogManager:
             ttl_seconds=cache_ttl,
         )
 
-    def get_usage_dashboard_range(
-        self,
-        *,
-        interval: int,
-        start_unix: int,
-        end_unix: int,
-        error_limit: int = 100,
-        model_limit: int = 20,
-    ) -> dict:
-        window_seconds = max(60, int(end_unix) - int(start_unix))
-        if window_seconds <= 24 * 3600:
-            cache_ttl = 60.0
-        elif window_seconds <= 7 * 24 * 3600:
-            cache_ttl = 300.0
-        elif window_seconds <= 30 * 24 * 3600:
-            cache_ttl = 1800.0
-        elif window_seconds <= 90 * 24 * 3600:
-            cache_ttl = 7200.0
-        else:
-            cache_ttl = 21600.0
-
-        def compute() -> dict:
-            return self._usage_store.get_dashboard_range(
-                interval_minutes=interval,
-                start_unix=start_unix,
-                end_unix=end_unix,
-                error_limit=error_limit,
-                model_limit=model_limit,
-            )
-
-        return self._cache_call(
-            (
-                "usage_dashboard_range",
-                interval,
-                int(start_unix),
-                int(end_unix),
-                error_limit,
-                model_limit,
-            ),
-            compute,
-            ttl_seconds=cache_ttl,
-        )
-
-    def get_usage_time_bounds(self) -> dict[str, int | None]:
-        def compute() -> dict[str, int | None]:
-            min_unix, max_unix = self._usage_store.get_time_bounds()
-            return {
-                "min_unix": min_unix,
-                "max_unix": max_unix,
-            }
-
-        return self._cache_call(
-            ("usage_time_bounds",),
-            compute,
-            ttl_seconds=60.0,
-        )
-
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
         def compute() -> dict:
             try:

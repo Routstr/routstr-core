@@ -76,104 +76,6 @@ class UsageAnalyticsStore:
                 "model_usage_mix": model_usage_mix,
             }
 
-    def get_dashboard_range(
-        self,
-        *,
-        interval_minutes: int,
-        start_unix: int,
-        end_unix: int,
-        error_limit: int,
-        model_limit: int,
-    ) -> dict[str, Any]:
-        safe_start = max(0, int(start_unix))
-        safe_end = max(safe_start + 60, int(end_unix))
-        hours_back = max(
-            1,
-            int(
-                (safe_end - safe_start + 3599) // 3600
-            ),
-        )
-
-        with self._lock:
-            conn = self._get_connection_locked()
-            self._ensure_up_to_date_locked(conn)
-            start_timestamp = datetime.fromtimestamp(
-                safe_start, tz=timezone.utc
-            ).strftime("%Y-%m-%d %H:%M:%S")
-            end_timestamp = datetime.fromtimestamp(
-                safe_end, tz=timezone.utc
-            ).strftime("%Y-%m-%d %H:%M:%S")
-
-            summary = self._query_summary_locked(
-                conn,
-                cutoff_timestamp=start_timestamp,
-                until_timestamp=end_timestamp,
-            )
-            metrics = self._query_metrics_locked(
-                conn,
-                cutoff_timestamp=start_timestamp,
-                until_timestamp=end_timestamp,
-                interval_minutes=interval_minutes,
-                hours_back=hours_back,
-            )
-            error_details = self._query_error_details_locked(
-                conn,
-                cutoff_timestamp=start_timestamp,
-                until_timestamp=end_timestamp,
-                limit=error_limit,
-                total_error_count=summary["total_errors"],
-            )
-            revenue_by_model = self._query_revenue_by_model_locked(
-                conn,
-                cutoff_timestamp=start_timestamp,
-                until_timestamp=end_timestamp,
-                limit=model_limit,
-            )
-            model_usage_mix = self._query_model_usage_mix_locked(
-                conn,
-                cutoff_timestamp=start_timestamp,
-                until_timestamp=end_timestamp,
-                interval_minutes=interval_minutes,
-                hours_back=hours_back,
-                limit=model_limit,
-            )
-
-            return {
-                "metrics": metrics,
-                "summary": summary,
-                "error_details": error_details,
-                "revenue_by_model": revenue_by_model,
-                "model_usage_mix": model_usage_mix,
-            }
-
-    def get_time_bounds(self) -> tuple[int | None, int | None]:
-        with self._lock:
-            conn = self._get_connection_locked()
-            self._ensure_up_to_date_locked(conn)
-            row = conn.execute(
-                """
-                SELECT
-                    MIN(minute_ts) AS min_ts,
-                    MAX(minute_ts) AS max_ts
-                FROM analytics_minute
-                """
-            ).fetchone()
-            if row is None:
-                return (None, None)
-
-            min_raw = row["min_ts"]
-            max_raw = row["max_ts"]
-            if not isinstance(min_raw, str) or not isinstance(max_raw, str):
-                return (None, None)
-
-            min_dt = datetime.strptime(min_raw, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc
-            )
-            max_dt = datetime.strptime(max_raw, "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=timezone.utc
-            )
-            return (int(min_dt.timestamp()), int(max_dt.timestamp()))
-
     def get_summary(self, *, hours_back: int) -> dict[str, Any]:
         with self._lock:
             conn = self._get_connection_locked()
@@ -873,17 +775,12 @@ class UsageAnalyticsStore:
         conn: sqlite3.Connection,
         *,
         cutoff_timestamp: str,
-        until_timestamp: str | None = None,
         interval_minutes: int,
         hours_back: int,
     ) -> dict[str, Any]:
         bucket_seconds = max(60, int(interval_minutes) * 60)
-        where_clause, where_params = self._time_filter_clause(
-            cutoff_timestamp=cutoff_timestamp,
-            until_timestamp=until_timestamp,
-        )
         rows = conn.execute(
-            f"""
+            """
             SELECT
                 datetime(
                     (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
@@ -902,11 +799,11 @@ class UsageAnalyticsStore:
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens
             FROM analytics_minute
-            WHERE {where_clause}
+            WHERE minute_ts >= ?
             GROUP BY bucket_ts
             ORDER BY bucket_ts
             """,
-            (bucket_seconds, bucket_seconds, *where_params),
+            (bucket_seconds, bucket_seconds, cutoff_timestamp),
         ).fetchall()
 
         totals: dict[str, float] = {
@@ -995,17 +892,10 @@ class UsageAnalyticsStore:
         }
 
     def _query_summary_locked(
-        self,
-        conn: sqlite3.Connection,
-        cutoff_timestamp: str,
-        until_timestamp: str | None = None,
+        self, conn: sqlite3.Connection, cutoff_timestamp: str
     ) -> dict[str, Any]:
-        where_clause, where_params = self._time_filter_clause(
-            cutoff_timestamp=cutoff_timestamp,
-            until_timestamp=until_timestamp,
-        )
         totals = conn.execute(
-            f"""
+            """
             SELECT
                 COALESCE(SUM(total_entries), 0) AS total_entries,
                 COALESCE(SUM(total_requests), 0) AS total_requests,
@@ -1021,34 +911,34 @@ class UsageAnalyticsStore:
                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens
             FROM analytics_minute
-            WHERE {where_clause}
+            WHERE minute_ts >= ?
             """,
-            where_params,
+            (cutoff_timestamp,),
         ).fetchone()
 
         unique_models = [
             str(row[0])
             for row in conn.execute(
-                f"""
+                """
                 SELECT DISTINCT model
                 FROM analytics_model_presence_minute
-                WHERE {where_clause}
+                WHERE minute_ts >= ?
                 ORDER BY model ASC
                 """,
-                where_params,
+                (cutoff_timestamp,),
             ).fetchall()
         ]
 
         error_types = {
             str(row[0]): int(row[1])
             for row in conn.execute(
-                f"""
+                """
                 SELECT error_type, COALESCE(SUM(count), 0) AS total_count
                 FROM analytics_error_type_minute
-                WHERE {where_clause}
+                WHERE minute_ts >= ?
                 GROUP BY error_type
                 """,
-                where_params,
+                (cutoff_timestamp,),
             ).fetchall()
         }
 
@@ -1113,17 +1003,11 @@ class UsageAnalyticsStore:
         conn: sqlite3.Connection,
         *,
         cutoff_timestamp: str,
-        until_timestamp: str | None = None,
         limit: int,
         total_error_count: int | None = None,
     ) -> dict[str, Any]:
-        where_clause, where_params = self._time_filter_clause(
-            cutoff_timestamp=cutoff_timestamp,
-            until_timestamp=until_timestamp,
-            column="timestamp",
-        )
         rows = conn.execute(
-            f"""
+            """
             SELECT
                 timestamp,
                 message,
@@ -1132,25 +1016,21 @@ class UsageAnalyticsStore:
                 lineno,
                 request_id
             FROM analytics_error_events
-            WHERE {where_clause}
+            WHERE timestamp >= ?
             ORDER BY timestamp DESC
             LIMIT ?
             """,
-            (*where_params, limit),
+            (cutoff_timestamp, limit),
         ).fetchall()
 
         if total_error_count is None:
-            minute_where_clause, minute_where_params = self._time_filter_clause(
-                cutoff_timestamp=cutoff_timestamp,
-                until_timestamp=until_timestamp,
-            )
             total_error_count_row = conn.execute(
-                f"""
+                """
                 SELECT COALESCE(SUM(errors), 0)
                 FROM analytics_minute
-                WHERE {minute_where_clause}
+                WHERE minute_ts >= ?
                 """,
-                minute_where_params,
+                (cutoff_timestamp,),
             ).fetchone()
             total_error_count = int(total_error_count_row[0]) if total_error_count_row else 0
 
@@ -1174,15 +1054,10 @@ class UsageAnalyticsStore:
         conn: sqlite3.Connection,
         *,
         cutoff_timestamp: str,
-        until_timestamp: str | None = None,
         limit: int,
     ) -> dict[str, Any]:
-        where_clause, where_params = self._time_filter_clause(
-            cutoff_timestamp=cutoff_timestamp,
-            until_timestamp=until_timestamp,
-        )
         rows = conn.execute(
-            f"""
+            """
             SELECT
                 model,
                 COALESCE(SUM(revenue_msats), 0) AS revenue_msats,
@@ -1191,11 +1066,11 @@ class UsageAnalyticsStore:
                 COALESCE(SUM(successful), 0) AS successful,
                 COALESCE(SUM(failed), 0) AS failed
             FROM analytics_model_minute
-            WHERE {where_clause}
+            WHERE minute_ts >= ?
             GROUP BY model
             ORDER BY (COALESCE(SUM(revenue_msats), 0) - COALESCE(SUM(refunds_msats), 0)) DESC
             """,
-            where_params,
+            (cutoff_timestamp,),
         ).fetchall()
 
         models: list[dict[str, Any]] = []
@@ -1236,29 +1111,24 @@ class UsageAnalyticsStore:
         conn: sqlite3.Connection,
         *,
         cutoff_timestamp: str,
-        until_timestamp: str | None = None,
         interval_minutes: int,
         hours_back: int,
         limit: int,
     ) -> dict[str, Any]:
         top_limit = max(1, min(int(limit), 20))
-        where_clause, where_params = self._time_filter_clause(
-            cutoff_timestamp=cutoff_timestamp,
-            until_timestamp=until_timestamp,
-        )
         top_rows = conn.execute(
-            f"""
+            """
             SELECT
                 model,
                 COALESCE(SUM(successful), 0) AS total_successful
             FROM analytics_model_minute
-            WHERE {where_clause}
+            WHERE minute_ts >= ?
               AND model != 'unknown'
             GROUP BY model
             ORDER BY total_successful DESC
             LIMIT ?
             """,
-            (*where_params, top_limit),
+            (cutoff_timestamp, top_limit),
         ).fetchall()
 
         top_models = [
@@ -1269,7 +1139,7 @@ class UsageAnalyticsStore:
 
         bucket_seconds = max(60, int(interval_minutes) * 60)
         total_rows = conn.execute(
-            f"""
+            """
             SELECT
                 datetime(
                     (CAST(strftime('%s', minute_ts) AS INTEGER) / ?) * ?,
@@ -1279,11 +1149,11 @@ class UsageAnalyticsStore:
                 COALESCE(SUM(revenue_msats), 0) AS total_revenue_msats,
                 COALESCE(SUM(total_tokens), 0) AS total_tokens
             FROM analytics_model_minute
-            WHERE {where_clause}
+            WHERE minute_ts >= ?
             GROUP BY bucket_ts
             ORDER BY bucket_ts
             """,
-            (bucket_seconds, bucket_seconds, *where_params),
+            (bucket_seconds, bucket_seconds, cutoff_timestamp),
         ).fetchall()
 
         bucket_index: dict[str, dict[str, Any]] = {}
@@ -1335,12 +1205,12 @@ class UsageAnalyticsStore:
                     COALESCE(SUM(revenue_msats), 0) AS revenue_msats,
                     COALESCE(SUM(total_tokens), 0) AS total_tokens
                 FROM analytics_model_minute
-                WHERE {where_clause}
+                WHERE minute_ts >= ?
                   AND model IN ({placeholders})
                 GROUP BY bucket_ts, model
                 ORDER BY bucket_ts
                 """,
-                (bucket_seconds, bucket_seconds, *where_params, *top_models),
+                (bucket_seconds, bucket_seconds, cutoff_timestamp, *top_models),
             ).fetchall()
 
             for row in top_model_rows:
@@ -1384,20 +1254,6 @@ class UsageAnalyticsStore:
     def _cutoff_timestamp(self, hours_back: int) -> str:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
         return cutoff.strftime("%Y-%m-%d %H:%M:%S")
-
-    def _time_filter_clause(
-        self,
-        *,
-        cutoff_timestamp: str,
-        until_timestamp: str | None,
-        column: str = "minute_ts",
-    ) -> tuple[str, tuple[str, ...]]:
-        if until_timestamp is None:
-            return (f"{column} >= ?", (cutoff_timestamp,))
-        return (
-            f"{column} >= ? AND {column} < ?",
-            (cutoff_timestamp, until_timestamp),
-        )
 
     def _minute_key(self, timestamp: Any) -> str | None:
         if not isinstance(timestamp, str) or len(timestamp) != 19:

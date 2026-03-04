@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 from typing import Any
 
 from routstr.nostr import analytics
@@ -229,62 +228,3 @@ def test_checkpoint_payload_contains_chain_hash() -> None:
     assert payload["previous_checkpoint_hash"] == "prev-hash"
     assert isinstance(payload["checkpoint_hash"], str)
     assert len(payload["checkpoint_hash"]) == 64
-
-
-def test_window_payload_for_range_uses_range_query(monkeypatch: Any) -> None:
-    calls: list[tuple[int, int, int]] = []
-
-    def fake_dashboard_range(
-        *,
-        interval: int,
-        start_unix: int,
-        end_unix: int,
-        error_limit: int,
-        model_limit: int,
-    ) -> dict[str, Any]:
-        _ = (error_limit, model_limit)
-        calls.append((interval, start_unix, end_unix))
-        return {
-            "summary": {
-                "total_requests": 12,
-                "successful_chat_completions": 10,
-                "failed_requests": 2,
-                "total_tokens": 1200,
-                "revenue_sats": 4.2,
-            },
-            "revenue_by_model": {"models": []},
-            "model_usage_mix": {"top_models": [], "metrics": []},
-        }
-
-    monkeypatch.setattr(
-        analytics.log_manager, "get_usage_dashboard_range", fake_dashboard_range
-    )
-
-    payload = analytics._build_window_payload_for_range(
-        start_unix=1772380800,
-        end_unix=1772467200,
-        interval=60,
-        model_limit=20,
-    )
-
-    assert calls == [(60, 1772380800, 1772467200)]
-    assert payload["summary"]["total_requests"] == 12
-    assert payload["interval_minutes"] == 60
-
-
-def test_resolve_backfill_range_uses_index_bounds(monkeypatch: Any) -> None:
-    min_day = datetime(2025, 1, 2, 12, 0, tzinfo=timezone.utc)
-    max_day = datetime(2025, 3, 4, 7, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        analytics.log_manager,
-        "get_usage_time_bounds",
-        lambda: {
-            "min_unix": int(min_day.timestamp()),
-            "max_unix": int(max_day.timestamp()),
-        },
-    )
-
-    start_day, end_day = analytics._resolve_backfill_range(None, None)
-
-    assert start_day == date(2025, 1, 2)
-    assert end_day == date(2025, 3, 4)
