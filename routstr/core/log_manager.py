@@ -718,6 +718,8 @@ class LogManager:
             lambda: defaultdict(int)
         )
         model_mix_totals: dict[str, int] = defaultdict(int)
+        model_mix_revenue_totals: dict[str, float] = defaultdict(float)
+        model_mix_token_totals: dict[str, int] = defaultdict(int)
         latest_errors_heap: list[tuple[str, dict[str, Any]]] = []
         total_error_count = 0
 
@@ -786,10 +788,11 @@ class LogManager:
                         model_mix_buckets[bucket_key][model] += 1
                         if revenue_msats > 0:
                             model_mix_revenue_buckets[bucket_key][model] += revenue_msats
+                            model_mix_revenue_totals[model] += revenue_msats
                         if input_tokens > 0 or output_tokens > 0:
-                            model_mix_token_buckets[bucket_key][model] += (
-                                input_tokens + output_tokens
-                            )
+                            token_total = input_tokens + output_tokens
+                            model_mix_token_buckets[bucket_key][model] += token_total
+                            model_mix_token_totals[model] += token_total
 
                     if revenue_msats > 0:
                         summary_stats["revenue_msats"] += revenue_msats
@@ -874,7 +877,7 @@ class LogManager:
             )
         ]
         top_model_limit = max(1, min(model_limit, 20))
-        top_models = [
+        top_models_requests = [
             model_name
             for model_name, _ in sorted(
                 (
@@ -886,7 +889,35 @@ class LogManager:
                 reverse=True,
             )[:top_model_limit]
         ]
-        top_model_set = set(top_models)
+        top_models_revenue = [
+            model_name
+            for model_name, _ in sorted(
+                (
+                    (name, amount)
+                    for name, amount in model_mix_revenue_totals.items()
+                    if name != "unknown"
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:top_model_limit]
+        ]
+        top_models_tokens = [
+            model_name
+            for model_name, _ in sorted(
+                (
+                    (name, token_count)
+                    for name, token_count in model_mix_token_totals.items()
+                    if name != "unknown"
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:top_model_limit]
+        ]
+        selected_models: list[str] = []
+        for model in top_models_requests + top_models_revenue + top_models_tokens:
+            if model not in selected_models:
+                selected_models.append(model)
+        top_model_set = set(selected_models)
 
         model_usage_mix_metrics: list[dict[str, Any]] = []
         mix_bucket_keys = sorted(
@@ -953,7 +984,12 @@ class LogManager:
                 "total_models": len(models),
             },
             "model_usage_mix": {
-                "top_models": top_models,
+                "top_models": top_models_requests,
+                "top_models_by_metric": {
+                    "requests": top_models_requests,
+                    "revenue": top_models_revenue,
+                    "tokens": top_models_tokens,
+                },
                 "metrics": model_usage_mix_metrics,
                 "interval_minutes": interval_minutes,
                 "hours_back": hours_back,
