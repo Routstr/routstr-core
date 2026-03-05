@@ -79,7 +79,7 @@ def test_build_stats_snapshot_payload_schema_and_shape(monkeypatch: Any) -> None
     ) -> dict[str, Any]:
         seen_windows.add((hours, interval))
         assert error_limit == 1
-        assert model_limit == 10
+        assert model_limit == 20
         return {
             "summary": {
                 "total_requests": hours,
