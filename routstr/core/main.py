@@ -108,7 +108,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         payout_task = asyncio.create_task(periodic_payout())
         if global_settings.nsec:
             nip91_task = asyncio.create_task(announce_provider())
-            analytics_task = asyncio.create_task(publish_usage_analytics())
+        analytics_task = asyncio.create_task(publish_usage_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         key_reset_task = asyncio.create_task(periodic_key_reset())
