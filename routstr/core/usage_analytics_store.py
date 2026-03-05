@@ -1116,7 +1116,7 @@ class UsageAnalyticsStore:
         limit: int,
     ) -> dict[str, Any]:
         top_limit = max(1, min(int(limit), 20))
-        top_rows = conn.execute(
+        top_rows_requests = conn.execute(
             """
             SELECT
                 model,
@@ -1130,12 +1130,55 @@ class UsageAnalyticsStore:
             """,
             (cutoff_timestamp, top_limit),
         ).fetchall()
+        top_rows_revenue = conn.execute(
+            """
+            SELECT
+                model,
+                COALESCE(SUM(revenue_msats), 0) AS total_revenue_msats
+            FROM analytics_model_minute
+            WHERE minute_ts >= ?
+              AND model != 'unknown'
+            GROUP BY model
+            ORDER BY total_revenue_msats DESC
+            LIMIT ?
+            """,
+            (cutoff_timestamp, top_limit),
+        ).fetchall()
+        top_rows_tokens = conn.execute(
+            """
+            SELECT
+                model,
+                COALESCE(SUM(total_tokens), 0) AS total_tokens
+            FROM analytics_model_minute
+            WHERE minute_ts >= ?
+              AND model != 'unknown'
+            GROUP BY model
+            ORDER BY total_tokens DESC
+            LIMIT ?
+            """,
+            (cutoff_timestamp, top_limit),
+        ).fetchall()
 
-        top_models = [
+        top_models_requests = [
             str(row["model"])
-            for row in top_rows
+            for row in top_rows_requests
             if int(row["total_successful"] or 0) > 0
         ]
+        top_models_revenue = [
+            str(row["model"])
+            for row in top_rows_revenue
+            if float(row["total_revenue_msats"] or 0.0) > 0
+        ]
+        top_models_tokens = [
+            str(row["model"])
+            for row in top_rows_tokens
+            if int(row["total_tokens"] or 0) > 0
+        ]
+
+        selected_models: list[str] = []
+        for model in top_models_requests + top_models_revenue + top_models_tokens:
+            if model not in selected_models:
+                selected_models.append(model)
 
         bucket_seconds = max(60, int(interval_minutes) * 60)
         total_rows = conn.execute(
@@ -1191,8 +1234,8 @@ class UsageAnalyticsStore:
             bucket["others_revenue_msats"] = total_revenue_msats
             bucket["others_tokens"] = total_tokens
 
-        if top_models and bucket_index:
-            placeholders = ",".join("?" for _ in top_models)
+        if selected_models and bucket_index:
+            placeholders = ",".join("?" for _ in selected_models)
             top_model_rows = conn.execute(
                 f"""
                 SELECT
@@ -1210,7 +1253,7 @@ class UsageAnalyticsStore:
                 GROUP BY bucket_ts, model
                 ORDER BY bucket_ts
                 """,
-                (bucket_seconds, bucket_seconds, cutoff_timestamp, *top_models),
+                (bucket_seconds, bucket_seconds, cutoff_timestamp, *selected_models),
             ).fetchall()
 
             for row in top_model_rows:
@@ -1244,7 +1287,12 @@ class UsageAnalyticsStore:
         metrics = sorted(bucket_index.values(), key=lambda item: str(item["timestamp"]))
 
         return {
-            "top_models": top_models,
+            "top_models": top_models_requests,
+            "top_models_by_metric": {
+                "requests": top_models_requests,
+                "revenue": top_models_revenue,
+                "tokens": top_models_tokens,
+            },
             "metrics": metrics,
             "hours_back": hours_back,
             "interval_minutes": interval_minutes,
