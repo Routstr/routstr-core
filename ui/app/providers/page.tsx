@@ -1227,44 +1227,6 @@ export default function ProvidersPage() {
                       >
                         <CardContent>
                           <div className='space-y-4'>
-                            {provider.api_key ? (
-                              <div className='bg-muted/50 rounded border p-3'>
-                                <div className='flex items-center justify-between'>
-                                  <div className='space-y-1'>
-                                    <Label className='text-muted-foreground text-[10px] uppercase'>
-                                      Active API Key
-                                    </Label>
-                                    <div className='max-w-[200px] truncate font-mono text-xs'>
-                                      {provider.api_key}
-                                    </div>
-                                  </div>
-                                  <Button
-                                    variant='ghost'
-                                    size='icon'
-                                    className='h-7 w-7'
-                                    onClick={() => {
-                                      navigator.clipboard.writeText(
-                                        provider.api_key!
-                                      );
-                                      toast.success('API key copied');
-                                    }}
-                                  >
-                                    <Copy className='h-3 w-3' />
-                                  </Button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className='rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-400'>
-                                <div className='mb-1 flex items-center gap-2'>
-                                  <AlertTriangle className='h-3 w-3' />
-                                  <span className='font-semibold'>
-                                    No API Key Configured
-                                  </span>
-                                </div>
-                                Click the &quot;Key&quot; button above to create
-                                a new key on the upstream node.
-                              </div>
-                            )}
                             <div className='space-y-2'>
                               {provider.api_version && (
                                 <div className='flex items-center justify-between text-sm'>

@@ -13,7 +13,7 @@ async function generateQRCodeSVG(text: string): Promise<string> {
   try {
     return await QRCode.toDataURL(text, {
       type: 'image/png',
-      width: 200,
+      width: 400,
       margin: 1,
       color: {
         dark: '#000000',
@@ -165,9 +165,9 @@ export function SimpleLightningTopup({
               <Image
                 src={qrCode}
                 alt='Lightning Invoice QR Code'
-                className='h-40 w-40'
-                width={160}
-                height={160}
+                className='h-60 w-60'
+                width={320}
+                height={320}
                 unoptimized
               />
             </div>

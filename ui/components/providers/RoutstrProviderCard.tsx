@@ -104,17 +104,6 @@ export function RoutstrProviderCard({
             <Button
               variant='outline'
               size='sm'
-              onClick={onUpdateKey}
-              className='text-blue-600 hover:text-blue-700 dark:text-blue-400'
-              title='Update or Create API Key'
-            >
-              <Key className='mr-1 h-4 w-4' />
-              <span className='hidden sm:inline'>Key</span>
-            </Button>
-
-            <Button
-              variant='outline'
-              size='sm'
               onClick={() => refundMutation.mutate()}
               disabled={refundMutation.isPending}
               className='text-orange-600 hover:text-orange-700 dark:text-orange-400'
