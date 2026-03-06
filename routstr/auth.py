@@ -590,12 +590,15 @@ async def pay_for_request(
 
 async def revert_pay_for_request(
     key: ApiKey, session: AsyncSession, cost_per_request: int
-) -> None:
+) -> bool:
+    """Revert a previously reserved payment. Returns True if revert succeeded,
+    False if the reservation was already released (prevents negative reserved_balance)."""
     billing_key = await get_billing_key(key, session)
 
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+        .where(col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
             total_requests=col(ApiKey.total_requests) - 1,
@@ -609,6 +612,7 @@ async def revert_pay_for_request(
         child_stmt = (
             update(ApiKey)
             .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .where(col(ApiKey.reserved_balance) >= cost_per_request)
             .values(
                 total_requests=col(ApiKey.total_requests) - 1,
                 reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
@@ -618,8 +622,8 @@ async def revert_pay_for_request(
 
     await session.commit()
     if result.rowcount == 0:
-        logger.error(
-            "Failed to revert payment - insufficient reserved balance",
+        logger.warning(
+            "Revert skipped - reservation already released (no-op to prevent negative reserved_balance)",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
                 "billing_key_hash": billing_key.hashed_key[:8] + "...",
@@ -627,19 +631,11 @@ async def revert_pay_for_request(
                 "current_reserved_balance": billing_key.reserved_balance,
             },
         )
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": {
-                    "message": f"failed to revert request payment: {cost_per_request} mSats required. {billing_key.balance} available.",
-                    "type": "payment_error",
-                    "code": "payment_error",
-                }
-            },
-        )
+        return False
     await session.refresh(billing_key)
     if billing_key.hashed_key != key.hashed_key:
         await session.refresh(key)
+    return True
 
 
 async def adjust_payment_for_tokens(
@@ -671,17 +667,19 @@ async def adjust_payment_for_tokens(
             release_stmt = (
                 update(ApiKey)
                 .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+                .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
                 .values(
                     reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost
                 )
             )
-            await session.exec(release_stmt)  # type: ignore[call-overload]
+            result = await session.exec(release_stmt)  # type: ignore[call-overload]
 
             # Also release on child key if it's different
             if billing_key.hashed_key != key.hashed_key:
                 child_release_stmt = (
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
                     .values(
                         reserved_balance=col(ApiKey.reserved_balance)
                         - deducted_max_cost
@@ -690,14 +688,24 @@ async def adjust_payment_for_tokens(
                 await session.exec(child_release_stmt)  # type: ignore[call-overload]
 
             await session.commit()
-            logger.warning(
-                "Released reservation without charging (fallback)",
-                extra={
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                    "deducted_max_cost": deducted_max_cost,
-                },
-            )
+            if result.rowcount == 0:  # type: ignore[union-attr]
+                logger.warning(
+                    "Release reservation skipped - already released (no-op to prevent negative reserved_balance)",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                        "deducted_max_cost": deducted_max_cost,
+                    },
+                )
+            else:
+                logger.warning(
+                    "Released reservation without charging (fallback)",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                        "deducted_max_cost": deducted_max_cost,
+                    },
+                )
         except Exception as e:
             logger.error(
                 "Failed to release reservation in fallback",

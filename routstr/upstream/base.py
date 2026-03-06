@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from ..auth import adjust_payment_for_tokens, revert_pay_for_request
+from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow, create_session
 from ..core.exceptions import UpstreamError
@@ -1294,8 +1294,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1325,13 +1324,9 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
+            raise UpstreamError(
+                "An unexpected server error occurred", status_code=500
             )
 
     async def forward_responses_request(
@@ -1513,8 +1508,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1544,13 +1538,9 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
+            raise UpstreamError(
+                "An unexpected server error occurred", status_code=500
             )
 
     async def forward_get_request(
@@ -3103,7 +3093,7 @@ class BaseUpstreamProvider:
                     UpstreamProviderRow.api_key == self.api_key
                 )
                 result = await session.exec(stmt)
-                
+
                 # .first() returns the object or None if not found
                 provider = result.first()
                 if not provider or not provider.id:
@@ -3125,7 +3115,6 @@ class BaseUpstreamProvider:
                     models.append(found_db_model)
 
                 models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
-                print([mode.id for mode in models_with_fees])
 
                 try:
                     sats_to_usd = sats_usd_price()
