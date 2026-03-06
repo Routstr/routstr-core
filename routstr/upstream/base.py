@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
-from ..auth import adjust_payment_for_tokens, revert_pay_for_request
+from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
 from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow, create_session
 from ..core.exceptions import UpstreamError
@@ -196,6 +196,23 @@ class BaseUpstreamProvider:
             Transformed model ID for this provider
         """
         return model_id
+
+    def normalize_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        """Normalize request path before forwarding to upstream."""
+        if path.startswith("v1/"):
+            return path.replace("v1/", "", 1)
+        return path
+
+    def get_request_base_url(
+        self, path: str, model_obj: Model | None = None
+    ) -> str:
+        """Get upstream base URL used when building forwarding URL."""
+        return self.base_url.rstrip("/")
+
+    def build_request_url(self, path: str, model_obj: Model | None = None) -> str:
+        """Build full upstream URL from normalized path."""
+        clean_path = path.lstrip("/")
+        return f"{self.get_request_base_url(path, model_obj)}/{clean_path}"
 
     def prepare_responses_request_body(
         self, body: bytes | None, model_obj: Model
@@ -1101,10 +1118,8 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path, model_obj)
+        url = self.build_request_url(path, model_obj)
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1279,8 +1294,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1310,13 +1324,9 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
+            raise UpstreamError(
+                "An unexpected server error occurred", status_code=500
             )
 
     async def forward_responses_request(
@@ -1345,11 +1355,8 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        # Remove v1/ prefix if present for Responses API
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path, model_obj)
+        url = self.build_request_url(path, model_obj)
 
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
@@ -1501,8 +1508,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1532,13 +1538,9 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
+            raise UpstreamError(
+                "An unexpected server error occurred", status_code=500
             )
 
     async def forward_get_request(
@@ -1557,10 +1559,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse from upstream
         """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path)
+        url = self.build_request_url(path)
 
         logger.info(
             "Forwarding GET request to upstream",

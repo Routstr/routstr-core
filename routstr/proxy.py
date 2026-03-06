@@ -296,9 +296,13 @@ async def proxy(
                         session,
                         model_obj,
                     )
+            except UpstreamError:
+                # Let the outer UpstreamError handler manage retry/revert
+                raise
             except Exception as e:
+                # Unexpected error (not an upstream failure) — revert and propagate
                 logger.error(
-                    "Upstream request failed, ensuring payment is reverted",
+                    "Unexpected error in upstream request, reverting payment",
                     extra={
                         "error": str(e),
                         "error_type": type(e).__name__,
