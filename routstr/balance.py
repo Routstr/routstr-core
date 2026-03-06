@@ -205,8 +205,9 @@ async def refund_wallet_endpoint(
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
 
-    if cached := await _refund_cache_get(bearer_value):
-        return cached
+    if key.total_balance <= 0:
+        if cached := await _refund_cache_get(bearer_value):
+            return cached
 
     if key.parent_key_hash:
         raise HTTPException(
