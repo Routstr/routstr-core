@@ -197,6 +197,23 @@ class BaseUpstreamProvider:
         """
         return model_id
 
+    def normalize_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        """Normalize request path before forwarding to upstream."""
+        if path.startswith("v1/"):
+            return path.replace("v1/", "", 1)
+        return path
+
+    def get_request_base_url(
+        self, path: str, model_obj: Model | None = None
+    ) -> str:
+        """Get upstream base URL used when building forwarding URL."""
+        return self.base_url.rstrip("/")
+
+    def build_request_url(self, path: str, model_obj: Model | None = None) -> str:
+        """Build full upstream URL from normalized path."""
+        clean_path = path.lstrip("/")
+        return f"{self.get_request_base_url(path, model_obj)}/{clean_path}"
+
     def prepare_responses_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
@@ -1101,10 +1118,8 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path, model_obj)
+        url = self.build_request_url(path, model_obj)
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1345,11 +1360,8 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        # Remove v1/ prefix if present for Responses API
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path, model_obj)
+        url = self.build_request_url(path, model_obj)
 
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
@@ -1557,10 +1569,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse from upstream
         """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path)
+        url = self.build_request_url(path)
 
         logger.info(
             "Forwarding GET request to upstream",
