@@ -1,5 +1,6 @@
 import type { Model } from '@/lib/api/schemas/models';
 import type { AdminModelGroup } from '@/lib/api/services/admin';
+import type { DisplayUnit } from '@/lib/types/units';
 import { ModelItemCard } from '@/components/model-item-card';
 import { Button } from '@/components/ui/button';
 import {
@@ -30,6 +31,8 @@ import {
 interface ModelProviderSectionProps {
   provider: string;
   providerModels: Model[];
+  displayUnit: DisplayUnit;
+  usdPerSat: number | null;
   filterProvider?: string;
   groupData?: AdminModelGroup;
   selectedModels: Set<string>;
@@ -52,6 +55,8 @@ interface ModelProviderSectionProps {
 export function ModelProviderSection({
   provider,
   providerModels,
+  displayUnit,
+  usdPerSat,
   filterProvider,
   groupData,
   selectedModels,
@@ -79,11 +84,13 @@ export function ModelProviderSection({
 
   if (filterProvider) {
     return (
-      <div className='bg-card/35 divide-border/55 border-border/60 divide-y overflow-hidden rounded-lg border'>
+      <div className='bg-card/35 border-border/70 overflow-hidden rounded-lg border md:divide-y md:divide-border/75'>
         {providerModels.map((model) => (
           <ModelItemCard
             key={model.id}
             model={model}
+            displayUnit={displayUnit}
+            usdPerSat={usdPerSat}
             isSelected={selectedModels.has(model.id)}
             hasEffectiveApiKey={hasEffectiveApiKey(model)}
             hasIndividualSettings={hasIndividualSettings(model)}
@@ -189,11 +196,13 @@ export function ModelProviderSection({
       </CardHeader>
 
       <CardContent className='px-3 pt-0 pb-3 sm:px-6 sm:pb-6'>
-        <div className='bg-card/35 divide-border/55 border-border/60 divide-y overflow-hidden rounded-lg border'>
+        <div className='bg-card/35 border-border/70 overflow-hidden rounded-lg border md:divide-y md:divide-border/75'>
           {providerModels.map((model) => (
             <ModelItemCard
               key={model.id}
               model={model}
+              displayUnit={displayUnit}
+              usdPerSat={usdPerSat}
               isSelected={selectedModels.has(model.id)}
               hasEffectiveApiKey={hasEffectiveApiKey(model)}
               hasIndividualSettings={hasIndividualSettings(model)}
