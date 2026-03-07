@@ -173,9 +173,11 @@ export function ProviderBalance({
         onClick={handleTopUpClick}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
-        className='w-full font-mono sm:w-auto'
+        className='w-full sm:w-auto'
       >
-        {isHovered ? 'Top Up' : displayValue}
+        <span className={isHovered ? undefined : 'font-mono'}>
+          {isHovered ? 'Top Up' : displayValue}
+        </span>
       </Button>
 
       <Dialog open={isTopupDialogOpen} onOpenChange={handleCloseDialog}>

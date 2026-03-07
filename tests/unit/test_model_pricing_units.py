@@ -1,6 +1,7 @@
 """Tests for pricing unit normalization across model sources."""
 
 import json
+from types import TracebackType
 
 import pytest
 
@@ -74,7 +75,13 @@ async def test_generic_provider_missing_pricing_defaults_to_zero(
         async def __aenter__(self) -> "FakeClient":
             return self
 
-        async def __aexit__(self, exc_type, exc, tb) -> None:
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            del exc_type, exc, tb
             return None
 
         async def get(

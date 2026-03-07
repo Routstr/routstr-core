@@ -107,10 +107,15 @@ export function DetailedWalletBalance({
 
   return (
     <>
-      <Card className='h-full w-full shadow-sm'>
+      <Card>
         <CardHeader className='pb-4'>
-          <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
-            <CardTitle className='text-xl'>Cashu Wallet Balance</CardTitle>
+          <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
+            <div className='space-y-1.5'>
+              <CardTitle>Cashu Wallet Balance</CardTitle>
+              <CardDescription>
+                Detailed balance breakdown by mint and currency
+              </CardDescription>
+            </div>
             <div className='flex w-full gap-2 sm:w-auto'>
               <Button
                 variant='default'
@@ -127,7 +132,6 @@ export function DetailedWalletBalance({
                 size='icon'
                 onClick={() => refetch()}
                 disabled={isLoading || isFetching}
-                className='h-8 w-8'
               >
                 <RefreshCw
                   className={cn(
@@ -139,19 +143,13 @@ export function DetailedWalletBalance({
               </Button>
             </div>
           </div>
-          <CardDescription>
-            Detailed balance breakdown by mint and currency
-          </CardDescription>
         </CardHeader>
         <CardContent>
           {isLoading ? (
             <div className='space-y-4'>
               <div className='grid gap-3 md:grid-cols-3'>
                 {Array.from({ length: 3 }).map((_, index) => (
-                  <Card
-                    key={`wallet-stat-skeleton-${index}`}
-                    className='shadow-none'
-                  >
+                  <Card key={`wallet-stat-skeleton-${index}`}>
                     <CardHeader className='space-y-2 pb-1'>
                       <Skeleton className='h-3.5 w-28' />
                       <Skeleton className='h-3 w-8' />
@@ -182,47 +180,47 @@ export function DetailedWalletBalance({
           ) : (
             <div className='space-y-6'>
               <div className='grid gap-3 md:grid-cols-3'>
-                <Card className='shadow-none'>
+                <Card>
                   <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                    <CardTitle className='text-sm font-medium'>
+                    <CardTitle className='text-muted-foreground text-sm font-medium'>
                       Your Balance (Total)
                     </CardTitle>
-                    <span className='inline-flex size-8 items-center justify-center text-green-600 dark:text-green-300'>
-                      <Coins className='h-4 w-4' />
+                    <span className='inline-flex size-8 items-center justify-center'>
+                      <Coins className='size-4 text-green-600 dark:text-green-300' />
                     </span>
                   </CardHeader>
-                  <CardContent>
-                    <p className='text-primary text-2xl font-bold tracking-tight'>
+                  <CardContent className='pt-0'>
+                    <p className='text-primary text-2xl font-semibold tracking-tight tabular-nums'>
                       {formatAmount(totals.totalOwner)}
                     </p>
                   </CardContent>
                 </Card>
-                <Card className='shadow-none'>
+                <Card>
                   <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                    <CardTitle className='text-sm font-medium'>
+                    <CardTitle className='text-muted-foreground text-sm font-medium'>
                       Total Wallet
                     </CardTitle>
-                    <span className='inline-flex size-8 items-center justify-center text-blue-600 dark:text-blue-300'>
-                      <Wallet className='h-4 w-4' />
+                    <span className='inline-flex size-8 items-center justify-center'>
+                      <Wallet className='size-4 text-blue-600 dark:text-blue-300' />
                     </span>
                   </CardHeader>
-                  <CardContent>
-                    <p className='text-2xl font-bold tracking-tight'>
+                  <CardContent className='pt-0'>
+                    <p className='text-2xl font-semibold tracking-tight tabular-nums'>
                       {formatAmount(totals.totalWallet)}
                     </p>
                   </CardContent>
                 </Card>
-                <Card className='shadow-none'>
+                <Card>
                   <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-                    <CardTitle className='text-sm font-medium'>
+                    <CardTitle className='text-muted-foreground text-sm font-medium'>
                       User Balance
                     </CardTitle>
-                    <span className='inline-flex size-8 items-center justify-center text-purple-600 dark:text-purple-300'>
-                      <User className='h-4 w-4' />
+                    <span className='inline-flex size-8 items-center justify-center'>
+                      <User className='size-4 text-purple-600 dark:text-purple-300' />
                     </span>
                   </CardHeader>
-                  <CardContent>
-                    <p className='text-2xl font-bold tracking-tight'>
+                  <CardContent className='pt-0'>
+                    <p className='text-2xl font-semibold tracking-tight tabular-nums'>
                       {formatAmount(totals.totalUser)}
                     </p>
                   </CardContent>
@@ -294,7 +292,6 @@ export function DetailedWalletBalance({
                         <Card
                           key={`${key}-mobile`}
                           className={cn(
-                            'shadow-none',
                             detail.error &&
                               'border-destructive/40 bg-destructive/5'
                           )}

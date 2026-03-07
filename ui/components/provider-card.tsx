@@ -54,22 +54,20 @@ export function ProviderCard({
   const hasDetails = Boolean(provider.api_version) || isExpanded;
 
   return (
-    <Card size='sm' className='border-border/70 bg-card/55'>
-      <CardHeader className='pb-2'>
+    <Card>
+      <CardHeader>
         <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
           <div className='min-w-0 flex-1'>
             <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
-              <CardTitle className='truncate text-base sm:text-lg'>
-                {provider.provider_type}
-              </CardTitle>
+              <CardTitle className='truncate'>{provider.provider_type}</CardTitle>
               <Badge
                 variant={provider.enabled ? 'default' : 'secondary'}
-                className='w-fit sm:ml-2'
+                className='w-fit'
               >
                 {provider.enabled ? 'Enabled' : 'Disabled'}
               </Badge>
             </div>
-            <CardDescription className='mt-1 text-xs break-all sm:text-sm'>
+            <CardDescription className='break-all'>
               {provider.base_url}
             </CardDescription>
           </div>
@@ -88,7 +86,7 @@ export function ProviderCard({
               variant='outline'
               size='sm'
               onClick={onToggleExpansion}
-              className='col-span-2 h-9 justify-between px-3 sm:col-auto sm:h-8 sm:justify-center'
+              className='col-span-2 justify-between sm:col-auto sm:justify-center'
             >
               <span className='inline-flex items-center gap-1.5'>
                 <Database className='h-4 w-4' />
@@ -105,7 +103,7 @@ export function ProviderCard({
               variant='outline'
               size='sm'
               onClick={onEditProvider}
-              className='h-9 justify-center gap-1.5 px-3 sm:h-8'
+              className='justify-center gap-1.5'
             >
               <Pencil className='h-4 w-4' />
               <span>Edit</span>
@@ -115,7 +113,7 @@ export function ProviderCard({
               variant='outline'
               size='sm'
               onClick={onDeleteProvider}
-              className='text-destructive hover:text-destructive h-9 justify-center gap-1.5 px-3 sm:h-8'
+              className='text-destructive hover:text-destructive justify-center gap-1.5'
             >
               <Trash2 className='h-4 w-4' />
               <span>Delete</span>
@@ -125,7 +123,7 @@ export function ProviderCard({
       </CardHeader>
 
       {hasDetails ? (
-        <CardContent className='pt-1'>
+        <CardContent>
           <div className='space-y-3'>
             {provider.api_version && (
               <div className='flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:justify-between'>

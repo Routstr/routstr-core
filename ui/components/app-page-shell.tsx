@@ -40,7 +40,7 @@ const NAV_ITEMS = [
   { title: 'Dashboard', url: '/', icon: LayoutDashboardIcon },
   { title: 'Balances', url: '/balances', icon: WalletIcon },
   { title: 'Logs', url: '/logs', icon: FileTextIcon },
-  { title: 'Models', url: '/model', icon: DatabaseIcon },
+  { title: 'Models', url: '/models', icon: DatabaseIcon },
   { title: 'Providers', url: '/providers', icon: ServerIcon },
   { title: 'Settings', url: '/settings', icon: SettingsIcon },
 ] as const;

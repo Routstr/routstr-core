@@ -79,23 +79,17 @@ export function DashboardBalanceSummary({
   return (
     <div className='grid grid-cols-2 gap-2.5 max-[359px]:grid-cols-1 sm:gap-3 lg:grid-cols-3'>
       {cards.map((card) => (
-        <Card
-          key={card.title}
-          size='sm'
-          className='min-h-[6.25rem] sm:min-h-[7rem]'
-        >
+        <Card key={card.title} size='sm'>
           <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1'>
             <CardTitle className='text-muted-foreground text-[11px] font-medium sm:text-sm'>
               {card.title}
             </CardTitle>
-            <div className='flex size-6 items-center justify-center sm:size-7'>
-              <card.icon
-                className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${card.color}`}
-              />
-            </div>
+            <span className='inline-flex size-6 items-center justify-center sm:size-7'>
+              <card.icon className={`size-3.5 sm:size-4 ${card.color}`} />
+            </span>
           </CardHeader>
           <CardContent className='pt-0'>
-            <div className='text-base font-semibold break-words sm:text-xl'>
+            <div className='text-base font-semibold break-words tabular-nums sm:text-xl'>
               {card.value}
             </div>
           </CardContent>

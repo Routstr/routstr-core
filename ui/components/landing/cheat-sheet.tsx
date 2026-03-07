@@ -2,7 +2,7 @@
 
 import { type JSX, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Bolt, Copy, RefreshCcw, ShieldCheck, Terminal } from 'lucide-react';
+import { Bolt, Copy, RefreshCcw, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -191,10 +191,7 @@ export function CheatSheet(): JSX.Element {
           <Card>
             <CardHeader className='flex flex-row items-start justify-between gap-4'>
               <div>
-                <CardTitle className='flex items-center gap-2 text-lg'>
-                  <ShieldCheck className='text-primary h-4 w-4' />
-                  Node identity
-                </CardTitle>
+                <CardTitle className='text-lg'>Node identity</CardTitle>
                 <p className='text-muted-foreground text-xs tracking-wide'>
                   /v1/info snapshot
                 </p>
@@ -339,10 +336,7 @@ export function CheatSheet(): JSX.Element {
 
           <Card>
             <CardHeader className='flex flex-row items-center justify-between'>
-              <CardTitle className='flex items-center gap-2 text-lg'>
-                <Terminal className='text-primary h-4 w-4' />
-                Quick docs
-              </CardTitle>
+              <CardTitle className='text-lg'>Quick docs</CardTitle>
               <span className='text-muted-foreground text-xs tracking-wide'>
                 curl-ready
               </span>

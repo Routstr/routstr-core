@@ -9,7 +9,6 @@ import {
   Clock,
   DollarSign,
   Activity,
-  type LucideIcon,
 } from 'lucide-react';
 import { AdminService, TemporaryBalance } from '@/lib/api/services/admin';
 import {
@@ -42,39 +41,6 @@ import {
 import { cn } from '@/lib/utils';
 import type { DisplayUnit } from '@/lib/types/units';
 import { formatFromMsat } from '@/lib/currency';
-
-function TemporaryBalanceStat({
-  icon: Icon,
-  label,
-  value,
-  iconClassName,
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: string;
-  iconClassName: string;
-}) {
-  return (
-    <Card className='shadow-none'>
-      <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-        <CardTitle className='text-sm font-medium'>{label}</CardTitle>
-        <span
-          className={cn(
-            'inline-flex size-8 items-center justify-center rounded-full',
-            iconClassName
-          )}
-        >
-          <Icon className='h-4 w-4' />
-        </span>
-      </CardHeader>
-      <CardContent>
-        <p className='text-2xl font-bold tracking-tight tabular-nums'>
-          {value}
-        </p>
-      </CardContent>
-    </Card>
-  );
-}
 
 function getTotals(balances: TemporaryBalance[]) {
   let totalBalance = 0;
@@ -157,32 +123,32 @@ export function TemporaryBalances({
   const rows = data ? buildHierarchicalData(data, filteredData) : [];
 
   return (
-    <Card className='h-full w-full shadow-sm'>
+    <Card>
       <CardHeader className='pb-4'>
-        <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
-          <CardTitle className='flex items-center gap-2 text-xl'>
-            <Key className='h-5 w-5' />
-            Temporary Balances
-          </CardTitle>
-          <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row'>
-            <div className='relative flex-1 sm:flex-initial'>
+        <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
+          <div className='space-y-1.5'>
+            <CardTitle>Temporary Balances</CardTitle>
+            <CardDescription className='max-w-2xl'>
+              API keys with their current balances and usage statistics
+            </CardDescription>
+          </div>
+
+          <div className='flex w-full gap-2 sm:w-auto sm:pt-0.5'>
+            <div className='min-w-0 flex-1 sm:w-72 sm:flex-none'>
               <Input
                 type='text'
                 placeholder='Search by key or address...'
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className='pr-3 pl-8 sm:w-64'
                 name='temporary_balance_search'
                 autoComplete='off'
               />
-              <Key className='text-muted-foreground absolute top-2.5 left-2 h-4 w-4' />
             </div>
             <Button
               variant='ghost'
               size='icon'
               onClick={() => refetch()}
               disabled={isLoading || isFetching}
-              className='h-8 w-full sm:w-8'
             >
               <RefreshCw
                 className={cn(
@@ -194,19 +160,13 @@ export function TemporaryBalances({
             </Button>
           </div>
         </div>
-        <CardDescription>
-          API keys with their current balances and usage statistics
-        </CardDescription>
       </CardHeader>
       <CardContent>
         {isLoading ? (
           <div className='space-y-4'>
             <div className='grid gap-3 md:grid-cols-3'>
               {Array.from({ length: 3 }).map((_, index) => (
-                <Card
-                  key={`temp-stat-skeleton-${index}`}
-                  className='shadow-none'
-                >
+                <Card key={`temp-stat-skeleton-${index}`}>
                   <CardHeader className='space-y-2 pb-1'>
                     <Skeleton className='h-3.5 w-24' />
                     <Skeleton className='h-3 w-8' />
@@ -236,24 +196,51 @@ export function TemporaryBalances({
         ) : (
           <div className='space-y-6'>
             <div className='grid gap-3 md:grid-cols-3'>
-              <TemporaryBalanceStat
-                icon={DollarSign}
-                label='Total Balance'
-                value={formatBalance(totals.totalBalance)}
-                iconClassName='text-green-600 dark:text-green-300'
-              />
-              <TemporaryBalanceStat
-                icon={Activity}
-                label='Total Spent'
-                value={formatBalance(totals.totalSpent)}
-                iconClassName='text-blue-600 dark:text-blue-300'
-              />
-              <TemporaryBalanceStat
-                icon={Key}
-                label='Total Requests'
-                value={totals.totalRequests.toLocaleString()}
-                iconClassName='text-purple-600 dark:text-purple-300'
-              />
+              <Card>
+                <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                  <CardTitle className='text-muted-foreground text-sm font-medium'>
+                    Total Balance
+                  </CardTitle>
+                  <span className='inline-flex size-8 items-center justify-center'>
+                    <DollarSign className='size-4 text-green-600 dark:text-green-300' />
+                  </span>
+                </CardHeader>
+                <CardContent className='pt-0'>
+                  <p className='text-2xl font-semibold tracking-tight tabular-nums'>
+                    {formatBalance(totals.totalBalance)}
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                  <CardTitle className='text-muted-foreground text-sm font-medium'>
+                    Total Spent
+                  </CardTitle>
+                  <span className='inline-flex size-8 items-center justify-center'>
+                    <Activity className='size-4 text-blue-600 dark:text-blue-300' />
+                  </span>
+                </CardHeader>
+                <CardContent className='pt-0'>
+                  <p className='text-2xl font-semibold tracking-tight tabular-nums'>
+                    {formatBalance(totals.totalSpent)}
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                  <CardTitle className='text-muted-foreground text-sm font-medium'>
+                    Total Requests
+                  </CardTitle>
+                  <span className='inline-flex size-8 items-center justify-center'>
+                    <Key className='size-4 text-purple-600 dark:text-purple-300' />
+                  </span>
+                </CardHeader>
+                <CardContent className='pt-0'>
+                  <p className='text-2xl font-semibold tracking-tight tabular-nums'>
+                    {totals.totalRequests.toLocaleString()}
+                  </p>
+                </CardContent>
+              </Card>
             </div>
 
             {rows.length > 0 ? (
@@ -343,7 +330,6 @@ export function TemporaryBalances({
                     <Card
                       key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
                       className={cn(
-                        'shadow-none',
                         balance.balance === 0 &&
                           !balance.isChild &&
                           'opacity-80',

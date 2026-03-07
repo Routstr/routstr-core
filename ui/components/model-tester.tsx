@@ -203,10 +203,7 @@ export function ModelTester({ models }: ModelTesterProps) {
   return (
     <Card className='w-full'>
       <CardHeader>
-        <CardTitle className='flex items-center gap-2'>
-          <Send className='h-5 w-5' />
-          Model Credential Tester
-        </CardTitle>
+        <CardTitle>Model Credential Tester</CardTitle>
         <CardDescription>
           Test model functionality by sending chat completion requests through
           the secure proxy (resolves CORS and network issues)

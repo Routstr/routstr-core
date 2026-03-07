@@ -778,12 +778,16 @@ export default function DashboardPage() {
 
   if (!isAuthResolved) {
     return (
-      <div className='bg-background min-h-screen'>
-        <main className='mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-10 sm:px-6 lg:px-8'>
+      <AppPageShell contentClassName='mx-auto w-full max-w-5xl'>
+        <div className='space-y-6'>
+          <div className='space-y-2'>
+            <Skeleton className='h-8 w-56 max-w-full sm:h-9' />
+            <Skeleton className='h-4 w-80 max-w-full' />
+          </div>
           <SectionLoading label='summary' />
           <SectionLoading label='metrics' />
-        </main>
-      </div>
+        </div>
+      </AppPageShell>
     );
   }
 

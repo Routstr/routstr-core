@@ -1,7 +1,7 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
-import { Copy, KeyRound, RefreshCcw, Trash2 } from 'lucide-react';
+import { Copy, RefreshCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -305,10 +305,7 @@ export function CashuPaymentWorkflow({
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <KeyRound className='text-primary h-5 w-5' />
-          API key workflow
-        </CardTitle>
+        <CardTitle className='text-xl'>API key workflow</CardTitle>
         <p className='text-muted-foreground text-xs tracking-wide'>
           Sections expand as soon as you interact
         </p>

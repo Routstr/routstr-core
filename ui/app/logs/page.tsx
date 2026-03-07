@@ -174,12 +174,7 @@ export default function LogsPage() {
           title='System Logs'
           description='View and filter application logs.'
           actions={
-            <Button
-              onClick={() => refetchLogs()}
-              variant='outline'
-              size='sm'
-              className='w-full sm:w-auto'
-            >
+            <Button onClick={() => refetchLogs()} variant='outline' size='sm'>
               <RefreshCw className='mr-2 h-4 w-4' />
               Refresh
             </Button>
@@ -208,21 +203,21 @@ export default function LogsPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
-              <span className='text-lg sm:text-xl'>Log Entries</span>
+            <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+              <CardTitle>Log Entries</CardTitle>
               {logsData && (
-                <Badge variant='secondary' className='text-xs sm:text-sm'>
+                <Badge variant='secondary'>
                   {logsData.logs.length} entries
                 </Badge>
               )}
-            </CardTitle>
+            </div>
             {hasActiveFilters && (
-              <CardDescription className='text-xs sm:text-sm'>
+              <CardDescription>
                 Showing logs filtered by {activeFilterDescription}
               </CardDescription>
             )}
           </CardHeader>
-          <CardContent className='overflow-hidden p-3 sm:p-6'>
+          <CardContent className='overflow-hidden'>
             {isLoading ? (
               <div className='space-y-2'>
                 {Array.from({ length: 8 }).map((_, index) => (
