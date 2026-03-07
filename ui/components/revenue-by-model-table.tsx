@@ -1,122 +1,201 @@
 'use client';
 
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { useCallback, useMemo } from 'react';
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
+import {
+  ChartConfig,
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from '@/components/ui/chart';
 import { ModelRevenueData } from '@/lib/api/services/admin';
-import { useCurrencyStore } from '@/lib/stores/currency';
-import { useQuery } from '@tanstack/react-query';
-import { fetchBtcUsdPrice, btcToSatsRate } from '@/lib/exchange-rate';
-import { formatFromMsat, convertToMsat } from '@/lib/currency';
+import { convertToMsat, formatFromMsat } from '@/lib/currency';
+import { useIsMobile } from '@/hooks/use-mobile';
+import type { DisplayUnit } from '@/lib/types/units';
 
 interface RevenueByModelTableProps {
   models: ModelRevenueData[];
-  totalRevenue: number;
+  displayUnit: DisplayUnit;
+  usdPerSat: number | null;
+}
+
+function truncateModelName(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength - 1)}…`;
 }
 
 export function RevenueByModelTable({
   models,
-  totalRevenue,
+  displayUnit,
+  usdPerSat,
 }: RevenueByModelTableProps) {
-  const { displayUnit } = useCurrencyStore();
-  const { data: btcUsdPrice } = useQuery({
-    queryKey: ['btc-usd-price'],
-    queryFn: fetchBtcUsdPrice,
-    refetchInterval: 120_000,
-    staleTime: 60_000,
-  });
-  const usdPerSat = btcUsdPrice ? btcToSatsRate(btcUsdPrice) : null;
+  const isMobile = useIsMobile();
+
+  const revenueDisplayUnit: DisplayUnit = useMemo(() => {
+    if (displayUnit === 'usd' && usdPerSat === null) {
+      return 'sat';
+    }
+    return displayUnit;
+  }, [displayUnit, usdPerSat]);
+  const unitLabel = revenueDisplayUnit === 'usd' ? 'USD' : revenueDisplayUnit;
+
+  const compactNumber = useMemo(
+    () =>
+      new Intl.NumberFormat('en-US', {
+        notation: 'compact',
+        maximumFractionDigits: 1,
+      }),
+    []
+  );
+
+  const convertSatsToDisplay = useCallback(
+    (sats: number): number => {
+      if (revenueDisplayUnit === 'msat') {
+        return sats * 1000;
+      }
+      if (revenueDisplayUnit === 'usd') {
+        return sats * (usdPerSat ?? 0);
+      }
+      return sats;
+    },
+    [revenueDisplayUnit, usdPerSat]
+  );
 
   const formatAmount = (sats: number) =>
-    formatFromMsat(convertToMsat(sats, 'sat'), displayUnit, usdPerSat);
+    formatFromMsat(convertToMsat(sats, 'sat'), revenueDisplayUnit, usdPerSat);
+
+  const formatCompactAmount = (value: number): string => {
+    const compact = compactNumber.format(value);
+    if (revenueDisplayUnit === 'usd') {
+      return `$${compact}`;
+    }
+    return `${compact} ${unitLabel}`;
+  };
+
+  const totalCollectedRevenue = models.reduce(
+    (sum, model) => sum + model.revenue_sats,
+    0
+  );
+  const totalOperationalNet = models.reduce(
+    (sum, model) => sum + model.net_revenue_sats,
+    0
+  );
+
+  const chartData = useMemo(
+    () =>
+      [...models]
+        .sort((a, b) => b.revenue_sats - a.revenue_sats)
+        .slice(0, 12)
+        .map((model) => ({
+          model: model.model,
+          modelLabel: truncateModelName(model.model, isMobile ? 16 : 28),
+          revenueDisplay: convertSatsToDisplay(model.revenue_sats),
+        })),
+    [models, isMobile, convertSatsToDisplay]
+  );
+
+  const chartConfig: ChartConfig = {
+    revenueDisplay: {
+      label: 'Revenue',
+      color: 'var(--chart-1)',
+    },
+  };
+
+  if (chartData.length === 0) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Revenue by Model</CardTitle>
+        </CardHeader>
+        <CardContent className='text-muted-foreground text-sm'>
+          No model data available
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Revenue by Model</CardTitle>
         <p className='text-muted-foreground text-sm'>
-          Total Revenue:{' '}
+          Total Collected Revenue:{' '}
           <span className='text-foreground font-mono font-medium'>
-            {formatAmount(totalRevenue)}
+            {formatAmount(totalCollectedRevenue)}
+          </span>
+        </p>
+        <p className='text-muted-foreground text-xs'>
+          Operational Net:{' '}
+          <span className='text-foreground font-mono'>
+            {formatAmount(totalOperationalNet)}
           </span>
         </p>
       </CardHeader>
       <CardContent>
-        <Table className='min-w-[680px] sm:min-w-[860px]'>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Model</TableHead>
-              <TableHead className='text-right'>Requests</TableHead>
-              <TableHead className='text-right'>Successful</TableHead>
-              <TableHead className='text-right'>Failed</TableHead>
-              <TableHead className='text-right'>Revenue</TableHead>
-              <TableHead className='w-[140px]'>Share</TableHead>
-              <TableHead className='text-right'>Refunds</TableHead>
-              <TableHead className='text-right'>Net Revenue</TableHead>
-              <TableHead className='text-right'>Avg/Request</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {models.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={9}
-                  className='text-muted-foreground text-center'
-                >
-                  No model data available
-                </TableCell>
-              </TableRow>
-            ) : (
-              models.map((model) => {
-                const share =
-                  totalRevenue > 0
-                    ? (model.revenue_sats / totalRevenue) * 100
-                    : 0;
-                return (
-                  <TableRow key={model.model}>
-                    <TableCell className='font-medium'>{model.model}</TableCell>
-                    <TableCell className='text-right font-mono'>
-                      {model.requests}
-                    </TableCell>
-                    <TableCell className='text-right font-mono tabular-nums'>
-                      {model.successful}
-                    </TableCell>
-                    <TableCell className='text-destructive text-right font-mono tabular-nums'>
-                      {model.failed}
-                    </TableCell>
-                    <TableCell className='text-right font-mono'>
-                      {formatAmount(model.revenue_sats)}
-                    </TableCell>
-                    <TableCell>
-                      <div className='flex items-center gap-2'>
-                        <Progress value={share} className='h-2' />
-                        <span className='text-muted-foreground w-8 text-right text-xs'>
-                          {share.toFixed(0)}%
+        <ChartContainer className='h-[360px] w-full' config={chartConfig}>
+          <BarChart
+            data={chartData}
+            layout='vertical'
+            margin={{
+              top: 8,
+              right: isMobile ? 8 : 28,
+              left: isMobile ? 8 : 28,
+              bottom: 8,
+            }}
+          >
+            <CartesianGrid horizontal={false} className='stroke-muted/30' />
+            <XAxis
+              type='number'
+              tickLine={false}
+              axisLine={false}
+              tickFormatter={(value) =>
+                compactNumber.format(
+                  typeof value === 'number' ? value : Number(value || 0)
+                )
+              }
+            />
+            <YAxis
+              type='category'
+              dataKey='modelLabel'
+              tickLine={false}
+              axisLine={false}
+              width={isMobile ? 110 : 220}
+            />
+            <ChartTooltip
+              cursor={false}
+              content={
+                <ChartTooltipContent
+                  labelFormatter={(label) => String(label)}
+                  formatter={(value, name) => {
+                    const numericValue =
+                      typeof value === 'number' ? value : Number(value || 0);
+                    return (
+                      <div className='grid w-full grid-cols-[minmax(0,1fr)_auto] gap-x-4'>
+                        <span className='text-muted-foreground truncate pr-1'>
+                          {name}
+                        </span>
+                        <span className='text-foreground text-right font-mono font-medium tabular-nums'>
+                          {Number.isFinite(numericValue)
+                            ? formatCompactAmount(numericValue)
+                            : '-'}
                         </span>
                       </div>
-                    </TableCell>
-                    <TableCell className='text-destructive text-right font-mono tabular-nums'>
-                      {formatAmount(model.refunds_sats)}
-                    </TableCell>
-                    <TableCell className='text-right font-mono font-semibold tabular-nums'>
-                      {formatAmount(model.net_revenue_sats)}
-                    </TableCell>
-                    <TableCell className='text-muted-foreground text-right font-mono tabular-nums'>
-                      {formatAmount(model.avg_revenue_per_request)}
-                    </TableCell>
-                  </TableRow>
-                );
-              })
-            )}
-          </TableBody>
-        </Table>
+                    );
+                  }}
+                />
+              }
+            />
+            <Bar
+              dataKey='revenueDisplay'
+              name={`Revenue (${unitLabel})`}
+              fill='var(--color-revenueDisplay)'
+              radius={[0, 6, 6, 0]}
+            />
+          </BarChart>
+        </ChartContainer>
       </CardContent>
     </Card>
   );

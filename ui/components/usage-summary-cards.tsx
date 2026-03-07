@@ -35,6 +35,10 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
 
   const formatAmount = (msat: number) =>
     formatFromMsat(msat, displayUnit, usdPerSat);
+  const totalTokens = Number(summary.total_tokens ?? 0);
+  const avgTotalTokensPerCompletion = Number(
+    summary.avg_total_tokens_per_completion ?? 0
+  );
 
   const cards = [
     {
@@ -50,19 +54,33 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
       iconClassName: 'text-emerald-600 dark:text-emerald-300',
     },
     {
+      title: 'Total Tokens',
+      value: totalTokens.toLocaleString(),
+      icon: Database,
+      iconClassName: 'text-cyan-600 dark:text-cyan-300',
+    },
+    {
+      title: 'Avg Tokens/Completion',
+      value: avgTotalTokensPerCompletion.toLocaleString(undefined, {
+        maximumFractionDigits: 1,
+      }),
+      icon: Activity,
+      iconClassName: 'text-indigo-600 dark:text-indigo-300',
+    },
+    {
       title: 'Revenue',
       value: formatAmount(summary.revenue_msats),
       icon: Coins,
       iconClassName: 'text-amber-600 dark:text-amber-300',
     },
     {
-      title: 'Net Revenue',
+      title: 'Operational Net',
       value: formatAmount(summary.net_revenue_msats),
       icon: DollarSign,
       iconClassName: 'text-lime-600 dark:text-lime-300',
     },
     {
-      title: 'Refunds',
+      title: 'Reverted Holds',
       value: formatAmount(summary.refunds_msats),
       icon: TrendingDown,
       iconClassName: 'text-rose-600 dark:text-rose-300',

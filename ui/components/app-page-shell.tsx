@@ -8,7 +8,6 @@ import {
   FileTextIcon,
   LayoutDashboardIcon,
   LogOutIcon,
-  MoreHorizontalIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   ServerIcon,
@@ -22,12 +21,12 @@ import { Button } from '@/components/ui/button';
 import { CurrencyToggle } from '@/components/currency-toggle';
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
-  Drawer,
-  DrawerContent,
-  DrawerDescription,
-  DrawerHeader,
-  DrawerTitle,
-} from '@/components/ui/drawer';
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 
 interface AppPageShellProps {
@@ -45,9 +44,6 @@ const NAV_ITEMS = [
   { title: 'Settings', url: '/settings', icon: SettingsIcon },
 ] as const;
 
-const MOBILE_NAV_TAB_WIDTH_CLASS = 'auto-cols-[22%]';
-const MOBILE_NAV_TAB_WIDTH_CLASS_XS = 'max-[359px]:auto-cols-[31%]';
-
 function isActivePath(pathname: string, itemUrl: string): boolean {
   if (itemUrl === '/') {
     return pathname === '/';
@@ -64,7 +60,7 @@ export function AppPageShell({
   const pathname = usePathname();
   const router = useRouter();
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isMobileMoreOpen, setIsMobileMoreOpen] = useState(false);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   const handleLogout = async (): Promise<void> => {
     try {
@@ -82,36 +78,43 @@ export function AppPageShell({
       <div className='flex min-h-dvh w-full min-w-0 overflow-x-clip md:h-full'>
         <aside
           className={cn(
-            'border-border/60 hidden shrink-0 border-r py-5 transition-[width,padding] duration-200 md:flex md:h-full md:flex-col md:overflow-y-auto',
+            'border-border/60 hidden shrink-0 border-r py-5 transition-[width,padding] duration-300 ease-in-out md:flex md:h-full md:flex-col md:overflow-y-auto',
             isSidebarCollapsed ? 'w-16 px-2' : 'w-60 px-4'
           )}
         >
-          <div className={cn('px-1', isSidebarCollapsed && 'px-0')}>
-            <div
-              className={cn(
-                'flex items-center',
-                isSidebarCollapsed ? 'justify-center' : 'justify-start gap-2'
-              )}
-            >
-              {isSidebarCollapsed ? null : (
-                <div className='flex min-w-0 items-center gap-2 overflow-hidden'>
-                  <Image
-                    src='/icon.ico'
-                    alt='Routstr Node'
-                    width={24}
-                    height={24}
-                    className='rounded-sm'
-                  />
-                  <h1 className='text-lg font-semibold tracking-tight'>
+          <div
+            className={cn(
+              'px-1 transition-[padding] duration-300 ease-in-out',
+              isSidebarCollapsed && 'px-0'
+            )}
+          >
+            <div className='flex items-center gap-2'>
+              <div className='flex min-w-0 flex-1 items-center gap-2 overflow-hidden'>
+                <Image
+                  src='/icon.ico'
+                  alt='Routstr Node'
+                  width={24}
+                  height={24}
+                  className='shrink-0 rounded-sm'
+                />
+                <div
+                  className={cn(
+                    'min-w-0 overflow-hidden transition-[max-width,opacity,transform] duration-300 ease-in-out',
+                    isSidebarCollapsed
+                      ? 'max-w-0 -translate-x-1 opacity-0'
+                      : 'max-w-[11rem] translate-x-0 opacity-100'
+                  )}
+                >
+                  <h1 className='truncate text-lg font-semibold tracking-tight whitespace-nowrap'>
                     Routstr Node
                   </h1>
                 </div>
-              )}
+              </div>
               <Button
                 variant='ghost'
                 size='icon'
                 className={cn(
-                  'text-muted-foreground hover:text-foreground h-8 w-8',
+                  'text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 transition-transform duration-300 ease-in-out',
                   isSidebarCollapsed ? 'mx-auto' : '-mr-1 ml-auto'
                 )}
                 onClick={() => setIsSidebarCollapsed((current) => !current)}
@@ -146,19 +149,24 @@ export function AppPageShell({
                   asChild
                   variant={active ? 'outline' : 'ghost'}
                   className={cn(
-                    'h-10 rounded-lg',
+                    'h-10 rounded-lg transition-[width,padding] duration-300 ease-in-out',
                     isSidebarCollapsed
                       ? 'mx-auto w-10 justify-center px-0'
                       : 'w-full justify-start'
                   )}
                 >
                   <Link href={item.url}>
-                    <Icon className='h-4 w-4' />
-                    {isSidebarCollapsed ? (
-                      <span className='sr-only'>{item.title}</span>
-                    ) : (
-                      item.title
-                    )}
+                    <Icon className='h-4 w-4 shrink-0' />
+                    <span
+                      className={cn(
+                        'overflow-hidden whitespace-nowrap transition-[max-width,opacity,margin] duration-300 ease-in-out',
+                        isSidebarCollapsed
+                          ? 'ml-0 max-w-0 opacity-0'
+                          : 'ml-0.5 max-w-[9rem] opacity-100'
+                      )}
+                    >
+                      {item.title}
+                    </span>
                   </Link>
                 </Button>
               );
@@ -167,7 +175,7 @@ export function AppPageShell({
 
           <div
             className={cn(
-              'mt-auto pt-3',
+              'mt-auto pt-3 transition-[padding] duration-300 ease-in-out',
               isSidebarCollapsed
                 ? 'flex flex-col items-center space-y-1.5'
                 : 'space-y-2'
@@ -224,9 +232,21 @@ export function AppPageShell({
         </aside>
 
         <section className='relative flex w-full min-w-0 flex-1 flex-col overflow-x-clip md:h-full md:min-h-0'>
+          <div className='bg-background/80 supports-[backdrop-filter]:bg-background/72 sticky top-0 z-30 flex items-center gap-2 px-3 py-2 backdrop-blur-xl md:hidden'>
+            <Button
+              type='button'
+              variant='outline'
+              size='sm'
+              className='h-9 gap-2 rounded-lg px-3'
+              onClick={() => setIsMobileSidebarOpen(true)}
+            >
+              <PanelLeftOpenIcon className='h-4 w-4' />
+              Menu
+            </Button>
+          </div>
           <main
             className={cn(
-              'pb-mobile-nav w-full min-w-0 flex-1 overflow-x-clip p-3 sm:p-4 md:min-h-0 md:overflow-y-auto md:p-6 md:pb-6',
+              'w-full min-w-0 flex-1 overflow-x-clip p-3 pb-4 sm:p-4 md:min-h-0 md:overflow-y-auto md:p-6 md:pb-6',
               contentClassName,
               className
             )}
@@ -236,96 +256,96 @@ export function AppPageShell({
         </section>
       </div>
 
-      <div className='pointer-events-none fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(0.35rem+env(safe-area-inset-bottom))] md:hidden'>
-        <nav className='border-border/65 bg-background/80 supports-[backdrop-filter]:bg-background/72 pointer-events-auto mx-auto w-full max-w-[34rem] overflow-x-auto overscroll-x-contain rounded-[1.5rem] border shadow-[0_-16px_36px_-22px_rgba(0,0,0,0.9)] backdrop-blur-2xl [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden'>
-          <div
-            className={cn(
-              'grid min-w-full snap-x snap-mandatory grid-flow-col gap-2 p-2.5',
-              MOBILE_NAV_TAB_WIDTH_CLASS,
-              MOBILE_NAV_TAB_WIDTH_CLASS_XS
-            )}
-          >
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const active = isActivePath(pathname, item.url);
-
-              return (
-                <Button
-                  key={`mobile-bottom-${item.url}`}
-                  asChild
-                  size='sm'
-                  variant={active ? 'outline' : 'ghost'}
-                  className='h-12 w-full snap-start flex-col gap-0.5 rounded-2xl px-2 text-[10px] leading-none'
-                >
-                  <Link href={item.url}>
-                    <Icon className='h-4 w-4' />
-                    <span className='truncate'>{item.title}</span>
-                  </Link>
-                </Button>
-              );
-            })}
-            <Button
-              type='button'
-              size='sm'
-              variant={isMobileMoreOpen ? 'outline' : 'ghost'}
-              className='h-12 w-full snap-start flex-col gap-0.5 rounded-2xl px-2 text-[10px] leading-none'
-              onClick={() => setIsMobileMoreOpen(true)}
-            >
-              <MoreHorizontalIcon className='h-4 w-4' />
-              <span className='truncate'>More</span>
-            </Button>
-          </div>
-        </nav>
-      </div>
-
-      <Drawer open={isMobileMoreOpen} onOpenChange={setIsMobileMoreOpen}>
-        <DrawerContent className='md:hidden'>
-          <DrawerHeader className='px-4 pb-2 text-left'>
-            <DrawerTitle>More</DrawerTitle>
-            <DrawerDescription>
-              Account and appearance settings.
-            </DrawerDescription>
-          </DrawerHeader>
-
-          <div className='space-y-4 px-4 pb-4'>
-            <div className='space-y-2'>
-              <p className='text-muted-foreground text-xs font-semibold tracking-[0.08em] uppercase'>
-                Preferences
-              </p>
-              <div className='grid grid-cols-2 gap-2'>
-                <CurrencyToggle
-                  menuSide='top'
-                  menuAlign='start'
-                  className='h-11 w-full justify-between rounded-lg px-3'
-                />
-                <ThemeToggle
-                  menuSide='top'
-                  menuAlign='end'
-                  className='h-11 w-full justify-between rounded-lg px-3'
-                />
+      <Sheet open={isMobileSidebarOpen} onOpenChange={setIsMobileSidebarOpen}>
+        <SheetContent
+          side='left'
+          showCloseButton={false}
+          className='w-[min(88vw,18rem)] p-0 md:hidden'
+        >
+          <SheetTitle className='sr-only'>Navigation sidebar</SheetTitle>
+          <SheetDescription className='sr-only'>
+            Browse admin pages and access sidebar controls.
+          </SheetDescription>
+          <div className='flex h-full min-h-0 flex-col'>
+            <div className='border-border/60 px-4 pt-4 pb-3'>
+              <div className='flex items-center justify-between gap-3'>
+                <div className='flex min-w-0 items-center gap-2'>
+                  <Image
+                    src='/icon.ico'
+                    alt='Routstr Node'
+                    width={24}
+                    height={24}
+                    className='rounded-sm'
+                  />
+                  <p className='truncate text-base font-medium tracking-tight'>
+                    Routstr Node
+                  </p>
+                </div>
+                <SheetClose asChild>
+                  <Button
+                    variant='ghost'
+                    size='icon'
+                    className='text-muted-foreground hover:text-foreground h-8 w-8 shrink-0'
+                  >
+                    <PanelLeftCloseIcon className='h-4 w-4' />
+                    <span className='sr-only'>Close sidebar</span>
+                  </Button>
+                </SheetClose>
               </div>
             </div>
+            <div className='flex h-full min-h-0 flex-col px-3 pb-3'>
+              <nav className='space-y-1.5 py-3'>
+                {NAV_ITEMS.map((item) => {
+                  const Icon = item.icon;
+                  const active = isActivePath(pathname, item.url);
 
-            <div className='space-y-2'>
-              <p className='text-muted-foreground text-xs font-semibold tracking-[0.08em] uppercase'>
-                Account
-              </p>
-              <Button
-                variant='outline'
-                size='sm'
-                onClick={async () => {
-                  setIsMobileMoreOpen(false);
-                  await handleLogout();
-                }}
-                className='h-11 w-full justify-start gap-2 rounded-lg px-3'
-              >
-                <LogOutIcon className='h-4 w-4' />
-                Logout
-              </Button>
+                  return (
+                    <Button
+                      key={`mobile-sidebar-${item.url}`}
+                      asChild
+                      variant={active ? 'outline' : 'ghost'}
+                      className='h-10 w-full justify-start rounded-lg'
+                    >
+                      <Link
+                        href={item.url}
+                        onClick={() => setIsMobileSidebarOpen(false)}
+                      >
+                        <Icon className='h-4 w-4' />
+                        {item.title}
+                      </Link>
+                    </Button>
+                  );
+                })}
+              </nav>
+
+              <div className='border-border/60 bg-card/30 mt-auto space-y-1 rounded-lg border p-1'>
+                <CurrencyToggle
+                  menuSide='right'
+                  menuAlign='start'
+                  className='text-foreground/90 hover:bg-accent/35 border-border/60 bg-background/25 h-9 w-full justify-between rounded-md px-2.5 text-[11px]'
+                />
+                <ThemeToggle
+                  menuSide='right'
+                  menuAlign='start'
+                  className='text-foreground/90 hover:bg-accent/35 border-border/60 bg-background/25 h-9 w-full justify-between rounded-md px-2.5 text-[11px]'
+                />
+                <Button
+                  variant='ghost'
+                  size='sm'
+                  onClick={async () => {
+                    setIsMobileSidebarOpen(false);
+                    await handleLogout();
+                  }}
+                  className='text-muted-foreground hover:bg-destructive/10 hover:text-destructive h-9 w-full justify-start gap-1.5 rounded-md px-2.5 text-[11px]'
+                >
+                  <LogOutIcon className='h-4 w-4' />
+                  Logout
+                </Button>
+              </div>
             </div>
           </div>
-        </DrawerContent>
-      </Drawer>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

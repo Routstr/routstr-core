@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { Model } from '@/lib/api/schemas/models';
 import type { AdminModelGroup } from '@/lib/api/services/admin';
 import type { DisplayUnit } from '@/lib/types/units';
@@ -80,13 +81,34 @@ export function ModelProviderSection({
   const someProviderSelected = providerModels.some((model) =>
     selectedModels.has(model.id)
   );
+  const keyedProviderModels = useMemo(() => {
+    const seenKeys = new Map<string, number>();
+
+    return providerModels.map((model) => {
+      const baseKey = [
+        provider,
+        model.id,
+        model.provider_id ?? '',
+        model.full_name,
+        model.api_key_type,
+      ].join('::');
+      const seenCount = seenKeys.get(baseKey) ?? 0;
+      seenKeys.set(baseKey, seenCount + 1);
+
+      return {
+        model,
+        renderKey:
+          seenCount === 0 ? baseKey : `${baseKey}::duplicate-${seenCount}`,
+      };
+    });
+  }, [provider, providerModels]);
 
   if (filterProvider) {
     return (
       <div className='bg-card/35 border-border/70 md:divide-border/75 overflow-hidden rounded-lg border md:divide-y'>
-        {providerModels.map((model) => (
+        {keyedProviderModels.map(({ model, renderKey }) => (
           <ModelItemCard
-            key={model.id}
+            key={renderKey}
             model={model}
             displayUnit={displayUnit}
             usdPerSat={usdPerSat}
@@ -195,9 +217,9 @@ export function ModelProviderSection({
 
       <CardContent className='px-3 pt-0 pb-3 sm:px-6 sm:pb-6'>
         <div className='bg-card/35 border-border/70 md:divide-border/75 overflow-hidden rounded-lg border md:divide-y'>
-          {providerModels.map((model) => (
+          {keyedProviderModels.map(({ model, renderKey }) => (
             <ModelItemCard
-              key={model.id}
+              key={renderKey}
               model={model}
               displayUnit={displayUnit}
               usdPerSat={usdPerSat}

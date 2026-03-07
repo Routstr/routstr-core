@@ -4,11 +4,12 @@ import { useEffect, useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { useQuery } from '@tanstack/react-query';
 import { CalendarIcon, RefreshCw } from 'lucide-react';
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import type { DateRange } from 'react-day-picker';
 import { UsageMetricsChart } from '@/components/usage-metrics-chart';
 import { UsageSummaryCards } from '@/components/usage-summary-cards';
 import { ErrorDetailsTable } from '@/components/error-details-table';
-import { RevenueByModelTable } from '@/components/revenue-by-model-table';
+import { TopModelsUsageChart } from '@/components/top-models-usage-chart';
 import { DashboardBalanceSummary } from '@/components/dashboard-balance-summary';
 import {
   AdminService,
@@ -18,7 +19,12 @@ import {
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Calendar } from '@/components/ui/calendar';
-import { Badge } from '@/components/ui/badge';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig as UiChartConfig,
+} from '@/components/ui/chart';
 import {
   Empty,
   EmptyDescription,
@@ -45,6 +51,7 @@ import { CheatSheet } from '@/components/landing/cheat-sheet';
 import { ConfigurationService } from '@/lib/api/services/configuration';
 import { AppPageShell } from '@/components/app-page-shell';
 import { useIsMobile } from '@/hooks/use-mobile';
+import type { DisplayUnit } from '@/lib/types/units';
 import { cn } from '@/lib/utils';
 
 type ChartDatum = Record<string, unknown> & { timestamp: string };
@@ -62,6 +69,7 @@ type ChartConfig = {
   description: string;
   data: ChartDatum[];
   dataKeys: ChartKeyConfig[];
+  totals?: Partial<Record<string, number>>;
   metricType: 'currency' | 'count';
 };
 
@@ -72,10 +80,13 @@ const TIME_RANGE_PRESETS = [
   { value: '3m', label: 'Last 3 Months', hours: 90 * 24 },
   { value: '12m', label: 'Last 12 Months', hours: 365 * 24 },
 ] as const;
+const MAX_USAGE_RANGE_HOURS = 365 * 24;
 
 type TimeRangePresetValue = (typeof TIME_RANGE_PRESETS)[number]['value'];
 
-const DEFAULT_TIME_RANGE_PRESET = TIME_RANGE_PRESETS[0];
+const DEFAULT_TIME_RANGE_PRESET =
+  TIME_RANGE_PRESETS.find((option) => option.value === '7d') ??
+  TIME_RANGE_PRESETS[0];
 
 function normalizeDateRange(range: DateRange): DateRange {
   if (!range.from || !range.to) {
@@ -109,36 +120,6 @@ function getRangeHours(range?: DateRange): number | null {
   const diffHours = Math.ceil(diffMs / (1000 * 60 * 60));
 
   return Math.max(1, diffHours);
-}
-
-function formatDateRangeLabel(range?: DateRange): string {
-  if (!range?.from && !range?.to) {
-    return 'Custom range';
-  }
-
-  if (range.from && !range.to) {
-    return `${format(range.from, 'MMM d, yyyy')} - ...`;
-  }
-
-  if (!range.from || !range.to) {
-    return 'Custom range';
-  }
-
-  const normalized = normalizeDateRange(range);
-  const from = normalized.from;
-  const to = normalized.to;
-
-  if (!from || !to) {
-    return 'Custom range';
-  }
-
-  const sameDay = format(from, 'yyyy-MM-dd') === format(to, 'yyyy-MM-dd');
-
-  if (sameDay) {
-    return format(from, 'MMM d, yyyy');
-  }
-
-  return `${format(from, 'MMM d')} - ${format(to, 'MMM d, yyyy')}`;
 }
 
 function formatCompactDateRangeLabel(range?: DateRange): string {
@@ -184,7 +165,7 @@ function SectionLoading({ label }: { label: string }) {
   if (label === 'summary') {
     return (
       <div className='grid grid-cols-1 gap-2.5 px-1 min-[380px]:grid-cols-2 sm:gap-4 sm:px-0 xl:grid-cols-4'>
-        {Array.from({ length: 12 }).map((_, index) => (
+        {Array.from({ length: 14 }).map((_, index) => (
           <Card key={`summary-skeleton-${index}`}>
             <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1 sm:pb-2'>
               <Skeleton
@@ -374,52 +355,136 @@ function SectionLoading({ label }: { label: string }) {
   );
 }
 
-function DashboardInsights({ summary }: { summary?: UsageSummary }) {
+function DashboardInsights({
+  summary,
+  isMobile,
+}: {
+  summary?: UsageSummary;
+  isMobile: boolean;
+}) {
   if (!summary) {
     return null;
   }
 
-  const errorTypes = Object.entries(summary.error_types || {}).sort(
-    ([, a], [, b]) => b - a
-  );
+  const errorTypes = Object.entries(summary.error_types || {})
+    .map(([type, count]) => ({
+      type,
+      count: typeof count === 'number' ? count : Number(count || 0),
+    }))
+    .filter((entry) => Number.isFinite(entry.count) && entry.count > 0)
+    .sort((a, b) => b.count - a.count);
 
-  const hasModels = summary.unique_models.length > 0;
   const hasErrorTypes = errorTypes.length > 0;
 
-  if (!hasModels && !hasErrorTypes) {
+  if (!hasErrorTypes) {
     return null;
   }
 
+  const compactNumber = new Intl.NumberFormat('en-US', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  });
+  const truncateErrorType = (value: string): string => {
+    const maxLength = isMobile ? 16 : 26;
+    if (value.length <= maxLength) {
+      return value;
+    }
+    return `${value.slice(0, maxLength - 1)}…`;
+  };
+  const chartData = errorTypes.slice(0, 10).map(({ type, count }) => ({
+    type,
+    label: truncateErrorType(type),
+    count,
+  }));
+  const totalErrors = errorTypes.reduce((sum, entry) => sum + entry.count, 0);
+  const chartConfig: UiChartConfig = {
+    count: {
+      label: 'Errors',
+      color: 'var(--chart-4)',
+    },
+  };
+
   return (
-    <div className='grid gap-6 lg:grid-cols-2'>
-      {hasModels && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Active Models</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className='flex flex-wrap gap-2'>
-              {summary.unique_models.map((model) => (
-                <Badge key={model} variant='secondary'>
-                  {model}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+    <div className='grid gap-6'>
       {hasErrorTypes && (
         <Card>
-          <CardHeader>
+          <CardHeader className='space-y-1'>
             <CardTitle>Error Types Distribution</CardTitle>
+            <p className='text-muted-foreground text-xs sm:text-sm'>
+              Top {chartData.length} categories in this range.
+            </p>
           </CardHeader>
-          <CardContent className='space-y-2'>
-            {errorTypes.map(([type, count]) => (
-              <div key={type} className='flex items-center justify-between'>
-                <span className='text-sm font-medium'>{type}</span>
-                <span className='text-muted-foreground text-sm'>{count}</span>
-              </div>
-            ))}
+          <CardContent>
+            <ChartContainer config={chartConfig} className='h-[300px] w-full'>
+              <BarChart
+                data={chartData}
+                layout='vertical'
+                margin={{
+                  top: 6,
+                  right: isMobile ? 8 : 20,
+                  left: isMobile ? 2 : 10,
+                  bottom: 6,
+                }}
+              >
+                <CartesianGrid horizontal={false} className='stroke-muted/25' />
+                <XAxis
+                  type='number'
+                  allowDecimals={false}
+                  tickLine={false}
+                  axisLine={false}
+                  tickFormatter={(value) =>
+                    compactNumber.format(
+                      typeof value === 'number' ? value : Number(value || 0)
+                    )
+                  }
+                />
+                <YAxis
+                  type='category'
+                  dataKey='label'
+                  tickLine={false}
+                  axisLine={false}
+                  width={isMobile ? 120 : 200}
+                />
+                <ChartTooltip
+                  cursor={false}
+                  content={
+                    <ChartTooltipContent
+                      labelFormatter={(_, payload) =>
+                        String(payload?.[0]?.payload?.type ?? '')
+                      }
+                      formatter={(value, name) => {
+                        const numericValue =
+                          typeof value === 'number'
+                            ? value
+                            : Number(value || 0);
+                        return (
+                          <div className='grid w-full grid-cols-[minmax(0,1fr)_auto] gap-x-4'>
+                            <span className='text-muted-foreground truncate pr-1'>
+                              {name}
+                            </span>
+                            <span className='text-foreground text-right font-mono font-medium tabular-nums'>
+                              {Number.isFinite(numericValue)
+                                ? numericValue.toLocaleString()
+                                : '-'}
+                            </span>
+                          </div>
+                        );
+                      }}
+                    />
+                  }
+                />
+                <Bar
+                  dataKey='count'
+                  name='Errors'
+                  fill='var(--color-count)'
+                  radius={[0, 6, 6, 0]}
+                  maxBarSize={24}
+                />
+              </BarChart>
+            </ChartContainer>
+            <p className='text-muted-foreground mt-2 text-xs'>
+              Total errors: {totalErrors.toLocaleString()}
+            </p>
           </CardContent>
         </Card>
       )}
@@ -428,8 +493,9 @@ function DashboardInsights({ summary }: { summary?: UsageSummary }) {
 }
 
 export default function DashboardPage() {
-  const [selectedPreset, setSelectedPreset] =
-    useState<TimeRangePresetValue>('24h');
+  const [selectedPreset, setSelectedPreset] = useState<TimeRangePresetValue>(
+    DEFAULT_TIME_RANGE_PRESET.value
+  );
   const [customRange, setCustomRange] = useState<DateRange>();
   const [pendingCustomRange, setPendingCustomRange] = useState<DateRange>();
   const [isCustomRangeActive, setIsCustomRangeActive] = useState(false);
@@ -476,55 +542,62 @@ export default function DashboardPage() {
     isCustomRangeActive && customRangeHours
       ? customRangeHours
       : activePreset.hours;
-  const autoInterval = getAutoIntervalMinutes(queryHours);
+  const safeQueryHours = Math.min(queryHours, MAX_USAGE_RANGE_HOURS);
+  const isUsageRangeCapped = safeQueryHours < queryHours;
+  const autoInterval = getAutoIntervalMinutes(safeQueryHours);
+  const usageRefetchIntervalMs = useMemo(() => {
+    if (safeQueryHours > 90 * 24) {
+      return 4 * 60 * 60_000;
+    }
+    if (safeQueryHours > 30 * 24) {
+      return 2 * 60 * 60_000;
+    }
+    if (safeQueryHours > 7 * 24) {
+      return 30 * 60_000;
+    }
+    return 60_000;
+  }, [safeQueryHours]);
+  const revenueDisplayUnit: DisplayUnit = useMemo(() => {
+    if (displayUnit === 'usd' && usdPerSat === null) {
+      // Keep revenue charts meaningful while the USD rate is unavailable.
+      return 'sat';
+    }
+    return displayUnit;
+  }, [displayUnit, usdPerSat]);
+  const revenueUnitLabel =
+    revenueDisplayUnit === 'usd'
+      ? 'USD'
+      : revenueDisplayUnit === 'sat'
+        ? 'sats'
+        : revenueDisplayUnit === 'msat'
+          ? 'msats'
+          : revenueDisplayUnit;
 
   const {
-    data: metricsData,
-    isLoading: metricsLoading,
-    refetch: refetchMetrics,
+    data: usageDashboardData,
+    isLoading: usageDashboardLoading,
+    refetch: refetchUsageDashboard,
   } = useQuery({
-    queryKey: ['usage-metrics', autoInterval, queryHours],
-    queryFn: () => AdminService.getUsageMetrics(autoInterval, queryHours),
+    queryKey: ['usage-dashboard', autoInterval, safeQueryHours],
+    queryFn: () =>
+      AdminService.getUsageDashboard(safeQueryHours, autoInterval, 100, 20),
     enabled: isAuthenticated,
-    refetchInterval: 60_000,
+    refetchInterval: usageRefetchIntervalMs,
     staleTime: 30_000,
   });
 
-  const {
-    data: summaryData,
-    isLoading: summaryLoading,
-    refetch: refetchSummary,
-  } = useQuery({
-    queryKey: ['usage-summary', queryHours],
-    queryFn: () => AdminService.getUsageSummary(queryHours),
-    enabled: isAuthenticated,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
+  const metricsData = usageDashboardData?.metrics;
+  const summaryData = usageDashboardData?.summary;
+  const errorData = usageDashboardData?.error_details;
+  const modelUsageMixData = usageDashboardData?.model_usage_mix;
+  const hasModelUsageMixMetrics =
+    Array.isArray(modelUsageMixData?.metrics) &&
+    modelUsageMixData.metrics.length > 0;
 
-  const {
-    data: errorData,
-    isLoading: errorLoading,
-    refetch: refetchErrors,
-  } = useQuery({
-    queryKey: ['usage-errors', queryHours],
-    queryFn: () => AdminService.getErrorDetails(queryHours, 100),
-    enabled: isAuthenticated,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
-
-  const {
-    data: revenueByModelData,
-    isLoading: revenueByModelLoading,
-    refetch: refetchRevenueByModel,
-  } = useQuery({
-    queryKey: ['revenue-by-model', queryHours],
-    queryFn: () => AdminService.getRevenueByModel(queryHours, 20),
-    enabled: isAuthenticated,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
+  const metricsLoading = usageDashboardLoading;
+  const summaryLoading = usageDashboardLoading;
+  const errorLoading = usageDashboardLoading;
+  const metricsTotals = metricsData?.totals;
 
   const chartConfigs = useMemo<ChartConfig[]>(() => {
     if (!metricsData || metricsData.metrics.length === 0) {
@@ -532,38 +605,43 @@ export default function DashboardPage() {
     }
 
     const metricPoints = metricsData.metrics as ChartDatum[];
+    const convertRevenueMsats = (amountMsats: number): number => {
+      if (revenueDisplayUnit === 'msat') {
+        return amountMsats;
+      }
+
+      const sats = amountMsats / 1000;
+      if (revenueDisplayUnit === 'usd') {
+        return sats * (usdPerSat ?? 0);
+      }
+
+      return sats;
+    };
     const revenuePoints = metricsData.metrics.map(
       (metric: UsageMetricData) => ({
         ...metric,
-        revenue_sats: metric.revenue_msats / 1000,
-        refunds_sats: metric.refunds_msats / 1000,
-        net_revenue_sats: (metric.revenue_msats - metric.refunds_msats) / 1000,
+        revenue_display: convertRevenueMsats(metric.revenue_msats),
       })
     ) as ChartDatum[];
 
     return [
       {
         id: 'revenue',
-        title: 'Revenue Over Time (sats)',
+        title: 'Revenue Over Time',
         mobileTitle: 'Revenue',
-        description: 'Track gross revenue, refunds, and net revenue trends.',
+        description: 'Track collected revenue trends over time.',
         data: revenuePoints,
         metricType: 'currency',
+        totals: metricsTotals
+          ? {
+              revenue_display: convertRevenueMsats(metricsTotals.revenue_msats),
+            }
+          : undefined,
         dataKeys: [
           {
-            key: 'revenue_sats',
+            key: 'revenue_display',
             name: 'Revenue',
             color: 'var(--chart-1)',
-          },
-          {
-            key: 'net_revenue_sats',
-            name: 'Net Revenue',
-            color: 'var(--chart-2)',
-          },
-          {
-            key: 'refunds_sats',
-            name: 'Refunds',
-            color: 'var(--chart-5)',
           },
         ],
       },
@@ -574,6 +652,14 @@ export default function DashboardPage() {
         description: 'Understand traffic and completion reliability over time.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              total_requests: metricsTotals.total_requests,
+              successful_chat_completions:
+                metricsTotals.successful_chat_completions,
+              failed_requests: metricsTotals.failed_requests,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'total_requests',
@@ -599,6 +685,13 @@ export default function DashboardPage() {
         description: 'Monitor warnings, handled errors, and upstream failures.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              errors: metricsTotals.errors,
+              warnings: metricsTotals.warnings,
+              upstream_errors: metricsTotals.upstream_errors,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'errors',
@@ -624,6 +717,11 @@ export default function DashboardPage() {
         description: 'Follow payment processing activity by interval.',
         data: metricPoints,
         metricType: 'count',
+        totals: metricsTotals
+          ? {
+              payment_processed: metricsTotals.payment_processed,
+            }
+          : undefined,
         dataKeys: [
           {
             key: 'payment_processed',
@@ -632,8 +730,41 @@ export default function DashboardPage() {
           },
         ],
       },
+      {
+        id: 'tokens',
+        title: 'Token Usage',
+        mobileTitle: 'Tokens',
+        description:
+          'Track input, output, and total token throughput over time.',
+        data: metricPoints,
+        metricType: 'count',
+        totals: metricsTotals
+          ? {
+              input_tokens: metricsTotals.input_tokens,
+              output_tokens: metricsTotals.output_tokens,
+              total_tokens: metricsTotals.total_tokens,
+            }
+          : undefined,
+        dataKeys: [
+          {
+            key: 'total_tokens',
+            name: 'Total Tokens',
+            color: 'var(--chart-1)',
+          },
+          {
+            key: 'input_tokens',
+            name: 'Input Tokens',
+            color: 'var(--chart-2)',
+          },
+          {
+            key: 'output_tokens',
+            name: 'Output Tokens',
+            color: 'var(--chart-3)',
+          },
+        ],
+      },
     ];
-  }, [metricsData]);
+  }, [metricsData, metricsTotals, revenueDisplayUnit, usdPerSat]);
 
   useEffect(() => {
     if (chartConfigs.length === 0) {
@@ -659,6 +790,7 @@ export default function DashboardPage() {
       </AppPageShell>
     );
   }
+
   if (!isAuthenticated) {
     return <CheatSheet />;
   }
@@ -669,13 +801,11 @@ export default function DashboardPage() {
     }
 
     setIsManualRefreshing(true);
-    await Promise.allSettled([
-      refetchMetrics(),
-      refetchSummary(),
-      refetchErrors(),
-      refetchRevenueByModel(),
-    ]);
-    setIsManualRefreshing(false);
+    try {
+      await refetchUsageDashboard();
+    } finally {
+      setIsManualRefreshing(false);
+    }
   };
 
   const openRangePicker = () => {
@@ -748,10 +878,6 @@ export default function DashboardPage() {
     isCustomRangeActive && customRange?.from && customRange?.to
       ? 'custom'
       : selectedPreset;
-  const activeRangeLabel =
-    selectedRangeValue === 'custom'
-      ? formatDateRangeLabel(customRange)
-      : activePreset.label;
   const compactCustomRangeLabel = formatCompactDateRangeLabel(customRange);
 
   return (
@@ -771,165 +897,167 @@ export default function DashboardPage() {
           usdPerSat={usdPerSat}
         />
 
-        <section className='border-border/60 bg-card/35 space-y-3 rounded-xl border p-3 sm:p-4'>
-          <div className='space-y-1'>
-            <div className='min-w-0'>
+        <section className='border-border/60 bg-card/35 space-y-4 rounded-xl border p-3 sm:p-4'>
+          <div className='space-y-2'>
+            <div className='flex flex-wrap items-center gap-2'>
               <h2 className='text-base leading-snug font-semibold tracking-tight sm:text-lg'>
                 Usage Analytics
               </h2>
-              <p className='text-muted-foreground text-xs sm:text-sm'>
-                Select a preset or custom date range to analyze traffic and
-                revenue.
-              </p>
-              <p className='text-muted-foreground text-[11px] sm:text-xs'>
-                Showing {activeRangeLabel}.
-              </p>
             </div>
-          </div>
-
-          <div className='space-y-1.5'>
-            <p className='text-muted-foreground text-[11px] font-normal tracking-tight sm:text-xs'>
-              Range
+            <p className='text-muted-foreground text-xs sm:text-sm'>
+              All cards and charts in this section update from the selected
+              range.
             </p>
-            <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
-              <div className='w-full max-w-[20rem] sm:max-w-[22rem]'>
-                <div className='border-input bg-card/30 dark:bg-input/30 flex h-8 w-full min-w-0 items-stretch overflow-hidden rounded-lg border sm:h-9'>
-                  <Popover
-                    open={isCustomRangePickerOpen}
-                    onOpenChange={handleCustomRangePickerChange}
-                  >
-                    <PopoverTrigger asChild>
-                      <Button
-                        type='button'
-                        variant='ghost'
-                        size='icon'
-                        id='dashboard-date-range'
-                        className='text-muted-foreground hover:bg-muted/50 hover:text-foreground dark:hover:bg-input/50 h-full w-8 rounded-none border-0 bg-transparent p-0 sm:w-9'
-                        aria-label='Open custom date range'
-                      >
-                        <CalendarIcon className='h-3.5 w-3.5' />
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent
-                      align='start'
-                      className='w-auto overflow-hidden p-0'
-                    >
-                      <Calendar
-                        mode='range'
-                        selected={pendingCustomRange}
-                        onSelect={handleCustomRangeSelect}
-                        defaultMonth={pendingCustomRange?.from}
-                        numberOfMonths={isMobile ? 1 : 2}
-                        className='p-3'
-                      />
-                    </PopoverContent>
-                  </Popover>
-
-                  <div className='bg-border/70 w-px' />
-
-                  <Select
-                    value={selectedRangeValue}
-                    onValueChange={handleRangeSelectChange}
-                  >
-                    <SelectTrigger className='h-full min-h-0 w-full rounded-none border-0 !bg-transparent px-3 py-0 text-sm font-normal shadow-none ring-0 hover:!bg-transparent focus-visible:border-transparent focus-visible:ring-0 data-[state=open]:!bg-transparent dark:!bg-transparent dark:hover:!bg-transparent'>
-                      <SelectValue
-                        placeholder='Select range'
-                        className='text-left'
-                      />
-                    </SelectTrigger>
-                    <SelectContent align='start'>
-                      {customRange?.from && customRange?.to && (
-                        <SelectItem value='custom'>
-                          {compactCustomRangeLabel}
-                        </SelectItem>
-                      )}
-                      {TIME_RANGE_PRESETS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <Button
-                onClick={handleRefresh}
-                variant='outline'
-                disabled={isManualRefreshing}
-                className='h-8 w-full px-2.5 text-xs sm:ml-auto sm:w-auto'
-              >
-                <RefreshCw
-                  className={cn(
-                    'mr-1 h-3 w-3',
-                    isManualRefreshing && 'animate-spin'
-                  )}
-                />
-                {isManualRefreshing ? 'Refreshing...' : 'Refresh'}
-              </Button>
-            </div>
+            {isUsageRangeCapped ? (
+              <p className='text-muted-foreground text-[11px] sm:text-xs'>
+                Usage analytics are capped to the last{' '}
+                {MAX_USAGE_RANGE_HOURS / 24} days for server safety.
+              </p>
+            ) : null}
           </div>
+
+          <div className='flex items-center gap-2'>
+            <div className='min-w-0 flex-1 sm:max-w-[22rem]'>
+              <div className='border-input bg-card/30 dark:bg-input/30 flex h-8 w-full min-w-0 items-stretch overflow-hidden rounded-lg border sm:h-9'>
+                <Popover
+                  open={isCustomRangePickerOpen}
+                  onOpenChange={handleCustomRangePickerChange}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      type='button'
+                      variant='ghost'
+                      size='icon'
+                      id='dashboard-date-range'
+                      className='text-muted-foreground hover:bg-muted/50 hover:text-foreground dark:hover:bg-input/50 h-full w-8 rounded-none border-0 bg-transparent p-0 sm:w-9'
+                      aria-label='Open custom date range'
+                    >
+                      <CalendarIcon className='h-3.5 w-3.5' />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align='start'
+                    className='w-auto overflow-hidden p-0'
+                  >
+                    <Calendar
+                      mode='range'
+                      selected={pendingCustomRange}
+                      onSelect={handleCustomRangeSelect}
+                      defaultMonth={pendingCustomRange?.from}
+                      numberOfMonths={isMobile ? 1 : 2}
+                      className='p-3'
+                    />
+                  </PopoverContent>
+                </Popover>
+
+                <div className='bg-border/70 w-px' />
+
+                <Select
+                  value={selectedRangeValue}
+                  onValueChange={handleRangeSelectChange}
+                >
+                  <SelectTrigger className='h-full min-h-0 w-full rounded-none border-0 !bg-transparent px-3 py-0 text-sm font-normal shadow-none ring-0 hover:!bg-transparent focus-visible:border-transparent focus-visible:ring-0 data-[state=open]:!bg-transparent dark:!bg-transparent dark:hover:!bg-transparent'>
+                    <SelectValue
+                      placeholder='Select range'
+                      className='text-left'
+                    />
+                  </SelectTrigger>
+                  <SelectContent align='start'>
+                    {customRange?.from && customRange?.to && (
+                      <SelectItem value='custom'>
+                        {compactCustomRangeLabel}
+                      </SelectItem>
+                    )}
+                    {TIME_RANGE_PRESETS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <Button
+              onClick={handleRefresh}
+              variant='outline'
+              disabled={isManualRefreshing}
+              aria-label='Refresh analytics'
+              className='h-8 w-8 shrink-0 rounded-lg p-0 sm:h-9 sm:w-auto sm:px-3'
+            >
+              <RefreshCw
+                className={cn(
+                  'h-3.5 w-3.5 sm:mr-1',
+                  isManualRefreshing && 'animate-spin'
+                )}
+              />
+              <span className='hidden sm:inline'>
+                {isManualRefreshing ? 'Refreshing...' : 'Refresh'}
+              </span>
+            </Button>
+          </div>
+
+          {metricsLoading ? (
+            <SectionLoading label='metrics' />
+          ) : activeChartConfig ? (
+            <UsageMetricsChart
+              data={activeChartConfig.data}
+              title={activeChartConfig.title}
+              description={activeChartConfig.description}
+              dataKeys={activeChartConfig.dataKeys}
+              totals={activeChartConfig.totals}
+              metricType={activeChartConfig.metricType}
+              currencyUnitLabel={revenueUnitLabel}
+              tabs={chartConfigs.map((config) => ({
+                id: config.id,
+                label: isMobile
+                  ? (config.mobileTitle ?? config.title)
+                  : config.title,
+              }))}
+              activeTabId={activeChartId}
+              onTabChange={setActiveChartId}
+            />
+          ) : (
+            <Card>
+              <CardContent>
+                <Empty className='border-none py-8'>
+                  <EmptyHeader>
+                    <EmptyMedia variant='icon'>
+                      <RefreshCw className='h-4 w-4' />
+                    </EmptyMedia>
+                    <EmptyTitle>No data available</EmptyTitle>
+                    <EmptyDescription>
+                      No metrics data exists for this range yet. Try a broader
+                      range.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              </CardContent>
+            </Card>
+          )}
+
+          {!metricsLoading && modelUsageMixData && hasModelUsageMixMetrics ? (
+            <TopModelsUsageChart
+              mix={modelUsageMixData}
+              displayUnit={displayUnit}
+              usdPerSat={usdPerSat}
+            />
+          ) : null}
+
+          {summaryLoading ? (
+            <SectionLoading label='summary' />
+          ) : summaryData ? (
+            <UsageSummaryCards summary={summaryData} />
+          ) : null}
+
+          <DashboardInsights summary={summaryData} isMobile={isMobile} />
+
+          {errorLoading ? (
+            <SectionLoading label='errors' />
+          ) : errorData ? (
+            <ErrorDetailsTable errors={errorData.errors} />
+          ) : null}
         </section>
-
-        {metricsLoading ? (
-          <SectionLoading label='metrics' />
-        ) : activeChartConfig ? (
-          <UsageMetricsChart
-            data={activeChartConfig.data}
-            title={activeChartConfig.title}
-            description={activeChartConfig.description}
-            dataKeys={activeChartConfig.dataKeys}
-            metricType={activeChartConfig.metricType}
-            tabs={chartConfigs.map((config) => ({
-              id: config.id,
-              label: isMobile
-                ? (config.mobileTitle ?? config.title)
-                : config.title,
-            }))}
-            activeTabId={activeChartId}
-            onTabChange={setActiveChartId}
-          />
-        ) : (
-          <Card>
-            <CardContent>
-              <Empty className='border-none py-8'>
-                <EmptyHeader>
-                  <EmptyMedia variant='icon'>
-                    <RefreshCw className='h-4 w-4' />
-                  </EmptyMedia>
-                  <EmptyTitle>No data available</EmptyTitle>
-                  <EmptyDescription>
-                    No metrics data exists for this range yet. Try a broader
-                    range.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            </CardContent>
-          </Card>
-        )}
-
-        {summaryLoading ? (
-          <SectionLoading label='summary' />
-        ) : summaryData ? (
-          <UsageSummaryCards summary={summaryData} />
-        ) : null}
-
-        <DashboardInsights summary={summaryData} />
-
-        {revenueByModelLoading ? (
-          <SectionLoading label='revenue by model' />
-        ) : revenueByModelData && revenueByModelData.models.length > 0 ? (
-          <RevenueByModelTable
-            models={revenueByModelData.models}
-            totalRevenue={revenueByModelData.total_revenue_sats}
-          />
-        ) : null}
-
-        {errorLoading ? (
-          <SectionLoading label='errors' />
-        ) : errorData ? (
-          <ErrorDetailsTable errors={errorData.errors} />
-        ) : null}
       </div>
     </AppPageShell>
   );
