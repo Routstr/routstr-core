@@ -438,12 +438,8 @@ export default function DashboardPage() {
   const [activeChartId, setActiveChartId] = useState('revenue');
   const isMobile = useIsMobile();
   const { displayUnit } = useCurrencyStore();
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    if (typeof window === 'undefined') {
-      return false;
-    }
-    return ConfigurationService.isTokenValid();
-  });
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthResolved, setIsAuthResolved] = useState(false);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -452,6 +448,7 @@ export default function DashboardPage() {
 
     const syncAuthState = (): void => {
       setIsAuthenticated(ConfigurationService.isTokenValid());
+      setIsAuthResolved(true);
     };
 
     syncAuthState();
