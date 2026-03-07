@@ -3,13 +3,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import httpx
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse
 
 from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
-    from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow
+    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -67,38 +65,11 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         """Strip 'ollama/' prefix for Ollama API compatibility."""
         return model_id.removeprefix("ollama/")
 
-    async def forward_request(
-        self,
-        request: Request,
-        path: str,
-        headers: dict,
-        request_body: bytes | None,
-        key: ApiKey,
-        max_cost_for_model: int,
-        session: AsyncSession,
-        model_obj: Model,
-    ) -> Response | StreamingResponse:
-        """Override to use OpenAI-compatible endpoint for proxy requests."""
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        original_base_url = self.base_url
-        self.base_url = f"{self.base_url}/v1"
-
-        try:
-            result = await super().forward_request(
-                request,
-                path,
-                headers,
-                request_body,
-                key,
-                max_cost_for_model,
-                session,
-                model_obj,
-            )
-            return result
-        finally:
-            self.base_url = original_base_url
+    def get_request_base_url(
+        self, path: str, model_obj: Model | None = None
+    ) -> str:
+        """Route proxy traffic through Ollama's OpenAI-compatible /v1 endpoint."""
+        return f"{self.base_url.rstrip('/')}/v1"
 
     async def fetch_models(self) -> list[Model]:
         """Fetch models from Ollama API using /api/tags endpoint."""
