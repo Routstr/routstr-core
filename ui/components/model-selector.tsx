@@ -12,6 +12,7 @@ type ModelGroup = AdminModelGroup;
 import { AddProviderModelDialog } from '@/components/add-provider-model-dialog';
 import { EditGroupForm } from '@/components/edit-group-form';
 import { ModelProviderSection } from '@/components/model-provider-section';
+import { useDisplayCurrency } from '@/lib/hooks/use-display-currency';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -104,6 +105,7 @@ export function ModelSelector({
   filteredModels: propFilteredModels,
   showDeleteAllButton = false,
 }: ModelSelectorProps) {
+  const { displayUnit, usdPerSat } = useDisplayCurrency();
   const [, setHoveredModelId] = useState<string | null>(null);
   const [editingGroup, setEditingGroup] = useState<{
     provider: string;
@@ -884,6 +886,8 @@ export function ModelSelector({
             key={provider}
             provider={provider}
             providerModels={providerModels}
+            displayUnit={displayUnit}
+            usdPerSat={usdPerSat}
             filterProvider={filterProvider}
             groupData={groupData}
             selectedModels={selectedModels}

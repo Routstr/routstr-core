@@ -193,7 +193,9 @@ export class AdminService {
     adminModel: AdminModel,
     providerName?: string
   ): AdminModelAsModel {
-    const pricing = this.convertPricingToPerMillionTokens(adminModel.pricing);
+    // Callers normalize prompt/completion to the UI's "per 1M tokens" unit
+    // before they pass models into this mapper.
+    const pricing = adminModel.pricing as Record<string, unknown>;
     const inputCost = (pricing?.prompt as number) || 0;
     const outputCost = (pricing?.completion as number) || 0;
     const requestCost = (pricing?.request as number) || 0;
