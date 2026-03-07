@@ -21,6 +21,13 @@ import { AlertCircle, Plus, Server } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogTrigger } from '@/components/ui/dialog';
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -333,7 +340,7 @@ export default function ProvidersPage() {
             description='Manage your AI provider connections and credentials.'
             actions={
               <DialogTrigger asChild>
-                <Button className='flex items-center gap-2'>
+                <Button>
                   <Plus className='h-4 w-4' />
                   Add Provider
                 </Button>
@@ -376,18 +383,22 @@ export default function ProvidersPage() {
           </Alert>
         ) : providers.length === 0 ? (
           <Card>
-            <CardContent className='flex flex-col items-center justify-center py-12'>
-              <Server className='text-muted-foreground mb-4 h-12 w-12' />
-              <h3 className='mb-2 text-lg font-semibold'>
-                No providers configured
-              </h3>
-              <p className='text-muted-foreground mb-4 text-sm'>
-                Get started by adding your first upstream provider
-              </p>
-              <Button onClick={() => setIsCreateDialogOpen(true)}>
-                <Plus className='mr-2 h-4 w-4' />
-                Add Provider
-              </Button>
+            <CardContent className='py-12'>
+              <Empty>
+                <EmptyHeader>
+                  <EmptyMedia variant='icon'>
+                    <Server className='h-4 w-4' />
+                  </EmptyMedia>
+                  <EmptyTitle>No providers configured</EmptyTitle>
+                  <EmptyDescription>
+                    Get started by adding your first upstream provider.
+                  </EmptyDescription>
+                </EmptyHeader>
+                <Button onClick={() => setIsCreateDialogOpen(true)}>
+                  <Plus className='mr-2 h-4 w-4' />
+                  Add Provider
+                </Button>
+              </Empty>
             </CardContent>
           </Card>
         ) : (

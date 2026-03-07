@@ -2,7 +2,7 @@
 
 import { type JSX, useCallback, useState } from 'react';
 import Image from 'next/image';
-import { Copy, Zap, CheckCircle, Loader2 } from 'lucide-react';
+import { Copy, CheckCircle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import QRCode from 'qrcode';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -514,10 +514,7 @@ export function LightningPaymentWorkflow({
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <Zap className='text-primary h-5 w-5' />
-          Lightning Payment Workflow
-        </CardTitle>
+        <CardTitle className='text-xl'>Lightning Payment Workflow</CardTitle>
         <p className='text-muted-foreground text-xs tracking-wide'>
           Create and manage API keys using Lightning Network payments
         </p>

@@ -72,14 +72,16 @@ def _normalize_legacy_prompt_completion_pricing(
 
     for field in ("prompt", "completion"):
         raw_value = normalized.get(field)
+        if not isinstance(raw_value, (str, int, float)):
+            continue
         try:
-            value = float(raw_value) if raw_value is not None else None
+            value = float(raw_value)
         except (TypeError, ValueError):
             continue
 
         # Older admin overrides were occasionally saved in "per 1M tokens"
         # units instead of the backend's expected per-token unit.
-        if value is not None and value > 0.1:
+        if value > 0.1:
             normalized[field] = value / 1_000_000
 
     return normalized

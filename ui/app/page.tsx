@@ -648,6 +648,20 @@ export default function DashboardPage() {
     }
   }, [chartConfigs, activeChartId]);
 
+  if (!isAuthResolved) {
+    return (
+      <AppPageShell contentClassName='mx-auto w-full max-w-5xl'>
+        <div className='space-y-6'>
+          <div className='space-y-2'>
+            <Skeleton className='h-8 w-56 max-w-full sm:h-9' />
+            <Skeleton className='h-4 w-80 max-w-full' />
+          </div>
+          <SectionLoading label='summary' />
+          <SectionLoading label='metrics' />
+        </div>
+      </AppPageShell>
+    );
+  }
   if (!isAuthenticated) {
     return <CheatSheet />;
   }

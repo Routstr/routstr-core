@@ -5,7 +5,7 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { format } from 'date-fns';
-import { CalendarIcon, Filter, X } from 'lucide-react';
+import { CalendarIcon, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -219,10 +219,7 @@ export function LogFilters({
   return (
     <Card className='mb-6'>
       <CardHeader>
-        <CardTitle className='flex items-center gap-2'>
-          <Filter className='h-5 w-5' />
-          Filters
-        </CardTitle>
+        <CardTitle>Filters</CardTitle>
         <CardDescription>
           Filter logs by date, level, request ID, text search, status code,
           method, endpoint and limit

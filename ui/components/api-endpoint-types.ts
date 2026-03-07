@@ -46,7 +46,7 @@ export const API_ENDPOINTS = {
   },
   models: {
     name: 'List Models',
-    path: '/model',
+    path: '/models',
     icon: List,
     description: 'List all available models from the provider',
   },

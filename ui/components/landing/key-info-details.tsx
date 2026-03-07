@@ -4,11 +4,7 @@ import { type JSX, useState, useCallback, useEffect } from 'react';
 import {
   Copy,
   RefreshCcw,
-  ShieldCheck,
-  History,
-  Users,
   RotateCcw,
-  KeyRound,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -154,10 +150,7 @@ export function KeyInfoDetails({
     <div className='space-y-6'>
       <Card>
         <CardHeader className='space-y-1'>
-          <CardTitle className='flex items-center gap-2 text-xl'>
-            <KeyRound className='text-primary h-5 w-5' />
-            Key Information
-          </CardTitle>
+          <CardTitle className='text-xl'>Key Information</CardTitle>
           <CardDescription>
             Enter an API key to view its balance, consumption, and child keys.
           </CardDescription>
@@ -202,10 +195,7 @@ export function KeyInfoDetails({
           <div className='grid gap-4 md:grid-cols-2'>
             <Card>
               <CardHeader className='pb-2'>
-                <CardTitle className='flex items-center gap-2 text-lg'>
-                  <ShieldCheck className='text-primary h-5 w-5' />
-                  Status & Identity
-                </CardTitle>
+                <CardTitle className='text-lg'>Status & Identity</CardTitle>
               </CardHeader>
               <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
@@ -255,10 +245,7 @@ export function KeyInfoDetails({
 
             <Card>
               <CardHeader className='pb-2'>
-                <CardTitle className='flex items-center gap-2 text-lg'>
-                  <History className='text-primary h-5 w-5' />
-                  Consumption
-                </CardTitle>
+                <CardTitle className='text-lg'>Consumption</CardTitle>
               </CardHeader>
               <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
@@ -313,8 +300,7 @@ export function KeyInfoDetails({
             walletInfo.childKeys.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className='flex items-center gap-2 text-lg'>
-                    <Users className='text-primary h-5 w-5' />
+                  <CardTitle className='text-lg'>
                     Child Keys ({walletInfo.childKeys.length})
                   </CardTitle>
                   <CardDescription>

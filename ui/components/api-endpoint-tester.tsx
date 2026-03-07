@@ -483,10 +483,7 @@ export function ApiEndpointTester({ models }: ApiEndpointTesterProps) {
   return (
     <Card className='w-full'>
       <CardHeader>
-        <CardTitle className='flex items-center gap-2'>
-          <Send className='h-5 w-5' />
-          API Endpoint Tester
-        </CardTitle>
+        <CardTitle>API Endpoint Tester</CardTitle>
         <CardDescription>
           Comprehensive testing of OpenAI-compatible API endpoints through the
           secure proxy (resolves CORS and network issues)

@@ -114,19 +114,17 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
   return (
     <div className='grid grid-cols-1 gap-2.5 px-1 min-[380px]:grid-cols-2 sm:gap-4 sm:px-0 xl:grid-cols-4'>
       {cards.map((card) => (
-        <Card key={card.title} className='hover:bg-muted/40 transition-colors'>
-          <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1 sm:pb-2'>
-            <CardTitle className='text-muted-foreground text-xs font-medium sm:text-sm'>
+        <Card key={card.title} size='sm'>
+          <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1'>
+            <CardTitle className='text-muted-foreground text-[11px] font-medium sm:text-sm'>
               {card.title}
             </CardTitle>
-            <span
-              className={`inline-flex size-6 items-center justify-center sm:size-8 ${card.iconClassName}`}
-            >
-              <card.icon className='h-3.5 w-3.5 sm:h-4 sm:w-4' />
+            <span className='inline-flex size-6 items-center justify-center sm:size-7'>
+              <card.icon className={`size-3.5 sm:size-4 ${card.iconClassName}`} />
             </span>
           </CardHeader>
           <CardContent className='pt-0'>
-            <div className='text-lg font-semibold tracking-tight break-words sm:text-2xl'>
+            <div className='text-base font-semibold break-words tabular-nums sm:text-2xl'>
               {card.value}
             </div>
           </CardContent>

@@ -172,10 +172,7 @@ export function ApiKeyManager({
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <RefreshCcw className='text-primary h-5 w-5' />
-          API Key Management
-        </CardTitle>
+        <CardTitle className='text-xl'>API Key Management</CardTitle>
         <p className='text-muted-foreground text-xs tracking-wide'>
           Manage your existing API keys and balances
         </p>

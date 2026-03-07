@@ -52,7 +52,7 @@ const data = {
     },
     {
       title: 'Models',
-      url: '/model',
+      url: '/models',
       icon: DatabaseIcon,
     },
     {

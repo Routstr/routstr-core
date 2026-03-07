@@ -25,7 +25,6 @@ import {
   Key,
   MoreVertical,
   RefreshCw,
-  Users,
 } from 'lucide-react';
 
 interface ModelProviderSectionProps {
@@ -133,8 +132,7 @@ export function ModelProviderSection({
               aria-label={`Select models for provider ${provider}`}
             />
             <div className='min-w-0'>
-              <CardTitle className='flex items-center gap-1.5 text-base sm:gap-2 sm:text-lg'>
-                <Users className='h-5 w-5' />
+              <CardTitle className='flex items-baseline gap-1.5 text-base sm:text-lg'>
                 <span className='truncate'>{provider}</span>
                 <span className='text-muted-foreground text-sm font-normal'>
                   ({providerModels.length} models)
