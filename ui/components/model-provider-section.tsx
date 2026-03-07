@@ -83,7 +83,7 @@ export function ModelProviderSection({
 
   if (filterProvider) {
     return (
-      <div className='bg-card/35 border-border/70 overflow-hidden rounded-lg border md:divide-y md:divide-border/75'>
+      <div className='bg-card/35 border-border/70 md:divide-border/75 overflow-hidden rounded-lg border md:divide-y'>
         {providerModels.map((model) => (
           <ModelItemCard
             key={model.id}
@@ -194,7 +194,7 @@ export function ModelProviderSection({
       </CardHeader>
 
       <CardContent className='px-3 pt-0 pb-3 sm:px-6 sm:pb-6'>
-        <div className='bg-card/35 border-border/70 overflow-hidden rounded-lg border md:divide-y md:divide-border/75'>
+        <div className='bg-card/35 border-border/70 md:divide-border/75 overflow-hidden rounded-lg border md:divide-y'>
           {providerModels.map((model) => (
             <ModelItemCard
               key={model.id}

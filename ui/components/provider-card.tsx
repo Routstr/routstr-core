@@ -59,7 +59,9 @@ export function ProviderCard({
         <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
           <div className='min-w-0 flex-1'>
             <div className='flex flex-col gap-2 sm:flex-row sm:items-center'>
-              <CardTitle className='truncate'>{provider.provider_type}</CardTitle>
+              <CardTitle className='truncate'>
+                {provider.provider_type}
+              </CardTitle>
               <Badge
                 variant={provider.enabled ? 'default' : 'secondary'}
                 className='w-fit'

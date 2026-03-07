@@ -120,7 +120,9 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
               {card.title}
             </CardTitle>
             <span className='inline-flex size-6 items-center justify-center sm:size-7'>
-              <card.icon className={`size-3.5 sm:size-4 ${card.iconClassName}`} />
+              <card.icon
+                className={`size-3.5 sm:size-4 ${card.iconClassName}`}
+              />
             </span>
           </CardHeader>
           <CardContent className='pt-0'>

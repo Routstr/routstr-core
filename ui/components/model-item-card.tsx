@@ -77,7 +77,9 @@ function getModelTypeParts(modelType: string): {
   inputs: ModelModality[];
   outputs: ModelModality[];
 } {
-  const [inputPart, outputPart] = modelType.split('->').map((part) => part.trim());
+  const [inputPart, outputPart] = modelType
+    .split('->')
+    .map((part) => part.trim());
 
   return {
     inputs: extractModalities(inputPart || modelType),
@@ -115,7 +117,7 @@ function ModelTypeIcons({ modelType }: { modelType: string }) {
 
   return (
     <span
-      className='inline-flex max-w-full min-w-0 items-center gap-0.5 overflow-hidden text-muted-foreground'
+      className='text-muted-foreground inline-flex max-w-full min-w-0 items-center gap-0.5 overflow-hidden'
       title={modelType}
       aria-label={modelType}
     >
@@ -254,7 +256,7 @@ export function ModelItemCard({
   return (
     <Card
       className={cn(
-        "relative overflow-hidden rounded-none border-0 bg-transparent py-0 shadow-none ring-0 transition-colors duration-150 after:absolute after:right-3 after:bottom-0 after:left-3 after:h-px after:bg-border/80 after:content-[''] last:after:hidden md:after:hidden",
+        "after:bg-border/80 relative overflow-hidden rounded-none border-0 bg-transparent py-0 shadow-none ring-0 transition-colors duration-150 after:absolute after:right-3 after:bottom-0 after:left-3 after:h-px after:content-[''] last:after:hidden md:after:hidden",
         'hover:bg-muted/25',
         isSelected && 'bg-primary/12',
         model.soft_deleted && 'bg-muted/20 opacity-80'
@@ -339,7 +341,7 @@ export function ModelItemCard({
                 <span className={statusDotClass} />
                 <h3
                   className={cn(
-                    'line-clamp-2 min-w-0 flex-1 text-[15px] font-medium leading-5',
+                    'line-clamp-2 min-w-0 flex-1 text-[15px] leading-5 font-medium',
                     model.soft_deleted && 'text-muted-foreground'
                   )}
                   title={model.name}
@@ -382,13 +384,13 @@ export function ModelItemCard({
 
             <div aria-hidden />
             {isFreeModel ? (
-              <div className='text-muted-foreground text-sm font-medium'>Free</div>
+              <div className='text-muted-foreground text-sm font-medium'>
+                Free
+              </div>
             ) : (
               <div className='border-border/45 bg-background/20 grid grid-cols-2 overflow-hidden rounded-lg border'>
                 <div className='px-3 py-2.5'>
-                  <div className='text-muted-foreground text-[11px]'>
-                    Input
-                  </div>
+                  <div className='text-muted-foreground text-[11px]'>Input</div>
                   <div className='pt-0.5 text-[15px] font-medium tabular-nums'>
                     {inputPriceLabel}
                   </div>
