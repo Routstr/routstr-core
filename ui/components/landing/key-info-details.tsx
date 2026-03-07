@@ -1,11 +1,7 @@
 'use client';
 
 import { type JSX, useState, useCallback, useEffect } from 'react';
-import {
-  Copy,
-  RefreshCcw,
-  RotateCcw,
-} from 'lucide-react';
+import { Copy, RefreshCcw, RotateCcw } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Card,

@@ -78,25 +78,35 @@ export function CostCalculator({ model }: CostCalculatorProps) {
         <div className='space-y-2 text-sm'>
           <div className='flex justify-between'>
             <span>Input Cost ({inputTokens.toLocaleString()} tokens):</span>
-            <span className='font-mono'>{formatDisplayCost(costCalculation.inputCost)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(costCalculation.inputCost)}
+            </span>
           </div>
           <div className='flex justify-between'>
             <span>Output Cost ({outputTokens.toLocaleString()} tokens):</span>
-            <span className='font-mono'>{formatDisplayCost(costCalculation.outputCost)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(costCalculation.outputCost)}
+            </span>
           </div>
           <hr className='my-2' />
           <div className='flex justify-between'>
             <span>Base Cost:</span>
-            <span className='font-mono'>{formatDisplayCost(costCalculation.baseCost)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(costCalculation.baseCost)}
+            </span>
           </div>
           <div className='flex justify-between'>
             <span>Minimum Cost per Request:</span>
-            <span className='font-mono'>{formatDisplayCost(costCalculation.minCostPerRequest)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(costCalculation.minCostPerRequest)}
+            </span>
           </div>
           <hr className='my-2' />
           <div className='flex justify-between font-medium'>
             <span>Final Cost:</span>
-            <span className='font-mono text-lg'>{formatDisplayCost(costCalculation.finalCost)}</span>
+            <span className='font-mono text-lg'>
+              {formatDisplayCost(costCalculation.finalCost)}
+            </span>
           </div>
         </div>
       </div>
@@ -197,15 +207,21 @@ export function CostCalculator({ model }: CostCalculatorProps) {
         <div className='space-y-2 text-sm'>
           <div className='flex justify-between'>
             <span>Input cost per 1M tokens:</span>
-            <span className='font-mono'>{formatDisplayCost(model.input_cost)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(model.input_cost)}
+            </span>
           </div>
           <div className='flex justify-between'>
             <span>Output cost per 1M tokens:</span>
-            <span className='font-mono'>{formatDisplayCost(model.output_cost)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(model.output_cost)}
+            </span>
           </div>
           <div className='flex justify-between'>
             <span>Minimum cost per request:</span>
-            <span className='font-mono'>{formatDisplayCost(model.min_cost_per_request)}</span>
+            <span className='font-mono'>
+              {formatDisplayCost(model.min_cost_per_request)}
+            </span>
           </div>
         </div>
       </div>
