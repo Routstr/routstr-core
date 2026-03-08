@@ -132,11 +132,10 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
     async def fetch_models(self) -> list[Model]:
         """Fetch models from the upstream Routstr node."""
         url = f"{self.base_url}/v1/models"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
 
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.get(url, headers=headers, timeout=15.0)
+                response = await client.get(url, headers={}, timeout=15.0)
                 response.raise_for_status()
                 data = response.json()
                 models = data.get("data", [])

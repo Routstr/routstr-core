@@ -32,8 +32,6 @@ import {
   Database,
   ChevronDown,
   ChevronUp,
-  Copy,
-  AlertTriangle,
 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
@@ -58,10 +56,9 @@ import { Switch } from '@/components/ui/switch';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { RoutstrProviderCard } from '@/components/providers/RoutstrProviderCard';
+import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
 import { SimpleLightningTopup } from '@/components/providers/SimpleLightningTopup';
 import { SimpleCashuTopup } from '@/components/providers/SimpleCashuTopup';
-import { CashuPaymentWorkflow } from '@/components/landing/cashu-payment-workflow';
-import { LightningPaymentWorkflow } from '@/components/landing/lightning-payment-workflow';
 import { useState } from 'react';
 import { toast } from 'sonner';
 
@@ -740,29 +737,6 @@ export default function ProvidersPage() {
                               }
                             />
                           </div>
-
-                          <div className='grid gap-2'>
-                            <Label htmlFor='refund_address' className='text-xs'>
-                              Global Refund Address (LNURL/Address)
-                            </Label>
-                            <Input
-                              id='refund_address'
-                              className='h-8 text-xs'
-                              placeholder='lightning@address.com'
-                              value={
-                                formData.provider_settings?.refund_address || ''
-                              }
-                              onChange={(e) =>
-                                setFormData({
-                                  ...formData,
-                                  provider_settings: {
-                                    ...formData.provider_settings,
-                                    refund_address: e.target.value,
-                                  },
-                                })
-                              }
-                            />
-                          </div>
                         </div>
                       </div>
                     )}
@@ -874,88 +848,17 @@ export default function ProvidersPage() {
                         1.01 means +1% e.g. currency exchange, card fees, etc.
                       </p>
                     </div>
-                    {formData.provider_type === 'routstr' &&
-                      editingProvider && (
-                        <div className='bg-muted/30 mt-4 space-y-6 rounded-lg border p-4'>
-                          <div className='flex items-center justify-between'>
-                            <Label className='text-sm font-semibold'>
-                              Upstream Node Wallet Management
-                            </Label>
-                            <Badge variant='outline' className='text-[10px]'>
-                              External Node
-                            </Badge>
-                          </div>
-
-                          <div className='bg-muted/30 mt-4 space-y-6 rounded-lg border p-4'>
-                            <div className='flex items-center justify-between'>
-                              <Label className='text-sm font-semibold'>
-                                Upstream Node Wallet Management
-                              </Label>
-                              <Badge variant='outline' className='text-[10px]'>
-                                External Node
-                              </Badge>
-                            </div>
-
-                            <section className='space-y-2'>
-                              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
-                                Lightning
-                              </Label>
-                              <LightningPaymentWorkflow
-                                baseUrl={formData.base_url || ''}
-                                onApiKeyCreated={(newApiKey) => {
-                                  setFormData((prev) => ({
-                                    ...prev,
-                                    api_key: newApiKey,
-                                  }));
-                                  toast.success(
-                                    'New API key created and saved'
-                                  );
-                                }}
-                              />
-                            </section>
-
-                            <Separator />
-
-                            <section className='space-y-2'>
-                              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
-                                Cashu
-                              </Label>
-                              <CashuPaymentWorkflow
-                                baseUrl={formData.base_url || ''}
-                                apiKey={formData.api_key || ''}
-                                onApiKeyCreated={(newApiKey) => {
-                                  setFormData((prev) => ({
-                                    ...prev,
-                                    api_key: newApiKey,
-                                  }));
-                                  toast.success(
-                                    'New API key created and saved'
-                                  );
-                                }}
-                              />
-                            </section>
-                          </div>
-
-                          <Separator />
-
-                          <section className='space-y-2'>
-                            <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
-                              Cashu
-                            </Label>
-                            <CashuPaymentWorkflow
-                              baseUrl={formData.base_url || ''}
-                              apiKey={formData.api_key || ''}
-                              onApiKeyCreated={(newApiKey) => {
-                                setFormData({
-                                  ...formData,
-                                  api_key: newApiKey,
-                                });
-                                toast.success('New API key created and saved');
-                              }}
-                            />
-                          </section>
-                        </div>
-                      )}
+                    {formData.provider_type === 'routstr' && (
+                      <RoutstrCreateKeySection
+                        baseUrl={formData.base_url || ''}
+                        onApiKeyCreated={(newApiKey) => {
+                          setFormData((prev) => ({
+                            ...prev,
+                            api_key: newApiKey,
+                          }));
+                        }}
+                      />
+                    )}
                   </div>
                   <DialogFooter>
                     <Button
@@ -1215,7 +1118,6 @@ export default function ProvidersPage() {
                         }
                         onEdit={() => handleEdit(provider)}
                         onDelete={() => handleDelete(provider.id)}
-                        onUpdateKey={() => handleEdit(provider)}
                         balanceComponent={
                           <ProviderBalance
                             providerId={provider.id}
@@ -1536,27 +1438,6 @@ export default function ProvidersPage() {
                         }
                       />
                     </div>
-
-                    <div className='grid gap-2'>
-                      <Label htmlFor='edit_refund_address' className='text-xs'>
-                        Global Refund Address (LNURL/Address)
-                      </Label>
-                      <Input
-                        id='edit_refund_address'
-                        className='h-8 text-xs'
-                        placeholder='lightning@address.com'
-                        value={formData.provider_settings?.refund_address || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            provider_settings: {
-                              ...formData.provider_settings,
-                              refund_address: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                    </div>
                   </div>
                 </div>
               )}
@@ -1655,6 +1536,17 @@ export default function ProvidersPage() {
                   1.01 means +1% e.g. currency exchange, card fees, etc.
                 </p>
               </div>
+              {formData.provider_type === 'routstr' && (
+                <RoutstrCreateKeySection
+                  baseUrl={formData.base_url || ''}
+                  onApiKeyCreated={(newApiKey) => {
+                    setFormData((prev) => ({
+                      ...prev,
+                      api_key: newApiKey,
+                    }));
+                  }}
+                />
+              )}
             </div>
             <DialogFooter>
               <Button
