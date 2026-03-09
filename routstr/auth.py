@@ -776,8 +776,6 @@ async def adjust_payment_for_tokens(
                         "key_hash": key.hashed_key[:8] + "...",
                         "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "charged_amount": cost.total_msats,
-                        "input_tokens": cost.input_tokens,
-                        "output_tokens": cost.output_tokens,
                         "new_balance": billing_key.balance,
                         "model": model,
                     },
@@ -801,8 +799,6 @@ async def adjust_payment_for_tokens(
                     "cost_difference": cost_difference,
                     "input_msats": cost.input_msats,
                     "output_msats": cost.output_msats,
-                    "input_tokens": cost.input_tokens,
-                    "output_tokens": cost.output_tokens,
                 },
             )
 

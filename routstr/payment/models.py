@@ -65,28 +65,6 @@ class Model(BaseModel):
         return hash(self.id)
 
 
-def _normalize_legacy_prompt_completion_pricing(
-    pricing: dict[str, object],
-) -> dict[str, object]:
-    normalized = dict(pricing)
-
-    for field in ("prompt", "completion"):
-        raw_value = normalized.get(field)
-        if not isinstance(raw_value, (str, int, float)):
-            continue
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            continue
-
-        # Older admin overrides were occasionally saved in "per 1M tokens"
-        # units instead of the backend's expected per-token unit.
-        if value > 0.1:
-            normalized[field] = value / 1_000_000
-
-    return normalized
-
-
 def _has_valid_pricing(model: dict) -> bool:
     """Check if model has valid pricing (not free, no negative values)."""
     pricing = model.get("pricing", {})
@@ -177,9 +155,6 @@ def _row_to_model(
 
     if apply_provider_fee and isinstance(pricing, dict):
         pricing = {k: float(v) * provider_fee for k, v in pricing.items()}
-
-    if isinstance(pricing, dict):
-        pricing = _normalize_legacy_prompt_completion_pricing(pricing)
 
     if isinstance(pricing, dict) and float(pricing.get("request", 0.0)) <= 0.0:
         pricing["request"] = max(pricing.get("request", 0.0), 0.0)

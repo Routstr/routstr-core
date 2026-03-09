@@ -1,6 +1,5 @@
 import asyncio
 import math
-import time
 from typing import TypedDict
 
 from cashu.core.base import Proof, Token
@@ -159,14 +158,6 @@ async def credit_balance(
 
 
 _wallets: dict[str, Wallet] = {}
-_balances_cache_ttl_seconds = 300.0
-_balances_cache: dict[
-    tuple[str, ...], tuple[float, tuple[list["BalanceDetail"], int, int, int]]
-] = {}
-_balances_refresh_tasks: dict[
-    tuple[str, ...], asyncio.Task[tuple[list["BalanceDetail"], int, int, int]]
-] = {}
-_balances_cache_lock = asyncio.Lock()
 
 
 async def get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Wallet:
@@ -235,12 +226,6 @@ async def fetch_all_balances(
     """
     if units is None:
         units = ["sat", "msat"]
-    units_key = tuple(units)
-
-    now = time.time()
-    cached = _balances_cache.get(units_key)
-    if cached and cached[0] > now:
-        return cached[1]
 
     async def fetch_balance(
         session: db.AsyncSession, mint_url: str, unit: str
@@ -276,71 +261,47 @@ async def fetch_all_balances(
             }
             return error_result
 
-    async def compute_balances() -> tuple[list[BalanceDetail], int, int, int]:
-        # Create tasks for all mint/unit combinations
-        async with db.create_session() as session:
-            tasks = [
-                fetch_balance(session, mint_url, unit)
-                for mint_url in settings.cashu_mints
-                for unit in units
-            ]
+    # Create tasks for all mint/unit combinations
+    async with db.create_session() as session:
+        tasks = [
+            fetch_balance(session, mint_url, unit)
+            for mint_url in settings.cashu_mints
+            for unit in units
+        ]
 
-            # Run all tasks concurrently
-            balance_details = list(await asyncio.gather(*tasks))
+        # Run all tasks concurrently
+        balance_details = list(await asyncio.gather(*tasks))
 
-        # Calculate totals
-        total_wallet_balance_sats = 0
-        total_user_balance_sats = 0
+    # Calculate totals
+    total_wallet_balance_sats = 0
+    total_user_balance_sats = 0
 
-        for detail in balance_details:
-            if not detail.get("error"):
-                # Convert to sats for total calculation
-                unit = detail["unit"]
-                proofs_balance_sats = (
-                    detail["wallet_balance"]
-                    if unit == "sat"
-                    else detail["wallet_balance"] // 1000
-                )
-                user_balance_sats = (
-                    detail["user_balance"]
-                    if unit == "sat"
-                    else detail["user_balance"] // 1000
-                )
+    for detail in balance_details:
+        if not detail.get("error"):
+            # Convert to sats for total calculation
+            unit = detail["unit"]
+            proofs_balance_sats = (
+                detail["wallet_balance"]
+                if unit == "sat"
+                else detail["wallet_balance"] // 1000
+            )
+            user_balance_sats = (
+                detail["user_balance"]
+                if unit == "sat"
+                else detail["user_balance"] // 1000
+            )
 
-                total_wallet_balance_sats += proofs_balance_sats
-                total_user_balance_sats += user_balance_sats
+            total_wallet_balance_sats += proofs_balance_sats
+            total_user_balance_sats += user_balance_sats
 
-        owner_balance = total_wallet_balance_sats - total_user_balance_sats
-        return (
-            balance_details,
-            total_wallet_balance_sats,
-            total_user_balance_sats,
-            owner_balance,
-        )
+    owner_balance = total_wallet_balance_sats - total_user_balance_sats
 
-    async with _balances_cache_lock:
-        now = time.time()
-        cached = _balances_cache.get(units_key)
-        if cached and cached[0] > now:
-            return cached[1]
-
-        refresh_task = _balances_refresh_tasks.get(units_key)
-        if refresh_task is None or refresh_task.done():
-            refresh_task = asyncio.create_task(compute_balances())
-            _balances_refresh_tasks[units_key] = refresh_task
-
-    result = await refresh_task
-
-    async with _balances_cache_lock:
-        _balances_cache[units_key] = (
-            time.time() + _balances_cache_ttl_seconds,
-            result,
-        )
-        current_task = _balances_refresh_tasks.get(units_key)
-        if current_task is refresh_task and refresh_task.done():
-            _balances_refresh_tasks.pop(units_key, None)
-
-    return result
+    return (
+        balance_details,
+        total_wallet_balance_sats,
+        total_user_balance_sats,
+        owner_balance,
+    )
 
 
 async def periodic_payout() -> None:

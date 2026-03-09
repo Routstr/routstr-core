@@ -27,8 +27,6 @@ admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
 admin_sessions: dict[str, int] = {}
 ADMIN_SESSION_DURATION = 3600
-# Usage analytics remain queryable up to 12 months.
-MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
 def require_admin_api(request: Request) -> None:
@@ -943,55 +941,18 @@ async def get_usage_metrics(
         default=15, ge=1, le=1440, description="Time interval in minutes"
     ),
     hours: int = Query(
-        default=24,
-        ge=1,
-        le=MAX_USAGE_ANALYTICS_HOURS,
-        description="Hours of history to analyze",
+        default=24, ge=1, le=168, description="Hours of history to analyze"
     ),
 ) -> dict:
     """Get usage metrics aggregated by time interval."""
     return log_manager.get_usage_metrics(interval=interval, hours=hours)
 
 
-@admin_router.get("/api/usage/dashboard", dependencies=[Depends(require_admin_api)])
-async def get_usage_dashboard(
-    request: Request,
-    interval: int = Query(
-        default=15, ge=1, le=1440, description="Time interval in minutes"
-    ),
-    hours: int = Query(
-        default=24,
-        ge=1,
-        le=MAX_USAGE_ANALYTICS_HOURS,
-        description="Hours of history to analyze",
-    ),
-    error_limit: int = Query(
-        default=100, ge=1, le=1000, description="Maximum number of errors to return"
-    ),
-    model_limit: int = Query(
-        default=20, ge=1, le=100, description="Maximum number of models to return"
-    ),
-) -> dict:
-    """
-    Get all dashboard analytics in one request.
-    This runs one combined aggregation pass and avoids repeated scans.
-    """
-    return log_manager.get_usage_dashboard(
-        interval=interval,
-        hours=hours,
-        error_limit=error_limit,
-        model_limit=model_limit,
-    )
-
-
 @admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
 async def get_usage_summary(
     request: Request,
     hours: int = Query(
-        default=24,
-        ge=1,
-        le=MAX_USAGE_ANALYTICS_HOURS,
-        description="Hours of history to analyze",
+        default=24, ge=1, le=168, description="Hours of history to analyze"
     ),
 ) -> dict:
     """Get summary statistics for the specified time period."""
@@ -1002,10 +963,7 @@ async def get_usage_summary(
 async def get_error_details(
     request: Request,
     hours: int = Query(
-        default=24,
-        ge=1,
-        le=MAX_USAGE_ANALYTICS_HOURS,
-        description="Hours of history to analyze",
+        default=24, ge=1, le=168, description="Hours of history to analyze"
     ),
     limit: int = Query(
         default=100, ge=1, le=1000, description="Maximum number of errors to return"
@@ -1021,10 +979,7 @@ async def get_error_details(
 async def get_revenue_by_model(
     request: Request,
     hours: int = Query(
-        default=24,
-        ge=1,
-        le=MAX_USAGE_ANALYTICS_HOURS,
-        description="Hours of history to analyze",
+        default=24, ge=1, le=168, description="Hours of history to analyze"
     ),
     limit: int = Query(
         default=20, ge=1, le=100, description="Maximum number of models to return"

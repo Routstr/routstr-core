@@ -3,38 +3,36 @@ Logging configuration for Routstr.
 
 CRITICAL LOG MESSAGES FOR USAGE STATISTICS:
 ===========================================
-The following log messages are parsed by the usage tracking system
-(routstr/core/usage_analytics_store.py and routstr/core/log_manager.py).
+The following log messages are parsed by the usage tracking system (routstr/core/admin.py).
 DO NOT modify or remove these messages without updating the usage tracking logic:
 
 1. "Received proxy request" (INFO) - routstr/proxy.py
    - Used to count total incoming requests
    - Includes model information in context
 
-2. "Calculated token-based cost" (INFO) - routstr/auth.py
+    2. "Payment adjustment completed for streaming" (INFO) - routstr/upstream/base.py
+       "Payment adjustment completed for non-streaming" (INFO) - routstr/upstream/base.py
    - Used to track successful completions and revenue
-   - The 'token_cost', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
+   - The 'cost_data.total_msats' field is extracted for revenue calculation
+   - Must include 'cost_data' in extra dict
 
-3. "Max cost payment finalized" (INFO) - routstr/auth.py
-   - Used as the successful completion fallback when token usage is unavailable
-   - The 'charged_amount', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
-
-4. "Payment processed successfully" (INFO) - routstr/auth.py
+3. "Payment processed successfully" (INFO) - routstr/auth.py
    - Used to count successful payment processing events
    - Tracks payment-related metrics
 
-5. "Upstream request failed, revert payment" (WARNING) - routstr/proxy.py
+4. "Upstream request failed, revert payment" (WARNING) - routstr/proxy.py
    - Used to track failed requests and refunds
    - The 'max_cost_for_model' field is extracted for refund calculation
    - Must include 'max_cost_for_model' in extra dict
 
-6. Any ERROR level logs with "upstream" in the message
+5. Any ERROR level logs with "upstream" in the message
    - Used to count upstream provider errors
    - Helps identify service reliability issues
 
 If you need to modify these messages, ensure you also update the parsing logic in:
-- routstr/core/usage_analytics_store.py
-- routstr/core/log_manager.py
+- routstr/core/admin.py:_aggregate_metrics_by_time()
+- routstr/core/admin.py:_get_summary_stats()
+- routstr/core/admin.py:get_revenue_by_model()
 """
 
 import logging.config

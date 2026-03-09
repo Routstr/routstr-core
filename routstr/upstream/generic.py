@@ -79,22 +79,6 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                 data = response.json()
 
                 models_list = []
-
-                def parse_pricing_value(value: object) -> float:
-                    if isinstance(value, dict):
-                        value = value.get("usd", 0.0)
-
-                    if isinstance(value, str):
-                        try:
-                            value = float(value)
-                        except ValueError:
-                            return 0.0
-
-                    if isinstance(value, (int, float)):
-                        return float(value)
-
-                    return 0.0
-
                 for model_data in data.get("data", []):
                     model_id = model_data.get("id", "")
                     if not model_id:
@@ -127,8 +111,8 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     input_pricing = pricing_info.get("input", {})
                     output_pricing = pricing_info.get("output", {})
 
-                    prompt_price = parse_pricing_value(input_pricing) / 1_000_000
-                    completion_price = parse_pricing_value(output_pricing) / 1_000_000
+                    prompt_price = input_pricing.get("usd", 0.001) / 1000000
+                    completion_price = output_pricing.get("usd", 0.001) / 1000000
 
                     capabilities = model_spec.get("capabilities", {})
                     input_modalities = ["text"]
