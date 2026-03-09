@@ -13,7 +13,11 @@ class ApiClient {
   private handleAuthError(error: unknown): void {
     if (axios.isAxiosError(error)) {
       const axiosError = error as AxiosError;
-      if (axiosError.response?.status === 401) {
+      const status = axiosError.response?.status;
+      const requestUrl = axiosError.config?.url ?? '';
+      const isAdminRequest = requestUrl.includes('/admin/');
+
+      if (status === 401 || (status === 403 && isAdminRequest)) {
         ConfigurationService.clearToken();
         if (
           typeof window !== 'undefined' &&

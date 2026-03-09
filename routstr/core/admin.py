@@ -940,9 +940,7 @@ async def get_usage_metrics(
     interval: int = Query(
         default=15, ge=1, le=1440, description="Time interval in minutes"
     ),
-    hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
-    ),
+    hours: int = Query(default=24, ge=1, description="Hours of history to analyze"),
 ) -> dict:
     """Get usage metrics aggregated by time interval."""
     return log_manager.get_usage_metrics(interval=interval, hours=hours)
@@ -951,9 +949,7 @@ async def get_usage_metrics(
 @admin_router.get("/api/usage/summary", dependencies=[Depends(require_admin_api)])
 async def get_usage_summary(
     request: Request,
-    hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
-    ),
+    hours: int = Query(default=24, ge=1, description="Hours of history to analyze"),
 ) -> dict:
     """Get summary statistics for the specified time period."""
     return log_manager.get_usage_summary(hours=hours)
@@ -962,9 +958,7 @@ async def get_usage_summary(
 @admin_router.get("/api/usage/error-details", dependencies=[Depends(require_admin_api)])
 async def get_error_details(
     request: Request,
-    hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
-    ),
+    hours: int = Query(default=24, ge=1, description="Hours of history to analyze"),
     limit: int = Query(
         default=100, ge=1, le=1000, description="Maximum number of errors to return"
     ),
@@ -978,9 +972,7 @@ async def get_error_details(
 )
 async def get_revenue_by_model(
     request: Request,
-    hours: int = Query(
-        default=24, ge=1, le=168, description="Hours of history to analyze"
-    ),
+    hours: int = Query(default=24, ge=1, description="Hours of history to analyze"),
     limit: int = Query(
         default=20, ge=1, le=100, description="Maximum number of models to return"
     ),
