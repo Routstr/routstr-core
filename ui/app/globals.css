@@ -155,12 +155,6 @@ body {
   max-width: 100%;
 }
 
-@layer utilities {
-  .pb-mobile-nav {
-    padding-bottom: calc(5.75rem + env(safe-area-inset-bottom));
-  }
-}
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
