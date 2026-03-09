@@ -1045,33 +1045,11 @@ export interface RevenueByModel {
   total_models: number;
 }
 
-export interface ModelUsageMixMetric {
-  timestamp: string;
-  total_successful: number;
-  total_revenue_msats: number;
-  total_tokens: number;
-  others: number;
-  others_revenue_msats: number;
-  others_tokens: number;
-  model_counts: Record<string, number>;
-  model_revenue_msats: Record<string, number>;
-  model_tokens: Record<string, number>;
-}
-
-export interface ModelUsageMix {
-  top_models: string[];
-  metrics: ModelUsageMixMetric[];
-  interval_minutes: number;
-  hours_back: number;
-  total_buckets: number;
-}
-
 export interface UsageDashboardResponse {
   metrics: UsageMetrics;
   summary: UsageSummary;
   error_details: ErrorDetails;
   revenue_by_model: RevenueByModel;
-  model_usage_mix?: ModelUsageMix;
 }
 
 export interface LogEntry {

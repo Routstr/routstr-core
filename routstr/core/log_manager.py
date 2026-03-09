@@ -708,18 +708,6 @@ class LogManager:
                 "failed": 0,
             }
         )
-        model_mix_buckets: dict[str, dict[str, int]] = defaultdict(
-            lambda: defaultdict(int)
-        )
-        model_mix_revenue_buckets: dict[str, dict[str, float]] = defaultdict(
-            lambda: defaultdict(float)
-        )
-        model_mix_token_buckets: dict[str, dict[str, int]] = defaultdict(
-            lambda: defaultdict(int)
-        )
-        model_mix_totals: dict[str, int] = defaultdict(int)
-        model_mix_revenue_totals: dict[str, float] = defaultdict(float)
-        model_mix_token_totals: dict[str, int] = defaultdict(int)
         latest_errors_heap: list[tuple[str, dict[str, Any]]] = []
         total_error_count = 0
 
@@ -777,22 +765,12 @@ class LogManager:
                     summary_stats["total_tokens"] += input_tokens + output_tokens
                     model_stats[model]["requests"] += 1
                     model_stats[model]["successful"] += 1
-                    model_mix_totals[model] += 1
                     if bucket:
                         bucket["total_requests"] += 1
                         bucket["successful_chat_completions"] += 1
                         bucket["input_tokens"] += input_tokens
                         bucket["output_tokens"] += output_tokens
                         bucket["total_tokens"] += input_tokens + output_tokens
-                    if bucket_key:
-                        model_mix_buckets[bucket_key][model] += 1
-                        if revenue_msats > 0:
-                            model_mix_revenue_buckets[bucket_key][model] += revenue_msats
-                            model_mix_revenue_totals[model] += revenue_msats
-                        if input_tokens > 0 or output_tokens > 0:
-                            token_total = input_tokens + output_tokens
-                            model_mix_token_buckets[bucket_key][model] += token_total
-                            model_mix_token_totals[model] += token_total
 
                     if revenue_msats > 0:
                         summary_stats["revenue_msats"] += revenue_msats
@@ -876,95 +854,6 @@ class LogManager:
                 latest_errors_heap, key=lambda x: x[0], reverse=True
             )
         ]
-        top_model_limit = max(1, min(model_limit, 20))
-        top_models_requests = [
-            model_name
-            for model_name, _ in sorted(
-                (
-                    (name, count)
-                    for name, count in model_mix_totals.items()
-                    if name != "unknown"
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )[:top_model_limit]
-        ]
-        top_models_revenue = [
-            model_name
-            for model_name, _ in sorted(
-                (
-                    (name, amount)
-                    for name, amount in model_mix_revenue_totals.items()
-                    if name != "unknown"
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )[:top_model_limit]
-        ]
-        top_models_tokens = [
-            model_name
-            for model_name, _ in sorted(
-                (
-                    (name, token_count)
-                    for name, token_count in model_mix_token_totals.items()
-                    if name != "unknown"
-                ),
-                key=lambda item: item[1],
-                reverse=True,
-            )[:top_model_limit]
-        ]
-        selected_models: list[str] = []
-        for model in top_models_requests + top_models_revenue + top_models_tokens:
-            if model not in selected_models:
-                selected_models.append(model)
-        top_model_set = set(selected_models)
-
-        model_usage_mix_metrics: list[dict[str, Any]] = []
-        mix_bucket_keys = sorted(
-            set(model_mix_buckets.keys())
-            | set(model_mix_revenue_buckets.keys())
-            | set(model_mix_token_buckets.keys())
-        )
-        for bucket_key in mix_bucket_keys:
-            counts = model_mix_buckets.get(bucket_key, {})
-            revenue_counts = model_mix_revenue_buckets.get(bucket_key, {})
-            token_counts = model_mix_token_buckets.get(bucket_key, {})
-            others = 0
-            others_revenue_msats = 0.0
-            others_tokens = 0
-            model_counts: dict[str, int] = {}
-            model_revenue_msats: dict[str, float] = {}
-            model_tokens: dict[str, int] = {}
-            for model_name, successful_count in counts.items():
-                if model_name in top_model_set:
-                    model_counts[model_name] = int(successful_count)
-                else:
-                    others += int(successful_count)
-            for model_name, revenue_value in revenue_counts.items():
-                if model_name in top_model_set:
-                    model_revenue_msats[model_name] = float(revenue_value)
-                else:
-                    others_revenue_msats += float(revenue_value)
-            for model_name, token_value in token_counts.items():
-                if model_name in top_model_set:
-                    model_tokens[model_name] = int(token_value)
-                else:
-                    others_tokens += int(token_value)
-
-            model_usage_mix_metrics.append(
-                {
-                    "timestamp": bucket_key,
-                    "total_successful": int(sum(counts.values())),
-                    "total_revenue_msats": float(sum(revenue_counts.values())),
-                    "total_tokens": int(sum(token_counts.values())),
-                    "others": others,
-                    "others_revenue_msats": others_revenue_msats,
-                    "others_tokens": others_tokens,
-                    "model_counts": model_counts,
-                    "model_revenue_msats": model_revenue_msats,
-                    "model_tokens": model_tokens,
-                }
-            )
 
         return {
             "metrics": {
@@ -982,18 +871,6 @@ class LogManager:
                 "models": models[:model_limit],
                 "total_revenue_sats": total_revenue,
                 "total_models": len(models),
-            },
-            "model_usage_mix": {
-                "top_models": top_models_requests,
-                "top_models_by_metric": {
-                    "requests": top_models_requests,
-                    "revenue": top_models_revenue,
-                    "tokens": top_models_tokens,
-                },
-                "metrics": model_usage_mix_metrics,
-                "interval_minutes": interval_minutes,
-                "hours_back": hours_back,
-                "total_buckets": len(model_usage_mix_metrics),
             },
         }
 

@@ -9,7 +9,6 @@ import type { DateRange } from 'react-day-picker';
 import { UsageMetricsChart } from '@/components/usage-metrics-chart';
 import { UsageSummaryCards } from '@/components/usage-summary-cards';
 import { ErrorDetailsTable } from '@/components/error-details-table';
-import { TopModelsUsageChart } from '@/components/top-models-usage-chart';
 import { DashboardBalanceSummary } from '@/components/dashboard-balance-summary';
 import {
   AdminService,
@@ -589,11 +588,6 @@ export default function DashboardPage() {
   const metricsData = usageDashboardData?.metrics;
   const summaryData = usageDashboardData?.summary;
   const errorData = usageDashboardData?.error_details;
-  const modelUsageMixData = usageDashboardData?.model_usage_mix;
-  const hasModelUsageMixMetrics =
-    Array.isArray(modelUsageMixData?.metrics) &&
-    modelUsageMixData.metrics.length > 0;
-
   const metricsLoading = usageDashboardLoading;
   const summaryLoading = usageDashboardLoading;
   const errorLoading = usageDashboardLoading;
@@ -1035,14 +1029,6 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
           )}
-
-          {!metricsLoading && modelUsageMixData && hasModelUsageMixMetrics ? (
-            <TopModelsUsageChart
-              mix={modelUsageMixData}
-              displayUnit={displayUnit}
-              usdPerSat={usdPerSat}
-            />
-          ) : null}
 
           {summaryLoading ? (
             <SectionLoading label='summary' />
