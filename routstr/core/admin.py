@@ -830,10 +830,13 @@ async def topup_provider_with_token(
 
         async with httpx.AsyncClient() as client:
             clean_url = provider.base_url.rstrip("/")
+            headers = {}
+            if provider.api_key:
+                headers["Authorization"] = f"Bearer {provider.api_key}"
             resp = await client.post(
                 f"{clean_url}/v1/balance/topup",
                 json={"cashu_token": payload.token},
-                headers={"Authorization": f"Bearer {provider.api_key}"},
+                headers=headers,
             )
 
             if resp.status_code == 200:
@@ -890,7 +893,7 @@ async def initiate_provider_topup(
                             "purpose": "topup",
                             "api_key": provider.api_key,
                         },
-                        headers={"Authorization": f"Bearer {provider.api_key}"},
+                        headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
                     )
 
                     if resp.status_code == 200:
@@ -974,7 +977,7 @@ async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, obj
                 clean_url = provider.base_url.rstrip("/")
                 resp = await client.get(
                     f"{clean_url}/v1/balance/lightning/invoice/{invoice_id}/status",
-                    headers={"Authorization": f"Bearer {provider.api_key}"},
+                    headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
                 )
                 if resp.status_code == 200:
                     status_data = resp.json()
@@ -1024,9 +1027,12 @@ async def get_provider_balance(provider_id: int) -> dict[str, object]:
 
             async with httpx.AsyncClient() as client:
                 clean_url = provider.base_url.rstrip("/")
+                headers = {}
+                if provider.api_key:
+                    headers["Authorization"] = f"Bearer {provider.api_key}"
                 resp = await client.get(
                     f"{clean_url}/v1/balance/info",
-                    headers={"Authorization": f"Bearer {provider.api_key}"},
+                    headers=headers,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
