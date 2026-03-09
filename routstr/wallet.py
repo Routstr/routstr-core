@@ -2,6 +2,7 @@ import asyncio
 import math
 from typing import TypedDict
 
+import httpx
 from cashu.core.base import Proof, Token
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
@@ -12,6 +13,41 @@ from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 
 logger = get_logger(__name__)
+
+# Cache of mint_url -> list of supported unit strings
+_mint_units_cache: dict[str, list[str]] = {}
+
+
+async def get_mint_units(mint_url: str) -> list[str]:
+    """Query a mint's /v1/keysets endpoint to discover its supported units."""
+    if mint_url in _mint_units_cache:
+        return _mint_units_cache[mint_url]
+
+    try:
+        url = f"{mint_url.rstrip('/')}/v1/keysets"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+
+        units = list(
+            {
+                ks["unit"]
+                for ks in data.get("keysets", [])
+                if ks.get("active", False)
+            }
+        )
+        if not units:
+            logger.warning(f"No active keysets found for {mint_url}, defaulting to sat")
+            units = ["sat"]
+
+        _mint_units_cache[mint_url] = units
+        logger.info(f"Mint {mint_url} supports units: {units}")
+        return units
+    except Exception as e:
+        logger.warning(f"Failed to query keysets for {mint_url}: {e}, defaulting to sat")
+        _mint_units_cache[mint_url] = ["sat"]
+        return ["sat"]
 
 
 async def get_balance(unit: str) -> int:
@@ -224,8 +260,6 @@ async def fetch_all_balances(
         - Total user balance in sats
         - Owner balance in sats (wallet - user)
     """
-    if units is None:
-        units = ["sat", "msat"]
 
     async def fetch_balance(
         session: db.AsyncSession, mint_url: str, unit: str
@@ -261,12 +295,19 @@ async def fetch_all_balances(
             }
             return error_result
 
-    # Create tasks for all mint/unit combinations
+    # Discover supported units for each mint, then create tasks
+    mint_units_map: dict[str, list[str]] = {}
+    for mint_url in settings.cashu_mints:
+        if units is not None:
+            mint_units_map[mint_url] = units
+        else:
+            mint_units_map[mint_url] = await get_mint_units(mint_url)
+
     async with db.create_session() as session:
         tasks = [
             fetch_balance(session, mint_url, unit)
-            for mint_url in settings.cashu_mints
-            for unit in units
+            for mint_url, mint_units in mint_units_map.items()
+            for unit in mint_units
         ]
 
         # Run all tasks concurrently
@@ -313,7 +354,8 @@ async def periodic_payout() -> None:
         try:
             async with db.create_session() as session:
                 for mint_url in settings.cashu_mints:
-                    for unit in ["sat", "msat"]:
+                    mint_supported_units = await get_mint_units(mint_url)
+                    for unit in mint_supported_units:
                         wallet = await get_wallet(mint_url, unit)
                         proofs = get_proofs_per_mint_and_unit(
                             wallet, mint_url, unit, not_reserved=True
