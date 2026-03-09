@@ -53,166 +53,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { RoutstrProviderCard } from '@/components/providers/RoutstrProviderCard';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
-import { SimpleLightningTopup } from '@/components/providers/SimpleLightningTopup';
-import { SimpleCashuTopup } from '@/components/providers/SimpleCashuTopup';
+import { RoutstrNodeSettings } from '@/components/providers/RoutstrNodeSettings';
+import { ProviderBalance } from '@/components/providers/ProviderBalance';
 import { useState } from 'react';
 import { toast } from 'sonner';
-
-function ProviderBalance({
-  providerId,
-  platformUrl,
-  isRoutstr = false,
-  nodeUrl,
-}: {
-  providerId: number;
-  platformUrl?: string | null;
-  isRoutstr?: boolean;
-  nodeUrl?: string;
-}) {
-  const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
-  const queryClient = useQueryClient();
-
-  const {
-    data: balanceData,
-    isLoading,
-    error,
-  } = useQuery({
-    queryKey: ['provider-balance', providerId],
-    queryFn: () => AdminService.getProviderBalance(providerId),
-    refetchInterval: 30000,
-    refetchOnWindowFocus: true,
-    retry: 1,
-  });
-
-  const handleTopUpClick = () => {
-    if (
-      platformUrl &&
-      (platformUrl.includes('openrouter.ai') ||
-        platformUrl.includes('openai.com'))
-    ) {
-      window.open(platformUrl, '_blank');
-      return;
-    }
-
-    setIsTopupDialogOpen(true);
-  };
-
-  const handleCloseDialog = () => {
-    setIsTopupDialogOpen(false);
-    queryClient.invalidateQueries({
-      queryKey: ['provider-balance', providerId],
-    });
-  };
-
-  if (isLoading) {
-    return <Skeleton className='h-9 w-24' />;
-  }
-
-  if (
-    error ||
-    !balanceData?.ok ||
-    balanceData.balance_data === undefined ||
-    balanceData.balance_data === null
-  ) {
-    return null;
-  }
-
-  const balance = balanceData.balance_data;
-  let displayValue = 'N/A';
-
-  if (typeof balance === 'number') {
-    displayValue = isRoutstr
-      ? `${balance.toLocaleString()} sats`
-      : `$${balance.toFixed(2)}`;
-  } else if (balance && typeof balance === 'object') {
-    // Legacy support for object response
-    const b = balance as Record<string, unknown>;
-    if (typeof b.balance === 'number') {
-      displayValue = `$${b.balance.toFixed(2)}`;
-    } else if (typeof b.balance === 'string') {
-      displayValue = b.balance;
-    } else if (b.amount !== undefined) {
-      displayValue = `$${Number(b.amount).toFixed(2)}`;
-    }
-  }
-
-  return (
-    <>
-      <Button
-        variant='outline'
-        size='sm'
-        onClick={handleTopUpClick}
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
-        className='w-full font-mono sm:w-auto'
-      >
-        {isHovered ? 'Top Up' : displayValue}
-      </Button>
-
-      <Dialog open={isTopupDialogOpen} onOpenChange={handleCloseDialog}>
-        <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-md'>
-          <DialogHeader>
-            <DialogTitle>Top Up Balance</DialogTitle>
-            <DialogDescription>
-              {isRoutstr
-                ? `Top up your balance on node ${nodeUrl}`
-                : 'Choose a payment method to top up your account balance.'}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className='space-y-6 py-4'>
-            <section className='space-y-2'>
-              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
-                Lightning Top-up
-              </Label>
-              <SimpleLightningTopup
-                providerId={providerId}
-                baseUrl={nodeUrl || ''}
-                onSuccess={() => {
-                  queryClient.invalidateQueries({
-                    queryKey: ['provider-balance', providerId],
-                  });
-                }}
-              />
-            </section>
-
-            <Separator />
-
-            <section className='space-y-2'>
-              <Label className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
-                Cashu Token Top-up
-              </Label>
-              <SimpleCashuTopup
-                providerId={providerId}
-                baseUrl={nodeUrl || ''}
-                onSuccess={() => {
-                  queryClient.invalidateQueries({
-                    queryKey: ['provider-balance', providerId],
-                  });
-                }}
-              />
-            </section>
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={handleCloseDialog}
-              className='w-full'
-            >
-              Close
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
-  );
-}
 
 export default function ProvidersPage() {
   const queryClient = useQueryClient();
@@ -501,6 +348,8 @@ export default function ProvidersPage() {
     setBatchOverrideProviderId(providerId);
   };
 
+  const availableMints = (globalSettings?.cashu_mints as string[]) || [];
+
   return (
     <SidebarProvider>
       <AppSidebar variant='inset' />
@@ -527,7 +376,7 @@ export default function ProvidersPage() {
                     Add Provider
                   </Button>
                 </DialogTrigger>
-                <DialogContent className='sm:max-w-[500px]'>
+                <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[500px]'>
                   <DialogHeader>
                     <DialogTitle>Add Upstream Provider</DialogTitle>
                     <DialogDescription>
@@ -561,184 +410,16 @@ export default function ProvidersPage() {
                       </Select>
                     </div>
                     {formData.provider_type === 'routstr' && (
-                      <div className='bg-muted/30 grid gap-4 rounded-lg border p-4'>
-                        <div className='flex items-center justify-between'>
-                          <Label className='text-sm font-semibold'>
-                            Routstr Node Settings
-                          </Label>
-                          <Badge variant='outline' className='text-[10px]'>
-                            JSONB Storage
-                          </Badge>
-                        </div>
-
-                        <div className='grid gap-3'>
-                          <div className='grid gap-2'>
-                            <Label
-                              htmlFor='edit_topup_mint_url'
-                              className='text-xs'
-                            >
-                              Top-up Mint
-                            </Label>
-                            <Select
-                              value={
-                                formData.provider_settings?.topup_mint_url || ''
-                              }
-                              onValueChange={(value) =>
-                                setFormData({
-                                  ...formData,
-                                  provider_settings: {
-                                    ...formData.provider_settings,
-                                    topup_mint_url: value,
-                                  },
-                                })
-                              }
-                            >
-                              <SelectTrigger
-                                id='edit_topup_mint_url'
-                                className='h-8 text-xs'
-                              >
-                                <SelectValue placeholder='Select a mint from your node configuration' />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {(
-                                  globalSettings?.cashu_mints as
-                                    | string[]
-                                    | undefined
-                                )?.map((mint: string) => (
-                                  <SelectItem
-                                    key={mint}
-                                    value={mint}
-                                    className='text-xs'
-                                  >
-                                    {mint}
-                                  </SelectItem>
-                                ))}
-                                {(!(globalSettings?.cashu_mints as string[]) ||
-                                  (globalSettings?.cashu_mints as string[])
-                                    .length === 0) && (
-                                  <SelectItem
-                                    value='none'
-                                    disabled
-                                    className='text-xs'
-                                  >
-                                    No mints configured in global settings
-                                  </SelectItem>
-                                )}
-                              </SelectContent>
-                            </Select>
-                            <p className='text-muted-foreground text-[10px]'>
-                              The token for top-up will be created from this
-                              mint.
-                            </p>
-                          </div>
-                          <div className='flex items-center justify-between'>
-                            <Label htmlFor='auto_topup' className='text-sm'>
-                              Enable Auto Top-up
-                            </Label>
-                            <Switch
-                              id='auto_topup'
-                              checked={!!formData.provider_settings?.auto_topup}
-                              onCheckedChange={(checked) =>
-                                setFormData({
-                                  ...formData,
-                                  provider_settings: {
-                                    ...formData.provider_settings,
-                                    auto_topup: checked,
-                                  },
-                                })
-                              }
-                            />
-                          </div>
-
-                          {formData.provider_settings?.auto_topup && (
-                            <div className='border-primary/20 grid gap-4 border-l-2 pt-2 pl-4'>
-                              <div className='grid gap-2'>
-                                <Label
-                                  htmlFor='topup_threshold'
-                                  className='text-xs font-medium'
-                                >
-                                  When credits are below (Sats)
-                                </Label>
-                                <Input
-                                  id='topup_threshold'
-                                  type='number'
-                                  className='h-9'
-                                  placeholder='e.g. 1000'
-                                  value={
-                                    formData.provider_settings
-                                      ?.topup_threshold || ''
-                                  }
-                                  onChange={(e) =>
-                                    setFormData({
-                                      ...formData,
-                                      provider_settings: {
-                                        ...formData.provider_settings,
-                                        topup_threshold: parseInt(
-                                          e.target.value
-                                        ),
-                                      },
-                                    })
-                                  }
-                                />
-                              </div>
-
-                              <div className='grid gap-2'>
-                                <Label
-                                  htmlFor='topup_amount_limit'
-                                  className='text-xs font-medium'
-                                >
-                                  Purchase this amount (Sats)
-                                </Label>
-                                <Input
-                                  id='topup_amount_limit'
-                                  type='number'
-                                  className='h-9'
-                                  placeholder='e.g. 5000'
-                                  value={
-                                    formData.provider_settings
-                                      ?.topup_amount_limit || ''
-                                  }
-                                  onChange={(e) =>
-                                    setFormData({
-                                      ...formData,
-                                      provider_settings: {
-                                        ...formData.provider_settings,
-                                        topup_amount_limit: parseInt(
-                                          e.target.value
-                                        ),
-                                      },
-                                    })
-                                  }
-                                />
-                              </div>
-                            </div>
-                          )}
-
-                          <div className='flex items-center justify-between'>
-                            <Label
-                              htmlFor='refund_on_expiry'
-                              className='text-xs'
-                            >
-                              Auto-Refund Expired Keys
-                            </Label>
-                            <Switch
-                              id='refund_on_expiry'
-                              checked={
-                                !!formData.provider_settings?.refund_on_expiry
-                              }
-                              onCheckedChange={(checked) =>
-                                setFormData({
-                                  ...formData,
-                                  provider_settings: {
-                                    ...formData.provider_settings,
-                                    refund_on_expiry: checked,
-                                  },
-                                })
-                              }
-                            />
-                          </div>
-                        </div>
-                      </div>
+                      <RoutstrNodeSettings
+                        settings={formData.provider_settings || {}}
+                        onSettingsChange={(settings) =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            provider_settings: settings,
+                          }))
+                        }
+                        availableMints={availableMints}
+                      />
                     )}
                     <div className='grid gap-2'>
                       <Label htmlFor='base_url'>Base URL</Label>
@@ -1243,7 +924,7 @@ export default function ProvidersPage() {
         </div>
 
         <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-          <DialogContent className='sm:max-w-[500px]'>
+          <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[500px]'>
             <DialogHeader>
               <DialogTitle>Edit Upstream Provider</DialogTitle>
               <DialogDescription>
@@ -1277,169 +958,17 @@ export default function ProvidersPage() {
                 </Select>
               </div>
               {formData.provider_type === 'routstr' && (
-                <div className='bg-muted/30 grid gap-4 rounded-lg border p-4'>
-                  <div className='flex items-center justify-between'>
-                    <Label className='text-sm font-semibold'>
-                      Routstr Node Settings
-                    </Label>
-                    <Badge variant='outline' className='text-[10px]'>
-                      JSONB Storage
-                    </Badge>
-                  </div>
-
-                  <div className='grid gap-3'>
-                    <div className='grid gap-2'>
-                      <Label htmlFor='edit_topup_mint_url' className='text-xs'>
-                        Top-up Mint
-                      </Label>
-                      <Select
-                        value={formData.provider_settings?.topup_mint_url || ''}
-                        onValueChange={(value) =>
-                          setFormData({
-                            ...formData,
-                            provider_settings: {
-                              ...formData.provider_settings,
-                              topup_mint_url: value,
-                            },
-                          })
-                        }
-                      >
-                        <SelectTrigger
-                          id='edit_topup_mint_url'
-                          className='h-8 text-xs'
-                        >
-                          <SelectValue placeholder='Select a mint from your node configuration' />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(
-                            globalSettings?.cashu_mints as string[] | undefined
-                          )?.map((mint: string) => (
-                            <SelectItem
-                              key={mint}
-                              value={mint}
-                              className='text-xs'
-                            >
-                              {mint}
-                            </SelectItem>
-                          ))}
-                          {(!(globalSettings?.cashu_mints as string[]) ||
-                            (globalSettings?.cashu_mints as string[]).length ===
-                              0) && (
-                            <SelectItem
-                              value='none'
-                              disabled
-                              className='text-xs'
-                            >
-                              No mints configured in global settings
-                            </SelectItem>
-                          )}
-                        </SelectContent>
-                      </Select>
-                      <p className='text-muted-foreground text-[10px]'>
-                        The token for top-up will be created from this mint.
-                      </p>
-                    </div>
-                    <div className='flex items-center justify-between'>
-                      <Label htmlFor='edit_auto_topup' className='text-sm'>
-                        Enable Auto Top-up
-                      </Label>
-                      <Switch
-                        id='edit_auto_topup'
-                        checked={!!formData.provider_settings?.auto_topup}
-                        onCheckedChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            provider_settings: {
-                              ...formData.provider_settings,
-                              auto_topup: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    {formData.provider_settings?.auto_topup && (
-                      <div className='border-primary/20 grid gap-4 border-l-2 pt-2 pl-4'>
-                        <div className='grid gap-2'>
-                          <Label
-                            htmlFor='edit_topup_threshold'
-                            className='text-xs font-medium'
-                          >
-                            When credits are below (Sats)
-                          </Label>
-                          <Input
-                            id='edit_topup_threshold'
-                            type='number'
-                            className='h-9'
-                            placeholder='e.g. 1000'
-                            value={
-                              formData.provider_settings?.topup_threshold || ''
-                            }
-                            onChange={(e) =>
-                              setFormData({
-                                ...formData,
-                                provider_settings: {
-                                  ...formData.provider_settings,
-                                  topup_threshold: parseInt(e.target.value),
-                                },
-                              })
-                            }
-                          />
-                        </div>
-
-                        <div className='grid gap-2'>
-                          <Label
-                            htmlFor='edit_topup_amount_limit'
-                            className='text-xs font-medium'
-                          >
-                            Purchase this amount (Sats)
-                          </Label>
-                          <Input
-                            id='edit_topup_amount_limit'
-                            type='number'
-                            className='h-9'
-                            placeholder='e.g. 5000'
-                            value={
-                              formData.provider_settings?.topup_amount_limit ||
-                              ''
-                            }
-                            onChange={(e) =>
-                              setFormData({
-                                ...formData,
-                                provider_settings: {
-                                  ...formData.provider_settings,
-                                  topup_amount_limit: parseInt(e.target.value),
-                                },
-                              })
-                            }
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    <div className='flex items-center justify-between'>
-                      <Label
-                        htmlFor='edit_refund_on_expiry'
-                        className='text-xs'
-                      >
-                        Auto-Refund Expired Keys
-                      </Label>
-                      <Switch
-                        id='edit_refund_on_expiry'
-                        checked={!!formData.provider_settings?.refund_on_expiry}
-                        onCheckedChange={(checked) =>
-                          setFormData({
-                            ...formData,
-                            provider_settings: {
-                              ...formData.provider_settings,
-                              refund_on_expiry: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
+                <RoutstrNodeSettings
+                  settings={formData.provider_settings || {}}
+                  onSettingsChange={(settings) =>
+                    setFormData((prev) => ({
+                      ...prev,
+                      provider_settings: settings,
+                    }))
+                  }
+                  availableMints={availableMints}
+                  idPrefix='edit'
+                />
               )}
               <div className='grid gap-2'>
                 <Label htmlFor='edit_base_url'>Base URL</Label>
