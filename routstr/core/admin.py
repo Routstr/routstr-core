@@ -2,7 +2,6 @@ import json
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -27,55 +26,20 @@ logger = get_logger(__name__)
 admin_router = APIRouter(prefix="/admin", include_in_schema=False)
 
 admin_sessions: dict[str, int] = {}
-ADMIN_SESSION_DURATION = 12 * 60 * 60
+ADMIN_SESSION_DURATION = 3600
 # Usage analytics remain queryable up to 12 months.
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
-def _current_timestamp() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
-
-
-def _cleanup_expired_admin_sessions(now_timestamp: int | None = None) -> None:
-    current_timestamp = (
-        now_timestamp if now_timestamp is not None else _current_timestamp()
-    )
-    expired_tokens = [
-        token
-        for token, expiry_timestamp in admin_sessions.items()
-        if expiry_timestamp <= current_timestamp
-    ]
-    for token in expired_tokens:
-        admin_sessions.pop(token, None)
-
-
-def _raise_unauthorized(detail: str) -> NoReturn:
-    raise HTTPException(
-        status_code=401,
-        detail=detail,
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-
 def require_admin_api(request: Request) -> None:
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        _raise_unauthorized("Missing bearer token")
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        expiry = admin_sessions.get(token)
+        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
+            return
 
-    token = auth_header.split(" ", 1)[1].strip()
-    if not token:
-        _raise_unauthorized("Missing bearer token")
-
-    now_timestamp = _current_timestamp()
-    expiry_timestamp = admin_sessions.get(token)
-    if expiry_timestamp is None:
-        _raise_unauthorized("Invalid session token")
-
-    if expiry_timestamp <= now_timestamp:
-        admin_sessions.pop(token, None)
-        _raise_unauthorized("Session expired")
-
-    _cleanup_expired_admin_sessions(now_timestamp)
+    raise HTTPException(status_code=403, detail="Unauthorized")
 
 
 @admin_router.get("/api/temporary-balances", dependencies=[Depends(require_admin_api)])
@@ -244,10 +208,18 @@ async def admin_login(
         raise HTTPException(status_code=401, detail="Invalid password")
 
     token = secrets.token_urlsafe(32)
-    expiry_timestamp = _current_timestamp() + ADMIN_SESSION_DURATION
+    expiry_timestamp = (
+        int(datetime.now(timezone.utc).timestamp()) + ADMIN_SESSION_DURATION
+    )
     admin_sessions[token] = expiry_timestamp
 
-    _cleanup_expired_admin_sessions()
+    expired_tokens = [
+        t
+        for t, exp in admin_sessions.items()
+        if exp <= int(datetime.now(timezone.utc).timestamp())
+    ]
+    for t in expired_tokens:
+        del admin_sessions[t]
 
     return {"ok": True, "token": token, "expires_in": ADMIN_SESSION_DURATION}
 

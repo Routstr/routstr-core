@@ -38,8 +38,3 @@ proof_backups
 
 *.todo
 ui_out
-output/
-.pnpm-store/
-
-# env files
-.env*
