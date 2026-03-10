@@ -80,13 +80,11 @@ export function RoutstrNodeSettings({
         <div className='flex items-center justify-between opacity-50'>
           <Label htmlFor={`${prefix}auto_topup`} className='text-sm'>
             Enable Auto Top-up
-            <span className='text-muted-foreground ml-2 text-xs'>(Coming Soon)</span>
+            <span className='text-muted-foreground ml-2 text-xs'>
+              (Coming Soon)
+            </span>
           </Label>
-          <Switch
-            id={`${prefix}auto_topup`}
-            checked={false}
-            disabled
-          />
+          <Switch id={`${prefix}auto_topup`} checked={false} disabled />
         </div>
 
         {settings.auto_topup && (
