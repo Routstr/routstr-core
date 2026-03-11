@@ -101,7 +101,25 @@ export function RoutstrProviderCard({
     },
   });
 
-  const handleKeyCreated = (newApiKey: string) => {
+  const handleKeyCreated = async (newApiKey: string) => {
+    if (hasApiKey) {
+      try {
+        const result = await RoutstrProviderService.refundBalance(provider.id);
+        if (result.ok) {
+          toast.success('Old key refunded', {
+            description: result.message,
+          });
+        } else {
+          toast.warning('Refund skipped', {
+            description: result.message,
+          });
+        }
+      } catch (error) {
+        toast.warning(
+          `Could not refund old key: ${error instanceof Error ? error.message : 'Unknown error'}`
+        );
+      }
+    }
     updateKeyMutation.mutate({
       id: provider.id,
       data: { api_key: newApiKey },
@@ -228,7 +246,7 @@ export function RoutstrProviderCard({
             </DialogTitle>
             <DialogDescription>
               {hasApiKey
-                ? 'Create a new API key on the upstream node. This will replace the current key.'
+                ? 'Create a new API key on the upstream node. The remaining balance on the current key will be automatically refunded to your local wallet before it is replaced.'
                 : 'Create an API key on the upstream Routstr node to enable balance, top-up, and refund operations.'}
             </DialogDescription>
           </DialogHeader>

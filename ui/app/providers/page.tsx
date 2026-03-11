@@ -438,45 +438,50 @@ export default function ProvidersPage() {
                         }
                       />
                     </div>
-                    <div className='grid gap-2'>
-                      <div className='flex items-center justify-between'>
-                        <Label htmlFor='api_key'>API Key</Label>
-                        {canCreateAccount(formData.provider_type) ? (
-                          <Button
-                            type='button'
-                            variant='outline'
-                            size='sm'
-                            onClick={handleCreateAccount}
-                            disabled={isCreatingAccount}
-                            className='h-6 text-xs'
-                          >
-                            {isCreatingAccount
-                              ? 'Creating...'
-                              : 'Create Account'}
-                          </Button>
-                        ) : (
-                          getPlatformUrl(formData.provider_type) && (
-                            <a
-                              href={getPlatformUrl(formData.provider_type)!}
-                              target='_blank'
-                              rel='noopener noreferrer'
-                              className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                    {formData.provider_type !== 'routstr' && (
+                      <div className='grid gap-2'>
+                        <div className='flex items-center justify-between'>
+                          <Label htmlFor='api_key'>API Key</Label>
+                          {canCreateAccount(formData.provider_type) ? (
+                            <Button
+                              type='button'
+                              variant='outline'
+                              size='sm'
+                              onClick={handleCreateAccount}
+                              disabled={isCreatingAccount}
+                              className='h-6 text-xs'
                             >
-                              Get Your API Key Here →
-                            </a>
-                          )
-                        )}
+                              {isCreatingAccount
+                                ? 'Creating...'
+                                : 'Create Account'}
+                            </Button>
+                          ) : (
+                            getPlatformUrl(formData.provider_type) && (
+                              <a
+                                href={getPlatformUrl(formData.provider_type)!}
+                                target='_blank'
+                                rel='noopener noreferrer'
+                                className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
+                              >
+                                Get Your API Key Here →
+                              </a>
+                            )
+                          )}
+                        </div>
+                        <Input
+                          id='api_key'
+                          type='password'
+                          value={formData.api_key}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              api_key: e.target.value,
+                            })
+                          }
+                          placeholder='sk-...'
+                        />
                       </div>
-                      <Input
-                        id='api_key'
-                        type='password'
-                        value={formData.api_key}
-                        onChange={(e) =>
-                          setFormData({ ...formData, api_key: e.target.value })
-                        }
-                        placeholder='sk-...'
-                      />
-                    </div>
+                    )}
                     {formData.provider_type === 'azure' && (
                       <div className='grid gap-2'>
                         <Label htmlFor='api_version'>API Version</Label>
@@ -987,32 +992,6 @@ export default function ProvidersPage() {
                   }
                 />
               </div>
-              <div className='grid gap-2'>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='edit_api_key'>
-                    API Key (leave blank to keep current)
-                  </Label>
-                  {getPlatformUrl(formData.provider_type) && (
-                    <a
-                      href={getPlatformUrl(formData.provider_type)!}
-                      target='_blank'
-                      rel='noopener noreferrer'
-                      className='text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300'
-                    >
-                      Get Your API Key Here →
-                    </a>
-                  )}
-                </div>
-                <Input
-                  id='edit_api_key'
-                  type='password'
-                  value={formData.api_key}
-                  onChange={(e) =>
-                    setFormData({ ...formData, api_key: e.target.value })
-                  }
-                  placeholder='Leave blank to keep current'
-                />
-              </div>
               {formData.provider_type === 'azure' && (
                 <div className='grid gap-2'>
                   <Label htmlFor='edit_api_version'>API Version</Label>
@@ -1065,17 +1044,6 @@ export default function ProvidersPage() {
                   1.01 means +1% e.g. currency exchange, card fees, etc.
                 </p>
               </div>
-              {formData.provider_type === 'routstr' && (
-                <RoutstrCreateKeySection
-                  baseUrl={formData.base_url || ''}
-                  onApiKeyCreated={(newApiKey) => {
-                    setFormData((prev) => ({
-                      ...prev,
-                      api_key: newApiKey,
-                    }));
-                  }}
-                />
-              )}
             </div>
             <DialogFooter>
               <Button
