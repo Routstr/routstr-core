@@ -4,7 +4,7 @@ import {
   estimateMinimumTokensForCost,
   formatCost,
   formatCostBreakdown,
-} from '../costValidation';
+} from '../cost-validation';
 import { type Model } from '../../api/schemas/models';
 
 // Mock model for testing

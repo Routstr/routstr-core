@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Loader2,
   RefreshCw,
   AlertCircle,
   Key,
@@ -20,9 +19,74 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 import type { DisplayUnit } from '@/lib/types/units';
 import { formatFromMsat } from '@/lib/currency';
+
+function getTotals(balances: TemporaryBalance[]) {
+  let totalBalance = 0;
+  let totalSpent = 0;
+  let totalRequests = 0;
+
+  balances.forEach((balance) => {
+    if (!balance.parent_key_hash) {
+      totalBalance += balance.balance || 0;
+    }
+    totalSpent += balance.total_spent || 0;
+    totalRequests += balance.total_requests || 0;
+  });
+
+  return { totalBalance, totalSpent, totalRequests };
+}
+
+function buildHierarchicalData(
+  allBalances: TemporaryBalance[],
+  filteredBalances: TemporaryBalance[]
+) {
+  const parents = filteredBalances.filter((item) => !item.parent_key_hash);
+  const result: Array<TemporaryBalance & { isChild?: boolean }> = [];
+
+  parents.forEach((parent) => {
+    result.push(parent);
+
+    const children = allBalances.filter(
+      (item) => item.parent_key_hash === parent.hashed_key
+    );
+
+    children.forEach((child) => {
+      result.push({ ...child, isChild: true });
+    });
+  });
+
+  const orphans = filteredBalances.filter(
+    (item) =>
+      item.parent_key_hash &&
+      !result.some((r) => r.hashed_key === item.hashed_key)
+  );
+
+  result.push(...orphans.map((item) => ({ ...item, isChild: true })));
+
+  return result;
+}
 
 export function TemporaryBalances({
   refreshInterval = 10000,
@@ -37,9 +101,7 @@ export function TemporaryBalances({
 
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ['temporary-balances'],
-    queryFn: async () => {
-      return AdminService.getTemporaryBalances();
-    },
+    queryFn: async () => AdminService.getTemporaryBalances(),
     refetchInterval: refreshInterval,
   });
 
@@ -54,336 +116,331 @@ export function TemporaryBalances({
       )
     : [];
 
-  const calculateTotals = (balances: TemporaryBalance[]) => {
-    let totalBalance = 0;
-    let totalSpent = 0;
-    let totalRequests = 0;
-
-    balances.forEach((balance) => {
-      // Only count parents for total balance to avoid double counting
-      // since child keys use parent balance
-      if (!balance.parent_key_hash) {
-        totalBalance += balance.balance || 0;
-      }
-      totalSpent += balance.total_spent || 0;
-      totalRequests += balance.total_requests || 0;
-    });
-
-    return { totalBalance, totalSpent, totalRequests };
-  };
-
   const totals = data
-    ? calculateTotals(data)
+    ? getTotals(data)
     : { totalBalance: 0, totalSpent: 0, totalRequests: 0 };
 
-  // Group parents and children
-  const hierarchicalData = (() => {
-    if (!data) return [];
-
-    const parents = filteredData.filter((item) => !item.parent_key_hash);
-    const result: (TemporaryBalance & { isChild?: boolean })[] = [];
-
-    parents.forEach((parent) => {
-      result.push(parent);
-      const children = data.filter(
-        (item) => item.parent_key_hash === parent.hashed_key
-      );
-      children.forEach((child) => {
-        result.push({ ...child, isChild: true });
-      });
-    });
-
-    // Add children whose parents didn't match the search or aren't in the list
-    const orphans = filteredData.filter(
-      (item) =>
-        item.parent_key_hash &&
-        !result.some((r) => r.hashed_key === item.hashed_key)
-    );
-    result.push(...orphans.map((o) => ({ ...o, isChild: true })));
-
-    return result;
-  })();
+  const rows = data ? buildHierarchicalData(data, filteredData) : [];
 
   return (
-    <>
-      <Card className='h-full w-full shadow-sm'>
-        <CardHeader className='pb-4'>
-          <div className='flex items-center justify-between'>
-            <CardTitle className='flex items-center gap-2 text-xl'>
-              <Key className='h-5 w-5' />
-              Temporary Balances
-            </CardTitle>
-            <div className='flex flex-col gap-2 sm:flex-row sm:gap-2'>
-              <div className='relative flex-1 sm:flex-initial'>
-                <input
-                  type='text'
-                  placeholder='Search by key or address...'
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className='focus:ring-primary/20 w-full rounded-md border py-2 pr-3 pl-8 text-sm focus:ring-2 focus:outline-none sm:w-64'
+    <Card>
+      <CardHeader className='pb-4'>
+        <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
+          <div className='space-y-1.5'>
+            <CardTitle>Temporary Balances</CardTitle>
+            <CardDescription className='max-w-2xl'>
+              API keys with their current balances and usage statistics
+            </CardDescription>
+          </div>
+
+          <div className='flex w-full gap-2 sm:w-auto sm:pt-0.5'>
+            <div className='min-w-0 flex-1 sm:w-72 sm:flex-none'>
+              <Input
+                type='text'
+                placeholder='Search by key or address...'
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                name='temporary_balance_search'
+                autoComplete='off'
+              />
+            </div>
+            <Button
+              variant='ghost'
+              size='icon'
+              onClick={() => refetch()}
+              disabled={isLoading || isFetching}
+            >
+              <RefreshCw
+                className={cn(
+                  'h-4 w-4',
+                  (isFetching || isLoading) && 'animate-spin'
+                )}
+              />
+              <span className='sr-only'>Refresh temporary balances</span>
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className='space-y-4'>
+            <div className='grid gap-3 md:grid-cols-3'>
+              {Array.from({ length: 3 }).map((_, index) => (
+                <Card key={`temp-stat-skeleton-${index}`}>
+                  <CardHeader className='space-y-2 pb-1'>
+                    <Skeleton className='h-3.5 w-24' />
+                    <Skeleton className='h-3 w-8' />
+                  </CardHeader>
+                  <CardContent className='pt-0'>
+                    <Skeleton className='h-7 w-24' />
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+            <div className='space-y-2'>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <Skeleton
+                  key={`temp-row-skeleton-${index}`}
+                  className='h-11 w-full'
                 />
-                <Key className='text-muted-foreground absolute top-2.5 left-2 h-4 w-4' />
-              </div>
-              <Button
-                variant='ghost'
-                size='icon'
-                onClick={() => refetch()}
-                disabled={isLoading || isFetching}
-                className='h-8 w-8'
-              >
-                <RefreshCw
-                  className={cn(
-                    'h-4 w-4',
-                    (isFetching || isLoading) && 'animate-spin'
-                  )}
-                />
-                <span className='sr-only'>Refresh temporary balances</span>
-              </Button>
+              ))}
             </div>
           </div>
-          <CardDescription>
-            API keys with their current balances and usage statistics
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className='flex items-center justify-center py-8'>
-              <Loader2 className='text-primary h-8 w-8 animate-spin' />
-            </div>
-          ) : isError ? (
-            <div className='bg-destructive/10 text-destructive flex items-center space-x-2 rounded-md p-4'>
-              <AlertCircle className='h-5 w-5' />
-              <span>
-                Error loading temporary balances: {(error as Error).message}
-              </span>
-            </div>
-          ) : (
-            <div className='space-y-6'>
-              {/* Summary Cards */}
-              <div className='mb-6 grid grid-cols-1 gap-4 md:grid-cols-3'>
-                <div className='rounded-lg border border-blue-200 bg-gradient-to-r from-blue-50 to-indigo-50 p-4'>
-                  <div className='flex items-center justify-between'>
-                    <div className='flex items-center gap-2'>
-                      <DollarSign className='h-5 w-5 text-blue-600' />
-                      <span className='text-sm font-medium text-blue-800'>
-                        Total Balance
-                      </span>
-                    </div>
-                  </div>
-                  <div className='mt-2 text-2xl font-bold text-blue-900'>
+        ) : isError ? (
+          <Alert variant='destructive'>
+            <AlertCircle className='h-5 w-5' />
+            <AlertDescription>
+              Error loading temporary balances: {(error as Error).message}
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <div className='space-y-6'>
+            <div className='grid gap-3 md:grid-cols-3'>
+              <Card>
+                <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                  <CardTitle className='text-muted-foreground text-sm font-medium'>
+                    Total Balance
+                  </CardTitle>
+                  <span className='inline-flex size-8 items-center justify-center'>
+                    <DollarSign className='size-4 text-green-600 dark:text-green-300' />
+                  </span>
+                </CardHeader>
+                <CardContent className='pt-0'>
+                  <p className='text-2xl font-semibold tracking-tight tabular-nums'>
                     {formatBalance(totals.totalBalance)}
-                  </div>
-                </div>
-                <div className='rounded-lg border border-green-200 bg-gradient-to-r from-green-50 to-emerald-50 p-4'>
-                  <div className='flex items-center justify-between'>
-                    <div className='flex items-center gap-2'>
-                      <Activity className='h-5 w-5 text-green-600' />
-                      <span className='text-sm font-medium text-green-800'>
-                        Total Spent
-                      </span>
-                    </div>
-                  </div>
-                  <div className='mt-2 text-2xl font-bold text-green-900'>
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                  <CardTitle className='text-muted-foreground text-sm font-medium'>
+                    Total Spent
+                  </CardTitle>
+                  <span className='inline-flex size-8 items-center justify-center'>
+                    <Activity className='size-4 text-blue-600 dark:text-blue-300' />
+                  </span>
+                </CardHeader>
+                <CardContent className='pt-0'>
+                  <p className='text-2xl font-semibold tracking-tight tabular-nums'>
                     {formatBalance(totals.totalSpent)}
-                  </div>
-                </div>
-                <div className='rounded-lg border border-purple-200 bg-gradient-to-r from-purple-50 to-pink-50 p-4'>
-                  <div className='flex items-center justify-between'>
-                    <div className='flex items-center gap-2'>
-                      <Key className='h-5 w-5 text-purple-600' />
-                      <span className='text-sm font-medium text-purple-800'>
-                        Total Requests
-                      </span>
-                    </div>
-                  </div>
-                  <div className='mt-2 text-2xl font-bold text-purple-900'>
+                  </p>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
+                  <CardTitle className='text-muted-foreground text-sm font-medium'>
+                    Total Requests
+                  </CardTitle>
+                  <span className='inline-flex size-8 items-center justify-center'>
+                    <Key className='size-4 text-purple-600 dark:text-purple-300' />
+                  </span>
+                </CardHeader>
+                <CardContent className='pt-0'>
+                  <p className='text-2xl font-semibold tracking-tight tabular-nums'>
                     {totals.totalRequests.toLocaleString()}
-                  </div>
-                </div>
-              </div>
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
 
-              {/* Table */}
-              <div className='overflow-hidden rounded-lg border'>
-                {/* Desktop Table Header */}
-                <div className='bg-muted hidden grid-cols-6 gap-2 p-3 text-sm font-semibold md:grid'>
-                  <div>Hashed Key</div>
-                  <div className='text-right'>Balance</div>
-                  <div className='text-right'>Total Spent</div>
-                  <div className='text-right'>Total Requests</div>
-                  <div>Refund Address</div>
-                  <div className='text-right'>Expiry Time</div>
+            {rows.length > 0 ? (
+              <>
+                <div className='hidden md:block'>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Hashed Key</TableHead>
+                        <TableHead className='text-right'>Balance</TableHead>
+                        <TableHead className='text-right'>
+                          Total Spent
+                        </TableHead>
+                        <TableHead className='text-right'>
+                          Total Requests
+                        </TableHead>
+                        <TableHead>Refund Address</TableHead>
+                        <TableHead className='text-right'>
+                          Expiry Time
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {rows.map((balance, index) => (
+                        <TableRow
+                          key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-${index}`}
+                          className={cn(
+                            balance.balance === 0 &&
+                              !balance.isChild &&
+                              'opacity-60',
+                            balance.isChild && 'bg-muted/30'
+                          )}
+                        >
+                          <TableCell className='max-w-[16rem] font-mono text-xs break-all whitespace-normal'>
+                            <div className='flex items-center gap-2'>
+                              {balance.isChild && (
+                                <Badge
+                                  variant='outline'
+                                  className='h-4 px-1 text-[10px] uppercase'
+                                >
+                                  Child
+                                </Badge>
+                              )}
+                              <span>{balance.hashed_key}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell className='text-right font-mono'>
+                            {balance.isChild ? (
+                              <span className='text-muted-foreground italic'>
+                                (Parent)
+                              </span>
+                            ) : (
+                              formatBalance(balance.balance)
+                            )}
+                          </TableCell>
+                          <TableCell className='text-right font-mono'>
+                            {formatBalance(balance.total_spent)}
+                          </TableCell>
+                          <TableCell className='text-right font-mono'>
+                            {balance.total_requests.toLocaleString()}
+                          </TableCell>
+                          <TableCell className='max-w-[14rem] font-mono text-xs break-all whitespace-normal'>
+                            {balance.refund_address || '-'}
+                          </TableCell>
+                          <TableCell className='text-right font-mono text-xs'>
+                            {balance.key_expiry_time ? (
+                              <div className='inline-flex items-center justify-end gap-1'>
+                                <Clock className='h-3 w-3' />
+                                <span>
+                                  {new Date(
+                                    balance.key_expiry_time * 1000
+                                  ).toLocaleDateString()}
+                                </span>
+                              </div>
+                            ) : (
+                              '-'
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
                 </div>
 
-                {hierarchicalData.length > 0 ? (
-                  hierarchicalData.map((balance, index) => (
-                    <div
-                      key={index}
+                <div className='space-y-2 md:hidden'>
+                  {rows.map((balance, index) => (
+                    <Card
+                      key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
                       className={cn(
-                        'hover:bg-muted/50 border-t p-3 text-sm transition-colors',
                         balance.balance === 0 &&
                           !balance.isChild &&
-                          'opacity-60',
-                        balance.isChild &&
-                          'ml-4 border-l-2 border-l-blue-200 bg-blue-50/30'
+                          'opacity-80',
+                        balance.isChild && 'bg-muted/30'
                       )}
                     >
-                      {/* Desktop Layout */}
-                      <div className='hidden grid-cols-6 gap-2 md:grid'>
-                        <div className='flex max-w-48 items-center gap-2 truncate font-mono text-xs break-all'>
+                      <CardHeader className='p-4 pb-2'>
+                        <div className='flex items-center justify-between gap-2'>
+                          <CardDescription className='font-mono text-xs break-all'>
+                            {balance.hashed_key}
+                          </CardDescription>
                           {balance.isChild && (
-                            <span className='rounded bg-blue-100 px-1 py-0.5 text-[10px] font-bold text-blue-700 uppercase'>
+                            <Badge
+                              variant='outline'
+                              className='h-4 px-1.5 text-[10px] uppercase'
+                            >
                               Child
-                            </span>
-                          )}
-                          {balance.hashed_key}
-                        </div>
-                        <div className='text-right font-mono'>
-                          {balance.isChild ? (
-                            <span className='text-muted-foreground italic'>
-                              (Parent)
-                            </span>
-                          ) : (
-                            formatBalance(balance.balance)
+                            </Badge>
                           )}
                         </div>
-                        <div className='text-right font-mono'>
-                          {formatBalance(balance.total_spent)}
+                      </CardHeader>
+                      <CardContent className='grid grid-cols-2 gap-3 p-4 pt-0'>
+                        <div>
+                          <p className='text-muted-foreground text-xs'>
+                            Balance
+                          </p>
+                          <p className='font-mono text-sm'>
+                            {balance.isChild
+                              ? '(Uses Parent)'
+                              : formatBalance(balance.balance)}
+                          </p>
                         </div>
-                        <div className='text-right font-mono'>
-                          {balance.total_requests.toLocaleString()}
+                        <div>
+                          <p className='text-muted-foreground text-xs'>Spent</p>
+                          <p className='font-mono text-sm'>
+                            {formatBalance(balance.total_spent)}
+                          </p>
                         </div>
-                        <div className='max-w-32 truncate font-mono text-xs break-all'>
-                          {balance.refund_address || '-'}
+                        <div>
+                          <p className='text-muted-foreground text-xs'>
+                            Requests
+                          </p>
+                          <p className='font-mono text-sm'>
+                            {balance.total_requests.toLocaleString()}
+                          </p>
                         </div>
-                        <div className='text-right font-mono text-xs'>
-                          {balance.key_expiry_time ? (
-                            <div className='flex items-center justify-end gap-1'>
-                              <Clock className='h-3 w-3' />
-                              <span>
+                        <div>
+                          <p className='text-muted-foreground text-xs'>
+                            Expires
+                          </p>
+                          <p className='font-mono text-xs'>
+                            {balance.key_expiry_time ? (
+                              <span className='inline-flex items-center gap-1'>
+                                <Clock className='h-3 w-3' />
                                 {new Date(
                                   balance.key_expiry_time * 1000
                                 ).toLocaleDateString()}
                               </span>
-                            </div>
-                          ) : (
-                            '-'
-                          )}
+                            ) : (
+                              '-'
+                            )}
+                          </p>
                         </div>
-                      </div>
-
-                      {/* Mobile Layout */}
-                      <div className='space-y-3 md:hidden'>
-                        <div className='flex items-center justify-between'>
-                          <div className='space-y-1'>
-                            <span className='text-muted-foreground text-xs font-medium'>
-                              {balance.isChild ? 'Child Key' : 'Key'}
-                            </span>
-                            <div className='font-mono text-xs break-all'>
-                              {balance.hashed_key}
-                            </div>
-                          </div>
-                          {balance.isChild && (
-                            <span className='rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold text-blue-700 uppercase'>
-                              Child
-                            </span>
-                          )}
-                        </div>
-
-                        <div className='grid grid-cols-2 gap-3'>
-                          <div className='space-y-1'>
-                            <div className='text-muted-foreground text-xs font-medium'>
-                              Balance
-                            </div>
-                            <div className='truncate font-mono text-sm'>
-                              {balance.isChild ? (
-                                <span className='text-muted-foreground text-xs italic'>
-                                  (Uses Parent)
-                                </span>
-                              ) : (
-                                formatBalance(balance.balance)
-                              )}
-                            </div>
-                          </div>
-                          <div className='space-y-1'>
-                            <div className='text-muted-foreground text-xs font-medium'>
-                              Spent
-                            </div>
-                            <div className='truncate font-mono text-sm'>
-                              {formatBalance(balance.total_spent)}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className='grid grid-cols-2 gap-3'>
-                          <div className='space-y-1'>
-                            <div className='text-muted-foreground text-xs font-medium'>
-                              Requests
-                            </div>
-                            <div className='truncate font-mono text-sm'>
-                              {balance.total_requests.toLocaleString()}
-                            </div>
-                          </div>
-                          <div className='space-y-1'>
-                            <div className='text-muted-foreground text-xs font-medium'>
-                              Expires
-                            </div>
-                            <div className='font-mono text-xs'>
-                              {balance.key_expiry_time ? (
-                                <div className='flex items-center gap-1'>
-                                  <Clock className='h-3 w-3 flex-shrink-0' />
-                                  <span className='truncate'>
-                                    {new Date(
-                                      balance.key_expiry_time * 1000
-                                    ).toLocaleDateString()}
-                                  </span>
-                                </div>
-                              ) : (
-                                '-'
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
                         {balance.refund_address && (
-                          <div className='space-y-1 border-t pt-2'>
-                            <div className='text-muted-foreground text-xs font-medium'>
+                          <div className='col-span-2'>
+                            <p className='text-muted-foreground text-xs'>
                               Refund Address
-                            </div>
-                            <div className='font-mono text-xs break-all'>
+                            </p>
+                            <p className='font-mono text-xs break-all'>
                               {balance.refund_address}
-                            </div>
+                            </p>
                           </div>
                         )}
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className='text-muted-foreground p-8 text-center text-sm'>
-                    {searchTerm ? (
-                      <div className='flex flex-col items-center gap-2'>
-                        <AlertCircle className='h-8 w-8' />
-                        <span>No temporary balances match your search</span>
-                      </div>
-                    ) : (
-                      <div className='flex flex-col items-center gap-2'>
-                        <Key className='h-8 w-8' />
-                        <span>No temporary balances found</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {data && data.length > 0 && (
-                <div className='text-muted-foreground mt-4 text-xs'>
-                  Showing {filteredData.length} of {data.length} temporary
-                  balances
+                      </CardContent>
+                    </Card>
+                  ))}
                 </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    </>
+              </>
+            ) : (
+              <Empty className='py-8'>
+                <EmptyHeader>
+                  <EmptyMedia variant='icon'>
+                    {searchTerm ? (
+                      <AlertCircle className='h-4 w-4' />
+                    ) : (
+                      <Key className='h-4 w-4' />
+                    )}
+                  </EmptyMedia>
+                  <EmptyTitle>
+                    {searchTerm
+                      ? 'No temporary balances match your search'
+                      : 'No temporary balances found'}
+                  </EmptyTitle>
+                  <EmptyDescription>
+                    {searchTerm
+                      ? 'Try a different key hash or refund address.'
+                      : 'Temporary balances will appear here once API keys are used.'}
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+
+            {data && data.length > 0 && (
+              <p className='text-muted-foreground text-xs'>
+                Showing {filteredData.length} of {data.length} temporary
+                balances
+              </p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

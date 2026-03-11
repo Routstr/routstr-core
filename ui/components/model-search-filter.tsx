@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -97,17 +98,22 @@ export function ModelSearchFilter({
 
   const hasActiveFilters =
     searchQuery.trim() !== '' || sortOption !== 'name-asc';
+  const searchInputId = 'model-search-filter-input';
 
   return (
     <div
       className={cn(
-        'flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-3',
+        'flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center',
         className
       )}
     >
-      <div className='relative flex-1'>
+      <div className='relative w-full min-w-0 flex-1'>
+        <Label htmlFor={searchInputId} className='sr-only'>
+          Search models
+        </Label>
         <Search className='text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2' />
         <Input
+          id={searchInputId}
           placeholder='Search models by name, provider, or description...'
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
@@ -115,32 +121,36 @@ export function ModelSearchFilter({
         />
       </div>
 
-      <div className='flex items-center gap-2'>
-        <Select
-          value={sortOption}
-          onValueChange={(value: SortOption) => setSortOption(value)}
-        >
-          <SelectTrigger className='w-full sm:w-[180px]'>
-            <Filter className='mr-2 h-4 w-4' />
-            <SelectValue placeholder='Sort by' />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value='name-asc'>Name (A-Z)</SelectItem>
-            <SelectItem value='name-desc'>Name (Z-A)</SelectItem>
-            <SelectItem value='price-asc'>Price (Low to High)</SelectItem>
-            <SelectItem value='price-desc'>Price (High to Low)</SelectItem>
-          </SelectContent>
-        </Select>
+      <div className='flex items-center gap-2 sm:shrink-0'>
+        <div className='min-w-0 flex-1 sm:flex-none'>
+          <Select
+            value={sortOption}
+            onValueChange={(value: SortOption) => setSortOption(value)}
+          >
+            <SelectTrigger className='h-8 w-full sm:w-[170px]'>
+              <Filter className='mr-2 h-4 w-4' />
+              <SelectValue placeholder='Sort by' />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='name-asc'>Name (A-Z)</SelectItem>
+              <SelectItem value='name-desc'>Name (Z-A)</SelectItem>
+              <SelectItem value='price-asc'>Price (Low to High)</SelectItem>
+              <SelectItem value='price-desc'>Price (High to Low)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
         {hasActiveFilters && (
           <Button
-            variant='outline'
-            size='icon'
+            variant='ghost'
+            size='sm'
             onClick={clearFilters}
-            className='h-9 w-9'
+            className='h-8 shrink-0 px-2 sm:size-8 sm:px-0'
+            aria-label='Clear model filters'
             title='Clear filters'
           >
-            <X className='h-4 w-4' />
+            <X className='hidden h-4 w-4 sm:block' />
+            <span className='text-xs sm:hidden'>Clear</span>
           </Button>
         )}
       </div>

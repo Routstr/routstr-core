@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
 import { ManualModelSchema, type ManualModel } from '@/lib/api/schemas/models';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,9 +46,10 @@ export function AddModelForm({
   isOpen,
 }: AddModelFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  type ManualModelInput = z.input<typeof ManualModelSchema>;
 
-  const form = useForm<ManualModel>({
-    resolver: zodResolver(ManualModelSchema) as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  const form = useForm<ManualModelInput, unknown, ManualModel>({
+    resolver: zodResolver(ManualModelSchema),
     defaultValues: {
       name: '',
       full_name: '',
