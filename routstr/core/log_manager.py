@@ -19,6 +19,7 @@ class LogManager:
         specific_date: str | None = None,
         reverse_files: bool = False,
         max_files: int | None = None,
+        window_center: datetime | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Yields log entries from files.
@@ -28,6 +29,7 @@ class LogManager:
             specific_date: specific date string (YYYY-MM-DD) to look at.
             reverse_files: if True, process files in reverse order (newest first).
             max_files: maximum number of log files to process (most recent if reverse_files is True).
+            window_center: datetime object to center a 5-month window around.
         """
         if not self.logs_dir.exists():
             return
@@ -41,6 +43,36 @@ class LogManager:
                 log_files.append(log_file)
         else:
             log_files = sorted(self.logs_dir.glob("app_*.log"))
+
+            if window_center:
+                # Calculate the 5 months: [center-2, center-1, center, center+1, center+2]
+                allowed_month_years = []
+                cur_m = window_center.month
+                cur_y = window_center.year
+
+                for offset in range(-2, 3):
+                    m = cur_m + offset
+                    y = cur_y
+                    while m <= 0:
+                        m += 12
+                        y -= 1
+                    while m > 12:
+                        m -= 12
+                        y += 1
+                    allowed_month_years.append(f"{y}-{m:02d}")
+
+                filtered_files = []
+                for log_path in log_files:
+                    try:
+                        # Stem is "app_YYYY-MM-DD"
+                        file_date_str = log_path.stem.split("_")[1]
+                        file_month_year = file_date_str[:7]  # YYYY-MM
+                        if file_month_year in allowed_month_years:
+                            filtered_files.append(log_path)
+                    except Exception:
+                        continue
+                log_files = filtered_files
+
             if reverse_files:
                 log_files.reverse()
 
@@ -217,11 +249,19 @@ class LogManager:
         return True
 
     def get_usage_summary(self, hours: int = 24) -> dict:
-        entries = list(self._yield_log_entries(hours_back=hours))
+        entries = list(
+            self._yield_log_entries(
+                hours_back=hours, window_center=datetime.now(timezone.utc)
+            )
+        )
         return self._calculate_summary_stats(entries)
 
     def get_usage_metrics(self, interval: int = 15, hours: int = 24) -> dict:
-        entries = list(self._yield_log_entries(hours_back=hours))
+        entries = list(
+            self._yield_log_entries(
+                hours_back=hours, window_center=datetime.now(timezone.utc)
+            )
+        )
         return self._aggregate_metrics_by_time(entries, interval, hours)
 
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
@@ -236,7 +276,9 @@ class LogManager:
 
         # Let's just stick to PR 229 logic which filters 'ERROR' level.
 
-        entries = self._yield_log_entries(hours_back=hours)  # oldest to newest
+        entries = self._yield_log_entries(
+            hours_back=hours, window_center=datetime.now(timezone.utc)
+        )  # oldest to newest
 
         for entry in entries:
             if entry.get("levelname", "").upper() == "ERROR":
@@ -257,7 +299,11 @@ class LogManager:
         return {"errors": errors[:limit], "total_count": len(errors)}
 
     def get_revenue_by_model(self, hours: int = 24, limit: int = 20) -> dict:
-        entries = list(self._yield_log_entries(hours_back=hours))
+        entries = list(
+            self._yield_log_entries(
+                hours_back=hours, window_center=datetime.now(timezone.utc)
+            )
+        )
 
         model_stats: dict[str, dict[str, int | float]] = defaultdict(
             lambda: {

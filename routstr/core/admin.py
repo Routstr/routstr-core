@@ -544,6 +544,7 @@ class UpstreamProviderCreate(BaseModel):
     api_version: str | None = None
     enabled: bool = True
     provider_fee: float = 1.01
+    provider_settings: dict | None = None
 
 
 class UpstreamProviderUpdate(BaseModel):
@@ -553,6 +554,7 @@ class UpstreamProviderUpdate(BaseModel):
     api_version: str | None = None
     enabled: bool | None = None
     provider_fee: float | None = None
+    provider_settings: dict | None = None
 
 
 @admin_router.get("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
@@ -569,6 +571,9 @@ async def get_upstream_providers() -> list[dict[str, object]]:
                 "api_version": p.api_version,
                 "enabled": p.enabled,
                 "provider_fee": p.provider_fee,
+                "provider_settings": json.loads(p.provider_settings)
+                if p.provider_settings
+                else None,
             }
             for p in providers
         ]
@@ -598,6 +603,9 @@ async def create_upstream_provider(
             api_version=payload.api_version,
             enabled=payload.enabled,
             provider_fee=payload.provider_fee,
+            provider_settings=json.dumps(payload.provider_settings)
+            if payload.provider_settings
+            else None,
         )
         session.add(provider)
         await session.commit()
@@ -613,6 +621,7 @@ async def create_upstream_provider(
         "api_version": provider.api_version,
         "enabled": provider.enabled,
         "provider_fee": provider.provider_fee,
+        "provider_settings": payload.provider_settings,
     }
 
 
@@ -632,6 +641,9 @@ async def get_upstream_provider(provider_id: int) -> dict[str, object]:
             "api_version": provider.api_version,
             "enabled": provider.enabled,
             "provider_fee": provider.provider_fee,
+            "provider_settings": json.loads(provider.provider_settings)
+            if provider.provider_settings
+            else None,
         }
 
 
@@ -658,6 +670,8 @@ async def update_upstream_provider(
             provider.enabled = payload.enabled
         if payload.provider_fee is not None:
             provider.provider_fee = payload.provider_fee
+        if payload.provider_settings is not None:
+            provider.provider_settings = json.dumps(payload.provider_settings)
 
         session.add(provider)
         await session.commit()
@@ -673,6 +687,9 @@ async def update_upstream_provider(
         "api_version": provider.api_version,
         "enabled": provider.enabled,
         "provider_fee": provider.provider_fee,
+        "provider_settings": json.loads(provider.provider_settings)
+        if provider.provider_settings
+        else None,
     }
 
 
@@ -792,6 +809,47 @@ class TopupRequest(BaseModel):
     amount: int
 
 
+class TopupTokenRequest(BaseModel):
+    token: str
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/topup-token",
+    dependencies=[Depends(require_admin_api)],
+)
+async def topup_provider_with_token(
+    provider_id: int, payload: TopupTokenRequest
+) -> dict:
+    """Redeem a Cashu token for an upstream provider."""
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            clean_url = provider.base_url.rstrip("/")
+            headers = {}
+            if provider.api_key:
+                headers["Authorization"] = f"Bearer {provider.api_key}"
+            resp = await client.post(
+                f"{clean_url}/v1/balance/topup",
+                json={"cashu_token": payload.token},
+                headers=headers,
+            )
+
+            if resp.status_code == 200:
+                return {"ok": True, "message": "Token redeemed successfully"}
+            else:
+                logger.error(f"Upstream token topup failed: {resp.text}")
+                try:
+                    error_detail = resp.json()
+                except Exception:
+                    error_detail = resp.text
+                return {"ok": False, "message": f"Upstream error: {error_detail}"}
+
+
 @admin_router.post(
     "/api/upstream-providers/{provider_id}/topup",
     dependencies=[Depends(require_admin_api)],
@@ -818,7 +876,49 @@ async def initiate_provider_topup(
                 f"Initiating top-up for provider {provider_id}",
                 extra={"amount": payload.amount},
             )
+
+            # For Routstr providers, we might be doing a Lightning top-up or a direct token transfer
+            if provider.provider_type == "routstr":
+                # UI sends sats for Routstr topup
+                import httpx
+
+                async with httpx.AsyncClient() as client:
+                    clean_url = provider.base_url.rstrip("/")
+                    # Proxy the request to upstream Routstr
+                    # Use the actual API key from the database
+                    resp = await client.post(
+                        f"{clean_url}/v1/balance/lightning/invoice",
+                        json={
+                            "amount_sats": int(payload.amount),
+                            "purpose": "topup",
+                            "api_key": provider.api_key,
+                        },
+                        headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
+                    )
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        return {
+                            "ok": True,
+                            "topup_data": {
+                                "payment_request": data.get("bolt11"),
+                                "invoice_id": data.get("invoice_id"),
+                                "status": "pending",
+                            },
+                        }
+                    else:
+                        logger.error(f"Upstream topup request failed: {resp.text}")
+                        # Check if it's JSON error
+                        try:
+                            error_detail = resp.json()
+                        except Exception:
+                            error_detail = resp.text
+                        raise HTTPException(
+                            status_code=resp.status_code, detail=error_detail
+                        )
+
             topup_data = await upstream_instance.initiate_topup(payload.amount)
+
             logger.info(
                 "Top-up initiated successfully",
                 extra={
@@ -869,6 +969,23 @@ async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, obj
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
 
+        # For Routstr providers, proxy the status check
+        if provider.provider_type == "routstr":
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                clean_url = provider.base_url.rstrip("/")
+                resp = await client.get(
+                    f"{clean_url}/v1/balance/lightning/invoice/{invoice_id}/status",
+                    headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
+                )
+                if resp.status_code == 200:
+                    status_data = resp.json()
+                    return {"ok": True, "paid": status_data.get("status") == "paid"}
+                else:
+                    logger.error(f"Upstream status check failed: {resp.text}")
+                    return {"ok": False, "paid": False}
+
         upstream_instance = _instantiate_provider(provider)
         if not upstream_instance:
             raise HTTPException(
@@ -896,13 +1013,37 @@ async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, obj
     dependencies=[Depends(require_admin_api)],
 )
 async def get_provider_balance(provider_id: int) -> dict[str, object]:
-    """Get the current account balance for the upstream provider."""
+    """Get the current balance for an upstream provider account."""
     from ..upstream.helpers import _instantiate_provider
 
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
+
+        # For Routstr providers, proxy the balance check
+        if provider.provider_type == "routstr":
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                clean_url = provider.base_url.rstrip("/")
+                headers = {}
+                if provider.api_key:
+                    headers["Authorization"] = f"Bearer {provider.api_key}"
+                resp = await client.get(
+                    f"{clean_url}/v1/balance/info",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Return balance in sats
+                    balance = data.get("balance", 0)
+                    if isinstance(balance, (int, float)):
+                        return {"ok": True, "balance_data": balance // 1000}
+                    return {"ok": True, "balance_data": balance}
+                else:
+                    logger.error(f"Failed to fetch Routstr balance: {resp.text}")
+                    return {"ok": False, "balance_data": None}
 
         upstream_instance = _instantiate_provider(provider)
         if not upstream_instance:
@@ -1073,3 +1214,71 @@ async def get_log_dates_api(request: Request) -> dict[str, object]:
                 continue
 
     return {"dates": dates}
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/routstr/refund",
+    dependencies=[Depends(require_admin_api)],
+)
+async def refund_routstr_provider_balance(provider_id: int) -> dict[str, object]:
+    """Refund balance from an upstream Routstr provider back to the local wallet."""
+    from ..upstream.helpers import _instantiate_provider
+    from ..upstream.routstr import RoutstrUpstreamProvider
+
+    async with create_session() as session:
+        provider_row = await session.get(UpstreamProviderRow, provider_id)
+        if not provider_row:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        if provider_row.provider_type != "routstr":
+            raise HTTPException(
+                status_code=400, detail="Refund only supported for Routstr providers"
+            )
+
+        provider = _instantiate_provider(provider_row)
+        if not isinstance(provider, RoutstrUpstreamProvider):
+            raise HTTPException(status_code=400, detail="Invalid provider instance")
+
+        try:
+            # Request refund from upstream
+            data = await provider.refund_balance()
+            if "error" in data:
+                # If the upstream returned an OpenAI-style error (like the model unknown error)
+                # it means the request likely didn't even reach the refund endpoint handler
+                # but was intercepted by the proxy layer.
+                error_info = data.get("error", {})
+                message = (
+                    error_info.get("message")
+                    if isinstance(error_info, dict)
+                    else str(error_info)
+                )
+                return {
+                    "ok": False,
+                    "message": f"Upstream refund failed: {message}",
+                }
+
+            token = data.get("token")
+            if not token:
+                return {"ok": False, "message": "Upstream did not return a token"}
+
+            # Receive token into local wallet
+            from ..wallet import recieve_token
+
+            try:
+                # Use current wallet to receive
+                await recieve_token(token)
+                return {
+                    "ok": True,
+                    "message": "Successfully received refund from upstream provider",
+                }
+            except Exception as e:
+                logger.error(f"Failed to receive refund token: {e}")
+                return {
+                    "ok": False,
+                    "message": f"Failed to receive refund token: {str(e)}",
+                    "token": token,
+                }
+
+        except Exception as e:
+            logger.exception(f"Refund failed for provider {provider_id}")
+            raise HTTPException(status_code=500, detail=str(e))

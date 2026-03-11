@@ -161,6 +161,8 @@ export default function DashboardPage() {
                   <SelectItem value='24'>Last 24 Hours</SelectItem>
                   <SelectItem value='72'>Last 3 Days</SelectItem>
                   <SelectItem value='168'>Last Week</SelectItem>
+                  <SelectItem value='720'>Last Month</SelectItem>
+                  <SelectItem value='8760'>Last Year</SelectItem>
                 </SelectContent>
               </Select>
               <Select value={interval} onValueChange={setInterval}>
@@ -172,6 +174,8 @@ export default function DashboardPage() {
                   <SelectItem value='15'>15 Minutes</SelectItem>
                   <SelectItem value='30'>30 Minutes</SelectItem>
                   <SelectItem value='60'>1 Hour</SelectItem>
+                  <SelectItem value='1440'>1 Day</SelectItem>
+                  <SelectItem value='10080'>1 Week</SelectItem>
                 </SelectContent>
               </Select>
               <Button onClick={handleRefresh} variant='outline' size='icon'>

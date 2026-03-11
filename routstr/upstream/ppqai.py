@@ -283,7 +283,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         )
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            print(f"Payload: {payload}", "sending to", url)
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             invoice_data = response.json()

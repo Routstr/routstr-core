@@ -148,6 +148,9 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     provider_fee: float = Field(
         default=1.01, description="Provider fee multiplier (default 1%)"
     )
+    provider_settings: str | None = Field(
+        default=None, description="JSON string for provider-specific settings"
+    )
     models: list["ModelRow"] = Relationship(
         back_populates="upstream_provider",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
