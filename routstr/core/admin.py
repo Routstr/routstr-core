@@ -16,7 +16,7 @@ from ..wallet import (
     send_token,
     slow_filter_spend_proofs,
 )
-from .db import ApiKey, ModelRow, UpstreamProviderRow, create_session
+from .db import ApiKey, CashuTransaction, ModelRow, UpstreamProviderRow, create_session
 from .log_manager import log_manager
 from .logging import get_logger
 from .settings import SettingsService, settings
@@ -747,7 +747,9 @@ async def get_provider_models(provider_id: int) -> dict[str, object]:
                 )
 
         db_model_ids = {model.id for model in db_models}
-        filtered_remote_models = [m for m in upstream_models if m.id not in db_model_ids]
+        filtered_remote_models = [
+            m for m in upstream_models if m.id not in db_model_ids
+        ]
 
         return {
             "provider": {
@@ -893,7 +895,9 @@ async def initiate_provider_topup(
                             "purpose": "topup",
                             "api_key": provider.api_key,
                         },
-                        headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
+                        headers={"Authorization": f"Bearer {provider.api_key}"}
+                        if provider.api_key
+                        else {},
                     )
 
                     if resp.status_code == 200:
@@ -977,7 +981,9 @@ async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, obj
                 clean_url = provider.base_url.rstrip("/")
                 resp = await client.get(
                     f"{clean_url}/v1/balance/lightning/invoice/{invoice_id}/status",
-                    headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
+                    headers={"Authorization": f"Bearer {provider.api_key}"}
+                    if provider.api_key
+                    else {},
                 )
                 if resp.status_code == 200:
                     status_data = resp.json()
@@ -1206,6 +1212,49 @@ async def get_log_dates_api(request: Request) -> dict[str, object]:
                 continue
 
     return {"dates": dates}
+
+
+@admin_router.get("/api/transactions", dependencies=[Depends(require_admin_api)])
+async def get_transactions_api(
+    type: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+) -> dict:
+    async with create_session() as session:
+        from sqlmodel import col
+
+        stmt = select(CashuTransaction)
+        if type:
+            stmt = stmt.where(CashuTransaction.type == type)
+        if status:
+            if status == "collected":
+                stmt = stmt.where(CashuTransaction.collected == True)  # noqa: E712
+            elif status == "swept":
+                stmt = stmt.where(CashuTransaction.swept == True)  # noqa: E712
+            elif status == "pending":
+                stmt = stmt.where(
+                    not CashuTransaction.collected,
+                    CashuTransaction.swept == False,  # noqa: E712
+                )
+
+        if search:
+            search_pattern = f"%{search}%"
+            stmt = stmt.where(
+                (col(CashuTransaction.id).like(search_pattern))
+                | (col(CashuTransaction.token).like(search_pattern))
+                | (col(CashuTransaction.request_id).like(search_pattern))
+            )
+
+        stmt = stmt.order_by(col(CashuTransaction.created_at).desc()).limit(limit)
+
+        results = await session.exec(stmt)
+        transactions = results.all()
+
+        return {
+            "transactions": [tx.dict() for tx in transactions],
+            "total": len(transactions),
+        }
 
 
 @admin_router.post(

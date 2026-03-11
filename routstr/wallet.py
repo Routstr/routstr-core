@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import math
 import time
 from typing import TypedDict
@@ -35,6 +36,21 @@ async def recieve_token(
 
     wallet.verify_proofs_dleq(token_obj.proofs)
     await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
+
+    # Store incoming transaction
+    try:
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        await db.store_cashu_transaction(
+            id=token_hash,
+            token=token,
+            amount=token_obj.amount,
+            unit=token_obj.unit,
+            mint_url=token_obj.mint,
+            type="in",
+        )
+    except Exception:
+        pass
+
     return token_obj.amount, token_obj.unit, token_obj.mint
 
 
@@ -359,23 +375,24 @@ async def periodic_refund_sweep() -> None:
         try:
             cutoff = int(time.time()) - settings.refund_sweep_ttl_seconds
             async with db.create_session() as session:
-                stmt = select(db.CashuRefund).where(
-                    db.CashuRefund.collected == False,  # noqa: E712
-                    db.CashuRefund.swept == False,  # noqa: E712
-                    db.CashuRefund.created_at < cutoff,
+                stmt = select(db.CashuTransaction).where(
+                    db.CashuTransaction.type == "out",
+                    db.CashuTransaction.collected == False,  # noqa: E712
+                    db.CashuTransaction.swept == False,  # noqa: E712
+                    db.CashuTransaction.created_at < cutoff,
                 )
                 results = await session.exec(stmt)
                 refunds = results.all()
 
                 for refund in refunds:
                     try:
-                        await recieve_token(refund.refund_token)
+                        await recieve_token(refund.token)
                         refund.swept = True
                         session.add(refund)
                         logger.info(
                             "Swept uncollected refund",
                             extra={
-                                "payment_token_hash": refund.payment_token_hash,
+                                "id": refund.id,
                                 "amount": refund.amount,
                                 "unit": refund.unit,
                             },
@@ -388,14 +405,14 @@ async def periodic_refund_sweep() -> None:
                             logger.info(
                                 "Refund already spent (client collected), marking swept",
                                 extra={
-                                    "payment_token_hash": refund.payment_token_hash,
+                                    "id": refund.id,
                                 },
                             )
                         else:
                             logger.warning(
                                 "Failed to sweep refund",
                                 extra={
-                                    "payment_token_hash": refund.payment_token_hash,
+                                    "id": refund.id,
                                     "error": str(e),
                                 },
                             )

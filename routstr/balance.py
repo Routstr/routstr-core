@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from .auth import get_billing_key, validate_bearer_key
-from .core.db import ApiKey, AsyncSession, CashuRefund, get_session
+from .core.db import ApiKey, AsyncSession, CashuTransaction, get_session
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
@@ -407,7 +407,7 @@ async def get_cashu_refund(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Retrieve a stored Cashu refund token by the hash of the original payment token."""
-    result = await session.get(CashuRefund, payment_token_hash)
+    result = await session.get(CashuTransaction, payment_token_hash)
     if result is None:
         raise HTTPException(status_code=404, detail="Refund not found")
     if result.swept:
@@ -416,7 +416,7 @@ async def get_cashu_refund(
     session.add(result)
     await session.commit()
     return {
-        "refund_token": result.refund_token,
+        "refund_token": result.token,
         "amount": result.amount,
         "unit": result.unit,
     }

@@ -13,6 +13,7 @@ import {
   ServerIcon,
   SettingsIcon,
   WalletIcon,
+  ArrowRightLeftIcon,
 } from 'lucide-react';
 import Image from 'next/image';
 import { toast } from 'sonner';
@@ -41,6 +42,7 @@ const NAV_ITEMS = [
   { title: 'Logs', url: '/logs', icon: FileTextIcon },
   { title: 'Models', url: '/models', icon: DatabaseIcon },
   { title: 'Providers', url: '/providers', icon: ServerIcon },
+  { title: 'Transactions', url: '/transactions', icon: ArrowRightLeftIcon },
   { title: 'Settings', url: '/settings', icon: SettingsIcon },
 ] as const;
 

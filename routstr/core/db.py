@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
+from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel import Field, Relationship, SQLModel, func, select, update
@@ -128,19 +129,19 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
 
 
-class CashuRefund(SQLModel, table=True):  # type: ignore
-    __tablename__ = "cashu_refunds"
+class CashuTransaction(SQLModel, table=True):  # type: ignore
+    __tablename__ = "cashu_transactions"
 
-    payment_token_hash: str = Field(
+    id: str = Field(
         primary_key=True,
-        description="SHA-256 hash of the original x-cashu payment token",
+        description="SHA-256 hash of the x-cashu token or unique identifier",
     )
-    refund_token: str = Field(description="Serialized Cashu refund token")
-    amount: int = Field(description="Refund amount in the token's unit")
+    token: str = Field(description="Serialized Cashu token")
+    amount: int = Field(description="Amount in the token's unit")
     unit: str = Field(description="Token unit (sat or msat)")
-    mint_url: str | None = Field(
-        default=None, description="Mint URL for the refund token"
-    )
+    mint_url: str | None = Field(default=None, description="Mint URL for the token")
+    type: str = Field(default="out", description="Transaction type: in or out")
+    request_id: str | None = Field(default=None, description="Associated request ID")
     created_at: int = Field(
         default_factory=lambda: int(time.time()),
         description="Unix timestamp",
@@ -149,28 +150,32 @@ class CashuRefund(SQLModel, table=True):  # type: ignore
     swept: bool = Field(default=False)
 
 
-async def store_cashu_refund(
-    payment_token_hash: str,
-    refund_token: str,
+async def store_cashu_transaction(
+    id: str,
+    token: str,
     amount: int,
     unit: str,
     mint_url: str | None = None,
+    type: str = "out",
+    request_id: str | None = None,
 ) -> None:
     try:
         async with create_session() as session:
-            refund = CashuRefund(
-                payment_token_hash=payment_token_hash,
-                refund_token=refund_token,
+            tx = CashuTransaction(
+                id=id,
+                token=token,
                 amount=amount,
                 unit=unit,
                 mint_url=mint_url,
+                type=type,
+                request_id=request_id,
             )
-            session.add(refund)
+            session.add(tx)
             await session.commit()
     except Exception as e:
         logger.warning(
-            "Failed to store cashu refund",
-            extra={"error": str(e), "payment_token_hash": payment_token_hash},
+            "Failed to store cashu transaction",
+            extra={"error": str(e), "id": id, "type": type},
         )
 
 
@@ -273,6 +278,17 @@ def fix_cashu_migrations() -> None:
             logger.warning(f"Could not check/fix Cashu database {db_file}: {e}")
 
 
+def _clear_alembic_version() -> None:
+    """Clear the alembic_version table so stamp/upgrade can proceed."""
+    sync_url = DATABASE_URL.replace("+aiosqlite", "")
+    from sqlalchemy import create_engine, text
+
+    eng = create_engine(sync_url)
+    with eng.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version"))
+    eng.dispose()
+
+
 def run_migrations() -> None:
     """Run Alembic migrations programmatically."""
     try:
@@ -294,8 +310,19 @@ def run_migrations() -> None:
         # Set the database URL in the config
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-        # Run migrations to the latest revision
-        command.upgrade(alembic_cfg, "head")
+        try:
+            command.upgrade(alembic_cfg, "head")
+        except CommandError as e:
+            if "Can't locate revision" in str(e):
+                logger.warning(
+                    "Database stamped with unknown revision (likely from another branch). "
+                    "Re-stamping to current head.",
+                    extra={"error": str(e)},
+                )
+                _clear_alembic_version()
+                command.stamp(alembic_cfg, "head")
+            else:
+                raise
 
         logger.info("Database migrations completed successfully")
 

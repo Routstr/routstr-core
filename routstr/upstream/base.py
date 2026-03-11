@@ -21,7 +21,7 @@ from ..core.db import (
     AsyncSession,
     UpstreamProviderRow,
     create_session,
-    store_cashu_refund,
+    store_cashu_transaction,
 )
 from ..core.exceptions import UpstreamError
 from ..payment.cost_calculation import (
@@ -1725,15 +1725,16 @@ class BaseUpstreamProvider:
 
                 if payment_token_hash:
                     try:
-                        await store_cashu_refund(
-                            payment_token_hash=payment_token_hash,
-                            refund_token=refund_token,
+                        await store_cashu_transaction(
+                            id=payment_token_hash,
+                            token=refund_token,
                             amount=amount,
                             unit=unit,
                             mint_url=mint,
+                            type="out",
                         )
                     except Exception:
-                        pass  # store_cashu_refund already logs
+                        pass  # store_cashu_transaction already logs
 
                 return refund_token
             except Exception as e:
@@ -2033,8 +2034,13 @@ class BaseUpstreamProvider:
             response.headers["X-Cashu"] = refund_token
             if payment_token_hash:
                 try:
-                    await store_cashu_refund(
-                        payment_token_hash, refund_token, emergency_refund, unit, mint
+                    await store_cashu_transaction(
+                        id=payment_token_hash,
+                        token=refund_token,
+                        amount=emergency_refund,
+                        unit=unit,
+                        mint_url=mint,
+                        type="out",
                     )
                 except Exception:
                     pass
@@ -2899,8 +2905,13 @@ class BaseUpstreamProvider:
             response.headers["X-Cashu"] = refund_token
             if payment_token_hash:
                 try:
-                    await store_cashu_refund(
-                        payment_token_hash, refund_token, emergency_refund, unit, mint
+                    await store_cashu_transaction(
+                        id=payment_token_hash,
+                        token=refund_token,
+                        amount=emergency_refund,
+                        unit=unit,
+                        mint_url=mint,
+                        type="out",
                     )
                 except Exception:
                     pass

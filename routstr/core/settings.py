@@ -238,9 +238,10 @@ class SettingsService:
             except Exception:
                 db_json = {}
 
+            valid_fields = set(env_resolved.dict().keys())
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "", [], {})}
+                {k: v for k, v in db_json.items() if v not in (None, "", [], {}) and k in valid_fields}
             )
 
             # Ensure primary_mint is consistent with cashu_mints if not explicitly set
@@ -306,8 +307,10 @@ class SettingsService:
                 raise RuntimeError("Settings row missing")
             (data_str,) = row
             data = json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
+            valid_fields = set(settings.dict().keys())
             # Update in-place
             for k, v in data.items():
-                setattr(settings, k, v)
+                if k in valid_fields:
+                    setattr(settings, k, v)
             cls._current = settings
             return settings
