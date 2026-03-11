@@ -30,6 +30,7 @@ interface ProviderFormDialogContentProps {
   onCancel: () => void;
   onSubmit: () => void;
   isSubmitting: boolean;
+  availableMints: string[];
 }
 
 export function ProviderFormDialogContent({
@@ -49,6 +50,7 @@ export function ProviderFormDialogContent({
   onCancel,
   onSubmit,
   isSubmitting,
+  availableMints,
 }: ProviderFormDialogContentProps) {
   return (
     <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[500px]'>
@@ -66,6 +68,7 @@ export function ProviderFormDialogContent({
         canCreateAccount={canCreateAccount}
         isCreatingAccount={isCreatingAccount}
         onCreateAccount={onCreateAccount}
+        availableMints={availableMints}
       />
       <DialogFooter>
         <Button

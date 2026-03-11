@@ -12,9 +12,19 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { ChevronDown, ChevronUp, Database, Pencil, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Database, Pencil, Trash2, Key } from 'lucide-react';
 import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
+import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
+import { useState } from 'react';
+import { cn } from '@/lib/utils';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 interface ProviderCardProps {
   provider: UpstreamProvider;
@@ -32,6 +42,7 @@ interface ProviderCardProps {
   onEditModel: (model: AdminModel) => void;
   onDeleteModel: (modelId: string) => void;
   onOverrideModel: (model: AdminModel) => void;
+  onUpdateApiKey: (newKey: string) => void;
 }
 
 export function ProviderCard({
@@ -50,7 +61,9 @@ export function ProviderCard({
   onEditModel,
   onDeleteModel,
   onOverrideModel,
+  onUpdateApiKey,
 }: ProviderCardProps) {
+  const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const hasDetails = Boolean(provider.api_version) || isExpanded;
 
   return (
@@ -76,12 +89,30 @@ export function ProviderCard({
 
           <div className='grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end'>
             {canShowBalance && provider.api_key && (
-              <div className='col-span-2 sm:col-auto'>
+              <div className={cn(
+                'col-span-2 sm:col-auto',
+                provider.provider_type === 'routstr' && 'col-span-1'
+              )}>
                 <ProviderBalance
                   providerId={provider.id}
                   platformUrl={platformUrl}
                 />
               </div>
+            )}
+
+            {provider.provider_type === 'routstr' && (
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => setIsKeyModalOpen(true)}
+                className={cn(
+                  'justify-center gap-1.5',
+                  canShowBalance && provider.api_key ? 'col-span-1' : 'col-span-2 sm:col-auto'
+                )}
+              >
+                <Key className='h-4 w-4' />
+                <span>New Key</span>
+              </Button>
             )}
 
             <Button
@@ -123,6 +154,27 @@ export function ProviderCard({
           </div>
         </div>
       </CardHeader>
+
+      <Dialog open={isKeyModalOpen} onOpenChange={setIsKeyModalOpen}>
+        <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[500px]'>
+          <DialogHeader>
+            <DialogTitle>Generate New Key</DialogTitle>
+            <DialogDescription>
+              Create a new API key for provider{' '}
+              <span className='font-medium'>{provider.provider_type}</span>.
+            </DialogDescription>
+          </DialogHeader>
+          <div className='py-4'>
+            <RoutstrCreateKeySection
+              baseUrl={provider.base_url || ''}
+              onApiKeyCreated={(newApiKey) => {
+                onUpdateApiKey(newApiKey);
+                setIsKeyModalOpen(false);
+              }}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {hasDetails ? (
         <CardContent>

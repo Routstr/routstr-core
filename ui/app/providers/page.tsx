@@ -84,6 +84,7 @@ export default function ProvidersPage() {
     api_version: null,
     enabled: true,
     provider_fee: 1.06,
+    provider_settings: {},
   });
 
   const getProviderFeePlaceholder = (type: string) => {
@@ -100,6 +101,12 @@ export default function ProvidersPage() {
     () => new Map<string, ProviderType>(providerTypes.map((pt) => [pt.id, pt])),
     [providerTypes]
   );
+
+  const { data: globalSettings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => AdminService.getSettings(),
+    refetchOnWindowFocus: false,
+  });
 
   const {
     data: providers = [],
@@ -213,6 +220,8 @@ export default function ProvidersPage() {
       api_key: '',
       api_version: null,
       enabled: true,
+      provider_fee: 1.06,
+      provider_settings: {},
     });
   };
 
@@ -233,6 +242,7 @@ export default function ProvidersPage() {
       api_version: provider.api_version || null,
       enabled: provider.enabled,
       provider_fee: provider.provider_fee,
+      provider_settings: provider.provider_settings || {},
     });
     setIsEditDialogOpen(true);
   };
@@ -245,6 +255,7 @@ export default function ProvidersPage() {
       api_version: formData.api_version,
       enabled: formData.enabled,
       provider_fee: formData.provider_fee,
+      provider_settings: formData.provider_settings,
     };
     if (formData.api_key) {
       updateData.api_key = formData.api_key;
@@ -331,6 +342,8 @@ export default function ProvidersPage() {
     setBatchOverrideProviderId(providerId);
   };
 
+  const availableMints = (globalSettings?.cashu_mints as string[]) || [];
+
   return (
     <AppPageShell contentClassName='mx-auto w-full max-w-5xl'>
       <div className='@container/main flex flex-col gap-4 md:gap-8'>
@@ -366,6 +379,7 @@ export default function ProvidersPage() {
             onCancel={() => setIsCreateDialogOpen(false)}
             onSubmit={handleCreate}
             isSubmitting={createMutation.isPending}
+            availableMints={availableMints}
           />
         </Dialog>
 
@@ -431,6 +445,13 @@ export default function ProvidersPage() {
                 onOverrideModel={(model) =>
                   handleOverrideModel(provider.id, model)
                 }
+                onUpdateApiKey={(newKey) => {
+                  updateMutation.mutate({
+                    id: provider.id,
+                    data: { api_key: newKey },
+                  });
+                }}
+                availableMints={availableMints}
               />
             ))}
           </div>
@@ -457,6 +478,7 @@ export default function ProvidersPage() {
           onCancel={() => setIsEditDialogOpen(false)}
           onSubmit={handleUpdate}
           isSubmitting={updateMutation.isPending}
+          availableMints={availableMints}
         />
       </Dialog>
 

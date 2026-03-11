@@ -17,6 +17,7 @@ from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
+from ..upstream.auto_topup import periodic_auto_topup
 from ..wallet import periodic_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
@@ -48,6 +49,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     models_refresh_task = None
     model_maps_refresh_task = None
     key_reset_task = None
+    auto_topup_task = None
 
     try:
         # Run database migrations on startup
@@ -104,6 +106,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         key_reset_task = asyncio.create_task(periodic_key_reset())
+        auto_topup_task = asyncio.create_task(periodic_auto_topup())
 
         yield
 
@@ -135,6 +138,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             model_maps_refresh_task.cancel()
         if key_reset_task is not None:
             key_reset_task.cancel()
+        if auto_topup_task is not None:
+            auto_topup_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -154,6 +159,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(model_maps_refresh_task)
             if key_reset_task is not None:
                 tasks_to_wait.append(key_reset_task)
+            if auto_topup_task is not None:
+                tasks_to_wait.append(auto_topup_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)

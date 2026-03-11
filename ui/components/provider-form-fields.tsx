@@ -17,6 +17,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { RoutstrNodeSettings } from '@/components/providers/RoutstrNodeSettings';
+import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
 
 interface ProviderFormFieldsProps {
   mode: 'create' | 'edit';
@@ -28,6 +30,7 @@ interface ProviderFormFieldsProps {
   canCreateAccount: boolean;
   isCreatingAccount: boolean;
   onCreateAccount: () => void;
+  availableMints: string[];
 }
 
 export function ProviderFormFields({
@@ -40,6 +43,7 @@ export function ProviderFormFields({
   canCreateAccount,
   isCreatingAccount,
   onCreateAccount,
+  availableMints,
 }: ProviderFormFieldsProps) {
   const idPrefix = mode === 'edit' ? 'edit_' : '';
   const providerType = providerTypes.find(
@@ -47,6 +51,12 @@ export function ProviderFormFields({
   );
   const hasFixedBaseUrl = providerType?.fixed_base_url || false;
   const platformUrl = providerType?.platform_url || null;
+
+  const getDefaultBaseUrl = (type: string) => {
+    const selectedType = providerTypes.find((pt) => pt.id === type);
+    return selectedType?.default_base_url || '';
+  };
+
   const isGenericType = (type: ProviderType) =>
     type.id.toLowerCase() === 'generic';
   const nonGenericTypes = providerTypes.filter((type) => !isGenericType(type));
@@ -63,11 +73,10 @@ export function ProviderFormFields({
         <Select
           value={formData.provider_type}
           onValueChange={(value) => {
-            const selectedType = providerTypes.find((pt) => pt.id === value);
             setFormData((prev) => ({
               ...prev,
               provider_type: value,
-              base_url: selectedType?.default_base_url || '',
+              base_url: getDefaultBaseUrl(value),
               provider_fee: value === 'openrouter' ? 1.06 : 1.01,
             }));
           }}
@@ -95,6 +104,20 @@ export function ProviderFormFields({
         </Select>
       </div>
 
+      {formData.provider_type === 'routstr' && (
+        <RoutstrNodeSettings
+          settings={formData.provider_settings || {}}
+          onSettingsChange={(settings) =>
+            setFormData((prev) => ({
+              ...prev,
+              provider_settings: settings,
+            }))
+          }
+          availableMints={availableMints}
+          idPrefix={mode === 'edit' ? 'edit' : ''}
+        />
+      )}
+
       <div className='grid gap-2'>
         <Label htmlFor={`${idPrefix}base_url`}>Base URL</Label>
         <Input
@@ -109,43 +132,45 @@ export function ProviderFormFields({
         />
       </div>
 
-      <div className='grid gap-2'>
-        <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-          <Label htmlFor={`${idPrefix}api_key`}>{apiKeyLabel}</Label>
-          {mode === 'create' && canCreateAccount ? (
-            <Button
-              type='button'
-              variant='outline'
-              size='sm'
-              onClick={onCreateAccount}
-              disabled={isCreatingAccount}
-              className='h-6 w-full text-xs sm:w-auto'
-            >
-              {isCreatingAccount ? 'Creating...' : 'Create Account'}
-            </Button>
-          ) : (
-            platformUrl && (
-              <a
-                href={platformUrl}
-                target='_blank'
-                rel='noopener noreferrer'
-                className={`${docsLinkClassName} break-all`}
+      {formData.provider_type !== 'routstr' && (
+        <div className='grid gap-2'>
+          <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
+            <Label htmlFor={`${idPrefix}api_key`}>{apiKeyLabel}</Label>
+            {mode === 'create' && canCreateAccount ? (
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                onClick={onCreateAccount}
+                disabled={isCreatingAccount}
+                className='h-6 w-full text-xs sm:w-auto'
               >
-                Get Your API Key Here →
-              </a>
-            )
-          )}
+                {isCreatingAccount ? 'Creating...' : 'Create Account'}
+              </Button>
+            ) : (
+              platformUrl && (
+                <a
+                  href={platformUrl}
+                  target='_blank'
+                  rel='noopener noreferrer'
+                  className={`${docsLinkClassName} break-all`}
+                >
+                  Get Your API Key Here →
+                </a>
+              )
+            )}
+          </div>
+          <Input
+            id={`${idPrefix}api_key`}
+            type='password'
+            value={formData.api_key}
+            onChange={(e) =>
+              setFormData((prev) => ({ ...prev, api_key: e.target.value }))
+            }
+            placeholder={apiKeyPlaceholder}
+          />
         </div>
-        <Input
-          id={`${idPrefix}api_key`}
-          type='password'
-          value={formData.api_key}
-          onChange={(e) =>
-            setFormData((prev) => ({ ...prev, api_key: e.target.value }))
-          }
-          placeholder={apiKeyPlaceholder}
-        />
-      </div>
+      )}
 
       {formData.provider_type === 'azure' && (
         <div className='grid gap-2'>
@@ -199,6 +224,18 @@ export function ProviderFormFields({
           1.01 means +1% e.g. currency exchange, card fees, etc.
         </p>
       </div>
+
+      {mode === 'create' && formData.provider_type === 'routstr' && (
+        <RoutstrCreateKeySection
+          baseUrl={formData.base_url || ''}
+          onApiKeyCreated={(newApiKey) => {
+            setFormData((prev) => ({
+              ...prev,
+              api_key: newApiKey,
+            }));
+          }}
+        />
+      )}
     </div>
   );
 }
