@@ -12,7 +12,14 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { ChevronDown, ChevronUp, Database, Pencil, Trash2, Key } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  Database,
+  Pencil,
+  Trash2,
+  Key,
+} from 'lucide-react';
 import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
@@ -89,10 +96,12 @@ export function ProviderCard({
 
           <div className='grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center sm:justify-end'>
             {canShowBalance && provider.api_key && (
-              <div className={cn(
-                'col-span-2 sm:col-auto',
-                provider.provider_type === 'routstr' && 'col-span-1'
-              )}>
+              <div
+                className={cn(
+                  'col-span-2 sm:col-auto',
+                  provider.provider_type === 'routstr' && 'col-span-1'
+                )}
+              >
                 <ProviderBalance
                   providerId={provider.id}
                   platformUrl={platformUrl}
@@ -107,7 +116,9 @@ export function ProviderCard({
                 onClick={() => setIsKeyModalOpen(true)}
                 className={cn(
                   'justify-center gap-1.5',
-                  canShowBalance && provider.api_key ? 'col-span-1' : 'col-span-2 sm:col-auto'
+                  canShowBalance && provider.api_key
+                    ? 'col-span-1'
+                    : 'col-span-2 sm:col-auto'
                 )}
               >
                 <Key className='h-4 w-4' />
