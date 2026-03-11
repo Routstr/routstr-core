@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import traceback
@@ -15,7 +16,13 @@ from sqlmodel import select
 
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
-from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow, create_session
+from ..core.db import (
+    ApiKey,
+    AsyncSession,
+    UpstreamProviderRow,
+    create_session,
+    store_cashu_refund,
+)
 from ..core.exceptions import UpstreamError
 from ..payment.cost_calculation import (
     CostData,
@@ -203,9 +210,7 @@ class BaseUpstreamProvider:
             return path.replace("v1/", "", 1)
         return path
 
-    def get_request_base_url(
-        self, path: str, model_obj: Model | None = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: Model | None = None) -> str:
         """Get upstream base URL used when building forwarding URL."""
         return self.base_url.rstrip("/")
 
@@ -1325,9 +1330,7 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            raise UpstreamError(
-                "An unexpected server error occurred", status_code=500
-            )
+            raise UpstreamError("An unexpected server error occurred", status_code=500)
 
     async def forward_responses_request(
         self,
@@ -1539,9 +1542,7 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            raise UpstreamError(
-                "An unexpected server error occurred", status_code=500
-            )
+            raise UpstreamError("An unexpected server error occurred", status_code=500)
 
     async def forward_get_request(
         self,
@@ -1679,13 +1680,20 @@ class BaseUpstreamProvider:
                     )
         return None
 
-    async def send_refund(self, amount: int, unit: str, mint: str | None = None) -> str:
+    async def send_refund(
+        self,
+        amount: int,
+        unit: str,
+        mint: str | None = None,
+        payment_token_hash: str | None = None,
+    ) -> str:
         """Create and send a refund token to the user.
 
         Args:
             amount: Refund amount
             unit: Unit of the refund (sat or msat)
             mint: Optional mint URL for the refund token
+            payment_token_hash: Optional SHA-256 hash of the original payment token for storage
 
         Returns:
             Refund token string
@@ -1714,6 +1722,18 @@ class BaseUpstreamProvider:
                         else refund_token,
                     },
                 )
+
+                if payment_token_hash:
+                    try:
+                        await store_cashu_refund(
+                            payment_token_hash=payment_token_hash,
+                            refund_token=refund_token,
+                            amount=amount,
+                            unit=unit,
+                            mint_url=mint,
+                        )
+                    except Exception:
+                        pass  # store_cashu_refund already logs
 
                 return refund_token
             except Exception as e:
@@ -1764,6 +1784,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1773,6 +1794,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            payment_token_hash: Optional hash of original payment token for refund storage
 
         Returns:
             StreamingResponse with refund token in header if applicable
@@ -1844,7 +1866,9 @@ class BaseUpstreamProvider:
                             },
                         )
 
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
+                        refund_token = await self.send_refund(
+                            refund_amount, unit, mint, payment_token_hash
+                        )
                         response_headers["X-Cashu"] = refund_token
 
                         logger.info(
@@ -1897,6 +1921,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1906,6 +1931,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            payment_token_hash: Optional hash of original payment token for refund storage
 
         Returns:
             Response with refund token in header if applicable
@@ -1967,7 +1993,9 @@ class BaseUpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit, mint)
+                refund_token = await self.send_refund(
+                    refund_amount, unit, mint, payment_token_hash
+                )
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -2003,6 +2031,13 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
+            if payment_token_hash:
+                try:
+                    await store_cashu_refund(
+                        payment_token_hash, refund_token, emergency_refund, unit, mint
+                    )
+                except Exception:
+                    pass
 
             logger.warning(
                 "Emergency refund issued due to JSON parse error",
@@ -2027,6 +2062,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -2063,11 +2099,23 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
                 )
 
         except Exception as e:
@@ -2096,6 +2144,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward request paid with X-Cashu token to upstream service.
 
@@ -2166,7 +2215,9 @@ class BaseUpstreamProvider:
                         },
                     )
 
-                    refund_token = await self.send_refund(amount - 60, unit, mint)
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash
+                    )
 
                     logger.info(
                         "Refund processed for failed upstream request",
@@ -2204,7 +2255,12 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model, mint
+                        response,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        mint,
+                        payment_token_hash,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -2279,6 +2335,7 @@ class BaseUpstreamProvider:
         )
 
         try:
+            payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
@@ -2297,6 +2354,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
+                payment_token_hash,
             )
         except Exception as e:
             error_message = str(e)
@@ -2356,6 +2414,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward Responses API request paid with X-Cashu token to upstream service.
 
@@ -2427,7 +2486,9 @@ class BaseUpstreamProvider:
                         },
                     )
 
-                    refund_token = await self.send_refund(amount - 60, unit, mint)
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash
+                    )
 
                     logger.info(
                         "Refund processed for failed upstream Responses API request",
@@ -2465,7 +2526,12 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_responses_completion(
-                        response, amount, unit, max_cost_for_model, mint
+                        response,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        mint,
+                        payment_token_hash,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -2515,6 +2581,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle Responses API completion response for X-Cashu payment.
 
@@ -2552,11 +2619,23 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_responses_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_responses_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
                 )
 
         except Exception as e:
@@ -2583,6 +2662,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API response for X-Cashu payment.
 
@@ -2664,7 +2744,9 @@ class BaseUpstreamProvider:
                             },
                         )
 
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
+                        refund_token = await self.send_refund(
+                            refund_amount, unit, mint, payment_token_hash
+                        )
                         response_headers["X-Cashu"] = refund_token
 
                         logger.info(
@@ -2717,6 +2799,7 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> Response:
         """Handle non-streaming Responses API response for X-Cashu payment."""
         logger.debug(
@@ -2776,7 +2859,9 @@ class BaseUpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit, mint)
+                refund_token = await self.send_refund(
+                    refund_amount, unit, mint, payment_token_hash
+                )
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -2812,6 +2897,13 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
+            if payment_token_hash:
+                try:
+                    await store_cashu_refund(
+                        payment_token_hash, refund_token, emergency_refund, unit, mint
+                    )
+                except Exception:
+                    pass
 
             logger.warning(
                 "Emergency refund issued for Responses API due to JSON parse error",
@@ -2861,6 +2953,7 @@ class BaseUpstreamProvider:
         )
 
         try:
+            payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
@@ -2879,6 +2972,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
+                payment_token_hash,
             )
         except Exception as e:
             error_message = str(e)
@@ -3090,7 +3184,7 @@ class BaseUpstreamProvider:
             async with create_session() as session:
                 stmt = select(UpstreamProviderRow).where(
                     UpstreamProviderRow.base_url == self.base_url,
-                    UpstreamProviderRow.api_key == self.api_key
+                    UpstreamProviderRow.api_key == self.api_key,
                 )
                 result = await session.exec(stmt)
 
@@ -3111,15 +3205,24 @@ class BaseUpstreamProvider:
                 diff = set(db_model_ids) - set(model_ids)
 
                 for db_model_id in diff:
-                    found_db_model = next((model_obj for model_obj in db_models if model_obj.id == db_model_id))
+                    found_db_model = next(
+                        (
+                            model_obj
+                            for model_obj in db_models
+                            if model_obj.id == db_model_id
+                        )
+                    )
                     models.append(found_db_model)
 
-                models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
+                models_with_fees = [
+                    self._apply_provider_fee_to_model(m) for m in models
+                ]
 
                 try:
                     sats_to_usd = sats_usd_price()
                     self._models_cache = [
-                        _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
+                        _update_model_sats_pricing(m, sats_to_usd)
+                        for m in models_with_fees
                     ]
                 except Exception:
                     self._models_cache = models_with_fees

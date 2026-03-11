@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from .auth import get_billing_key, validate_bearer_key
-from .core.db import ApiKey, AsyncSession, get_session
+from .core.db import ApiKey, AsyncSession, CashuRefund, get_session
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
@@ -399,6 +399,27 @@ async def reset_child_key_spent(
     await session.commit()
 
     return {"success": True, "message": "Child key balance reset successfully."}
+
+
+@router.get("/cashu-refund/{payment_token_hash}")
+async def get_cashu_refund(
+    payment_token_hash: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Retrieve a stored Cashu refund token by the hash of the original payment token."""
+    result = await session.get(CashuRefund, payment_token_hash)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Refund not found")
+    if result.swept:
+        raise HTTPException(status_code=410, detail="Refund has been swept")
+    result.collected = True
+    session.add(result)
+    await session.commit()
+    return {
+        "refund_token": result.refund_token,
+        "amount": result.amount,
+        "unit": result.unit,
+    }
 
 
 @router.api_route(

@@ -128,6 +128,52 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
 
 
+class CashuRefund(SQLModel, table=True):  # type: ignore
+    __tablename__ = "cashu_refunds"
+
+    payment_token_hash: str = Field(
+        primary_key=True,
+        description="SHA-256 hash of the original x-cashu payment token",
+    )
+    refund_token: str = Field(description="Serialized Cashu refund token")
+    amount: int = Field(description="Refund amount in the token's unit")
+    unit: str = Field(description="Token unit (sat or msat)")
+    mint_url: str | None = Field(
+        default=None, description="Mint URL for the refund token"
+    )
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()),
+        description="Unix timestamp",
+    )
+    collected: bool = Field(default=False)
+    swept: bool = Field(default=False)
+
+
+async def store_cashu_refund(
+    payment_token_hash: str,
+    refund_token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+) -> None:
+    try:
+        async with create_session() as session:
+            refund = CashuRefund(
+                payment_token_hash=payment_token_hash,
+                refund_token=refund_token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint_url,
+            )
+            session.add(refund)
+            await session.commit()
+    except Exception as e:
+        logger.warning(
+            "Failed to store cashu refund",
+            extra={"error": str(e), "payment_token_hash": payment_token_hash},
+        )
+
+
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     __table_args__ = (
