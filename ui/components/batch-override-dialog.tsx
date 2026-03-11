@@ -119,7 +119,7 @@ export function BatchOverrideDialog({
             value={jsonInput}
             onChange={(e) => setJsonInput(e.target.value)}
             placeholder={JSON.stringify(sampleJson, null, 2)}
-            className='min-h-[400px] font-mono text-xs'
+            className='min-h-[260px] font-mono text-xs sm:min-h-[400px]'
           />
         </div>
 

@@ -36,6 +36,7 @@ class LogManager:
 
         log_files = []
         cutoff_date = None
+        cutoff_timestamp_str: str | None = None
 
         if specific_date:
             log_file = self.logs_dir / f"app_{specific_date}.log"
@@ -79,6 +80,7 @@ class LogManager:
             # If we only care about hours back, we can optimize file selection
             if hours_back is not None:
                 cutoff_date = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+                cutoff_timestamp_str = cutoff_date.strftime("%Y-%m-%d %H:%M:%S")
                 filtered_files = []
                 for log_path in log_files:
                     try:
@@ -101,27 +103,20 @@ class LogManager:
         for log_file in log_files:
             try:
                 with open(log_file, "r") as f:
-                    # For reverse search, we might want to read lines in reverse?
-                    # But usually logs are append-only.
-                    # If reverse_files is True, we iterate files newest to oldest.
-                    # But lines within file are still oldest to newest unless we reverse them.
-                    lines = f.readlines()
-                    if reverse_files:
-                        lines.reverse()
+                    lines_iter = reversed(f.readlines()) if reverse_files else f
 
-                    for line in lines:
+                    for line in lines_iter:
                         try:
                             entry = json.loads(line.strip())
 
-                            if cutoff_date:
+                            if cutoff_timestamp_str:
                                 timestamp_str = entry.get("asctime", "")
-                                if not timestamp_str:
+                                if (
+                                    not isinstance(timestamp_str, str)
+                                    or len(timestamp_str) != 19
+                                ):
                                     continue
-                                log_time = datetime.strptime(
-                                    timestamp_str, "%Y-%m-%d %H:%M:%S"
-                                )
-                                log_time = log_time.replace(tzinfo=timezone.utc)
-                                if log_time < cutoff_date:
+                                if timestamp_str < cutoff_timestamp_str:
                                     continue
 
                             yield entry
@@ -198,7 +193,7 @@ class LogManager:
         methods: list[str] | None = None,
         endpoints: list[str] | None = None,
     ) -> bool:
-        if level and log_data.get("levelname", "").upper() != level.upper():
+        if level and str(log_data.get("levelname", "")).upper() != level.upper():
             return False
 
         if request_id and log_data.get("request_id") != request_id:
@@ -248,6 +243,65 @@ class LogManager:
 
         return True
 
+    def _bucket_key_for_timestamp(
+        self, timestamp_str: str, interval_minutes: int
+    ) -> str | None:
+        if len(timestamp_str) != 19:
+            return None
+        if timestamp_str[10] != " ":
+            return None
+
+        try:
+            hour = int(timestamp_str[11:13])
+            minute = int(timestamp_str[14:16])
+        except (TypeError, ValueError):
+            return None
+
+        total_minutes = hour * 60 + minute
+        rounded_minutes = (total_minutes // interval_minutes) * interval_minutes
+        rounded_hour = rounded_minutes // 60
+        rounded_minute = rounded_minutes % 60
+        return f"{timestamp_str[:10]} {rounded_hour:02d}:{rounded_minute:02d}:00"
+
+    def _extract_success_metrics(
+        self, entry: dict[str, Any], message: str
+    ) -> tuple[bool, float, int, int]:
+        # Use auth settlement logs as the canonical successful request signal.
+        logger_name = str(entry.get("name", ""))
+        if not logger_name.startswith("routstr.auth"):
+            return False, 0.0, 0, 0
+
+        input_tokens = self._parse_token_count(entry.get("input_tokens", 0))
+        output_tokens = self._parse_token_count(entry.get("output_tokens", 0))
+
+        if "calculated token-based cost" in message:
+            token_cost = entry.get("token_cost", 0)
+            if isinstance(token_cost, (int, float)) and token_cost > 0:
+                return True, float(token_cost), input_tokens, output_tokens
+            return True, 0.0, input_tokens, output_tokens
+
+        if "max cost payment finalized" in message:
+            charged_amount = entry.get("charged_amount", 0)
+            if isinstance(charged_amount, (int, float)) and charged_amount > 0:
+                return True, float(charged_amount), input_tokens, output_tokens
+            return True, 0.0, input_tokens, output_tokens
+
+        return False, 0.0, 0, 0
+
+    def _parse_token_count(self, value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            return max(0, int(value))
+        if isinstance(value, str):
+            try:
+                return max(0, int(float(value)))
+            except ValueError:
+                return 0
+        return 0
+
     def get_usage_summary(self, hours: int = 24) -> dict:
         entries = list(
             self._yield_log_entries(
@@ -265,37 +319,24 @@ class LogManager:
         return self._aggregate_metrics_by_time(entries, interval, hours)
 
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
-        errors: list[dict] = []
-        # Iterate newest to oldest for errors?
-        # yield_log_entries sorts files by name (date) ascending by default.
-        # usage stats logic usually expects ascending time for aggregation (though dictionaries don't care).
-        # For error details "last N errors", we probably want newest first.
+        errors: list[dict[str, Any]] = []
 
-        # Using list() loads everything into memory, which is what PR 229 did.
-        # For optimization, we could use reverse iterator.
+        for entry in self._yield_log_entries(hours_back=hours):
+            if str(entry.get("levelname", "")).upper() != "ERROR":
+                continue
 
-        # Let's just stick to PR 229 logic which filters 'ERROR' level.
+            errors.append(
+                {
+                    "timestamp": entry.get("asctime", ""),
+                    "message": entry.get("message", ""),
+                    "error_type": entry.get("error_type", "unknown"),
+                    "pathname": entry.get("pathname", ""),
+                    "lineno": entry.get("lineno", 0),
+                    "request_id": entry.get("request_id", ""),
+                }
+            )
 
-        entries = self._yield_log_entries(
-            hours_back=hours, window_center=datetime.now(timezone.utc)
-        )  # oldest to newest
-
-        for entry in entries:
-            if entry.get("levelname", "").upper() == "ERROR":
-                timestamp_str = entry.get("asctime", "")
-                errors.append(
-                    {
-                        "timestamp": timestamp_str,
-                        "message": entry.get("message", ""),
-                        "error_type": entry.get("error_type", "unknown"),
-                        "pathname": entry.get("pathname", ""),
-                        "lineno": entry.get("lineno", 0),
-                        "request_id": entry.get("request_id", ""),
-                    }
-                )
-
-        # Sort reverse time
-        errors.sort(key=lambda x: x["timestamp"], reverse=True)
+        errors.sort(key=lambda x: str(x["timestamp"]), reverse=True)
         return {"errors": errors[:limit], "total_count": len(errors)}
 
     def get_revenue_by_model(self, hours: int = 24, limit: int = 20) -> dict:
@@ -321,23 +362,22 @@ class LogManager:
                 if not isinstance(model, str):
                     model = "unknown"
 
-                message = entry.get("message", "").lower()
+                message = str(entry.get("message", "")).lower()
 
-                if "received proxy request" in message:
+                completed, revenue_msats, _, _ = self._extract_success_metrics(
+                    entry, message
+                )
+                if completed:
                     model_stats[model]["requests"] += 1
-
-                if (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                ):
                     model_stats[model]["successful"] += 1
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            model_stats[model]["revenue_msats"] += actual_cost
+                    if revenue_msats > 0:
+                        model_stats[model]["revenue_msats"] += revenue_msats
 
-                if "revert payment" in message or "upstream request failed" in message:
+                failed = (
+                    "revert payment" in message or "upstream request failed" in message
+                )
+                if failed:
+                    model_stats[model]["requests"] += 1
                     model_stats[model]["failed"] += 1
                     if "revert payment" in message:
                         max_cost = entry.get("max_cost_for_model", 0)
@@ -386,83 +426,16 @@ class LogManager:
             "total_models": len(models),
         }
 
-    def _calculate_summary_stats(self, entries: list[dict]) -> dict:
-        stats: dict[str, Any] = {
-            "total_entries": 0,
-            "total_requests": 0,
-            "successful_chat_completions": 0,
-            "failed_requests": 0,
-            "total_errors": 0,
-            "total_warnings": 0,
-            "payment_processed": 0,
-            "upstream_errors": 0,
-            "unique_models": set(),
-            "error_types": defaultdict(int),
-            "revenue_msats": 0.0,
-            "refunds_msats": 0.0,
-        }
-
-        for entry in entries:
-            try:
-                stats["total_entries"] += 1
-
-                message = entry.get("message", "").lower()
-                level = entry.get("levelname", "").upper()
-
-                if level == "ERROR":
-                    stats["total_errors"] += 1
-                    if "error_type" in entry:
-                        stats["error_types"][str(entry["error_type"])] += 1
-                elif level == "WARNING":
-                    stats["total_warnings"] += 1
-
-                if "received proxy request" in message:
-                    stats["total_requests"] += 1
-
-                if (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                ):
-                    stats["successful_chat_completions"] += 1
-
-                if "upstream request failed" in message or "revert payment" in message:
-                    stats["failed_requests"] += 1
-
-                if "payment processed successfully" in message:
-                    stats["payment_processed"] += 1
-
-                if "upstream" in message and level == "ERROR":
-                    stats["upstream_errors"] += 1
-
-                if "model" in entry:
-                    model = entry["model"]
-                    if isinstance(model, str) and model != "unknown":
-                        stats["unique_models"].add(model)
-
-                if (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                ):
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            stats["revenue_msats"] += float(actual_cost)
-
-                if "revert payment" in message:
-                    max_cost = entry.get("max_cost_for_model", 0)
-                    if isinstance(max_cost, (int, float)) and max_cost > 0:
-                        stats["refunds_msats"] += float(max_cost)
-
-            except Exception:
-                continue
-
+    def _build_summary_response(self, stats: dict[str, Any]) -> dict[str, Any]:
         revenue_sats = stats["revenue_msats"] / 1000
         refunds_sats = stats["refunds_msats"] / 1000
         net_revenue_sats = revenue_sats - refunds_sats
 
         total_requests = stats["total_requests"]
         successful = stats["successful_chat_completions"]
+        input_tokens = stats["input_tokens"]
+        output_tokens = stats["output_tokens"]
+        total_tokens = stats["total_tokens"]
 
         return {
             "total_entries": stats["total_entries"],
@@ -476,6 +449,18 @@ class LogManager:
             "unique_models_count": len(stats["unique_models"]),
             "unique_models": sorted(list(stats["unique_models"])),
             "error_types": dict(stats["error_types"]),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "avg_input_tokens_per_completion": (
+                input_tokens / successful if successful > 0 else 0
+            ),
+            "avg_output_tokens_per_completion": (
+                output_tokens / successful if successful > 0 else 0
+            ),
+            "avg_total_tokens_per_completion": (
+                total_tokens / successful if successful > 0 else 0
+            ),
             "success_rate": (successful / total_requests * 100)
             if total_requests > 0
             else 0,
@@ -495,62 +480,198 @@ class LogManager:
             ),
         }
 
+    def _calculate_summary_stats(self, entries: list[dict]) -> dict:
+        stats: dict[str, Any] = {
+            "total_entries": 0,
+            "total_requests": 0,
+            "successful_chat_completions": 0,
+            "failed_requests": 0,
+            "total_errors": 0,
+            "total_warnings": 0,
+            "payment_processed": 0,
+            "upstream_errors": 0,
+            "unique_models": set(),
+            "error_types": defaultdict(int),
+            "revenue_msats": 0.0,
+            "refunds_msats": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+
+        for entry in entries:
+            try:
+                stats["total_entries"] += 1
+
+                message = str(entry.get("message", "")).lower()
+                level = str(entry.get("levelname", "")).upper()
+
+                if level == "ERROR":
+                    stats["total_errors"] += 1
+                    if "error_type" in entry:
+                        stats["error_types"][str(entry["error_type"])] += 1
+                elif level == "WARNING":
+                    stats["total_warnings"] += 1
+
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
+                )
+                if completed:
+                    stats["total_requests"] += 1
+                    stats["successful_chat_completions"] += 1
+                    stats["input_tokens"] += input_tokens
+                    stats["output_tokens"] += output_tokens
+                    stats["total_tokens"] += input_tokens + output_tokens
+
+                failed = (
+                    "upstream request failed" in message
+                    or "revert payment" in message
+                )
+                if failed:
+                    stats["total_requests"] += 1
+                    stats["failed_requests"] += 1
+
+                if "payment processed successfully" in message:
+                    stats["payment_processed"] += 1
+
+                if "upstream" in message and level == "ERROR":
+                    stats["upstream_errors"] += 1
+
+                if "model" in entry:
+                    model = entry["model"]
+                    if isinstance(model, str) and model != "unknown":
+                        stats["unique_models"].add(model)
+
+                if completed and revenue_msats > 0:
+                    stats["revenue_msats"] += revenue_msats
+
+                if "revert payment" in message:
+                    max_cost = entry.get("max_cost_for_model", 0)
+                    if isinstance(max_cost, (int, float)) and max_cost > 0:
+                        stats["refunds_msats"] += float(max_cost)
+
+            except Exception:
+                continue
+
+        return self._build_summary_response(stats)
+
     def _aggregate_metrics_by_time(
         self, entries: list[dict], interval_minutes: int, hours_back: int
     ) -> dict:
         time_buckets: dict[str, dict[str, Any]] = defaultdict(
-            lambda: {"requests": 0, "errors": 0, "revenue_msats": 0.0}
+            lambda: {
+                "total_requests": 0,
+                "successful_chat_completions": 0,
+                "failed_requests": 0,
+                "errors": 0,
+                "warnings": 0,
+                "payment_processed": 0,
+                "upstream_errors": 0,
+                "revenue_msats": 0.0,
+                "refunds_msats": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
         )
 
         for entry in entries:
             try:
                 timestamp_str = entry.get("asctime", "")
-                if not timestamp_str:
+                if not isinstance(timestamp_str, str):
                     continue
-
-                log_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-                log_time = log_time.replace(tzinfo=timezone.utc)
-
-                # Round down to nearest interval
-                minutes = log_time.minute
-                rounded_minutes = (minutes // interval_minutes) * interval_minutes
-                bucket_time = log_time.replace(
-                    minute=rounded_minutes, second=0, microsecond=0
+                bucket_key = self._bucket_key_for_timestamp(
+                    timestamp_str, interval_minutes
                 )
-                bucket_key = bucket_time.strftime("%Y-%m-%d %H:%M:%S")
+                if not bucket_key:
+                    continue
 
                 bucket = time_buckets[bucket_key]
 
-                message = entry.get("message", "").lower()
-                level = entry.get("levelname", "").upper()
+                message = str(entry.get("message", "")).lower()
+                level = str(entry.get("levelname", "")).upper()
 
-                if "received proxy request" in message:
-                    bucket["requests"] += 1
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
+                )
+                if completed:
+                    bucket["total_requests"] += 1
+                    bucket["successful_chat_completions"] += 1
+                    bucket["input_tokens"] += input_tokens
+                    bucket["output_tokens"] += output_tokens
+                    bucket["total_tokens"] += input_tokens + output_tokens
 
                 if level == "ERROR":
                     bucket["errors"] += 1
+                    if "upstream" in message:
+                        bucket["upstream_errors"] += 1
+                elif level == "WARNING":
+                    bucket["warnings"] += 1
 
-                if (
-                    "completed for streaming" in message
-                    or "completed for non-streaming" in message
-                ):
-                    cost_data = entry.get("cost_data")
-                    if isinstance(cost_data, dict):
-                        actual_cost = cost_data.get("total_msats", 0)
-                        if isinstance(actual_cost, (int, float)) and actual_cost > 0:
-                            bucket["revenue_msats"] += float(actual_cost)
+                failed = (
+                    "upstream request failed" in message
+                    or "revert payment" in message
+                )
+                if failed:
+                    bucket["total_requests"] += 1
+                    bucket["failed_requests"] += 1
+
+                if "payment processed successfully" in message:
+                    bucket["payment_processed"] += 1
+
+                if completed and revenue_msats > 0:
+                    bucket["revenue_msats"] += revenue_msats
+
+                if "revert payment" in message:
+                    max_cost = entry.get("max_cost_for_model", 0)
+                    if isinstance(max_cost, (int, float)) and max_cost > 0:
+                        bucket["refunds_msats"] += float(max_cost)
             except Exception:
                 continue
 
         result = []
         for bucket_key in sorted(time_buckets.keys()):
-            result.append({"timestamp": bucket_key, **time_buckets[bucket_key]})
+            bucket = dict(time_buckets[bucket_key])
+            # Backward-compatible alias for any callers still reading "requests".
+            bucket["requests"] = bucket["total_requests"]
+            result.append({"timestamp": bucket_key, **bucket})
+
+        totals = {
+            "total_requests": 0,
+            "successful_chat_completions": 0,
+            "failed_requests": 0,
+            "errors": 0,
+            "warnings": 0,
+            "payment_processed": 0,
+            "upstream_errors": 0,
+            "revenue_msats": 0.0,
+            "refunds_msats": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        for bucket in result:
+            totals["total_requests"] += int(bucket["total_requests"])
+            totals["successful_chat_completions"] += int(
+                bucket["successful_chat_completions"]
+            )
+            totals["failed_requests"] += int(bucket["failed_requests"])
+            totals["errors"] += int(bucket["errors"])
+            totals["warnings"] += int(bucket["warnings"])
+            totals["payment_processed"] += int(bucket["payment_processed"])
+            totals["upstream_errors"] += int(bucket["upstream_errors"])
+            totals["revenue_msats"] += float(bucket["revenue_msats"])
+            totals["refunds_msats"] += float(bucket["refunds_msats"])
+            totals["input_tokens"] += int(bucket["input_tokens"])
+            totals["output_tokens"] += int(bucket["output_tokens"])
+            totals["total_tokens"] += int(bucket["total_tokens"])
 
         return {
             "metrics": result,
             "interval_minutes": interval_minutes,
             "hours_back": hours_back,
             "total_buckets": len(result),
+            "totals": totals,
         }
 
 

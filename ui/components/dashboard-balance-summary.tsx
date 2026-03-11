@@ -21,7 +21,8 @@ export function DashboardBalanceSummary({
     queryFn: async () => {
       return WalletService.getDetailedBalances();
     },
-    refetchInterval: 30000,
+    refetchInterval: 900000,
+    staleTime: 300000,
   });
 
   const calculateTotals = (balances: BalanceDetail[]) => {
@@ -59,37 +60,38 @@ export function DashboardBalanceSummary({
       title: 'Your Balance',
       value: formatAmount(totals.totalOwner),
       icon: Coins,
-      color: 'text-green-600',
-      bgColor: 'bg-green-100 dark:bg-green-900/20',
+      color: 'text-green-600 dark:text-green-300',
     },
     {
       title: 'Total Wallet',
       value: formatAmount(totals.totalWallet),
       icon: Wallet,
-      color: 'text-blue-600',
-      bgColor: 'bg-blue-100 dark:bg-blue-900/20',
+      color: 'text-blue-600 dark:text-blue-300',
     },
     {
       title: 'User Balance',
       value: formatAmount(totals.totalUser),
       icon: User,
-      color: 'text-purple-600',
-      bgColor: 'bg-purple-100 dark:bg-purple-900/20',
+      color: 'text-purple-600 dark:text-purple-300',
     },
   ];
 
   return (
-    <div className='grid gap-4 md:grid-cols-3'>
+    <div className='grid grid-cols-2 gap-2.5 max-[359px]:grid-cols-1 sm:gap-3 lg:grid-cols-3'>
       {cards.map((card) => (
-        <Card key={card.title}>
-          <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-            <CardTitle className='text-sm font-medium'>{card.title}</CardTitle>
-            <div className={`rounded-full p-2 ${card.bgColor}`}>
-              <card.icon className={`h-4 w-4 ${card.color}`} />
-            </div>
+        <Card key={card.title} size='sm'>
+          <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1'>
+            <CardTitle className='text-muted-foreground text-[11px] font-medium sm:text-sm'>
+              {card.title}
+            </CardTitle>
+            <span className='inline-flex size-6 items-center justify-center sm:size-7'>
+              <card.icon className={`size-3.5 sm:size-4 ${card.color}`} />
+            </span>
           </CardHeader>
-          <CardContent>
-            <div className='text-2xl font-bold'>{card.value}</div>
+          <CardContent className='pt-0'>
+            <div className='text-base font-semibold break-words tabular-nums sm:text-xl'>
+              {card.value}
+            </div>
           </CardContent>
         </Card>
       ))}

@@ -3,30 +3,34 @@
 import { Button } from '@/components/ui/button';
 import { useRouter } from 'next/navigation';
 import { ShieldAlertIcon } from 'lucide-react';
+import { AuthPageShell } from '@/components/auth-page-shell';
 
 export default function UnauthorizedPage() {
   const router = useRouter();
 
   return (
-    <div className='bg-background flex min-h-screen flex-col items-center justify-center p-4'>
-      <div className='flex max-w-md flex-col items-center space-y-6 text-center'>
-        <ShieldAlertIcon className='text-destructive h-24 w-24' />
-
-        <h1 className='text-4xl font-bold'>Access Denied</h1>
-
-        <p className='text-muted-foreground text-lg'>
-          You don&apos;t have permission to access this page. Please contact
-          your administrator if you believe this is an error.
+    <AuthPageShell
+      title='Access Denied'
+      description="You don't have permission to access this page."
+    >
+      <div className='flex flex-col items-center gap-6'>
+        <ShieldAlertIcon className='text-destructive h-20 w-20' />
+        <p className='text-muted-foreground text-center text-sm'>
+          Contact your administrator if you believe this is an error.
         </p>
-
-        <div className='flex gap-4'>
-          <Button onClick={() => router.push('/')}>Go to Dashboard</Button>
-
-          <Button variant='outline' onClick={() => router.back()}>
+        <div className='flex w-full flex-col gap-3 sm:w-auto sm:flex-row'>
+          <Button onClick={() => router.push('/')} className='w-full sm:w-auto'>
+            Go to Dashboard
+          </Button>
+          <Button
+            variant='outline'
+            onClick={() => router.back()}
+            className='w-full sm:w-auto'
+          >
             Go Back
           </Button>
         </div>
       </div>
-    </div>
+    </AuthPageShell>
   );
 }

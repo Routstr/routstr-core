@@ -36,7 +36,7 @@ export const CollectModelsRequestSchema = z.object({
 export const CollectModelsResponseSchema = z.object({
   collected_count: z.number(),
   skipped_count: z.number(),
-  models: z.array(z.any()),
+  models: z.array(z.unknown()),
   errors: z.array(z.string()),
 });
 
@@ -90,10 +90,10 @@ export const EnhancedOpenAIModelSchema = z.object({
   created: z.number(),
   description: z.string().optional(),
   context_length: z.number().optional(),
-  architecture: z.any().optional(),
-  pricing: z.any().optional(),
-  top_provider: z.any().optional(),
-  per_request_limits: z.any().optional(),
+  architecture: z.unknown().optional(),
+  pricing: z.unknown().optional(),
+  top_provider: z.unknown().optional(),
+  per_request_limits: z.unknown().optional(),
   supported_parameters: z.array(z.string()).optional(),
   provider_url: z.string(),
   provider_name: z.string().optional(),
@@ -124,7 +124,7 @@ export const BackendModelSchema = z.object({
   provider_id: z.string().optional(),
   provider: z.string().optional(),
   soft_deleted: z.boolean().optional(),
-  architecture: z.any().optional(),
+  architecture: z.unknown().optional(),
   model_type: z.string().optional(),
   description: z.string().optional(),
   context_length: z.number().optional(),
@@ -486,7 +486,7 @@ export class ModelService {
   static async testModel(
     modelId: string,
     endpointType: string,
-    requestData: Record<string, unknown>
+    requestData: unknown
   ): Promise<{
     success: boolean;
     data?: unknown;

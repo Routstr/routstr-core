@@ -5,7 +5,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { type Model } from '@/lib/api/schemas/models';
-import { AdminService } from '@/lib/api/services/admin';
+import { AdminService, type AdminModel } from '@/lib/api/services/admin';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -32,9 +32,9 @@ import { Switch } from '@/components/ui/switch';
 const EditModelFormSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   description: z.string().optional(),
-  context_length: z.coerce.number().min(0),
-  prompt: z.coerce.number().min(0),
-  completion: z.coerce.number().min(0),
+  context_length: z.number().min(0),
+  prompt: z.number().min(0),
+  completion: z.number().min(0),
   enabled: z.boolean(),
 });
 
@@ -45,6 +45,29 @@ const roundToFiveDecimals = (value: number | undefined | null): number => {
     return 0;
   }
   return Math.round(value * 100000) / 100000;
+};
+
+const toNumber = (value: unknown, fallback = 0): number => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return fallback;
+};
+
+const toStringArray = (value: unknown, fallback: string[]): string[] => {
+  if (!Array.isArray(value)) {
+    return fallback;
+  }
+  const filtered = value.filter(
+    (item): item is string => typeof item === 'string'
+  );
+  return filtered.length > 0 ? filtered : fallback;
 };
 
 interface EditModelFormProps {
@@ -82,6 +105,81 @@ interface AdminModelData {
   enabled: boolean;
 }
 
+const normalizeAdminModelData = (
+  adminModel: AdminModel,
+  fallbackModel: Model,
+  providerId: number
+): AdminModelData => {
+  const pricingRecord =
+    adminModel.pricing && typeof adminModel.pricing === 'object'
+      ? (adminModel.pricing as Record<string, unknown>)
+      : {};
+
+  const architectureRecord =
+    adminModel.architecture && typeof adminModel.architecture === 'object'
+      ? (adminModel.architecture as Record<string, unknown>)
+      : {};
+
+  return {
+    id: adminModel.id,
+    name: adminModel.name,
+    description: adminModel.description || '',
+    created: toNumber(adminModel.created, Math.floor(Date.now() / 1000)),
+    context_length: Math.max(
+      0,
+      Math.trunc(
+        toNumber(adminModel.context_length, fallbackModel.contextLength || 4096)
+      )
+    ),
+    architecture: {
+      modality:
+        typeof architectureRecord.modality === 'string'
+          ? architectureRecord.modality
+          : fallbackModel.modelType || 'text',
+      input_modalities: toStringArray(architectureRecord.input_modalities, [
+        fallbackModel.modelType || 'text',
+      ]),
+      output_modalities: toStringArray(architectureRecord.output_modalities, [
+        fallbackModel.modelType || 'text',
+      ]),
+      tokenizer:
+        typeof architectureRecord.tokenizer === 'string'
+          ? architectureRecord.tokenizer
+          : '',
+      instruct_type:
+        typeof architectureRecord.instruct_type === 'string'
+          ? architectureRecord.instruct_type
+          : null,
+    },
+    pricing: {
+      prompt: roundToFiveDecimals(
+        toNumber(pricingRecord.prompt, fallbackModel.input_cost)
+      ),
+      completion: roundToFiveDecimals(
+        toNumber(pricingRecord.completion, fallbackModel.output_cost)
+      ),
+      request: toNumber(pricingRecord.request, 0),
+      image: toNumber(pricingRecord.image, 0),
+      web_search: toNumber(pricingRecord.web_search, 0),
+      internal_reasoning: toNumber(pricingRecord.internal_reasoning, 0),
+    },
+    per_request_limits:
+      adminModel.per_request_limits === null ||
+      adminModel.per_request_limits === undefined
+        ? adminModel.per_request_limits
+        : null,
+    top_provider:
+      adminModel.top_provider === null || adminModel.top_provider === undefined
+        ? adminModel.top_provider
+        : null,
+    upstream_provider_id:
+      typeof adminModel.upstream_provider_id === 'number'
+        ? adminModel.upstream_provider_id
+        : providerId,
+    enabled: adminModel.enabled !== false,
+  };
+};
+
 export function EditModelForm({
   model,
   providerId,
@@ -114,29 +212,28 @@ export function EditModelForm({
     }
 
     try {
-      console.log('Loading admin model:', {
-        providerId,
-        modelId: model.full_name,
-      });
-
       const adminModel = await AdminService.getProviderModel(
         providerId,
         model.id
       );
 
-      setAdminModelData(adminModel as AdminModelData);
+      const normalizedAdminModel = normalizeAdminModelData(
+        adminModel,
+        model,
+        providerId
+      );
+      setAdminModelData(normalizedAdminModel);
       setIsNewOverride(false);
 
       form.reset({
-        name: adminModel.name,
-        description: adminModel.description || '',
-        context_length: adminModel.context_length,
-        prompt: roundToFiveDecimals(adminModel.pricing.prompt),
-        completion: roundToFiveDecimals(adminModel.pricing.completion),
-        enabled: adminModel.enabled !== false,
+        name: normalizedAdminModel.name,
+        description: normalizedAdminModel.description || '',
+        context_length: normalizedAdminModel.context_length,
+        prompt: normalizedAdminModel.pricing.prompt,
+        completion: normalizedAdminModel.pricing.completion,
+        enabled: normalizedAdminModel.enabled !== false,
       });
-    } catch (error: unknown) {
-      console.log('Model not in database, will create new override:', error);
+    } catch {
       setIsNewOverride(true);
       setAdminModelData({
         id: model.full_name,
@@ -238,11 +335,9 @@ export function EditModelForm({
       };
 
       if (isNewOverride) {
-        console.log('Creating new model override');
         await AdminService.createProviderModel(providerId, payload);
         toast.success('Model override created successfully!');
       } else {
-        console.log('Updating existing model override');
         await AdminService.updateProviderModel(
           providerId,
           adminModelData.id,
@@ -318,7 +413,19 @@ export function EditModelForm({
                         type='number'
                         min='0'
                         placeholder='4096'
-                        {...field}
+                        value={field.value ?? ''}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          field.onChange(
+                            value === '' ? 0 : parseInt(value, 10) || 0
+                          );
+                        }}
+                        onBlur={(e) => {
+                          const value = parseInt(e.target.value, 10);
+                          field.onChange(
+                            Number.isNaN(value) ? 0 : Math.max(0, value)
+                          );
+                        }}
                         className='w-full'
                       />
                     </FormControl>

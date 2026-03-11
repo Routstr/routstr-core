@@ -36,7 +36,7 @@ export const ModelSchema = z.object({
 
 // Schema for a model with additional provider-specific settings
 export const ModelWithSettingsSchema = ModelSchema.extend({
-  settings: z.record(z.unknown()).optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
   pricing: z
     .object({
       inputCostPer1kTokens: z.number().optional(),
@@ -54,7 +54,7 @@ export const CreateModelSchema = ModelSchema.omit({
   has_own_api_key: true,
   api_key_type: true,
 }).extend({
-  settings: z.record(z.unknown()).optional(),
+  settings: z.record(z.string(), z.unknown()).optional(),
 });
 
 // Schema for updating an existing model
@@ -67,28 +67,24 @@ export const UpdateModelSchema = ModelSchema.partial().omit({
 });
 
 // Schema for manual model addition form
-export const ManualModelSchema = z
-  .object({
-    name: z.string().min(1, 'Name is required'),
-    full_name: z.string().optional(),
-    input_cost: z.number().min(0, 'Input cost must be non-negative'),
-    output_cost: z.number().min(0, 'Output cost must be non-negative'),
-    provider: z.string().min(1, 'Provider is required'),
-    modelType: z.enum(['text', 'embedding', 'image', 'audio', 'multimodal']),
-    description: z
-      .string()
-      .optional()
-      .transform((val) => (val === '' ? undefined : val)),
-    contextLength: z
-      .number()
-      .int()
-      .min(0)
-      .optional()
-      .transform((val) => (val === 0 ? undefined : val)),
-  })
-  .transform((data) => ({
-    ...data,
-  }));
+export const ManualModelSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  full_name: z.string().optional(),
+  input_cost: z.number().min(0, 'Input cost must be non-negative'),
+  output_cost: z.number().min(0, 'Output cost must be non-negative'),
+  provider: z.string().min(1, 'Provider is required'),
+  modelType: z.enum(['text', 'embedding', 'image', 'audio', 'multimodal']),
+  description: z
+    .string()
+    .optional()
+    .transform((val) => (val === '' ? undefined : val)),
+  contextLength: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .transform((val) => (val === 0 ? undefined : val)),
+});
 
 // Schema for group settings
 export const GroupSettingsSchema = z.object({
@@ -119,7 +115,7 @@ export const ModelListResponseSchema = z.object({
 export const ModelTestRequestSchema = z.object({
   modelId: z.string(),
   input: z.string(),
-  parameters: z.record(z.unknown()).optional(),
+  parameters: z.record(z.string(), z.unknown()).optional(),
 });
 
 // Schema for model testing response

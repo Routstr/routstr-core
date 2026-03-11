@@ -1,7 +1,7 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
-import { Copy, KeyRound, RefreshCcw, Trash2 } from 'lucide-react';
+import { Copy, RefreshCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
+import { WalletBalanceStats } from './wallet-balance-stats';
 import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
 
 export type RefundReceipt = {
@@ -72,10 +73,6 @@ async function fetchWalletInfo(
     validityDate: payload.validity_date,
     childKeys: payload.child_keys,
   };
-}
-
-function formatMsats(msats: number): string {
-  return new Intl.NumberFormat('en-US').format(msats);
 }
 
 function formatSats(msats: number): string {
@@ -308,17 +305,14 @@ export function CashuPaymentWorkflow({
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <KeyRound className='text-primary h-5 w-5' />
-          API key workflow
-        </CardTitle>
-        <p className='text-muted-foreground text-xs tracking-wide uppercase'>
+        <CardTitle className='text-xl'>API key workflow</CardTitle>
+        <p className='text-muted-foreground text-xs tracking-wide'>
           Sections expand as soon as you interact
         </p>
       </CardHeader>
       <CardContent className='space-y-6'>
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>1 · Create key</span>
             {showCreateDetails && (
               <span className='text-primary'>Cashu token detected</span>
@@ -362,7 +356,7 @@ export function CashuPaymentWorkflow({
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>2 · Manage key</span>
             {walletInfo && (
               <span className='text-primary'>
@@ -401,45 +395,17 @@ export function CashuPaymentWorkflow({
             </div>
           </div>
           {showManageDetails && (
-            <div className='grid gap-3 sm:grid-cols-2'>
-              <div className='rounded-lg border p-3'>
-                <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                  Spendable
-                </p>
-                <p className='text-xl font-semibold'>
-                  {walletInfo
-                    ? `${formatSats(walletInfo.balanceMsats)} sats`
-                    : '—'}
-                </p>
-                {walletInfo && (
-                  <p className='text-muted-foreground text-xs'>
-                    {formatMsats(walletInfo.balanceMsats)} msats
-                  </p>
-                )}
-              </div>
-              <div className='rounded-lg border p-3'>
-                <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                  Reserved
-                </p>
-                <p className='text-xl font-semibold'>
-                  {walletInfo
-                    ? `${formatSats(walletInfo.reservedMsats)} sats`
-                    : '—'}
-                </p>
-                {walletInfo && (
-                  <p className='text-muted-foreground text-xs'>
-                    {formatMsats(walletInfo.reservedMsats)} msats
-                  </p>
-                )}
-              </div>
-            </div>
+            <WalletBalanceStats
+              balanceMsats={walletInfo?.balanceMsats}
+              reservedMsats={walletInfo?.reservedMsats}
+            />
           )}
         </section>
 
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>3 · Top up</span>
             {showTopupDetails && (
               <span className={canTopup ? 'text-primary' : 'text-destructive'}>
@@ -482,7 +448,7 @@ export function CashuPaymentWorkflow({
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>4 · Refund</span>
           </header>
           <div className='flex flex-wrap gap-2'>

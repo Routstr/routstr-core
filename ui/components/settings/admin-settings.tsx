@@ -16,7 +16,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { AlertCircle, Save, RefreshCw, Eye, EyeOff } from 'lucide-react';
+import { Skeleton } from '@/components/ui/skeleton';
+import { AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { toast } from 'sonner';
 import { Switch } from '@/components/ui/switch';
 
@@ -63,6 +64,7 @@ interface PasswordData {
 
 export function AdminSettings() {
   const [settings, setSettings] = useState<SettingsData>({});
+  const [initialSettings, setInitialSettings] = useState<SettingsData>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>('');
@@ -87,11 +89,11 @@ export function AdminSettings() {
       setError('');
       const data = await AdminService.getSettings();
       setSettings(data as SettingsData);
+      setInitialSettings(data as SettingsData);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Failed to load settings';
       setError(message);
-      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -104,6 +106,7 @@ export function AdminSettings() {
 
       const updatedData = await AdminService.updateSettings(settings);
       setSettings(updatedData as SettingsData);
+      setInitialSettings(updatedData as SettingsData);
       toast.success('Settings saved successfully');
     } catch (err) {
       const message =
@@ -152,6 +155,15 @@ export function AdminSettings() {
     } finally {
       setPasswordSaving(false);
     }
+  };
+
+  const clearPasswordForm = () => {
+    setPasswordData({
+      current_password: '',
+      new_password: '',
+      confirm_password: '',
+    });
+    setPasswordError('');
   };
 
   const handleInputChange = (field: string, value: unknown) => {
@@ -206,7 +218,7 @@ export function AdminSettings() {
     return (
       <div key={field} className='space-y-2'>
         <Label htmlFor={field}>{label}</Label>
-        <div className='flex gap-2'>
+        <div className='flex flex-col gap-2 sm:flex-row'>
           <Input
             id={field}
             type={showSecrets ? 'text' : 'password'}
@@ -315,23 +327,112 @@ export function AdminSettings() {
     );
   };
 
+  const normalizeForCompare = (value: unknown): unknown => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+
+    if (Array.isArray(value)) {
+      return value;
+    }
+
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+
+    return value;
+  };
+
+  const areValuesEqual = (a: unknown, b: unknown): boolean => {
+    const normalizedA = normalizeForCompare(a);
+    const normalizedB = normalizeForCompare(b);
+
+    if (Array.isArray(normalizedA) && Array.isArray(normalizedB)) {
+      return JSON.stringify(normalizedA) === JSON.stringify(normalizedB);
+    }
+
+    return normalizedA === normalizedB;
+  };
+
+  const hasFieldChanged = (key: string): boolean =>
+    !areValuesEqual(settings[key], initialSettings[key]);
+
+  const basicInfoChanged = [
+    'name',
+    'description',
+    'http_url',
+    'onion_url',
+  ].some(hasFieldChanged);
+  const nostrChanged = ['npub', 'nsec'].some(hasFieldChanged);
+  const cashuMintsChanged = hasFieldChanged('cashu_mints');
+  const relaysChanged = hasFieldChanged('relays');
+  const advancedKeys = Object.keys(settings).filter(
+    (key) => !HANDLED_KEYS.includes(key) && !IGNORED_KEYS.includes(key)
+  );
+  const advancedChanged = advancedKeys.some(hasFieldChanged);
+  const hasPasswordChanges = Boolean(
+    passwordData.current_password ||
+    passwordData.new_password ||
+    passwordData.confirm_password
+  );
+
+  const resetFields = (keys: string[]) => {
+    setSettings((prev) => {
+      const next = { ...prev };
+      keys.forEach((key) => {
+        next[key] = initialSettings[key];
+      });
+      return next;
+    });
+  };
+
+  const resetBasicInfo = () =>
+    resetFields(['name', 'description', 'http_url', 'onion_url']);
+  const resetNostr = () => resetFields(['npub', 'nsec']);
+  const resetCashuMints = () => {
+    resetFields(['cashu_mints']);
+    setNewMint('');
+  };
+  const resetRelays = () => {
+    resetFields(['relays']);
+    setNewRelay('');
+  };
+  const resetAdvanced = () => resetFields(advancedKeys);
+
   if (loading) {
     return (
-      <div className='flex items-center justify-center py-8'>
-        <div className='text-muted-foreground'>Loading settings...</div>
+      <div className='space-y-4'>
+        <div className='space-y-2'>
+          <Skeleton className='h-7 w-48' />
+          <Skeleton className='h-4 w-64 max-w-full' />
+        </div>
+        <Card>
+          <CardHeader className='space-y-2'>
+            <Skeleton className='h-5 w-40' />
+            <Skeleton className='h-4 w-72 max-w-full' />
+          </CardHeader>
+          <CardContent className='space-y-3'>
+            <Skeleton className='h-10 w-full' />
+            <Skeleton className='h-20 w-full' />
+            <Skeleton className='h-10 w-full' />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className='space-y-2'>
+            <Skeleton className='h-5 w-36' />
+            <Skeleton className='h-4 w-64 max-w-full' />
+          </CardHeader>
+          <CardContent className='space-y-3'>
+            <Skeleton className='h-10 w-full' />
+            <Skeleton className='h-10 w-full' />
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
   return (
     <>
-      <div className='mb-6'>
-        <h2 className='text-xl font-semibold tracking-tight'>Admin Settings</h2>
-        <p className='text-muted-foreground'>
-          Configure your Routstr node settings
-        </p>
-      </div>
-
       {error && (
         <Alert variant='destructive' className='mb-6'>
           <AlertCircle className='h-4 w-4' />
@@ -389,6 +490,22 @@ export function AdminSettings() {
               />
             </div>
           </CardContent>
+          {basicInfoChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetBasicInfo}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
         </Card>
 
         {/* Nostr Configuration */}
@@ -411,6 +528,22 @@ export function AdminSettings() {
             </div>
             {renderSecretField('nsec', 'Private Key (nsec)', 'nsec1...')}
           </CardContent>
+          {nostrChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetNostr}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
         </Card>
 
         {/* Cashu Mints */}
@@ -424,14 +557,18 @@ export function AdminSettings() {
           <CardContent className='space-y-4'>
             <div className='space-y-2'>
               <Label htmlFor='newMint'>Add Mint URL</Label>
-              <div className='flex gap-2'>
+              <div className='flex flex-col gap-2 sm:flex-row'>
                 <Input
                   id='newMint'
                   value={newMint}
                   onChange={(e) => setNewMint(e.target.value)}
                   placeholder='https://mint.example.com'
                 />
-                <Button onClick={addMint} disabled={!newMint.trim()}>
+                <Button
+                  onClick={addMint}
+                  disabled={!newMint.trim()}
+                  className='sm:w-auto'
+                >
                   Add Mint
                 </Button>
               </div>
@@ -444,13 +581,14 @@ export function AdminSettings() {
                   {settings.cashu_mints.map((mint, index) => (
                     <div
                       key={index}
-                      className='flex items-center gap-2 rounded border p-2'
+                      className='flex flex-col gap-2 rounded border p-2 sm:flex-row sm:items-center'
                     >
                       <span className='flex-1 text-sm'>{mint}</span>
                       <Button
                         variant='outline'
                         size='sm'
                         onClick={() => removeMint(index)}
+                        className='w-full sm:w-auto'
                       >
                         Remove
                       </Button>
@@ -460,6 +598,22 @@ export function AdminSettings() {
               </div>
             )}
           </CardContent>
+          {cashuMintsChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetCashuMints}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
         </Card>
 
         {/* Relays */}
@@ -473,14 +627,18 @@ export function AdminSettings() {
           <CardContent className='space-y-4'>
             <div className='space-y-2'>
               <Label htmlFor='newRelay'>Add Relay URL</Label>
-              <div className='flex gap-2'>
+              <div className='flex flex-col gap-2 sm:flex-row'>
                 <Input
                   id='newRelay'
                   value={newRelay}
                   onChange={(e) => setNewRelay(e.target.value)}
                   placeholder='wss://relay.example.com'
                 />
-                <Button onClick={addRelay} disabled={!newRelay.trim()}>
+                <Button
+                  onClick={addRelay}
+                  disabled={!newRelay.trim()}
+                  className='sm:w-auto'
+                >
                   Add Relay
                 </Button>
               </div>
@@ -493,13 +651,14 @@ export function AdminSettings() {
                   {settings.relays.map((relay, index) => (
                     <div
                       key={index}
-                      className='flex items-center gap-2 rounded border p-2'
+                      className='flex flex-col gap-2 rounded border p-2 sm:flex-row sm:items-center'
                     >
                       <span className='flex-1 text-sm'>{relay}</span>
                       <Button
                         variant='outline'
                         size='sm'
                         onClick={() => removeRelay(index)}
+                        className='w-full sm:w-auto'
                       >
                         Remove
                       </Button>
@@ -509,6 +668,22 @@ export function AdminSettings() {
               </div>
             )}
           </CardContent>
+          {relaysChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetRelays}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
         </Card>
 
         {/* Other Settings */}
@@ -527,23 +702,22 @@ export function AdminSettings() {
               )
               .map((key) => renderDynamicField(key, settings[key]))}
           </CardContent>
-        </Card>
-
-        <Card className='mt-6'>
-          <CardFooter className='flex justify-between'>
-            <Button
-              variant='outline'
-              onClick={loadSettings}
-              disabled={loading || saving}
-            >
-              <RefreshCw className='mr-2 h-4 w-4' />
-              Reload
-            </Button>
-            <Button onClick={handleSave} disabled={loading || saving}>
-              <Save className='mr-2 h-4 w-4' />
-              {saving ? 'Saving...' : 'Save Settings'}
-            </Button>
-          </CardFooter>
+          {advancedChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetAdvanced}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
         </Card>
 
         {/* Password Change */}
@@ -610,20 +784,30 @@ export function AdminSettings() {
               />
             </div>
           </CardContent>
-          <CardFooter>
-            <Button
-              onClick={handlePasswordUpdate}
-              disabled={
-                passwordSaving ||
-                !passwordData.current_password ||
-                !passwordData.new_password ||
-                !passwordData.confirm_password
-              }
-            >
-              <Save className='mr-2 h-4 w-4' />
-              {passwordSaving ? 'Updating...' : 'Update Password'}
-            </Button>
-          </CardFooter>
+          {hasPasswordChanges ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={clearPasswordForm}
+                  disabled={passwordSaving}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handlePasswordUpdate}
+                  disabled={
+                    passwordSaving ||
+                    !passwordData.current_password ||
+                    !passwordData.new_password ||
+                    !passwordData.confirm_password
+                  }
+                >
+                  {passwordSaving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
         </Card>
       </div>
     </>

@@ -5,16 +5,10 @@ import type { ChangeEvent, FormEvent, ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
 import { adminLogin } from '@/lib/api/services/auth';
 import { ConfigurationService } from '@/lib/api/services/configuration';
 import { toast } from 'sonner';
+import { AuthPageShell } from '@/components/auth-page-shell';
 
 export default function AdminLoginPage(): ReactElement {
   const router = useRouter();
@@ -78,51 +72,42 @@ export default function AdminLoginPage(): ReactElement {
   };
 
   return (
-    <div className='bg-background text-foreground flex min-h-screen items-center justify-center px-4 py-12'>
-      <Card className='border-border/60 bg-card/90 w-full max-w-md border shadow-2xl shadow-black/30 backdrop-blur'>
-        <CardHeader className='space-y-1'>
-          <CardTitle className='text-center text-2xl font-bold'>
-            Admin Login
-          </CardTitle>
-          <CardDescription className='text-center'>
-            Enter your admin password to access the dashboard
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className='space-y-4'>
-            {allowCustomBaseUrl && (
-              <div className='space-y-2'>
-                <Input
-                  type='text'
-                  placeholder='API URL (https://api.example.com)'
-                  value={baseUrl}
-                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                    setBaseUrl(event.target.value)
-                  }
-                  disabled={isLoading}
-                  required
-                />
-              </div>
-            )}
-            <div className='space-y-2'>
-              <Input
-                type='password'
-                placeholder='Admin Password'
-                value={password}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  setPassword(event.target.value)
-                }
-                disabled={isLoading}
-                autoFocus
-                required
-              />
-            </div>
-            <Button type='submit' className='w-full' disabled={isLoading}>
-              {isLoading ? 'Logging in...' : 'Login'}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-    </div>
+    <AuthPageShell
+      title='Admin Login'
+      description='Enter your admin password to access the dashboard.'
+    >
+      <form onSubmit={handleSubmit} className='space-y-4'>
+        {allowCustomBaseUrl && (
+          <div className='space-y-2'>
+            <Input
+              type='text'
+              placeholder='API URL (https://api.example.com)'
+              value={baseUrl}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setBaseUrl(event.target.value)
+              }
+              disabled={isLoading}
+              required
+            />
+          </div>
+        )}
+        <div className='space-y-2'>
+          <Input
+            type='password'
+            placeholder='Admin Password'
+            value={password}
+            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+              setPassword(event.target.value)
+            }
+            disabled={isLoading}
+            autoFocus
+            required
+          />
+        </div>
+        <Button type='submit' className='w-full' disabled={isLoading}>
+          {isLoading ? 'Logging in...' : 'Login'}
+        </Button>
+      </form>
+    </AuthPageShell>
   );
 }

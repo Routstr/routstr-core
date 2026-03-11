@@ -2,7 +2,7 @@
 
 import { type JSX, useCallback, useState } from 'react';
 import Image from 'next/image';
-import { Copy, Zap, CheckCircle, Loader2 } from 'lucide-react';
+import { Copy, CheckCircle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import QRCode from 'qrcode';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Separator } from '@/components/ui/separator';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { KeyOptions } from '@/components/key-options';
 import type { WalletSnapshot } from './key-info-details';
 
@@ -35,6 +36,24 @@ interface LightningPaymentWorkflowProps {
   onApiKeyCreated?: (apiKey: string, walletInfo: WalletSnapshot) => void;
 }
 
+interface InvoiceDetailsCardProps {
+  label: string;
+  amountSats: number;
+  bolt11: string;
+  qrCode: string;
+  waiting: boolean;
+  helperText: string;
+  onCopy: () => void;
+}
+
+interface ApiKeyResultAlertProps {
+  title: string;
+  description: string;
+  apiKey: string;
+  onCopy: () => void;
+  onDismiss: () => void;
+}
+
 function formatSats(msats: number): string {
   return new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
 }
@@ -54,6 +73,113 @@ async function generateQRCodeSVG(text: string): Promise<string> {
     console.error('Failed to generate QR code:', error);
     return '';
   }
+}
+
+function InvoiceDetailsCard({
+  label,
+  amountSats,
+  bolt11,
+  qrCode,
+  waiting,
+  helperText,
+  onCopy,
+}: InvoiceDetailsCardProps): JSX.Element {
+  return (
+    <Card className='bg-muted/30 shadow-none'>
+      <CardContent className='space-y-3 p-4'>
+        <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
+          <span>
+            {label} ({amountSats} sats)
+          </span>
+          <Button
+            variant='outline'
+            size='sm'
+            className='gap-1 text-xs'
+            onClick={onCopy}
+          >
+            <Copy className='h-3 w-3' />
+            Copy
+          </Button>
+        </div>
+
+        {waiting && (
+          <Alert>
+            <Loader2 className='h-4 w-4 animate-spin' />
+            <AlertDescription>Waiting for payment...</AlertDescription>
+          </Alert>
+        )}
+
+        {qrCode && (
+          <div className='flex justify-center'>
+            <Image
+              src={qrCode}
+              alt='QR Code'
+              className='h-48 w-48'
+              width={192}
+              height={192}
+              unoptimized
+            />
+          </div>
+        )}
+
+        <Textarea
+          value={bolt11}
+          readOnly
+          rows={4}
+          className='font-mono text-xs'
+        />
+
+        <p className='text-muted-foreground text-center text-xs'>
+          {helperText}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ApiKeyResultAlert({
+  title,
+  description,
+  apiKey,
+  onCopy,
+  onDismiss,
+}: ApiKeyResultAlertProps): JSX.Element {
+  return (
+    <Alert>
+      <CheckCircle className='h-4 w-4' />
+      <AlertTitle className='flex items-center justify-between gap-2'>
+        <span>{title}</span>
+        <Button
+          variant='outline'
+          size='sm'
+          className='gap-1 text-xs'
+          onClick={onCopy}
+        >
+          <Copy className='h-3 w-3' />
+          Copy
+        </Button>
+      </AlertTitle>
+      <AlertDescription className='space-y-3'>
+        <Textarea
+          value={apiKey}
+          readOnly
+          rows={2}
+          className='font-mono text-xs'
+        />
+        <div className='flex items-center justify-between gap-2'>
+          <span>{description}</span>
+          <Button
+            variant='ghost'
+            size='sm'
+            className='h-6 px-2 text-xs'
+            onClick={onDismiss}
+          >
+            Dismiss
+          </Button>
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
 }
 
 export function LightningPaymentWorkflow({
@@ -388,17 +514,14 @@ export function LightningPaymentWorkflow({
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <Zap className='text-primary h-5 w-5' />
-          Lightning Payment Workflow
-        </CardTitle>
-        <p className='text-muted-foreground text-xs tracking-wide uppercase'>
+        <CardTitle className='text-xl'>Lightning Payment Workflow</CardTitle>
+        <p className='text-muted-foreground text-xs tracking-wide'>
           Create and manage API keys using Lightning Network payments
         </p>
       </CardHeader>
       <CardContent className='space-y-6'>
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>1 · Create key with Lightning</span>
             {showCreateDetails && (
               <span className='text-primary'>Amount specified</span>
@@ -434,95 +557,25 @@ export function LightningPaymentWorkflow({
               </Button>
 
               {createInvoice && (
-                <div className='bg-muted/30 space-y-3 rounded-lg border p-4'>
-                  <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                    <span>
-                      Lightning Invoice ({createInvoice.amount_sats} sats)
-                    </span>
-                    <Button
-                      variant='outline'
-                      size='sm'
-                      className='gap-1 text-xs'
-                      onClick={() => handleCopy(createInvoice.bolt11)}
-                    >
-                      <Copy className='h-3 w-3' />
-                      Copy
-                    </Button>
-                  </div>
-
-                  {isWaitingPayment && (
-                    <div className='flex items-center justify-center gap-2 rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950'>
-                      <Loader2 className='h-4 w-4 animate-spin text-orange-600' />
-                      <span className='text-sm font-medium text-orange-800 dark:text-orange-200'>
-                        Waiting for payment...
-                      </span>
-                    </div>
-                  )}
-
-                  {createQRCode && (
-                    <div className='flex justify-center'>
-                      <Image
-                        src={createQRCode}
-                        alt='QR Code'
-                        className='h-48 w-48'
-                        width={192}
-                        height={192}
-                        unoptimized
-                      />
-                    </div>
-                  )}
-
-                  <Textarea
-                    value={createInvoice.bolt11}
-                    readOnly
-                    rows={4}
-                    className='font-mono text-xs'
-                  />
-
-                  <p className='text-muted-foreground text-center text-xs'>
-                    Scan QR code or copy invoice. Payment will be detected
-                    automatically.
-                  </p>
-                </div>
+                <InvoiceDetailsCard
+                  label='Lightning Invoice'
+                  amountSats={createInvoice.amount_sats}
+                  bolt11={createInvoice.bolt11}
+                  qrCode={createQRCode}
+                  waiting={isWaitingPayment}
+                  helperText='Scan QR code or copy invoice. Payment will be detected automatically.'
+                  onCopy={() => handleCopy(createInvoice.bolt11)}
+                />
               )}
 
               {createdApiKey && (
-                <div className='space-y-3 rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-950'>
-                  <div className='flex items-center justify-between text-[0.7rem] tracking-wider text-green-700 uppercase dark:text-green-300'>
-                    <div className='flex items-center gap-2'>
-                      <CheckCircle className='h-4 w-4' />
-                      <span>API Key Created Successfully</span>
-                    </div>
-                    <Button
-                      variant='outline'
-                      size='sm'
-                      className='gap-1 border-green-300 text-xs hover:bg-green-100 dark:border-green-700 dark:hover:bg-green-900'
-                      onClick={() => handleCopy(createdApiKey)}
-                    >
-                      <Copy className='h-3 w-3' />
-                      Copy
-                    </Button>
-                  </div>
-
-                  <Textarea
-                    value={createdApiKey}
-                    readOnly
-                    rows={2}
-                    className='border-green-200 bg-white font-mono text-xs dark:border-green-800 dark:bg-green-950/50'
-                  />
-
-                  <div className='flex items-center justify-between text-xs text-green-700 dark:text-green-300'>
-                    <span>Your API key is ready to use!</span>
-                    <Button
-                      variant='ghost'
-                      size='sm'
-                      className='h-6 px-2 text-xs text-green-700 hover:text-green-800 dark:text-green-300 dark:hover:text-green-200'
-                      onClick={() => setCreatedApiKey('')}
-                    >
-                      Dismiss
-                    </Button>
-                  </div>
-                </div>
+                <ApiKeyResultAlert
+                  title='API Key Created Successfully'
+                  description='Your API key is ready to use!'
+                  apiKey={createdApiKey}
+                  onCopy={() => handleCopy(createdApiKey)}
+                  onDismiss={() => setCreatedApiKey('')}
+                />
               )}
             </div>
           </div>
@@ -531,7 +584,7 @@ export function LightningPaymentWorkflow({
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>2 · Top up existing key</span>
             {showTopupDetails && (
               <span className='text-primary'>Ready to create invoice</span>
@@ -567,93 +620,25 @@ export function LightningPaymentWorkflow({
               </Button>
 
               {topupInvoice && (
-                <div className='bg-muted/30 space-y-3 rounded-lg border p-4'>
-                  <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
-                    <span>Topup Invoice ({topupInvoice.amount_sats} sats)</span>
-                    <Button
-                      variant='outline'
-                      size='sm'
-                      className='gap-1 text-xs'
-                      onClick={() => handleCopy(topupInvoice.bolt11)}
-                    >
-                      <Copy className='h-3 w-3' />
-                      Copy
-                    </Button>
-                  </div>
-
-                  {topupQRCode && (
-                    <div className='flex justify-center'>
-                      <Image
-                        src={topupQRCode}
-                        alt='QR Code'
-                        className='h-48 w-48'
-                        width={192}
-                        height={192}
-                        unoptimized
-                      />
-                    </div>
-                  )}
-
-                  <Textarea
-                    value={topupInvoice.bolt11}
-                    readOnly
-                    rows={4}
-                    className='font-mono text-xs'
-                  />
-
-                  <p className='text-muted-foreground text-center text-xs'>
-                    Scan QR code or copy invoice. Balance will be added
-                    automatically.
-                  </p>
-
-                  {isWaitingTopupPayment && (
-                    <div className='flex items-center justify-center gap-2 rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950'>
-                      <Loader2 className='h-4 w-4 animate-spin text-orange-600' />
-                      <span className='text-sm font-medium text-orange-800 dark:text-orange-200'>
-                        Waiting for payment...
-                      </span>
-                    </div>
-                  )}
-                </div>
+                <InvoiceDetailsCard
+                  label='Topup Invoice'
+                  amountSats={topupInvoice.amount_sats}
+                  bolt11={topupInvoice.bolt11}
+                  qrCode={topupQRCode}
+                  waiting={isWaitingTopupPayment}
+                  helperText='Scan QR code or copy invoice. Balance will be added automatically.'
+                  onCopy={() => handleCopy(topupInvoice.bolt11)}
+                />
               )}
 
               {topupApiKeyResult && (
-                <div className='space-y-3 rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-950'>
-                  <div className='flex items-center justify-between text-[0.7rem] tracking-wider text-blue-700 uppercase dark:text-blue-300'>
-                    <div className='flex items-center gap-2'>
-                      <CheckCircle className='h-4 w-4' />
-                      <span>Topup Successful</span>
-                    </div>
-                    <Button
-                      variant='outline'
-                      size='sm'
-                      className='gap-1 border-blue-300 text-xs hover:bg-blue-100 dark:border-blue-700 dark:hover:bg-blue-900'
-                      onClick={() => handleCopy(topupApiKeyResult)}
-                    >
-                      <Copy className='h-3 w-3' />
-                      Copy
-                    </Button>
-                  </div>
-
-                  <Textarea
-                    value={topupApiKeyResult}
-                    readOnly
-                    rows={2}
-                    className='border-blue-200 bg-white font-mono text-xs dark:border-blue-800 dark:bg-blue-950/50'
-                  />
-
-                  <div className='flex items-center justify-between text-xs text-blue-700 dark:text-blue-300'>
-                    <span>Balance has been added to your API key!</span>
-                    <Button
-                      variant='ghost'
-                      size='sm'
-                      className='h-6 px-2 text-xs text-blue-700 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200'
-                      onClick={() => setTopupApiKeyResult('')}
-                    >
-                      Dismiss
-                    </Button>
-                  </div>
-                </div>
+                <ApiKeyResultAlert
+                  title='Topup Successful'
+                  description='Balance has been added to your API key!'
+                  apiKey={topupApiKeyResult}
+                  onCopy={() => handleCopy(topupApiKeyResult)}
+                  onDismiss={() => setTopupApiKeyResult('')}
+                />
               )}
             </div>
           )}
@@ -662,7 +647,7 @@ export function LightningPaymentWorkflow({
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>3 · Recover from invoice</span>
             {showRecoverDetails && (
               <span className='text-primary'>Invoice provided</span>
@@ -693,42 +678,13 @@ export function LightningPaymentWorkflow({
           )}
 
           {recoveredApiKey && (
-            <div className='space-y-3 rounded-lg border border-purple-200 bg-purple-50 p-4 dark:border-purple-800 dark:bg-purple-950'>
-              <div className='flex items-center justify-between text-[0.7rem] tracking-wider text-purple-700 uppercase dark:text-purple-300'>
-                <div className='flex items-center gap-2'>
-                  <CheckCircle className='h-4 w-4' />
-                  <span>API Key Recovered</span>
-                </div>
-                <Button
-                  variant='outline'
-                  size='sm'
-                  className='gap-1 border-purple-300 text-xs hover:bg-purple-100 dark:border-purple-700 dark:hover:bg-purple-900'
-                  onClick={() => handleCopy(recoveredApiKey)}
-                >
-                  <Copy className='h-3 w-3' />
-                  Copy
-                </Button>
-              </div>
-
-              <Textarea
-                value={recoveredApiKey}
-                readOnly
-                rows={2}
-                className='border-purple-200 bg-white font-mono text-xs dark:border-purple-800 dark:bg-purple-950/50'
-              />
-
-              <div className='flex items-center justify-between text-xs text-purple-700 dark:text-purple-300'>
-                <span>Your recovered API key is ready to use!</span>
-                <Button
-                  variant='ghost'
-                  size='sm'
-                  className='h-6 px-2 text-xs text-purple-700 hover:text-purple-800 dark:text-purple-300 dark:hover:text-purple-200'
-                  onClick={() => setRecoveredApiKey('')}
-                >
-                  Dismiss
-                </Button>
-              </div>
-            </div>
+            <ApiKeyResultAlert
+              title='API Key Recovered'
+              description='Your recovered API key is ready to use!'
+              apiKey={recoveredApiKey}
+              onCopy={() => handleCopy(recoveredApiKey)}
+              onDismiss={() => setRecoveredApiKey('')}
+            />
           )}
         </section>
       </CardContent>
