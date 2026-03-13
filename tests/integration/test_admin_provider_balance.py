@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.admin import admin_sessions
 from routstr.core.db import UpstreamProviderRow
@@ -29,7 +30,7 @@ def _admin_headers() -> dict[str, str]:
 @pytest.mark.asyncio
 async def test_admin_routstr_provider_balance_timeout_returns_504(
     integration_client: httpx.AsyncClient,
-    integration_session,
+    integration_session: AsyncSession,
 ) -> None:
     provider = await _create_routstr_provider()
     integration_session.add(provider)
@@ -56,7 +57,7 @@ async def test_admin_routstr_provider_balance_timeout_returns_504(
 @pytest.mark.asyncio
 async def test_admin_routstr_provider_balance_request_error_returns_502(
     integration_client: httpx.AsyncClient,
-    integration_session,
+    integration_session: AsyncSession,
 ) -> None:
     provider = await _create_routstr_provider()
     integration_session.add(provider)
