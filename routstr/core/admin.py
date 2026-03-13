@@ -1025,15 +1025,46 @@ async def get_provider_balance(provider_id: int) -> dict[str, object]:
         if provider.provider_type == "routstr":
             import httpx
 
-            async with httpx.AsyncClient() as client:
-                clean_url = provider.base_url.rstrip("/")
-                headers = {}
-                if provider.api_key:
-                    headers["Authorization"] = f"Bearer {provider.api_key}"
-                resp = await client.get(
-                    f"{clean_url}/v1/balance/info",
-                    headers=headers,
-                )
+            clean_url = provider.base_url.rstrip("/")
+            headers = {}
+            if provider.api_key:
+                headers["Authorization"] = f"Bearer {provider.api_key}"
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                try:
+                    resp = await client.get(
+                        f"{clean_url}/v1/balance/info",
+                        headers=headers,
+                    )
+                except httpx.TimeoutException as exc:
+                    logger.error(
+                        "Timed out fetching Routstr provider balance",
+                        extra={
+                            "provider_id": provider_id,
+                            "base_url": clean_url,
+                            "upstream_url": f"{clean_url}/v1/balance/info",
+                            "error": str(exc),
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=504,
+                        detail="Timed out contacting upstream Routstr provider",
+                    ) from exc
+                except httpx.RequestError as exc:
+                    logger.error(
+                        "Failed to fetch Routstr provider balance",
+                        extra={
+                            "provider_id": provider_id,
+                            "base_url": clean_url,
+                            "upstream_url": f"{clean_url}/v1/balance/info",
+                            "error": str(exc),
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Failed to contact upstream Routstr provider",
+                    ) from exc
+
                 if resp.status_code == 200:
                     data = resp.json()
                     # Return balance in sats
