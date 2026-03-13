@@ -4,6 +4,7 @@ Tests GET /v1/providers/ endpoint for listing and managing providers.
 """
 
 import time
+from types import TracebackType
 from typing import Any, Generator
 from unittest.mock import patch
 
@@ -714,13 +715,18 @@ async def test_admin_routstr_topup_retries_transient_upstream_failure(
             return self._data
 
     class MockAsyncClient:
-        def __init__(self):
+        def __init__(self) -> None:
             self.calls = 0
 
         async def __aenter__(self) -> "MockAsyncClient":
             return self
 
-        async def __aexit__(self, exc_type, exc, tb) -> None:
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
             return None
 
         async def post(
