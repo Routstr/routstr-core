@@ -50,6 +50,7 @@ interface ProviderCardProps {
   onDeleteModel: (modelId: string) => void;
   onOverrideModel: (model: AdminModel) => void;
   onUpdateApiKey: (newKey: string) => void;
+  availableMints: string[];
 }
 
 export function ProviderCard({
@@ -69,6 +70,7 @@ export function ProviderCard({
   onDeleteModel,
   onOverrideModel,
   onUpdateApiKey,
+  availableMints,
 }: ProviderCardProps) {
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const hasDetails = Boolean(provider.api_version) || isExpanded;

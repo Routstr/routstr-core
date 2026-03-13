@@ -20,7 +20,7 @@ export const UpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean(),
   provider_fee: z.number().optional(),
-  provider_settings: z.record(z.string(), z.unknown()).optional(),
+  provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
 export const CreateUpstreamProviderSchema = z.object({
@@ -30,7 +30,7 @@ export const CreateUpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().default(true),
   provider_fee: z.number().optional(),
-  provider_settings: z.record(z.string(), z.unknown()).optional(),
+  provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
 export const UpdateUpstreamProviderSchema = z.object({
@@ -40,7 +40,7 @@ export const UpdateUpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().optional(),
   provider_fee: z.number().optional(),
-  provider_settings: z.record(z.string(), z.unknown()).optional(),
+  provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
 export const AdminModelPricingSchema = z.object({
@@ -912,26 +912,17 @@ export class AdminService {
       ok: boolean;
       topup_data: Record<string, unknown>;
       message: string;
-    }>(`/admin/api/upstream-providers/${providerId}/topup`, {
-      amount: amount,
-    });
+    }>(`/admin/api/upstream-providers/${providerId}/topup`, { amount });
   }
 
   static async topupProviderWithToken(
     providerId: number,
-    cashuToken: string
-  ): Promise<{
-    ok: boolean;
-    topup_data: Record<string, unknown>;
-    message: string;
-  }> {
-    return await apiClient.post<{
-      ok: boolean;
-      topup_data: Record<string, unknown>;
-      message: string;
-    }>(`/admin/api/upstream-providers/${providerId}/topup/token`, {
-      cashu_token: cashuToken,
-    });
+    token: string
+  ): Promise<{ ok: boolean; message?: string }> {
+    return await apiClient.post<{ ok: boolean; message?: string }>(
+      `/admin/api/upstream-providers/${providerId}/topup-token`,
+      { token }
+    );
   }
 
   static async checkTopupStatus(
