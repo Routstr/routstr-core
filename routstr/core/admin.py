@@ -1046,6 +1046,30 @@ async def get_provider_balance(provider_id: int) -> dict[str, object]:
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
 
+        # For Routstr providers, proxy the balance check
+        if provider.provider_type == "routstr":
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                clean_url = provider.base_url.rstrip("/")
+                headers = {}
+                if provider.api_key:
+                    headers["Authorization"] = f"Bearer {provider.api_key}"
+                resp = await client.get(
+                    f"{clean_url}/v1/balance/info",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Return balance in sats
+                    balance = data.get("balance", 0)
+                    if isinstance(balance, (int, float)):
+                        return {"ok": True, "balance_data": balance // 1000}
+                    return {"ok": True, "balance_data": balance}
+                else:
+                    logger.error(f"Failed to fetch Routstr balance: {resp.text}")
+                    return {"ok": False, "balance_data": None}
+
         upstream_instance = _instantiate_provider(provider)
         if not upstream_instance:
             raise HTTPException(
@@ -1054,16 +1078,6 @@ async def get_provider_balance(provider_id: int) -> dict[str, object]:
 
         try:
             balance_data = await upstream_instance.get_balance()
-            if balance_data is None:
-                logger.warning(
-                    "Balance check returned no data",
-                    extra={
-                        "provider_id": provider_id,
-                        "provider_type": provider.provider_type,
-                        "base_url": provider.base_url,
-                    },
-                )
-                return {"ok": False, "balance_data": None}
             return {"ok": True, "balance_data": balance_data}
         except NotImplementedError as e:
             raise HTTPException(
