@@ -107,6 +107,8 @@ export function ProviderCard({
                 <ProviderBalance
                   providerId={provider.id}
                   platformUrl={platformUrl}
+                  isRoutstr={provider.provider_type === 'routstr'}
+                  nodeUrl={provider.base_url}
                 />
               </div>
             )}

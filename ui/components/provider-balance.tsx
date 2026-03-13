@@ -23,11 +23,15 @@ import {
 interface ProviderBalanceProps {
   providerId: number;
   platformUrl?: string | null;
+  isRoutstr?: boolean;
+  nodeUrl?: string;
 }
 
 export function ProviderBalance({
   providerId,
   platformUrl,
+  isRoutstr = false,
+  nodeUrl,
 }: ProviderBalanceProps) {
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
   const [topupAmount, setTopupAmount] = useState('');
@@ -153,15 +157,24 @@ export function ProviderBalance({
   let displayValue = 'N/A';
 
   if (typeof balance === 'number') {
-    displayValue = `$${balance.toFixed(2)}`;
+    displayValue = isRoutstr
+      ? `${balance.toLocaleString()} sats`
+      : `$${balance.toFixed(2)}`;
   } else if (balance && typeof balance === 'object') {
     const b = balance as Record<string, unknown>;
     if (typeof b.balance === 'number') {
-      displayValue = `$${b.balance.toFixed(2)}`;
+      displayValue = isRoutstr
+        ? `${b.balance.toLocaleString()} sats`
+        : `$${b.balance.toFixed(2)}`;
     } else if (typeof b.balance === 'string') {
       displayValue = b.balance;
     } else if (b.amount !== undefined) {
-      displayValue = `$${Number(b.amount).toFixed(2)}`;
+      const amount = Number(b.amount);
+      if (!Number.isNaN(amount)) {
+        displayValue = isRoutstr
+          ? `${amount.toLocaleString()} sats`
+          : `$${amount.toFixed(2)}`;
+      }
     }
   }
 
@@ -193,7 +206,9 @@ export function ProviderBalance({
                 ? 'Your account balance has been updated.'
                 : invoiceData
                   ? 'Scan the QR code or copy the Lightning invoice to pay.'
-                  : 'Enter the amount you want to add to your account balance.'}
+                  : isRoutstr
+                    ? `Top up your balance on node ${nodeUrl || ''}`.trim()
+                    : 'Enter the amount you want to add to your account balance.'}
             </DialogDescription>
           </DialogHeader>
 
