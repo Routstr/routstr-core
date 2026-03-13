@@ -451,7 +451,6 @@ export default function ProvidersPage() {
                     data: { api_key: newKey },
                   });
                 }}
-                availableMints={availableMints}
               />
             ))}
           </div>

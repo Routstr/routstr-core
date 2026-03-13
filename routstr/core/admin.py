@@ -822,6 +822,10 @@ class TopupRequest(BaseModel):
     amount: int
 
 
+class CashuTopupRequest(BaseModel):
+    cashu_token: str
+
+
 @admin_router.post(
     "/api/upstream-providers/{provider_id}/topup",
     dependencies=[Depends(require_admin_api)],
@@ -881,6 +885,61 @@ async def initiate_provider_topup(
             logger.error(
                 f"Failed to initiate top-up for provider {provider_id}: {e}",
                 extra={"error_type": type(e).__name__, "error": str(e)},
+            )
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/topup/token",
+    dependencies=[Depends(require_admin_api)],
+)
+async def topup_provider_with_token(
+    provider_id: int, payload: CashuTopupRequest
+) -> dict[str, object]:
+    """Top up the upstream provider account with a Cashu token."""
+    from ..upstream.helpers import _instantiate_provider
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        upstream_instance = _instantiate_provider(provider)
+        if not upstream_instance:
+            raise HTTPException(
+                status_code=400, detail="Could not instantiate provider"
+            )
+
+        cashu_token = payload.cashu_token.strip()
+        if not cashu_token:
+            raise HTTPException(status_code=400, detail="Cashu token is required")
+
+        if not hasattr(upstream_instance, "topup"):
+            raise HTTPException(
+                status_code=400, detail="Provider does not support token top-up"
+            )
+
+        try:
+            topup_data = await upstream_instance.topup(cashu_token)
+            if isinstance(topup_data, dict) and topup_data.get("error"):
+                raise HTTPException(status_code=400, detail=str(topup_data["error"]))
+
+            return {
+                "ok": True,
+                "topup_data": topup_data if isinstance(topup_data, dict) else {},
+                "message": "Token redeemed successfully",
+            }
+        except NotImplementedError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provider does not support token top-up: {str(e)}",
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(
+                f"Failed to top up provider {provider_id} with token: {e}",
+                extra={"error_type": type(e).__name__},
             )
             raise HTTPException(status_code=500, detail=str(e))
 

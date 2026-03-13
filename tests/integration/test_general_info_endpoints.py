@@ -264,12 +264,12 @@ async def test_models_endpoint_accept_headers(integration_client: AsyncClient) -
 async def test_admin_endpoint_unauthenticated(
     integration_client: AsyncClient, db_snapshot: Any
 ) -> None:
-    """Test GET /admin/ endpoint redirects to /"""
+    """Test admin API requires authentication."""
     await db_snapshot.capture()
 
     response = await integration_client.get("/admin/api/settings")
 
-    assert response.status_code == 403
+    assert response.status_code == 401
 
     diff = await db_snapshot.diff()
     assert len(diff["api_keys"]["added"]) == 0
