@@ -1,9 +1,10 @@
-from typing import Any, cast
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, cast
 from unittest.mock import patch
 
 import pytest
 
-from routstr.core.db import ModelRow, UpstreamProviderRow
+from routstr.core.db import AsyncSession, ModelRow, UpstreamProviderRow
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.proxy import refresh_model_maps
 from routstr.upstream.base import BaseUpstreamProvider
@@ -112,11 +113,21 @@ async def test_enforce_lowest_provider_fee_for_same_url(
     assert p1.id is not None
     assert p2.id is not None
 
-    # Need to patch proxy._upstreams
+    # Need to patch proxy._upstreams and proxy.create_session
     mp1: MockProvider = MockProvider(p1.id, url, "key1", 1.01)
     mp2: MockProvider = MockProvider(p2.id, url, "key2", 1.05)
 
-    with patch("routstr.proxy._upstreams", [mp1, mp2]):
+    with (
+        patch("routstr.proxy._upstreams", [mp1, mp2]),
+        patch("routstr.proxy.create_session") as mock_session_factory,
+    ):
+        # Configure mock_session_factory to return a session that uses the test engine
+        @asynccontextmanager
+        async def mock_create_session() -> AsyncGenerator[AsyncSession, None]:
+            yield integration_session
+
+        mock_session_factory.return_value = mock_create_session()
+
         await refresh_model_maps()
 
         # 5. Check which provider is selected for 'model-a'
