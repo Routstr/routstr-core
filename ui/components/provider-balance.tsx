@@ -285,9 +285,7 @@ export function ProviderBalance({
                   id='topup_amount'
                   type='number'
                   placeholder={
-                    isRoutstr
-                      ? 'Enter amount in sats'
-                      : 'Enter amount (1-500)'
+                    isRoutstr ? 'Enter amount in sats' : 'Enter amount (1-500)'
                   }
                   value={topupAmount}
                   onChange={(e) => {
