@@ -70,7 +70,6 @@ export function ProviderCard({
   onDeleteModel,
   onOverrideModel,
   onUpdateApiKey,
-  availableMints,
 }: ProviderCardProps) {
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const hasDetails = Boolean(provider.api_version) || isExpanded;
