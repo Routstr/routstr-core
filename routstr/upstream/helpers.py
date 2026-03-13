@@ -63,7 +63,9 @@ def resolve_model_alias(
                     aliases.append(canonical_base)
 
     if alias_ids:
-        aliases.extend(alias_ids)
+        for aid in alias_ids:
+            if aid not in aliases:
+                aliases.append(aid)
 
     return aliases
 

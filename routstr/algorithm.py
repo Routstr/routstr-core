@@ -89,7 +89,7 @@ def create_model_mappings(
     overrides_by_id: dict[str, tuple],
     disabled_model_ids: set[str],
 ) -> tuple[
-    dict[str, "Model"], dict[str, list["BaseUpstreamProvider"]], dict[str, "Model"]
+    dict[str, "Model"], dict[str, list[tuple["BaseUpstreamProvider", "Model"]]], dict[str, "Model"]
 ]:
     """Create optimal model mappings based on cost and provider preferences.
 
@@ -298,7 +298,7 @@ def create_model_mappings(
 
     # Sort candidates and build final maps
     model_instances: dict[str, "Model"] = {}
-    provider_map: dict[str, list["BaseUpstreamProvider"]] = {}
+    provider_map: dict[str, list[tuple["BaseUpstreamProvider", "Model"]]] = {}
 
     def alias_priority(model: "Model", alias: str) -> int:
         """Rank how strong the mapping of alias->model is."""
@@ -326,13 +326,13 @@ def create_model_mappings(
 
         best_model, best_provider = items[0]
         model_instances[alias] = best_model
-        provider_map[alias] = [p for _, p in items]
+        provider_map[alias] = [(p, m) for m, p in items]
 
     # Log provider distribution (using top provider for stats)
     provider_counts: dict[str, int] = {}
     for providers in provider_map.values():
         if providers:
-            provider = providers[0]
+            provider, _model = providers[0]
             provider_name = getattr(provider, "upstream_name", "unknown")
             provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
 

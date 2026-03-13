@@ -34,8 +34,8 @@ proxy_router = APIRouter()
 _upstreams: list[BaseUpstreamProvider] = []
 _model_instances: dict[str, Model] = {}  # All aliases -> Model
 _provider_map: dict[
-    str, list[BaseUpstreamProvider]
-] = {}  # All aliases -> List[Provider]
+    str, list[tuple[BaseUpstreamProvider, Model]]
+] = {}  # All aliases -> List[(Provider, Model)]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
@@ -72,8 +72,10 @@ def get_model_instance(model_id: str) -> Model | None:
     return _model_instances.get(model_id.lower())
 
 
-def get_provider_for_model(model_id: str) -> list[BaseUpstreamProvider] | None:
-    """Get UpstreamProvider list for model ID from global cache."""
+def get_provider_for_model(
+    model_id: str,
+) -> list[tuple[BaseUpstreamProvider, Model]] | None:
+    """Get UpstreamProvider list (with their Model) for model ID from global cache."""
     return _provider_map.get(model_id.lower())
 
 
@@ -180,15 +182,15 @@ async def proxy(
 
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
-        for i, upstream in enumerate(upstreams):
+        for i, (upstream, upstream_model) in enumerate(upstreams):
             try:
                 if is_responses_api:
                     return await upstream.handle_x_cashu_responses(
-                        request, x_cashu, path, max_cost_for_model, model_obj
+                        request, x_cashu, path, max_cost_for_model, upstream_model
                     )
                 else:
                     return await upstream.handle_x_cashu(
-                        request, x_cashu, path, max_cost_for_model, model_obj
+                        request, x_cashu, path, max_cost_for_model, upstream_model
                     )
             except UpstreamError as e:
                 logger.warning(
@@ -222,7 +224,7 @@ async def proxy(
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
 
         last_error_response = None
-        for i, upstream in enumerate(upstreams):
+        for i, (upstream, _upstream_model) in enumerate(upstreams):
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
@@ -269,7 +271,11 @@ async def proxy(
     if request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
-    for i, upstream in enumerate(upstreams):
+    for i, (upstream, upstream_model) in enumerate(upstreams):
+        logger.info(f"Selected upstream provider: {upstream.provider_type}")
+        logger.info(
+            f"Forwarding request to {upstream.provider_type} for model {upstream_model.id}"
+        )
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
@@ -283,7 +289,7 @@ async def proxy(
                         key,
                         max_cost_for_model,
                         session,
-                        model_obj,
+                        upstream_model,
                     )
                 else:
                     response = await upstream.forward_request(
@@ -294,7 +300,7 @@ async def proxy(
                         key,
                         max_cost_for_model,
                         session,
-                        model_obj,
+                        upstream_model,
                     )
             except UpstreamError:
                 # Let the outer UpstreamError handler manage retry/revert
