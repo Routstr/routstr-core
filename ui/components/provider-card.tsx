@@ -19,11 +19,15 @@ import {
   Pencil,
   Trash2,
   Key,
+  RotateCcw,
 } from 'lucide-react';
 import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
+import { RoutstrProviderService } from '@/lib/api/services/routstr-provider';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import {
   Dialog,
@@ -71,8 +75,28 @@ export function ProviderCard({
   onOverrideModel,
   onUpdateApiKey,
 }: ProviderCardProps) {
+  const queryClient = useQueryClient();
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const hasDetails = Boolean(provider.api_version) || isExpanded;
+  const isRoutstr = provider.provider_type === 'routstr';
+
+  const refundMutation = useMutation({
+    mutationFn: () => RoutstrProviderService.refundBalance(provider.id),
+    onSuccess: (data) => {
+      if (data.ok) {
+        toast.success('Refund successful', { description: data.message });
+        queryClient.invalidateQueries({
+          queryKey: ['provider-balance', provider.id],
+        });
+        queryClient.invalidateQueries({ queryKey: ['balances'] });
+      } else {
+        toast.error('Refund failed', { description: data.message });
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(`Refund error: ${error.message}`);
+    },
+  });
 
   return (
     <Card>
@@ -112,7 +136,7 @@ export function ProviderCard({
               </div>
             )}
 
-            {provider.provider_type === 'routstr' && (
+            {isRoutstr && (
               <Button
                 variant='outline'
                 size='sm'
@@ -126,6 +150,25 @@ export function ProviderCard({
               >
                 <Key className='h-4 w-4' />
                 <span>New Key</span>
+              </Button>
+            )}
+
+            {isRoutstr && provider.api_key && (
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => refundMutation.mutate()}
+                disabled={refundMutation.isPending}
+                className='justify-center gap-1.5 text-orange-600 hover:text-orange-700 dark:text-orange-400'
+                title='Refund balance to local wallet'
+              >
+                <RotateCcw
+                  className={cn(
+                    'h-4 w-4',
+                    refundMutation.isPending && 'animate-spin'
+                  )}
+                />
+                <span>Refund</span>
               </Button>
             )}
 
@@ -172,16 +215,41 @@ export function ProviderCard({
       <Dialog open={isKeyModalOpen} onOpenChange={setIsKeyModalOpen}>
         <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[500px]'>
           <DialogHeader>
-            <DialogTitle>Generate New Key</DialogTitle>
+            <DialogTitle>
+              {provider.api_key
+                ? 'Create New Key on Upstream Node'
+                : 'Create API Key'}
+            </DialogTitle>
             <DialogDescription>
-              Create a new API key for provider{' '}
-              <span className='font-medium'>{provider.provider_type}</span>.
+              {provider.api_key
+                ? 'Create a new API key on the upstream node. The remaining balance on the current key will be automatically refunded to your local wallet before it is replaced.'
+                : 'Create an API key on the upstream Routstr node to enable balance, top-up, and refund operations.'}
             </DialogDescription>
           </DialogHeader>
           <div className='py-4'>
             <RoutstrCreateKeySection
               baseUrl={provider.base_url || ''}
-              onApiKeyCreated={(newApiKey) => {
+              onApiKeyCreated={async (newApiKey) => {
+                if (provider.api_key) {
+                  try {
+                    const result = await RoutstrProviderService.refundBalance(
+                      provider.id
+                    );
+                    if (result.ok) {
+                      toast.success('Old key refunded', {
+                        description: result.message,
+                      });
+                    } else {
+                      toast.warning('Refund skipped', {
+                        description: result.message,
+                      });
+                    }
+                  } catch (error) {
+                    toast.warning(
+                      `Could not refund old key: ${error instanceof Error ? error.message : 'Unknown error'}`
+                    );
+                  }
+                }
                 onUpdateApiKey(newApiKey);
                 setIsKeyModalOpen(false);
               }}
