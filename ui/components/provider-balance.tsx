@@ -104,14 +104,23 @@ export function ProviderBalance({
   });
 
   const handleTopup = () => {
-    const amount = parseFloat(topupAmount);
+    const amount = Number(topupAmount);
 
-    if (isNaN(amount)) {
-      setTopupError('Please enter a valid amount');
+    if (Number.isNaN(amount)) {
+      setTopupError(
+        isRoutstr
+          ? 'Please enter a valid amount in sats'
+          : 'Please enter a valid amount'
+      );
       return;
     }
 
-    if (amount < 1 || amount > 500) {
+    if (isRoutstr) {
+      if (!Number.isInteger(amount) || amount < 1) {
+        setTopupError('Amount must be a whole number of sats');
+        return;
+      }
+    } else if (amount < 1 || amount > 500) {
       setTopupError('Amount must be between $1 and $500');
       return;
     }
@@ -269,20 +278,31 @@ export function ProviderBalance({
           ) : (
             <div className='grid gap-4 py-4'>
               <div className='grid gap-2'>
-                <Label htmlFor='topup_amount'>Amount (USD)</Label>
+                <Label htmlFor='topup_amount'>
+                  {isRoutstr ? 'Amount (sats)' : 'Amount (USD)'}
+                </Label>
                 <Input
                   id='topup_amount'
                   type='number'
-                  placeholder='Enter amount (1-500)'
+                  placeholder={
+                    isRoutstr
+                      ? 'Enter amount in sats'
+                      : 'Enter amount (1-500)'
+                  }
                   value={topupAmount}
                   onChange={(e) => {
                     setTopupAmount(e.target.value);
                     setTopupError('');
                   }}
                   min='1'
-                  max='500'
-                  step='0.01'
+                  max={isRoutstr ? undefined : '500'}
+                  step={isRoutstr ? '1' : '0.01'}
                 />
+                {isRoutstr && (
+                  <p className='text-muted-foreground text-sm'>
+                    The invoice amount will be created in sats.
+                  </p>
+                )}
                 {topupError && (
                   <p className='text-destructive text-sm'>{topupError}</p>
                 )}
