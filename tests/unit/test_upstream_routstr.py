@@ -1,3 +1,4 @@
+from types import TracebackType
 from unittest.mock import Mock
 
 import httpx
@@ -15,7 +16,12 @@ class DummyAsyncClient:
     async def __aenter__(self) -> "DummyAsyncClient":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
         return False
 
     async def get(
