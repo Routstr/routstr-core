@@ -3,12 +3,16 @@ Integration tests for provider management functionality.
 Tests GET /v1/providers/ endpoint for listing and managing providers.
 """
 
+import time
+from types import TracebackType
 from typing import Any, Generator
 from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
 
+from routstr.core.admin import admin_sessions
+from routstr.core.db import UpstreamProviderRow
 from routstr.nostr.discovery import _PROVIDERS_CACHE
 
 from .utils import ResponseValidator
@@ -678,3 +682,88 @@ async def test_no_database_changes_during_provider_operations(
     assert final_diff["api_keys"]["added"] == []
     assert final_diff["api_keys"]["modified"] == []
     assert final_diff["api_keys"]["removed"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_routstr_topup_retries_transient_upstream_failure(
+    integration_client: AsyncClient,
+    integration_session: Any,
+) -> None:
+    admin_token = "test-admin-token"
+    admin_sessions[admin_token] = int(time.time()) + 3600
+    integration_client.headers["Authorization"] = f"Bearer {admin_token}"
+
+    provider = UpstreamProviderRow(
+        provider_type="routstr",
+        base_url="https://node.example",
+        api_key="sk-upstream-test",
+        enabled=True,
+        provider_fee=1.01,
+    )
+    integration_session.add(provider)
+    await integration_session.commit()
+    await integration_session.refresh(provider)
+
+    class MockResponse:
+        def __init__(self, status_code: int, data: dict[str, Any] | None = None):
+            self.status_code = status_code
+            self._data = data or {}
+            self.text = str(self._data)
+
+        def json(self) -> dict[str, Any]:
+            return self._data
+
+    class MockAsyncClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __aenter__(self) -> "MockAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc: BaseException | None,
+            tb: TracebackType | None,
+        ) -> None:
+            return None
+
+        async def post(
+            self, url: str, json: dict[str, Any], headers: dict[str, str]
+        ) -> MockResponse:
+            self.calls += 1
+            assert url == "https://node.example/v1/balance/lightning/invoice"
+            assert json["amount_sats"] == 10
+            assert json["purpose"] == "topup"
+            assert json["api_key"] == "sk-upstream-test"
+            assert headers["Authorization"] == "Bearer sk-upstream-test"
+
+            if self.calls == 1:
+                return MockResponse(500, {"detail": "warmup failure"})
+
+            return MockResponse(
+                200,
+                {
+                    "bolt11": "lnbc1testinvoice",
+                    "invoice_id": "invoice-123",
+                },
+            )
+
+    mock_client = MockAsyncClient()
+
+    try:
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            response = await integration_client.post(
+                f"/admin/api/upstream-providers/{provider.id}/topup",
+                json={"amount": 10},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["topup_data"]["payment_request"] == "lnbc1testinvoice"
+        assert data["topup_data"]["invoice_id"] == "invoice-123"
+        assert mock_client.calls == 2
+    finally:
+        admin_sessions.pop(admin_token, None)

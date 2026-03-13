@@ -23,11 +23,15 @@ import {
 interface ProviderBalanceProps {
   providerId: number;
   platformUrl?: string | null;
+  isRoutstr?: boolean;
+  nodeUrl?: string;
 }
 
 export function ProviderBalance({
   providerId,
   platformUrl,
+  isRoutstr = false,
+  nodeUrl,
 }: ProviderBalanceProps) {
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
   const [topupAmount, setTopupAmount] = useState('');
@@ -100,14 +104,23 @@ export function ProviderBalance({
   });
 
   const handleTopup = () => {
-    const amount = parseFloat(topupAmount);
+    const amount = Number(topupAmount);
 
-    if (isNaN(amount)) {
-      setTopupError('Please enter a valid amount');
+    if (Number.isNaN(amount)) {
+      setTopupError(
+        isRoutstr
+          ? 'Please enter a valid amount in sats'
+          : 'Please enter a valid amount'
+      );
       return;
     }
 
-    if (amount < 1 || amount > 500) {
+    if (isRoutstr) {
+      if (!Number.isInteger(amount) || amount < 1) {
+        setTopupError('Amount must be a whole number of sats');
+        return;
+      }
+    } else if (amount < 1 || amount > 500) {
       setTopupError('Amount must be between $1 and $500');
       return;
     }
@@ -153,15 +166,24 @@ export function ProviderBalance({
   let displayValue = 'N/A';
 
   if (typeof balance === 'number') {
-    displayValue = `$${balance.toFixed(2)}`;
+    displayValue = isRoutstr
+      ? `${balance.toLocaleString()} sats`
+      : `$${balance.toFixed(2)}`;
   } else if (balance && typeof balance === 'object') {
     const b = balance as Record<string, unknown>;
     if (typeof b.balance === 'number') {
-      displayValue = `$${b.balance.toFixed(2)}`;
+      displayValue = isRoutstr
+        ? `${b.balance.toLocaleString()} sats`
+        : `$${b.balance.toFixed(2)}`;
     } else if (typeof b.balance === 'string') {
       displayValue = b.balance;
     } else if (b.amount !== undefined) {
-      displayValue = `$${Number(b.amount).toFixed(2)}`;
+      const amount = Number(b.amount);
+      if (!Number.isNaN(amount)) {
+        displayValue = isRoutstr
+          ? `${amount.toLocaleString()} sats`
+          : `$${amount.toFixed(2)}`;
+      }
     }
   }
 
@@ -193,7 +215,9 @@ export function ProviderBalance({
                 ? 'Your account balance has been updated.'
                 : invoiceData
                   ? 'Scan the QR code or copy the Lightning invoice to pay.'
-                  : 'Enter the amount you want to add to your account balance.'}
+                  : isRoutstr
+                    ? `Top up your balance on node ${nodeUrl || ''}`.trim()
+                    : 'Enter the amount you want to add to your account balance.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -254,20 +278,29 @@ export function ProviderBalance({
           ) : (
             <div className='grid gap-4 py-4'>
               <div className='grid gap-2'>
-                <Label htmlFor='topup_amount'>Amount (USD)</Label>
+                <Label htmlFor='topup_amount'>
+                  {isRoutstr ? 'Amount (sats)' : 'Amount (USD)'}
+                </Label>
                 <Input
                   id='topup_amount'
                   type='number'
-                  placeholder='Enter amount (1-500)'
+                  placeholder={
+                    isRoutstr ? 'Enter amount in sats' : 'Enter amount (1-500)'
+                  }
                   value={topupAmount}
                   onChange={(e) => {
                     setTopupAmount(e.target.value);
                     setTopupError('');
                   }}
                   min='1'
-                  max='500'
-                  step='0.01'
+                  max={isRoutstr ? undefined : '500'}
+                  step={isRoutstr ? '1' : '0.01'}
                 />
+                {isRoutstr && (
+                  <p className='text-muted-foreground text-sm'>
+                    The invoice amount will be created in sats.
+                  </p>
+                )}
                 {topupError && (
                   <p className='text-destructive text-sm'>{topupError}</p>
                 )}

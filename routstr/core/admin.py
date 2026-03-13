@@ -1,3 +1,4 @@
+import asyncio
 import json
 import secrets
 from datetime import datetime, timezone
@@ -865,12 +866,6 @@ async def initiate_provider_topup(
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
 
-        upstream_instance = _instantiate_provider(provider)
-        if not upstream_instance:
-            raise HTTPException(
-                status_code=400, detail="Could not instantiate provider"
-            )
-
         try:
             logger.info(
                 f"Initiating top-up for provider {provider_id}",
@@ -884,38 +879,68 @@ async def initiate_provider_topup(
 
                 async with httpx.AsyncClient() as client:
                     clean_url = provider.base_url.rstrip("/")
-                    # Proxy the request to upstream Routstr
-                    # Use the actual API key from the database
-                    resp = await client.post(
-                        f"{clean_url}/v1/balance/lightning/invoice",
-                        json={
-                            "amount_sats": int(payload.amount),
-                            "purpose": "topup",
-                            "api_key": provider.api_key,
-                        },
-                        headers={"Authorization": f"Bearer {provider.api_key}"} if provider.api_key else {},
+                    request_json = {
+                        "amount_sats": int(payload.amount),
+                        "purpose": "topup",
+                        "api_key": provider.api_key,
+                    }
+                    headers = (
+                        {"Authorization": f"Bearer {provider.api_key}"}
+                        if provider.api_key
+                        else {}
                     )
 
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        return {
-                            "ok": True,
-                            "topup_data": {
-                                "payment_request": data.get("bolt11"),
-                                "invoice_id": data.get("invoice_id"),
-                                "status": "pending",
-                            },
-                        }
-                    else:
-                        logger.error(f"Upstream topup request failed: {resp.text}")
-                        # Check if it's JSON error
-                        try:
-                            error_detail = resp.json()
-                        except Exception:
-                            error_detail = resp.text
-                        raise HTTPException(
-                            status_code=resp.status_code, detail=error_detail
+                    last_status_code = 500
+                    last_error_detail: object = "Failed to create top-up invoice"
+
+                    # Some upstream Routstr nodes fail the first invoice request after warm-up
+                    # and succeed immediately on retry. Retry once here so the UI stays single-click.
+                    for attempt in range(2):
+                        resp = await client.post(
+                            f"{clean_url}/v1/balance/lightning/invoice",
+                            json=request_json,
+                            headers=headers,
                         )
+
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            return {
+                                "ok": True,
+                                "topup_data": {
+                                    "payment_request": data.get("bolt11"),
+                                    "invoice_id": data.get("invoice_id"),
+                                    "status": "pending",
+                                },
+                            }
+
+                        logger.error(
+                            f"Upstream topup request failed: {resp.text}",
+                            extra={
+                                "provider_id": provider_id,
+                                "attempt": attempt + 1,
+                                "status_code": resp.status_code,
+                            },
+                        )
+                        try:
+                            last_error_detail = resp.json()
+                        except Exception:
+                            last_error_detail = resp.text
+                        last_status_code = resp.status_code
+
+                        if resp.status_code < 500 or attempt == 1:
+                            break
+
+                        await asyncio.sleep(0.2)
+
+                    raise HTTPException(
+                        status_code=last_status_code, detail=last_error_detail
+                    )
+
+            upstream_instance = _instantiate_provider(provider)
+            if not upstream_instance:
+                raise HTTPException(
+                    status_code=400, detail="Could not instantiate provider"
+                )
 
             topup_data = await upstream_instance.initiate_topup(payload.amount)
 

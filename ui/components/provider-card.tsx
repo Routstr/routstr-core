@@ -70,7 +70,6 @@ export function ProviderCard({
   onDeleteModel,
   onOverrideModel,
   onUpdateApiKey,
-  availableMints,
 }: ProviderCardProps) {
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const hasDetails = Boolean(provider.api_version) || isExpanded;
@@ -107,6 +106,8 @@ export function ProviderCard({
                 <ProviderBalance
                   providerId={provider.id}
                   platformUrl={platformUrl}
+                  isRoutstr={provider.provider_type === 'routstr'}
+                  nodeUrl={provider.base_url}
                 />
               </div>
             )}
