@@ -2,6 +2,7 @@ import os
 import pathlib
 import sqlite3
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -134,7 +135,8 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
 
     id: str = Field(
         primary_key=True,
-        description="SHA-256 hash of the x-cashu token or unique identifier",
+        default_factory=lambda: uuid.uuid4().hex,
+        description="Unique transaction identifier",
     )
     token: str = Field(description="Serialized Cashu token")
     amount: int = Field(description="Amount in the token's unit")
@@ -151,31 +153,33 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
 
 
 async def store_cashu_transaction(
-    id: str,
     token: str,
     amount: int,
     unit: str,
     mint_url: str | None = None,
-    type: str = "out",
+    typ: str = "out",
     request_id: str | None = None,
+    collected: bool = False,
+    created_at: int | None = None,
 ) -> None:
     try:
         async with create_session() as session:
             tx = CashuTransaction(
-                id=id,
                 token=token,
                 amount=amount,
                 unit=unit,
                 mint_url=mint_url,
-                type=type,
+                type=typ,
                 request_id=request_id,
+                collected=collected,
+                created_at=created_at or int(time.time()),
             )
             session.add(tx)
             await session.commit()
     except Exception as e:
         logger.warning(
-            "Failed to store cashu transaction",
-            extra={"error": str(e), "id": id, "type": type},
+            f"Failed to store cashu transaction: {e} (type={typ})",
+            extra={"error": str(e), "type": typ},
         )
 
 

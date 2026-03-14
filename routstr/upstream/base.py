@@ -1686,6 +1686,7 @@ class BaseUpstreamProvider:
         unit: str,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> str:
         """Create and send a refund token to the user.
 
@@ -1694,6 +1695,7 @@ class BaseUpstreamProvider:
             unit: Unit of the refund (sat or msat)
             mint: Optional mint URL for the refund token
             payment_token_hash: Optional SHA-256 hash of the original payment token for storage
+            request_id: Optional HTTP request ID for tracking
 
         Returns:
             Refund token string
@@ -1723,18 +1725,17 @@ class BaseUpstreamProvider:
                     },
                 )
 
-                if payment_token_hash:
-                    try:
-                        await store_cashu_transaction(
-                            id=payment_token_hash,
-                            token=refund_token,
-                            amount=amount,
-                            unit=unit,
-                            mint_url=mint,
-                            type="out",
-                        )
-                    except Exception:
-                        pass  # store_cashu_transaction already logs
+                try:
+                    await store_cashu_transaction(
+                        token=refund_token,
+                        amount=amount,
+                        unit=unit,
+                        mint_url=mint,
+                        typ="out",
+                        request_id=request_id,
+                    )
+                except Exception:
+                    pass  # store_cashu_transaction already logs
 
                 return refund_token
             except Exception as e:
@@ -1786,6 +1787,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1868,7 +1870,8 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash
+                            refund_amount, unit, mint, payment_token_hash,
+                            request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
 
@@ -1923,6 +1926,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1995,7 +1999,8 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash
+                    refund_amount, unit, mint, payment_token_hash,
+                    request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
 
@@ -2032,18 +2037,17 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
-            if payment_token_hash:
-                try:
-                    await store_cashu_transaction(
-                        id=payment_token_hash,
-                        token=refund_token,
-                        amount=emergency_refund,
-                        unit=unit,
-                        mint_url=mint,
-                        type="out",
-                    )
-                except Exception:
-                    pass
+            try:
+                await store_cashu_transaction(
+                    token=refund_token,
+                    amount=emergency_refund,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="out",
+                    request_id=getattr(request.state, "request_id", None),
+                )
+            except Exception:
+                pass
 
             logger.warning(
                 "Emergency refund issued due to JSON parse error",
@@ -2069,6 +2073,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -2112,6 +2117,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     payment_token_hash,
+                    request_id=request_id,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
@@ -2122,6 +2128,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     payment_token_hash,
+                    request_id=request_id,
                 )
 
         except Exception as e:
@@ -2222,7 +2229,8 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash
+                        amount - 60, unit, mint, payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
                     )
 
                     logger.info(
@@ -2267,6 +2275,7 @@ class BaseUpstreamProvider:
                         max_cost_for_model,
                         mint,
                         payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -2345,6 +2354,20 @@ class BaseUpstreamProvider:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
+
+            request_id = getattr(request.state, "request_id", None)
+            try:
+                await store_cashu_transaction(
+                    token=x_cashu_token,
+                    amount=amount,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="in",
+                    request_id=request_id,
+                    collected=True,
+                )
+            except Exception:
+                pass
 
             logger.info(
                 "X-Cashu token redeemed for Responses API",
@@ -2493,7 +2516,8 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash
+                        amount - 60, unit, mint, payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
                     )
 
                     logger.info(
@@ -2538,6 +2562,7 @@ class BaseUpstreamProvider:
                         max_cost_for_model,
                         mint,
                         payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -2588,6 +2613,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle Responses API completion response for X-Cashu payment.
 
@@ -2632,6 +2658,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     payment_token_hash,
+                    request_id=request_id,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_responses_response(
@@ -2642,6 +2669,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     payment_token_hash,
+                    request_id=request_id,
                 )
 
         except Exception as e:
@@ -2669,6 +2697,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API response for X-Cashu payment.
 
@@ -2751,7 +2780,8 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash
+                            refund_amount, unit, mint, payment_token_hash,
+                            request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
 
@@ -2806,6 +2836,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> Response:
         """Handle non-streaming Responses API response for X-Cashu payment."""
         logger.debug(
@@ -2866,7 +2897,8 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash
+                    refund_amount, unit, mint, payment_token_hash,
+                    request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
 
@@ -2903,18 +2935,17 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
-            if payment_token_hash:
-                try:
-                    await store_cashu_transaction(
-                        id=payment_token_hash,
-                        token=refund_token,
-                        amount=emergency_refund,
-                        unit=unit,
-                        mint_url=mint,
-                        type="out",
-                    )
-                except Exception:
-                    pass
+            try:
+                await store_cashu_transaction(
+                    token=refund_token,
+                    amount=emergency_refund,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="out",
+                    request_id=getattr(request.state, "request_id", None),
+                )
+            except Exception:
+                pass
 
             logger.warning(
                 "Emergency refund issued for Responses API due to JSON parse error",
@@ -2968,6 +2999,20 @@ class BaseUpstreamProvider:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
+
+            request_id = getattr(request.state, "request_id", None)
+            try:
+                await store_cashu_transaction(
+                    token=x_cashu_token,
+                    amount=amount,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="in",
+                    request_id=request_id,
+                    collected=True,
+                )
+            except Exception:
+                pass
 
             logger.info(
                 "X-Cashu token redeemed successfully",

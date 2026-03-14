@@ -16,7 +16,13 @@ from ..wallet import (
     send_token,
     slow_filter_spend_proofs,
 )
-from .db import ApiKey, CashuTransaction, ModelRow, UpstreamProviderRow, create_session
+from .db import (
+    ApiKey,
+    CashuTransaction,
+    ModelRow,
+    UpstreamProviderRow,
+    create_session,
+)
 from .log_manager import log_manager
 from .logging import get_logger
 from .settings import SettingsService, settings
@@ -1234,7 +1240,7 @@ async def get_transactions_api(
                 stmt = stmt.where(CashuTransaction.swept == True)  # noqa: E712
             elif status == "pending":
                 stmt = stmt.where(
-                    not CashuTransaction.collected,
+                    CashuTransaction.collected == False,
                     CashuTransaction.swept == False,  # noqa: E712
                 )
 
