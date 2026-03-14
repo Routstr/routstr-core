@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import math
 import time
 from typing import TypedDict
@@ -36,20 +35,6 @@ async def recieve_token(
 
     wallet.verify_proofs_dleq(token_obj.proofs)
     await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
-
-    # Store incoming transaction
-    try:
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
-        await db.store_cashu_transaction(
-            id=token_hash,
-            token=token,
-            amount=token_obj.amount,
-            unit=token_obj.unit,
-            mint_url=token_obj.mint,
-            type="in",
-        )
-    except Exception:
-        pass
 
     return token_obj.amount, token_obj.unit, token_obj.mint
 

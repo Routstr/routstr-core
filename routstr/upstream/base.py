@@ -2044,7 +2044,7 @@ class BaseUpstreamProvider:
                     unit=unit,
                     mint_url=mint,
                     typ="out",
-                    request_id=getattr(request.state, "request_id", None),
+                    request_id=request_id,
                 )
             except Exception:
                 pass
@@ -2942,7 +2942,7 @@ class BaseUpstreamProvider:
                     unit=unit,
                     mint_url=mint,
                     typ="out",
-                    request_id=getattr(request.state, "request_id", None),
+                    request_id=request_id,
                 )
             except Exception:
                 pass

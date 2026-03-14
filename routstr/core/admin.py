@@ -1240,7 +1240,7 @@ async def get_transactions_api(
                 stmt = stmt.where(CashuTransaction.swept == True)  # noqa: E712
             elif status == "pending":
                 stmt = stmt.where(
-                    CashuTransaction.collected == False,
+                    CashuTransaction.collected == False,  # noqa: E712
                     CashuTransaction.swept == False,  # noqa: E712
                 )
 
