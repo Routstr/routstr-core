@@ -34,7 +34,7 @@ import {
   Check,
 } from 'lucide-react';
 import { AdminService, type Transaction } from '@/lib/api/services/admin';
-import { formatDistanceToNow } from 'date-fns';
+import { format } from 'date-fns';
 import { toast } from 'sonner';
 
 export default function TransactionsPage() {
@@ -141,6 +141,7 @@ export default function TransactionsPage() {
               <SelectItem value='all'>All Statuses</SelectItem>
               <SelectItem value='pending'>Pending</SelectItem>
               <SelectItem value='collected'>Collected</SelectItem>
+              <SelectItem value='swept'>Swept</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -164,7 +165,7 @@ export default function TransactionsPage() {
                       <TableHead>Type</TableHead>
                       <TableHead>Amount</TableHead>
                       <TableHead>Status</TableHead>
-                      <TableHead>ID / Request ID</TableHead>
+                      <TableHead>Request ID</TableHead>
                       <TableHead>Mint</TableHead>
                       <TableHead>Date</TableHead>
                       <TableHead className='text-right'>Actions</TableHead>
@@ -188,51 +189,32 @@ export default function TransactionsPage() {
                         </TableCell>
                         <TableCell>{getStatusBadge(tx)}</TableCell>
                         <TableCell>
-                          <div className='flex flex-col gap-1'>
-                            <div className='text-muted-foreground flex items-center gap-1 text-xs'>
-                              <span className='max-w-[100px] truncate font-mono'>
-                                {tx.id}
+                          {tx.request_id ? (
+                            <div className='flex items-center gap-1 text-xs'>
+                              <span className='max-w-[150px] truncate font-mono'>
+                                {tx.request_id}
                               </span>
                               <Button
                                 variant='ghost'
                                 size='icon'
                                 className='h-4 w-4'
                                 onClick={() =>
-                                  copyToClipboard(tx.id, tx.id + '-id')
+                                  copyToClipboard(
+                                    tx.request_id!,
+                                    tx.id + '-req'
+                                  )
                                 }
                               >
-                                {copiedId === tx.id + '-id' ? (
+                                {copiedId === tx.id + '-req' ? (
                                   <Check className='h-3 w-3' />
                                 ) : (
                                   <Copy className='h-3 w-3' />
                                 )}
                               </Button>
                             </div>
-                            {tx.request_id && (
-                              <div className='text-primary flex items-center gap-1 text-xs'>
-                                <span className='max-w-[100px] truncate'>
-                                  {tx.request_id}
-                                </span>
-                                <Button
-                                  variant='ghost'
-                                  size='icon'
-                                  className='text-primary h-4 w-4'
-                                  onClick={() =>
-                                    copyToClipboard(
-                                      tx.request_id!,
-                                      tx.id + '-req'
-                                    )
-                                  }
-                                >
-                                  {copiedId === tx.id + '-req' ? (
-                                    <Check className='h-3 w-3' />
-                                  ) : (
-                                    <Copy className='h-3 w-3' />
-                                  )}
-                                </Button>
-                              </div>
-                            )}
-                          </div>
+                          ) : (
+                            <span className='text-muted-foreground text-xs'>—</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           <div className='flex max-w-[150px] items-center gap-1 truncate text-xs'>
@@ -240,9 +222,7 @@ export default function TransactionsPage() {
                           </div>
                         </TableCell>
                         <TableCell className='text-xs whitespace-nowrap'>
-                          {formatDistanceToNow(tx.created_at * 1000, {
-                            addSuffix: true,
-                          })}
+                          {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
                         </TableCell>
                         <TableCell className='text-right'>
                           <Button
