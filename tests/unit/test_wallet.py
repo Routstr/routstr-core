@@ -109,6 +109,92 @@ async def test_credit_balance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_swap_to_primary_mint_insufficient_for_fees() -> None:
+    """Token amount is less than melt_quote.amount + melt_quote.fee_reserve."""
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token = Mock()
+    mock_token.mint = "http://foreign:3338"
+    mock_token.unit = "sat"
+    mock_token.amount = 404
+    mock_token.keysets = ["keyset1"]
+    mock_token.proofs = [{"amount": 404}]
+
+    mock_token_wallet = Mock()
+    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_proofs = AsyncMock()
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.load_mint = AsyncMock()
+    mock_primary_wallet.load_proofs = AsyncMock()
+
+    mock_mint_quote = Mock()
+    mock_mint_quote.quote = "mint_quote_123"
+    mock_mint_quote.request = "lnbc1..."
+    mock_primary_wallet.request_mint = AsyncMock(return_value=mock_mint_quote)
+
+    mock_melt_quote = Mock()
+    mock_melt_quote.quote = "melt_quote_123"
+    mock_melt_quote.amount = 400
+    mock_melt_quote.fee_reserve = 12  # total needed: 412 > 404
+    mock_token_wallet.melt_quote = AsyncMock(return_value=mock_melt_quote)
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "primary_mint", "http://primary:3338"):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
+                with pytest.raises(ValueError, match="insufficient to cover melt fees"):
+                    await swap_to_primary_mint(mock_token, mock_token_wallet)
+
+    # melt should never have been called
+    mock_token_wallet.melt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_swap_to_primary_mint_melt_error_wrapped() -> None:
+    """Melt failure from cashu lib is wrapped as ValueError."""
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token = Mock()
+    mock_token.mint = "http://foreign:3338"
+    mock_token.unit = "sat"
+    mock_token.amount = 5000
+    mock_token.keysets = ["keyset1"]
+    mock_token.proofs = [{"amount": 5000}]
+
+    mock_token_wallet = Mock()
+    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_proofs = AsyncMock()
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.load_mint = AsyncMock()
+    mock_primary_wallet.load_proofs = AsyncMock()
+
+    mock_mint_quote = Mock()
+    mock_mint_quote.quote = "mint_quote_456"
+    mock_mint_quote.request = "lnbc1..."
+    mock_primary_wallet.request_mint = AsyncMock(return_value=mock_mint_quote)
+
+    mock_melt_quote = Mock()
+    mock_melt_quote.quote = "melt_quote_456"
+    mock_melt_quote.amount = 4940
+    mock_melt_quote.fee_reserve = 50  # total 4990 < 5000, passes fee check
+    mock_token_wallet.melt_quote = AsyncMock(return_value=mock_melt_quote)
+    mock_token_wallet.melt = AsyncMock(
+        side_effect=Exception("Provided: 5000, needed: 5100 (Code: 11000)")
+    )
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "primary_mint", "http://primary:3338"):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
+                with pytest.raises(ValueError, match="Failed to melt token"):
+                    await swap_to_primary_mint(mock_token, mock_token_wallet)
+
+
+@pytest.mark.asyncio
 async def test_recieve_token_untrusted_mint() -> None:
     mock_wallet = Mock()
 
