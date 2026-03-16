@@ -1,12 +1,19 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import {
   Select,
   SelectContent,
@@ -26,22 +33,53 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import {
   RefreshCw,
   Search,
   ArrowDownLeft,
   ArrowUpRight,
   Copy,
   Check,
+  Receipt,
 } from 'lucide-react';
 import { AdminService, type Transaction } from '@/lib/api/services/admin';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
+
+const STORAGE_KEY = 'routstr-transaction-filters';
 
 export default function TransactionsPage() {
   const [search, setSearch] = useState('');
   const [type, setType] = useState<string>('all');
   const [status, setStatus] = useState<string>('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Load filters from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.search) setSearch(parsed.search);
+        if (parsed.type) setType(parsed.type);
+        if (parsed.status) setStatus(parsed.status);
+      } catch (e) {
+        console.error('Failed to load filters from localStorage', e);
+      }
+    }
+  }, []);
+
+  // Save filters to localStorage whenever they change
+  useEffect(() => {
+    const filters = { search, type, status };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(filters));
+  }, [search, type, status]);
 
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['transactions', type, status, search],
@@ -53,6 +91,12 @@ export default function TransactionsPage() {
         100
       ),
   });
+
+  const handleClearFilters = () => {
+    setSearch('');
+    setType('all');
+    setStatus('all');
+  };
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -90,11 +134,22 @@ export default function TransactionsPage() {
     );
   };
 
+  const hasActiveFilters =
+    type !== 'all' || status !== 'all' || Boolean(search);
+
+  const activeFilterDescription = [
+    type !== 'all' ? `type ${type === 'in' ? 'incoming' : 'outgoing'}` : null,
+    status !== 'all' ? `status ${status}` : null,
+    search ? `search "${search}"` : null,
+  ]
+    .filter(Boolean)
+    .join(' • ');
+
   return (
-    <AppPageShell contentClassName='mx-auto w-full max-w-7xl'>
+    <AppPageShell contentClassName='mx-auto w-full max-w-5xl overflow-x-hidden'>
       <div className='space-y-6'>
         <PageHeader
-          title='Transactions'
+          title='X-Cashu Transactions'
           description='View all incoming and outgoing X-Cashu token transactions.'
           actions={
             <Button
@@ -111,54 +166,96 @@ export default function TransactionsPage() {
           }
         />
 
-        <div className='grid grid-cols-1 gap-4 md:grid-cols-4'>
-          <div className='md:col-span-2'>
-            <div className='relative'>
-              <Search className='text-muted-foreground absolute top-2.5 left-2.5 h-4 w-4' />
-              <Input
-                placeholder='Search by ID, token or request ID...'
-                className='pl-8'
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+        <Card className='mb-6'>
+          <CardHeader>
+            <CardTitle>Filters</CardTitle>
+            <CardDescription>
+              Filter transactions by type, status, or search text
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className='grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3'>
+              <div className='space-y-2'>
+                <Label htmlFor='search'>Search</Label>
+                <div className='relative'>
+                  <Search className='text-muted-foreground absolute top-2.5 left-2.5 h-4 w-4' />
+                  <Input
+                    id='search'
+                    placeholder='Search by ID, token or request ID...'
+                    className='pl-8'
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='type'>Type</Label>
+                <Select value={type} onValueChange={setType}>
+                  <SelectTrigger>
+                    <SelectValue placeholder='Type' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>All Types</SelectItem>
+                    <SelectItem value='in'>Incoming (Payments)</SelectItem>
+                    <SelectItem value='out'>Outgoing (Refunds)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='status'>Status</Label>
+                <Select value={status} onValueChange={setStatus}>
+                  <SelectTrigger>
+                    <SelectValue placeholder='Status' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>All Statuses</SelectItem>
+                    <SelectItem value='pending'>Pending</SelectItem>
+                    <SelectItem value='collected'>Collected</SelectItem>
+                    <SelectItem value='swept'>Swept</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className='flex items-end sm:col-span-2 lg:col-span-1'>
+                <Button
+                  onClick={handleClearFilters}
+                  variant='outline'
+                  className='w-full'
+                >
+                  Clear Filters
+                </Button>
+              </div>
             </div>
-          </div>
-          <Select value={type} onValueChange={setType}>
-            <SelectTrigger>
-              <SelectValue placeholder='Type' />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='all'>All Types</SelectItem>
-              <SelectItem value='in'>Incoming (Payments)</SelectItem>
-              <SelectItem value='out'>Outgoing (Refunds)</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={status} onValueChange={setStatus}>
-            <SelectTrigger>
-              <SelectValue placeholder='Status' />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value='all'>All Statuses</SelectItem>
-              <SelectItem value='pending'>Pending</SelectItem>
-              <SelectItem value='collected'>Collected</SelectItem>
-              <SelectItem value='swept'>Swept</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>Transaction History</CardTitle>
+            <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+              <CardTitle>Transaction History</CardTitle>
+              {data && (
+                <Badge variant='secondary'>
+                  {data.transactions.length} entries
+                </Badge>
+              )}
+            </div>
+            {hasActiveFilters && (
+              <CardDescription>
+                Showing transactions filtered by {activeFilterDescription}
+              </CardDescription>
+            )}
           </CardHeader>
-          <CardContent>
+          <CardContent className='overflow-hidden'>
             {isLoading ? (
               <div className='space-y-2'>
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Skeleton key={i} className='h-12 w-full' />
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton
+                    key={`tx-loading-${index}`}
+                    className='h-16 w-full rounded-lg'
+                  />
                 ))}
               </div>
-            ) : (
-              <ScrollArea className='h-[600px]'>
+            ) : data?.transactions && data.transactions.length > 0 ? (
+              <ScrollArea className='h-[55svh] min-h-[420px] w-full sm:h-[600px]'>
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -172,7 +269,7 @@ export default function TransactionsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {data?.transactions.map((tx) => (
+                    {data.transactions.map((tx) => (
                       <TableRow key={tx.id}>
                         <TableCell>
                           <div className='flex items-center gap-2'>
@@ -213,7 +310,9 @@ export default function TransactionsPage() {
                               </Button>
                             </div>
                           ) : (
-                            <span className='text-muted-foreground text-xs'>—</span>
+                            <span className='text-muted-foreground text-xs'>
+                              —
+                            </span>
                           )}
                         </TableCell>
                         <TableCell>
@@ -243,19 +342,21 @@ export default function TransactionsPage() {
                         </TableCell>
                       </TableRow>
                     ))}
-                    {data?.transactions.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={7}
-                          className='text-muted-foreground py-10 text-center'
-                        >
-                          No transactions found
-                        </TableCell>
-                      </TableRow>
-                    )}
                   </TableBody>
                 </Table>
               </ScrollArea>
+            ) : (
+              <Empty className='py-8'>
+                <EmptyHeader>
+                  <EmptyMedia variant='icon'>
+                    <Receipt className='h-4 w-4' />
+                  </EmptyMedia>
+                  <EmptyTitle>No transactions found</EmptyTitle>
+                  <EmptyDescription>
+                    Try adjusting your filters or check back later.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             )}
           </CardContent>
         </Card>
