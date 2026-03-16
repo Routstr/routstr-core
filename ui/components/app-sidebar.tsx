@@ -9,6 +9,7 @@ import {
   ServerIcon,
   SettingsIcon,
   WalletIcon,
+  ArrowRightLeftIcon,
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
@@ -44,6 +45,11 @@ const data = {
       title: 'Balances',
       url: '/balances',
       icon: WalletIcon,
+    },
+    {
+      title: 'Transactions',
+      url: '/transactions',
+      icon: ArrowRightLeftIcon,
     },
     {
       title: 'Logs',

@@ -1,11 +1,12 @@
 import asyncio
 import math
+import time
 from typing import TypedDict
 
 from cashu.core.base import Proof, Token
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
-from sqlmodel import col, update
+from sqlmodel import col, select, update
 
 from .core import db, get_logger
 from .core.settings import settings
@@ -34,6 +35,7 @@ async def recieve_token(
 
     wallet.verify_proofs_dleq(token_obj.proofs)
     await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
+
     return token_obj.amount, token_obj.unit, token_obj.mint
 
 
@@ -349,6 +351,61 @@ async def periodic_payout() -> None:
             logger.error(
                 f"Error sending payout: {type(e).__name__}",
                 extra={"error": str(e)},
+            )
+
+
+async def periodic_refund_sweep() -> None:
+    while True:
+        await asyncio.sleep(60 * 60)  # every hour
+        try:
+            cutoff = int(time.time()) - settings.refund_sweep_ttl_seconds
+            async with db.create_session() as session:
+                stmt = select(db.CashuTransaction).where(
+                    db.CashuTransaction.type == "out",
+                    db.CashuTransaction.collected == False,  # noqa: E712
+                    db.CashuTransaction.swept == False,  # noqa: E712
+                    db.CashuTransaction.created_at < cutoff,
+                )
+                results = await session.exec(stmt)
+                refunds = results.all()
+
+                for refund in refunds:
+                    try:
+                        await recieve_token(refund.token)
+                        refund.swept = True
+                        session.add(refund)
+                        logger.info(
+                            "Swept uncollected refund",
+                            extra={
+                                "id": refund.id,
+                                "amount": refund.amount,
+                                "unit": refund.unit,
+                            },
+                        )
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "already spent" in error_msg:
+                            refund.swept = True
+                            session.add(refund)
+                            logger.info(
+                                "Refund already spent (client collected), marking swept",
+                                extra={
+                                    "id": refund.id,
+                                },
+                            )
+                        else:
+                            logger.warning(
+                                "Failed to sweep refund",
+                                extra={
+                                    "id": refund.id,
+                                    "error": str(e),
+                                },
+                            )
+                await session.commit()
+        except Exception as e:
+            logger.error(
+                "Error in periodic refund sweep",
+                extra={"error": str(e), "error_type": type(e).__name__},
             )
 
 

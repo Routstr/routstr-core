@@ -455,15 +455,14 @@ async def get_bearer_token_key(
         )
         return key
     except Exception as e:
+        key_preview = bearer_key[:20] + "..." if len(bearer_key) > 20 else bearer_key
         logger.error(
-            "Bearer token validation failed",
+            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} key={key_preview!r}",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "path": path,
-                "bearer_key_preview": bearer_key[:20] + "..."
-                if len(bearer_key) > 20
-                else bearer_key,
+                "bearer_key_preview": key_preview,
             },
         )
         raise

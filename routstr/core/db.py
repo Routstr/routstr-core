@@ -2,11 +2,13 @@ import os
 import pathlib
 import sqlite3
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
+from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel import Field, Relationship, SQLModel, func, select, update
@@ -128,6 +130,59 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
 
 
+class CashuTransaction(SQLModel, table=True):  # type: ignore
+    __tablename__ = "cashu_transactions"
+
+    id: str = Field(
+        primary_key=True,
+        default_factory=lambda: uuid.uuid4().hex,
+        description="Unique transaction identifier",
+    )
+    token: str = Field(description="Serialized Cashu token")
+    amount: int = Field(description="Amount in the token's unit")
+    unit: str = Field(description="Token unit (sat or msat)")
+    mint_url: str | None = Field(default=None, description="Mint URL for the token")
+    type: str = Field(default="out", description="Transaction type: in or out")
+    request_id: str | None = Field(default=None, description="Associated request ID")
+    created_at: int = Field(
+        default_factory=lambda: int(time.time()),
+        description="Unix timestamp",
+    )
+    collected: bool = Field(default=False)
+    swept: bool = Field(default=False)
+
+
+async def store_cashu_transaction(
+    token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    typ: str = "out",
+    request_id: str | None = None,
+    collected: bool = False,
+    created_at: int | None = None,
+) -> None:
+    try:
+        async with create_session() as session:
+            tx = CashuTransaction(
+                token=token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint_url,
+                type=typ,
+                request_id=request_id,
+                collected=collected,
+                created_at=created_at or int(time.time()),
+            )
+            session.add(tx)
+            await session.commit()
+    except Exception as e:
+        logger.warning(
+            f"Failed to store cashu transaction: {e} (type={typ})",
+            extra={"error": str(e), "type": typ},
+        )
+
+
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     __table_args__ = (
@@ -227,6 +282,17 @@ def fix_cashu_migrations() -> None:
             logger.warning(f"Could not check/fix Cashu database {db_file}: {e}")
 
 
+def _clear_alembic_version() -> None:
+    """Clear the alembic_version table so stamp/upgrade can proceed."""
+    sync_url = DATABASE_URL.replace("+aiosqlite", "")
+    from sqlalchemy import create_engine, text
+
+    eng = create_engine(sync_url)
+    with eng.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version"))
+    eng.dispose()
+
+
 def run_migrations() -> None:
     """Run Alembic migrations programmatically."""
     try:
@@ -248,8 +314,19 @@ def run_migrations() -> None:
         # Set the database URL in the config
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-        # Run migrations to the latest revision
-        command.upgrade(alembic_cfg, "head")
+        try:
+            command.upgrade(alembic_cfg, "head")
+        except CommandError as e:
+            if "Can't locate revision" in str(e):
+                logger.warning(
+                    "Database stamped with unknown revision (likely from another branch). "
+                    "Re-stamping to current head.",
+                    extra={"error": str(e)},
+                )
+                _clear_alembic_version()
+                command.stamp(alembic_cfg, "head")
+            else:
+                raise
 
         logger.info("Database migrations completed successfully")
 
