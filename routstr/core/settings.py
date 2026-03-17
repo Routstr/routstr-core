@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     web_rag_provider: str = Field(default="disabled", env="WEB_RAG_PROVIDER")
     tavily_api_key: str = Field(default="", env="TAVILY_API_KEY")
     exa_api_key: str = Field(default="", env="EXA_API_KEY")
-    web_search_max_results: int = Field(default=5, env="WEB_SEARCH_MAX_RESULTS")
+    web_search_max_results: int = Field(default=10, env="WEB_SEARCH_MAX_RESULTS")
     web_search_fixed_cost: int = Field(default=10, env="WEB_SEARCH_FIXED_COST")
     web_excluded_domains: list[str] = Field(
         default=[

@@ -58,14 +58,14 @@ class SerperWebSearcher(BaseWebSearcher):
 
         try:
             # --- MOCK DATA FOR TESTING ---
-            api_response = await self._load_mock_data(
-                "serper_What_happend_between_the_US_and_Venezuela_20260115_103055.json"
+            #api_response = await self._load_mock_data(
+            #    "serper_What_happend_between_the_US_and_Venezuela_20260115_103055.json"
                 #    "serper_trump-peace-plan.json"
                 #    serper_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_150343.json
-            )
+            #)
             # ---------------------------------------------------------------
-            # api_response = await self._call_serper_api(query, max_results)
-            # await self._save_api_response(api_response, query, "serper")
+            api_response = await self._call_serper_api(query, max_results)
+            await self._save_api_response(api_response, query, "serper")
             # ---------------------------------------------------------------
 
             return self._map_to_search_result(api_response, query)

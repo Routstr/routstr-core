@@ -128,6 +128,7 @@ class CustomWebRAG(BaseWebRAG):
             )
             timings["chunk"] = int((datetime.now() - step_start).total_seconds() * 1000)
 
+            # 4. RANK
             step_start = datetime.now()
             search_response = await self.rank_provider.rank(search_response, query)
             timings["rank"] = int((datetime.now() - step_start).total_seconds() * 1000)

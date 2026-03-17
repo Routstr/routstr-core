@@ -85,13 +85,13 @@ class TavilyWebRAG(BaseWebRAG):
 
         try:
             # --- MOCK DATA FOR TESTING  ---
-            api_response = await self._load_mock_data(
-                "tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
+            #api_response = await self._load_mock_data(
+                #"tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
                 # tavily_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_150031.json
-            )
+            #)
             # ---------------------------------------------------------------
-            # api_response = await self._call_tavily_api(query, max_results)
-            # await self._save_api_response(api_response, query, "tavily")
+            api_response = await self._call_tavily_api(query, max_results)
+            await self._save_api_response(api_response, query, "tavily")
             # ---------------------------------------------------------------
 
             total_ms = int((datetime.now() - start_time).total_seconds() * 1000)
