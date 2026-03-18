@@ -64,11 +64,12 @@ async def swap_to_primary_mint(
     token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, str, str]:
     logger.info(
-        "swap_to_primary_mint",
+        "swap_to_primary_mint: starting",
         extra={
-            "mint": token_obj.mint,
-            "amount": token_obj.amount,
+            "foreign_mint": token_obj.mint,
+            "token_amount": token_obj.amount,
             "unit": token_obj.unit,
+            "primary_mint": settings.primary_mint,
         },
     )
     # Ensure amount is an integer
@@ -91,16 +92,105 @@ async def swap_to_primary_mint(
         minted_amount = int(amount_msat_after_fee // 1000)
     else:
         minted_amount = int(amount_msat_after_fee)
+
+    logger.info(
+        "swap_to_primary_mint: fee estimation",
+        extra={
+            "token_amount_sat": amount_msat // 1000,
+            "estimated_fee_sat": estimated_fee_sat,
+            "minted_amount": minted_amount,
+            "minted_unit": settings.primary_mint_unit,
+        },
+    )
+
     mint_quote = await primary_wallet.request_mint(minted_amount)
+    logger.info(
+        "swap_to_primary_mint: mint quote received",
+        extra={"mint_quote_id": mint_quote.quote},
+    )
 
     melt_quote = await token_wallet.melt_quote(mint_quote.request)
-    _ = await token_wallet.melt(
-        proofs=token_obj.proofs,
-        invoice=mint_quote.request,
-        fee_reserve_sat=melt_quote.fee_reserve,
-        quote_id=melt_quote.quote,
+    total_needed = melt_quote.amount + melt_quote.fee_reserve
+    logger.info(
+        "swap_to_primary_mint: melt quote received",
+        extra={
+            "melt_quote_id": melt_quote.quote,
+            "melt_amount": melt_quote.amount,
+            "melt_fee_reserve": melt_quote.fee_reserve,
+            "total_needed": total_needed,
+            "token_amount": token_amount,
+        },
     )
-    _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
+
+    if total_needed > token_amount:
+        logger.warning(
+            "swap_to_primary_mint: insufficient token amount for melt fees",
+            extra={
+                "token_amount": token_amount,
+                "melt_amount": melt_quote.amount,
+                "melt_fee_reserve": melt_quote.fee_reserve,
+                "total_needed": total_needed,
+                "shortfall": total_needed - token_amount,
+            },
+        )
+        raise ValueError(
+            f"Token amount ({token_amount} {token_obj.unit}) is insufficient to cover "
+            f"melt fees. Needed: {total_needed} {token_obj.unit} "
+            f"(amount: {melt_quote.amount} + fee: {melt_quote.fee_reserve})"
+        )
+
+    try:
+        _ = await token_wallet.melt(
+            proofs=token_obj.proofs,
+            invoice=mint_quote.request,
+            fee_reserve_sat=melt_quote.fee_reserve,
+            quote_id=melt_quote.quote,
+        )
+    except Exception as e:
+        logger.error(
+            "swap_to_primary_mint: melt failed",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "foreign_mint": token_obj.mint,
+                "token_amount": token_amount,
+                "melt_quote_id": melt_quote.quote,
+                "total_needed": total_needed,
+            },
+        )
+        raise ValueError(
+            f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
+        ) from e
+
+    logger.info(
+        "swap_to_primary_mint: melt succeeded, minting on primary",
+        extra={"minted_amount": minted_amount, "mint_quote_id": mint_quote.quote},
+    )
+
+    try:
+        _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
+    except Exception as e:
+        logger.error(
+            "swap_to_primary_mint: mint on primary failed after successful melt",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "minted_amount": minted_amount,
+                "mint_quote_id": mint_quote.quote,
+            },
+        )
+        raise
+
+    logger.info(
+        "swap_to_primary_mint: completed successfully",
+        extra={
+            "foreign_mint": token_obj.mint,
+            "primary_mint": settings.primary_mint,
+            "original_amount": token_amount,
+            "minted_amount": minted_amount,
+            "unit": settings.primary_mint_unit,
+        },
+    )
 
     return int(minted_amount), settings.primary_mint_unit, settings.primary_mint
 

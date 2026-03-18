@@ -154,9 +154,23 @@ async def topup_wallet_endpoint(
             raise HTTPException(status_code=400, detail="Token already spent")
         elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
             raise HTTPException(status_code=400, detail="Invalid token format")
+        elif "insufficient" in error_msg.lower() or "melt fee" in error_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Token value is too small to cover swap fees. {error_msg}",
+            )
+        elif "failed to melt" in error_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to swap foreign mint token. {error_msg}",
+            )
         else:
-            raise HTTPException(status_code=400, detail="Failed to redeem token")
-    except Exception:
+            raise HTTPException(status_code=400, detail=f"Failed to redeem token: {error_msg}")
+    except Exception as e:
+        logger.error(
+            "topup_wallet_endpoint: unhandled error",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}
 
