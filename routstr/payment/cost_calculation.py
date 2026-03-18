@@ -16,6 +16,8 @@ class CostData(BaseModel):
     output_msats: int
     total_msats: int
     total_usd: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class MaxCostData(CostData):
@@ -63,9 +65,48 @@ async def calculate_cost(  # todo: can be sync
             output_msats=0,
             total_msats=0,
             total_usd=0.0,
+            input_tokens=0,
+            output_tokens=0,
         )
 
     usage_data = response_data["usage"]
+
+    def parse_token_count(value: object) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, float):
+            return max(0, int(value))
+        if isinstance(value, str):
+            try:
+                return max(0, int(float(value)))
+            except ValueError:
+                return 0
+        return 0
+
+    input_tokens = parse_token_count(usage_data.get("prompt_tokens", 0))
+    output_tokens = parse_token_count(usage_data.get("completion_tokens", 0))
+    input_tokens = (
+        input_tokens
+        if input_tokens != 0
+        else parse_token_count(usage_data.get("input_tokens", 0))
+    )
+    output_tokens = (
+        output_tokens
+        if output_tokens != 0
+        else parse_token_count(usage_data.get("output_tokens", 0))
+    )
+    input_tokens = (
+        input_tokens
+        if input_tokens != 0
+        else parse_token_count(response_data.get("usage", {}).get("input_tokens", 0))
+    )
+    output_tokens = (
+        output_tokens
+        if output_tokens != 0
+        else parse_token_count(response_data.get("usage", {}).get("output_tokens", 0))
+    )
 
     usd_cost = 0.0
 
@@ -104,6 +145,8 @@ async def calculate_cost(  # todo: can be sync
                 output_msats=-1,
                 total_msats=cost_in_msats,
                 total_usd=usd_cost,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
         except Exception as e:
             logger.warning(
@@ -184,30 +227,9 @@ async def calculate_cost(  # todo: can be sync
             input_msats=0,
             output_msats=0,
             total_msats=max_cost,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
-
-    input_tokens = usage_data.get("prompt_tokens", 0)
-    output_tokens = usage_data.get("completion_tokens", 0)
-
-    # added for response api
-    input_tokens = (
-        input_tokens if input_tokens != 0 else usage_data.get("input_tokens", 0)
-    )
-    output_tokens = (
-        output_tokens if output_tokens != 0 else usage_data.get("output_tokens", 0)
-    )
-
-    # added for response api
-    input_tokens = (
-        input_tokens
-        if input_tokens != 0
-        else response_data.get("usage", {}).get("input_tokens", 0)
-    )
-    output_tokens = (
-        output_tokens
-        if output_tokens != 0
-        else response_data.get("usage", {}).get("output_tokens", 0)
-    )
 
     input_msats = round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 3)
 
@@ -234,4 +256,6 @@ async def calculate_cost(  # todo: can be sync
         output_msats=int(output_msats),
         total_msats=token_based_cost,
         total_usd=total_usd,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )

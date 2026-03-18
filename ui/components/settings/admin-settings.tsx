@@ -26,6 +26,7 @@ interface SettingsData {
   description?: string;
   npub?: string;
   nsec?: string;
+  enable_analytics_sharing?: boolean;
   upstream_api_key?: string;
   http_url?: string;
   onion_url?: string;
@@ -43,6 +44,7 @@ const HANDLED_KEYS = [
   'nsec',
   'cashu_mints',
   'relays',
+  'enable_analytics_sharing',
   'admin_password',
   'id',
   'updated_at',
@@ -366,6 +368,7 @@ export function AdminSettings() {
   const nostrChanged = ['npub', 'nsec'].some(hasFieldChanged);
   const cashuMintsChanged = hasFieldChanged('cashu_mints');
   const relaysChanged = hasFieldChanged('relays');
+  const analyticsSharingChanged = hasFieldChanged('enable_analytics_sharing');
   const advancedKeys = Object.keys(settings).filter(
     (key) => !HANDLED_KEYS.includes(key) && !IGNORED_KEYS.includes(key)
   );
@@ -397,6 +400,7 @@ export function AdminSettings() {
     resetFields(['relays']);
     setNewRelay('');
   };
+  const resetAnalyticsSharing = () => resetFields(['enable_analytics_sharing']);
   const resetAdvanced = () => resetFields(advancedKeys);
 
   if (loading) {
@@ -674,6 +678,52 @@ export function AdminSettings() {
                 <Button
                   variant='outline'
                   onClick={resetRelays}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
+        </Card>
+
+        {/* Analytics Sharing */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Analytics Sharing</CardTitle>
+            <CardDescription>
+              Publish aggregate usage stats to Nostr for external dashboards
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className='flex items-center justify-between space-y-0 py-1'>
+              <div className='space-y-1'>
+                <Label htmlFor='enable_analytics_sharing'>
+                  Share analytics to Nostr
+                </Label>
+                <p className='text-muted-foreground text-sm'>
+                  When enabled, Routstr periodically publishes aggregate model
+                  usage and revenue stats.
+                </p>
+              </div>
+              <Switch
+                id='enable_analytics_sharing'
+                checked={Boolean(settings.enable_analytics_sharing ?? true)}
+                onCheckedChange={(checked) =>
+                  handleInputChange('enable_analytics_sharing', checked)
+                }
+              />
+            </div>
+          </CardContent>
+          {analyticsSharingChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetAnalyticsSharing}
                   disabled={loading || saving}
                 >
                   Cancel

@@ -97,6 +97,7 @@ Announce your node on the network:
 | **Npub**   | Your Nostr public key                |
 | **Nsec**   | Your Nostr private key (for signing) |
 | **Relays** | Relays to publish announcements      |
+| **Share Analytics** | Publish aggregate usage stats to Nostr |
 
 See [Discovery](discovery.md) for details.
 
@@ -122,6 +123,7 @@ Use environment variables for:
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
 | `NSEC`               | Nostr private key                 | —                                    |
+| `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |

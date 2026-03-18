@@ -1,17 +1,73 @@
 import json
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from heapq import heappush, heapreplace
 from pathlib import Path
-from typing import Any, Iterator
+from threading import Lock
+from typing import Any, Callable, Iterator, TypeVar
 
 from .logging import get_logger
+from .usage_analytics_store import UsageAnalyticsStore
 
 logger = get_logger(__name__)
+T = TypeVar("T")
 
 
 class LogManager:
     def __init__(self, logs_dir: Path = Path("logs")):
         self.logs_dir = logs_dir
+        self._usage_store = UsageAnalyticsStore(logs_dir=logs_dir)
+        self._analytics_cache_ttl_seconds = 30.0
+        self._analytics_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+        self._analytics_cache_lock = Lock()
+        self._cache_miss = object()
+
+    def _get_cached(self, key: tuple[Any, ...]) -> Any:
+        now = time.time()
+        with self._analytics_cache_lock:
+            cached = self._analytics_cache.get(key)
+            if cached is None:
+                return self._cache_miss
+
+            expires_at, value = cached
+            if expires_at <= now:
+                self._analytics_cache.pop(key, None)
+                return self._cache_miss
+
+            return value
+
+    def _set_cached(
+        self, key: tuple[Any, ...], value: Any, ttl_seconds: float | None = None
+    ) -> None:
+        ttl = (
+            self._analytics_cache_ttl_seconds
+            if ttl_seconds is None
+            else max(1.0, ttl_seconds)
+        )
+        expires_at = time.time() + ttl
+        with self._analytics_cache_lock:
+            self._analytics_cache[key] = (expires_at, value)
+
+    def _cache_call(
+        self,
+        key: tuple[Any, ...],
+        compute: Callable[[], T],
+        ttl_seconds: float | None = None,
+    ) -> T:
+        cached = self._get_cached(key)
+        if cached is not self._cache_miss:
+            return cached
+
+        value = compute()
+        self._set_cached(key, value, ttl_seconds=ttl_seconds)
+        return value
+
+    def _get_cached_entries(self, hours: int) -> list[dict[str, Any]]:
+        return self._cache_call(
+            ("usage_entries", hours),
+            lambda: list(self._yield_log_entries(hours_back=hours)),
+        )
 
     def _yield_log_entries(
         self,
@@ -19,7 +75,6 @@ class LogManager:
         specific_date: str | None = None,
         reverse_files: bool = False,
         max_files: int | None = None,
-        window_center: datetime | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Yields log entries from files.
@@ -29,7 +84,6 @@ class LogManager:
             specific_date: specific date string (YYYY-MM-DD) to look at.
             reverse_files: if True, process files in reverse order (newest first).
             max_files: maximum number of log files to process (most recent if reverse_files is True).
-            window_center: datetime object to center a 5-month window around.
         """
         if not self.logs_dir.exists():
             return
@@ -44,36 +98,6 @@ class LogManager:
                 log_files.append(log_file)
         else:
             log_files = sorted(self.logs_dir.glob("app_*.log"))
-
-            if window_center:
-                # Calculate the 5 months: [center-2, center-1, center, center+1, center+2]
-                allowed_month_years = []
-                cur_m = window_center.month
-                cur_y = window_center.year
-
-                for offset in range(-2, 3):
-                    m = cur_m + offset
-                    y = cur_y
-                    while m <= 0:
-                        m += 12
-                        y -= 1
-                    while m > 12:
-                        m -= 12
-                        y += 1
-                    allowed_month_years.append(f"{y}-{m:02d}")
-
-                filtered_files = []
-                for log_path in log_files:
-                    try:
-                        # Stem is "app_YYYY-MM-DD"
-                        file_date_str = log_path.stem.split("_")[1]
-                        file_month_year = file_date_str[:7]  # YYYY-MM
-                        if file_month_year in allowed_month_years:
-                            filtered_files.append(log_path)
-                    except Exception:
-                        continue
-                log_files = filtered_files
-
             if reverse_files:
                 log_files.reverse()
 
@@ -303,128 +327,208 @@ class LogManager:
         return 0
 
     def get_usage_summary(self, hours: int = 24) -> dict:
-        entries = list(
-            self._yield_log_entries(
-                hours_back=hours, window_center=datetime.now(timezone.utc)
-            )
+        def compute() -> dict:
+            try:
+                return self._usage_store.get_summary(hours_back=hours)
+            except Exception as e:
+                logger.error(
+                    f"Usage analytics index failed, falling back to log scan: {e}"
+                )
+                return self._calculate_summary_stats(self._get_cached_entries(hours))
+
+        return self._cache_call(
+            ("usage_summary", hours),
+            compute,
         )
-        return self._calculate_summary_stats(entries)
 
     def get_usage_metrics(self, interval: int = 15, hours: int = 24) -> dict:
-        entries = list(
-            self._yield_log_entries(
-                hours_back=hours, window_center=datetime.now(timezone.utc)
-            )
+        def compute() -> dict:
+            try:
+                return self._usage_store.get_metrics(
+                    interval_minutes=interval,
+                    hours_back=hours,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Usage analytics index failed, falling back to log scan: {e}"
+                )
+                return self._aggregate_metrics_by_time(
+                    self._get_cached_entries(hours), interval, hours
+                )
+
+        return self._cache_call(
+            ("usage_metrics", interval, hours),
+            compute,
         )
-        return self._aggregate_metrics_by_time(entries, interval, hours)
+
+    def get_usage_dashboard(
+        self,
+        interval: int = 15,
+        hours: int = 24,
+        error_limit: int = 100,
+        model_limit: int = 20,
+    ) -> dict:
+        # Large ranges are expensive to scan; keep cached longer.
+        if hours <= 24:
+            cache_ttl = 60.0
+        elif hours <= 7 * 24:
+            cache_ttl = 300.0
+        elif hours <= 30 * 24:
+            cache_ttl = 1800.0
+        elif hours <= 90 * 24:
+            cache_ttl = 7200.0
+        else:
+            cache_ttl = 21600.0
+
+        def compute() -> dict:
+            try:
+                return self._usage_store.get_dashboard(
+                    interval_minutes=interval,
+                    hours_back=hours,
+                    error_limit=error_limit,
+                    model_limit=model_limit,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Usage analytics index failed, falling back to log scan: {e}"
+                )
+                return self._aggregate_dashboard(
+                    interval_minutes=interval,
+                    hours_back=hours,
+                    error_limit=error_limit,
+                    model_limit=model_limit,
+                )
+
+        return self._cache_call(
+            ("usage_dashboard", interval, hours, error_limit, model_limit),
+            compute,
+            ttl_seconds=cache_ttl,
+        )
 
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
-        errors: list[dict[str, Any]] = []
+        def compute() -> dict:
+            try:
+                return self._usage_store.get_error_details(hours_back=hours, limit=limit)
+            except Exception as e:
+                logger.error(
+                    f"Usage analytics index failed, falling back to log scan: {e}"
+                )
 
-        for entry in self._yield_log_entries(hours_back=hours):
-            if str(entry.get("levelname", "")).upper() != "ERROR":
-                continue
+            errors: list[dict] = []
+            for entry in self._get_cached_entries(hours):
+                if str(entry.get("levelname", "")).upper() == "ERROR":
+                    timestamp_str = entry.get("asctime", "")
+                    errors.append(
+                        {
+                            "timestamp": timestamp_str,
+                            "message": entry.get("message", ""),
+                            "error_type": entry.get("error_type", "unknown"),
+                            "pathname": entry.get("pathname", ""),
+                            "lineno": entry.get("lineno", 0),
+                            "request_id": entry.get("request_id", ""),
+                        }
+                    )
 
-            errors.append(
-                {
-                    "timestamp": entry.get("asctime", ""),
-                    "message": entry.get("message", ""),
-                    "error_type": entry.get("error_type", "unknown"),
-                    "pathname": entry.get("pathname", ""),
-                    "lineno": entry.get("lineno", 0),
-                    "request_id": entry.get("request_id", ""),
-                }
-            )
+            errors.sort(key=lambda x: x["timestamp"], reverse=True)
+            return {"errors": errors[:limit], "total_count": len(errors)}
 
-        errors.sort(key=lambda x: str(x["timestamp"]), reverse=True)
-        return {"errors": errors[:limit], "total_count": len(errors)}
+        return self._cache_call(("error_details", hours, limit), compute)
 
     def get_revenue_by_model(self, hours: int = 24, limit: int = 20) -> dict:
-        entries = list(
-            self._yield_log_entries(
-                hours_back=hours, window_center=datetime.now(timezone.utc)
-            )
-        )
-
-        model_stats: dict[str, dict[str, int | float]] = defaultdict(
-            lambda: {
-                "revenue_msats": 0,
-                "refunds_msats": 0,
-                "requests": 0,
-                "successful": 0,
-                "failed": 0,
-            }
-        )
-
-        for entry in entries:
+        def compute() -> dict:
             try:
-                model = entry.get("model", "unknown")
-                if not isinstance(model, str):
-                    model = "unknown"
-
-                message = str(entry.get("message", "")).lower()
-
-                completed, revenue_msats, _, _ = self._extract_success_metrics(
-                    entry, message
+                return self._usage_store.get_revenue_by_model(
+                    hours_back=hours, limit=limit
                 )
-                if completed:
-                    model_stats[model]["requests"] += 1
-                    model_stats[model]["successful"] += 1
-                    if revenue_msats > 0:
-                        model_stats[model]["revenue_msats"] += revenue_msats
-
-                failed = (
-                    "revert payment" in message or "upstream request failed" in message
+            except Exception as e:
+                logger.error(
+                    f"Usage analytics index failed, falling back to log scan: {e}"
                 )
-                if failed:
-                    model_stats[model]["requests"] += 1
-                    model_stats[model]["failed"] += 1
-                    if "revert payment" in message:
-                        max_cost = entry.get("max_cost_for_model", 0)
-                        if isinstance(max_cost, (int, float)) and max_cost > 0:
-                            model_stats[model]["refunds_msats"] += max_cost
 
-            except Exception:
-                continue
+            entries = self._get_cached_entries(hours)
 
-        models: list[dict[str, Any]] = []
-        total_revenue = 0.0
-
-        for model, stats in model_stats.items():
-            revenue_msats = float(stats["revenue_msats"])
-            refunds_msats = float(stats["refunds_msats"])
-
-            revenue_sats = revenue_msats / 1000
-            refunds_sats = refunds_msats / 1000
-            net_revenue_sats = revenue_sats - refunds_sats
-
-            total_revenue += net_revenue_sats
-
-            requests = int(stats["requests"])
-            successful = int(stats["successful"])
-
-            models.append(
-                {
-                    "model": model,
-                    "revenue_sats": revenue_sats,
-                    "refunds_sats": refunds_sats,
-                    "net_revenue_sats": net_revenue_sats,
-                    "requests": requests,
-                    "successful": successful,
-                    "failed": int(stats["failed"]),
-                    "avg_revenue_per_request": (
-                        revenue_sats / successful if successful > 0 else 0
-                    ),
+            model_stats: dict[str, dict[str, int | float]] = defaultdict(
+                lambda: {
+                    "revenue_msats": 0,
+                    "refunds_msats": 0,
+                    "requests": 0,
+                    "successful": 0,
+                    "failed": 0,
                 }
             )
 
-        models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
+            for entry in entries:
+                try:
+                    model = entry.get("model", "unknown")
+                    if not isinstance(model, str):
+                        model = "unknown"
 
-        return {
-            "models": models[:limit],
-            "total_revenue_sats": total_revenue,
-            "total_models": len(models),
-        }
+                    message = str(entry.get("message", "")).lower()
+
+                    completed, revenue_msats, _, _ = self._extract_success_metrics(
+                        entry, message
+                    )
+                    if completed:
+                        model_stats[model]["requests"] += 1
+                        model_stats[model]["successful"] += 1
+                        if revenue_msats > 0:
+                            model_stats[model]["revenue_msats"] += revenue_msats
+
+                    failed = (
+                        "revert payment" in message
+                        or "upstream request failed" in message
+                    )
+                    if failed:
+                        model_stats[model]["requests"] += 1
+                        model_stats[model]["failed"] += 1
+                        if "revert payment" in message:
+                            max_cost = entry.get("max_cost_for_model", 0)
+                            if isinstance(max_cost, (int, float)) and max_cost > 0:
+                                model_stats[model]["refunds_msats"] += max_cost
+
+                except Exception:
+                    continue
+
+            models: list[dict[str, Any]] = []
+            total_revenue = 0.0
+
+            for model, stats in model_stats.items():
+                revenue_msats = float(stats["revenue_msats"])
+                refunds_msats = float(stats["refunds_msats"])
+
+                revenue_sats = revenue_msats / 1000
+                refunds_sats = refunds_msats / 1000
+                net_revenue_sats = revenue_sats - refunds_sats
+
+                total_revenue += net_revenue_sats
+
+                requests = int(stats["requests"])
+                successful = int(stats["successful"])
+
+                models.append(
+                    {
+                        "model": model,
+                        "revenue_sats": revenue_sats,
+                        "refunds_sats": refunds_sats,
+                        "net_revenue_sats": net_revenue_sats,
+                        "requests": requests,
+                        "successful": successful,
+                        "failed": int(stats["failed"]),
+                        "avg_revenue_per_request": (
+                            revenue_sats / successful if successful > 0 else 0
+                        ),
+                    }
+                )
+
+            models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
+
+            return {
+                "models": models[:limit],
+                "total_revenue_sats": total_revenue,
+                "total_models": len(models),
+            }
+
+        return self._cache_call(("revenue_by_model", hours, limit), compute)
 
     def _build_summary_response(self, stats: dict[str, Any]) -> dict[str, Any]:
         revenue_sats = stats["revenue_msats"] / 1000
@@ -554,6 +658,344 @@ class LogManager:
                 continue
 
         return self._build_summary_response(stats)
+
+    def _aggregate_dashboard(
+        self,
+        interval_minutes: int,
+        hours_back: int,
+        error_limit: int,
+        model_limit: int,
+    ) -> dict[str, Any]:
+        time_buckets: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {
+                "total_requests": 0,
+                "successful_chat_completions": 0,
+                "failed_requests": 0,
+                "errors": 0,
+                "warnings": 0,
+                "payment_processed": 0,
+                "upstream_errors": 0,
+                "revenue_msats": 0.0,
+                "refunds_msats": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+        )
+        summary_stats: dict[str, Any] = {
+            "total_entries": 0,
+            "total_requests": 0,
+            "successful_chat_completions": 0,
+            "failed_requests": 0,
+            "total_errors": 0,
+            "total_warnings": 0,
+            "payment_processed": 0,
+            "upstream_errors": 0,
+            "unique_models": set(),
+            "error_types": defaultdict(int),
+            "revenue_msats": 0.0,
+            "refunds_msats": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        model_stats: dict[str, dict[str, int | float]] = defaultdict(
+            lambda: {
+                "revenue_msats": 0,
+                "refunds_msats": 0,
+                "requests": 0,
+                "successful": 0,
+                "failed": 0,
+            }
+        )
+        model_mix_buckets: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        model_mix_revenue_buckets: dict[str, dict[str, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+        model_mix_token_buckets: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        model_mix_totals: dict[str, int] = defaultdict(int)
+        model_mix_revenue_totals: dict[str, float] = defaultdict(float)
+        model_mix_token_totals: dict[str, int] = defaultdict(int)
+        latest_errors_heap: list[tuple[str, dict[str, Any]]] = []
+        total_error_count = 0
+
+        for entry in self._yield_log_entries(hours_back=hours_back):
+            try:
+                summary_stats["total_entries"] += 1
+
+                timestamp_str = entry.get("asctime", "")
+                message = str(entry.get("message", "")).lower()
+                level = str(entry.get("levelname", "")).upper()
+                model = entry.get("model", "unknown")
+                if not isinstance(model, str):
+                    model = "unknown"
+
+                bucket_key = (
+                    self._bucket_key_for_timestamp(timestamp_str, interval_minutes)
+                    if isinstance(timestamp_str, str)
+                    else None
+                )
+                bucket = time_buckets[bucket_key] if bucket_key else None
+
+                if level == "ERROR":
+                    summary_stats["total_errors"] += 1
+                    if bucket:
+                        bucket["errors"] += 1
+                    if "error_type" in entry:
+                        summary_stats["error_types"][str(entry["error_type"])] += 1
+
+                    total_error_count += 1
+                    error_item = {
+                        "timestamp": timestamp_str,
+                        "message": entry.get("message", ""),
+                        "error_type": entry.get("error_type", "unknown"),
+                        "pathname": entry.get("pathname", ""),
+                        "lineno": entry.get("lineno", 0),
+                        "request_id": entry.get("request_id", ""),
+                    }
+                    if len(latest_errors_heap) < error_limit:
+                        heappush(latest_errors_heap, (timestamp_str, error_item))
+                    elif timestamp_str > latest_errors_heap[0][0]:
+                        heapreplace(latest_errors_heap, (timestamp_str, error_item))
+                elif level == "WARNING":
+                    summary_stats["total_warnings"] += 1
+                    if bucket:
+                        bucket["warnings"] += 1
+
+                completed, revenue_msats, input_tokens, output_tokens = (
+                    self._extract_success_metrics(entry, message)
+                )
+                if completed:
+                    summary_stats["total_requests"] += 1
+                    summary_stats["successful_chat_completions"] += 1
+                    summary_stats["input_tokens"] += input_tokens
+                    summary_stats["output_tokens"] += output_tokens
+                    summary_stats["total_tokens"] += input_tokens + output_tokens
+                    model_stats[model]["requests"] += 1
+                    model_stats[model]["successful"] += 1
+                    model_mix_totals[model] += 1
+                    if bucket:
+                        bucket["total_requests"] += 1
+                        bucket["successful_chat_completions"] += 1
+                        bucket["input_tokens"] += input_tokens
+                        bucket["output_tokens"] += output_tokens
+                        bucket["total_tokens"] += input_tokens + output_tokens
+                    if bucket_key:
+                        model_mix_buckets[bucket_key][model] += 1
+                        if revenue_msats > 0:
+                            model_mix_revenue_buckets[bucket_key][model] += revenue_msats
+                            model_mix_revenue_totals[model] += revenue_msats
+                        if input_tokens > 0 or output_tokens > 0:
+                            token_total = input_tokens + output_tokens
+                            model_mix_token_buckets[bucket_key][model] += token_total
+                            model_mix_token_totals[model] += token_total
+
+                    if revenue_msats > 0:
+                        summary_stats["revenue_msats"] += revenue_msats
+                        model_stats[model]["revenue_msats"] += revenue_msats
+                        if bucket:
+                            bucket["revenue_msats"] += revenue_msats
+
+                failed = (
+                    "upstream request failed" in message
+                    or "revert payment" in message
+                )
+                if failed:
+                    summary_stats["total_requests"] += 1
+                    summary_stats["failed_requests"] += 1
+                    model_stats[model]["requests"] += 1
+                    model_stats[model]["failed"] += 1
+                    if bucket:
+                        bucket["total_requests"] += 1
+                        bucket["failed_requests"] += 1
+
+                if "payment processed successfully" in message:
+                    summary_stats["payment_processed"] += 1
+                    if bucket:
+                        bucket["payment_processed"] += 1
+
+                if "upstream" in message and level == "ERROR":
+                    summary_stats["upstream_errors"] += 1
+                    if bucket:
+                        bucket["upstream_errors"] += 1
+
+                if model != "unknown":
+                    summary_stats["unique_models"].add(model)
+
+                if "revert payment" in message:
+                    max_cost = entry.get("max_cost_for_model", 0)
+                    if isinstance(max_cost, (int, float)) and max_cost > 0:
+                        max_cost_float = float(max_cost)
+                        summary_stats["refunds_msats"] += max_cost_float
+                        model_stats[model]["refunds_msats"] += max_cost_float
+                        if bucket:
+                            bucket["refunds_msats"] += max_cost_float
+            except Exception:
+                continue
+
+        metrics_result = []
+        for bucket_key in sorted(time_buckets.keys()):
+            bucket = dict(time_buckets[bucket_key])
+            bucket["requests"] = bucket["total_requests"]
+            metrics_result.append({"timestamp": bucket_key, **bucket})
+
+        models: list[dict[str, Any]] = []
+        total_revenue = 0.0
+        for model_name, stats in model_stats.items():
+            revenue_msats = float(stats["revenue_msats"])
+            refunds_msats = float(stats["refunds_msats"])
+            revenue_sats = revenue_msats / 1000
+            refunds_sats = refunds_msats / 1000
+            net_revenue_sats = revenue_sats - refunds_sats
+            total_revenue += net_revenue_sats
+
+            successful = int(stats["successful"])
+            models.append(
+                {
+                    "model": model_name,
+                    "revenue_sats": revenue_sats,
+                    "refunds_sats": refunds_sats,
+                    "net_revenue_sats": net_revenue_sats,
+                    "requests": int(stats["requests"]),
+                    "successful": successful,
+                    "failed": int(stats["failed"]),
+                    "avg_revenue_per_request": (
+                        revenue_sats / successful if successful > 0 else 0
+                    ),
+                }
+            )
+
+        models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
+        latest_errors = [
+            item
+            for _, item in sorted(
+                latest_errors_heap, key=lambda x: x[0], reverse=True
+            )
+        ]
+        top_model_limit = max(1, min(model_limit, 20))
+        top_models_requests = [
+            model_name
+            for model_name, _ in sorted(
+                (
+                    (name, count)
+                    for name, count in model_mix_totals.items()
+                    if name != "unknown"
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:top_model_limit]
+        ]
+        top_models_revenue = [
+            model_name
+            for model_name, _ in sorted(
+                (
+                    (name, amount)
+                    for name, amount in model_mix_revenue_totals.items()
+                    if name != "unknown"
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:top_model_limit]
+        ]
+        top_models_tokens = [
+            model_name
+            for model_name, _ in sorted(
+                (
+                    (name, token_count)
+                    for name, token_count in model_mix_token_totals.items()
+                    if name != "unknown"
+                ),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:top_model_limit]
+        ]
+        selected_models: list[str] = []
+        for model in top_models_requests + top_models_revenue + top_models_tokens:
+            if model not in selected_models:
+                selected_models.append(model)
+        top_model_set = set(selected_models)
+
+        model_usage_mix_metrics: list[dict[str, Any]] = []
+        mix_bucket_keys = sorted(
+            set(model_mix_buckets.keys())
+            | set(model_mix_revenue_buckets.keys())
+            | set(model_mix_token_buckets.keys())
+        )
+        for bucket_key in mix_bucket_keys:
+            counts = model_mix_buckets.get(bucket_key, {})
+            revenue_counts = model_mix_revenue_buckets.get(bucket_key, {})
+            token_counts = model_mix_token_buckets.get(bucket_key, {})
+            others = 0
+            others_revenue_msats = 0.0
+            others_tokens = 0
+            model_counts: dict[str, int] = {}
+            model_revenue_msats: dict[str, float] = {}
+            model_tokens: dict[str, int] = {}
+            for model_name, successful_count in counts.items():
+                if model_name in top_model_set:
+                    model_counts[model_name] = int(successful_count)
+                else:
+                    others += int(successful_count)
+            for model_name, revenue_value in revenue_counts.items():
+                if model_name in top_model_set:
+                    model_revenue_msats[model_name] = float(revenue_value)
+                else:
+                    others_revenue_msats += float(revenue_value)
+            for model_name, token_value in token_counts.items():
+                if model_name in top_model_set:
+                    model_tokens[model_name] = int(token_value)
+                else:
+                    others_tokens += int(token_value)
+
+            model_usage_mix_metrics.append(
+                {
+                    "timestamp": bucket_key,
+                    "total_successful": int(sum(counts.values())),
+                    "total_revenue_msats": float(sum(revenue_counts.values())),
+                    "total_tokens": int(sum(token_counts.values())),
+                    "others": others,
+                    "others_revenue_msats": others_revenue_msats,
+                    "others_tokens": others_tokens,
+                    "model_counts": model_counts,
+                    "model_revenue_msats": model_revenue_msats,
+                    "model_tokens": model_tokens,
+                }
+            )
+
+        return {
+            "metrics": {
+                "metrics": metrics_result,
+                "interval_minutes": interval_minutes,
+                "hours_back": hours_back,
+                "total_buckets": len(metrics_result),
+            },
+            "summary": self._build_summary_response(summary_stats),
+            "error_details": {
+                "errors": latest_errors,
+                "total_count": total_error_count,
+            },
+            "revenue_by_model": {
+                "models": models[:model_limit],
+                "total_revenue_sats": total_revenue,
+                "total_models": len(models),
+            },
+            "model_usage_mix": {
+                "top_models": top_models_requests,
+                "top_models_by_metric": {
+                    "requests": top_models_requests,
+                    "revenue": top_models_revenue,
+                    "tokens": top_models_tokens,
+                },
+                "metrics": model_usage_mix_metrics,
+                "interval_minutes": interval_minutes,
+                "hours_back": hours_back,
+                "total_buckets": len(model_usage_mix_metrics),
+            },
+        }
 
     def _aggregate_metrics_by_time(
         self, entries: list[dict], interval_minutes: int, hours_back: int
