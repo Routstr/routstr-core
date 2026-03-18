@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
+    refund_sweep_ttl_seconds: int = Field(default=86400, env="REFUND_SWEEP_TTL_SECONDS")
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
@@ -254,9 +255,10 @@ class SettingsService:
                 db_json_raw = {}
             db_json = _normalize_settings_data(db_json_raw)
 
+            valid_fields = set(env_resolved.dict().keys())
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "", [], {})}
+                {k: v for k, v in db_json.items() if v not in (None, "", [], {}) and k in valid_fields}
             )
             merged_dict = Settings(**merged_dict).dict()
 
@@ -322,14 +324,11 @@ class SettingsService:
             if row is None:
                 raise RuntimeError("Settings row missing")
             (data_str,) = row
-            data_raw = (
-                json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
-            )
-            if not isinstance(data_raw, dict):
-                data_raw = {}
-            data = _normalize_settings_data(data_raw)
+            data = json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
+            valid_fields = set(settings.dict().keys())
             # Update in-place
             for k, v in data.items():
-                setattr(settings, k, v)
+                if k in valid_fields:
+                    setattr(settings, k, v)
             cls._current = settings
             return settings

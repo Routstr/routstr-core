@@ -372,12 +372,12 @@ async def validate_bearer_key(
                 },
             )
 
+    key_preview = bearer_key[:10] + "..." if len(bearer_key) > 10 else bearer_key
     logger.error(
-        "Invalid API key format",
+        f"Invalid API key format: preview={key_preview!r} length={len(bearer_key)} "
+        f"(expected 'sk-...' or 'cashu...' token)",
         extra={
-            "key_preview": bearer_key[:10] + "..."
-            if len(bearer_key) > 10
-            else bearer_key,
+            "key_preview": key_preview,
             "key_length": len(bearer_key),
         },
     )
@@ -386,7 +386,7 @@ async def validate_bearer_key(
         status_code=401,
         detail={
             "error": {
-                "message": "Invalid API key",
+                "message": "Invalid API key format. Expected an 'sk-...' API key or a 'cashu...' token.",
                 "type": "invalid_request_error",
                 "code": "invalid_api_key",
             }

@@ -886,6 +886,23 @@ export class AdminService {
     );
   }
 
+  static async getTransactions(
+    type?: string,
+    status?: string,
+    search?: string,
+    limit: number = 100
+  ): Promise<TransactionsResponse> {
+    const params = new URLSearchParams();
+    if (type) params.append('type', type);
+    if (status) params.append('status', status);
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+
+    return await apiClient.get<TransactionsResponse>(
+      `/admin/api/transactions?${params.toString()}`
+    );
+  }
+
   static async createProviderAccountByType(providerType: string): Promise<{
     ok: boolean;
     account_data: Record<string, unknown>;
@@ -1104,4 +1121,22 @@ export interface LogResponse {
   request_id: string | null;
   search: string | null;
   limit: number;
+}
+
+export interface Transaction {
+  id: string;
+  token: string;
+  amount: number;
+  unit: string;
+  mint_url: string;
+  type: 'in' | 'out';
+  request_id?: string;
+  created_at: number;
+  collected: boolean;
+  swept: boolean;
+}
+
+export interface TransactionsResponse {
+  transactions: Transaction[];
+  total: number;
 }

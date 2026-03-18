@@ -83,7 +83,7 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
             Balance in satoshis, or None if failed
         """
         url = f"{self.base_url}/v1/balance/info"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
         async with httpx.AsyncClient() as client:
             try:

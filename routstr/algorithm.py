@@ -126,11 +126,24 @@ def create_model_mappings(
         if isinstance(db_id, int):
             providers_by_db_id[db_id] = upstream
 
+    # Group upstreams by URL and keep only the one with the lowest fee for each URL
+    upstreams_by_url: dict[str, list["BaseUpstreamProvider"]] = {}
+    for upstream in upstreams:
+        url = getattr(upstream, "base_url", "")
+        if url not in upstreams_by_url:
+            upstreams_by_url[url] = []
+        upstreams_by_url[url].append(upstream)
+
+    filtered_upstreams: list["BaseUpstreamProvider"] = []
+    for providers in upstreams_by_url.values():
+        best_provider = min(providers, key=lambda p: p.provider_fee)
+        filtered_upstreams.append(best_provider)
+
     # Separate OpenRouter from other providers
     openrouter: "BaseUpstreamProvider" | None = None
     other_upstreams: list["BaseUpstreamProvider"] = []
 
-    for upstream in upstreams:
+    for upstream in filtered_upstreams:
         base_url = getattr(upstream, "base_url", "")
         if base_url == "https://openrouter.ai/api/v1":
             openrouter = upstream
