@@ -449,10 +449,10 @@ function DashboardInsights({
                   cursor={false}
                   content={
                     <ChartTooltipContent
-                      labelFormatter={(_, payload) =>
+                      labelFormatter={(_: any, payload: readonly any[]) =>
                         String(payload?.[0]?.payload?.type ?? '')
                       }
-                      formatter={(value, name) => {
+                      formatter={(value: any, name: any) => {
                         const numericValue =
                           typeof value === 'number'
                             ? value
