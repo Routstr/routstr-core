@@ -449,7 +449,7 @@ function DashboardInsights({
                   cursor={false}
                   content={
                     <ChartTooltipContent
-                      labelFormatter={(_, payload) =>
+                      labelFormatter={(_: React.ReactNode, payload) =>
                         String(payload?.[0]?.payload?.type ?? '')
                       }
                       formatter={(value, name) => {
