@@ -23,7 +23,7 @@ const PAGE_META: Record<string, { title: string; description: string }> = {
     title: 'System Logs',
     description: 'Inspect request and application logs.',
   },
-  '/models': {
+  '/model': {
     title: 'Models',
     description: 'Manage model catalog and provider mappings.',
   },
