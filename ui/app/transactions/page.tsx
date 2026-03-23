@@ -1,20 +1,27 @@
 'use client';
 
-import { useState } from 'react';
-import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar';
-import { AppSidebar } from '@/components/app-sidebar';
-import { SiteHeader } from '@/components/site-header';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Skeleton } from '@/components/ui/skeleton';
+import { AppPageShell } from '@/components/app-page-shell';
+import { PageHeader } from '@/components/page-header';
 import {
-  AlertCircle,
-  Copy,
-  RefreshCw,
-  ChevronLeft,
-  ChevronRight,
-} from 'lucide-react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import {
   Table,
   TableBody,
@@ -23,331 +30,337 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
+import {
+  RefreshCw,
+  Search,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Copy,
+  Check,
+  Receipt,
+} from 'lucide-react';
+import { AdminService, type Transaction } from '@/lib/api/services/admin';
+import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { apiClient } from '@/lib/api/client';
 
-interface Transaction {
-  id: string;
-  created_at: string;
-  token: string;
-  amount: string;
-}
-
-interface PaginatedTransactionsResponse {
-  transactions: Transaction[];
-  total: number;
-  page: number;
-  per_page: number;
-  total_pages: number;
-}
-
-const TransactionService = {
-  getAllTransactions: async (): Promise<Transaction[]> => {
-    try {
-      const response = await apiClient.get<Transaction[]>('/api/transactions');
-      return response || [];
-    } catch (error) {
-      console.error('Failed to fetch transactions:', error);
-      throw new Error('Failed to fetch transactions');
-    }
-  },
-
-  getPaginatedTransactions: async (
-    page: number,
-    perPage: number
-  ): Promise<PaginatedTransactionsResponse> => {
-    try {
-      const response = await apiClient.get<PaginatedTransactionsResponse>(
-        `/api/transactions/paginated/${page}/${perPage}`
-      );
-      return response;
-    } catch (error) {
-      console.error('Failed to fetch paginated transactions:', error);
-      throw new Error('Failed to fetch paginated transactions');
-    }
-  },
-
-  getRecentTransactions: async (limit: number): Promise<Transaction[]> => {
-    try {
-      const response = await apiClient.get<Transaction[]>(
-        `/api/transactions/recent/${limit}`
-      );
-      return response || [];
-    } catch (error) {
-      console.error('Failed to fetch recent transactions:', error);
-      throw new Error('Failed to fetch recent transactions');
-    }
-  },
-};
+const STORAGE_KEY = 'routstr-transaction-filters';
 
 export default function TransactionsPage() {
-  const [currentPage, setCurrentPage] = useState(1);
-  const perPage = 20;
+  const [search, setSearch] = useState('');
+  const [type, setType] = useState<string>('all');
+  const [status, setStatus] = useState<string>('all');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Fetch paginated transactions data
-  const {
-    data: paginationData,
-    isLoading,
-    error,
-    refetch,
-  } = useQuery({
-    queryKey: ['transactions', currentPage, perPage],
+  // Load filters from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.search) setSearch(parsed.search);
+        if (parsed.type) setType(parsed.type);
+        if (parsed.status) setStatus(parsed.status);
+      } catch (e) {
+        console.error('Failed to load filters from localStorage', e);
+      }
+    }
+  }, []);
+
+  // Save filters to localStorage whenever they change
+  useEffect(() => {
+    const filters = { search, type, status };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(filters));
+  }, [search, type, status]);
+
+  const { data, isLoading, refetch, isRefetching } = useQuery({
+    queryKey: ['transactions', type, status, search],
     queryFn: () =>
-      TransactionService.getPaginatedTransactions(currentPage, perPage),
-    refetchOnWindowFocus: false,
-    retry: 1,
-    staleTime: 30000, // 30 seconds
+      AdminService.getTransactions(
+        type === 'all' ? undefined : type,
+        status === 'all' ? undefined : status,
+        search || undefined,
+        100
+      ),
   });
 
-  const transactions = paginationData?.transactions || [];
-  const totalPages = paginationData?.total_pages || 0;
-  const total = paginationData?.total || 0;
-
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleString();
+  const handleClearFilters = () => {
+    setSearch('');
+    setType('all');
+    setStatus('all');
   };
 
-  const formatAmount = (amount: string) => {
-    return `${parseInt(amount).toLocaleString()} msats`;
+  const copyToClipboard = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    toast.success('Copied to clipboard');
+    setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const truncateToken = (token: string) => {
-    if (token.length <= 20) return token;
-    return `${token.slice(0, 10)}...${token.slice(-10)}`;
+  const getStatusBadge = (tx: Transaction) => {
+    if (tx.swept)
+      return (
+        <Badge
+          variant='outline'
+          className='border-orange-500/20 bg-orange-500/10 text-orange-500'
+        >
+          Swept
+        </Badge>
+      );
+    if (tx.collected)
+      return (
+        <Badge
+          variant='outline'
+          className='border-green-500/20 bg-green-500/10 text-green-500'
+        >
+          Collected
+        </Badge>
+      );
+    return (
+      <Badge
+        variant='outline'
+        className='border-blue-500/20 bg-blue-500/10 text-blue-500'
+      >
+        Pending
+      </Badge>
+    );
   };
 
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success('Token copied to clipboard!');
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error);
-      toast.error('Failed to copy token');
-    }
-  };
+  const hasActiveFilters =
+    type !== 'all' || status !== 'all' || Boolean(search);
 
-  const goToPage = (page: number) => {
-    if (page >= 1 && page <= totalPages) {
-      setCurrentPage(page);
-    }
-  };
-
-  const goToPrevious = () => {
-    if (currentPage > 1) {
-      setCurrentPage(currentPage - 1);
-    }
-  };
-
-  const goToNext = () => {
-    if (currentPage < totalPages) {
-      setCurrentPage(currentPage + 1);
-    }
-  };
+  const activeFilterDescription = [
+    type !== 'all' ? `type ${type === 'in' ? 'incoming' : 'outgoing'}` : null,
+    status !== 'all' ? `status ${status}` : null,
+    search ? `search "${search}"` : null,
+  ]
+    .filter(Boolean)
+    .join(' • ');
 
   return (
-    <TooltipProvider>
-      <SidebarProvider>
-        <AppSidebar variant='inset' />
-        <SidebarInset>
-          <SiteHeader />
-          <div className='flex flex-1 flex-col'>
-            <div className='@container/main flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8'>
-              <div className='mb-6 flex items-center justify-between'>
-                <div>
-                  <h1 className='text-2xl font-bold tracking-tight'>
-                    Transaction History
-                  </h1>
-                  <p className='text-muted-foreground text-sm'>
-                    View all Cashu token transactions processed by the system
-                  </p>
-                </div>
-                <Button
-                  onClick={() => refetch()}
-                  variant='outline'
-                  size='sm'
-                  disabled={isLoading}
-                >
-                  <RefreshCw
-                    className={`mr-2 h-4 w-4 ${isLoading ? 'animate-spin' : ''}`}
+    <AppPageShell contentClassName='mx-auto w-full max-w-5xl overflow-x-hidden'>
+      <div className='space-y-6'>
+        <PageHeader
+          title='X-Cashu Transactions'
+          description='View all incoming and outgoing X-Cashu token transactions.'
+          actions={
+            <Button
+              onClick={() => refetch()}
+              variant='outline'
+              size='sm'
+              disabled={isRefetching}
+            >
+              <RefreshCw
+                className={`mr-2 h-4 w-4 ${isRefetching ? 'animate-spin' : ''}`}
+              />
+              Refresh
+            </Button>
+          }
+        />
+
+        <Card className='mb-6'>
+          <CardHeader>
+            <CardTitle>Filters</CardTitle>
+            <CardDescription>
+              Filter transactions by type, status, or search text
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className='grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3'>
+              <div className='space-y-2'>
+                <Label htmlFor='search'>Search</Label>
+                <div className='relative'>
+                  <Search className='text-muted-foreground absolute top-2.5 left-2.5 h-4 w-4' />
+                  <Input
+                    id='search'
+                    placeholder='Search by ID, token or request ID...'
+                    className='pl-8'
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
                   />
-                  Refresh
+                </div>
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='type'>Type</Label>
+                <Select value={type} onValueChange={setType}>
+                  <SelectTrigger>
+                    <SelectValue placeholder='Type' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>All Types</SelectItem>
+                    <SelectItem value='in'>Incoming (Payments)</SelectItem>
+                    <SelectItem value='out'>Outgoing (Refunds)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className='space-y-2'>
+                <Label htmlFor='status'>Status</Label>
+                <Select value={status} onValueChange={setStatus}>
+                  <SelectTrigger>
+                    <SelectValue placeholder='Status' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>All Statuses</SelectItem>
+                    <SelectItem value='pending'>Pending</SelectItem>
+                    <SelectItem value='collected'>Collected</SelectItem>
+                    <SelectItem value='swept'>Swept</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className='flex items-end sm:col-span-2 lg:col-span-1'>
+                <Button
+                  onClick={handleClearFilters}
+                  variant='outline'
+                  className='w-full'
+                >
+                  Clear Filters
                 </Button>
               </div>
+            </div>
+          </CardContent>
+        </Card>
 
-              {isLoading ? (
-                <div className='space-y-4'>
-                  {[...Array(5)].map((_, i) => (
-                    <Skeleton key={i} className='h-[120px] w-full' />
-                  ))}
-                </div>
-              ) : error ? (
-                <Alert variant='destructive'>
-                  <AlertCircle className='h-4 w-4' />
-                  <AlertDescription>
-                    Failed to load transactions.{' '}
-                    {error instanceof Error
-                      ? error.message
-                      : 'Please check if the server is running and try refreshing the page.'}
-                  </AlertDescription>
-                </Alert>
-              ) : transactions.length === 0 ? (
-                <div className='py-8 text-center'>
-                  <p className='text-muted-foreground'>
-                    No transactions found.
-                  </p>
-                </div>
-              ) : (
-                <div className='space-y-4'>
-                  <div className='flex items-center justify-between'>
-                    <div className='text-muted-foreground text-sm'>
-                      Showing {(currentPage - 1) * perPage + 1} to{' '}
-                      {Math.min(currentPage * perPage, total)} of {total}{' '}
-                      transactions
-                    </div>
-                    <div className='text-muted-foreground text-sm'>
-                      Page {currentPage} of {totalPages}
-                    </div>
-                  </div>
-
-                  <div className='rounded-md border'>
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className='w-[100px]'>ID</TableHead>
-                          <TableHead>Date & Time</TableHead>
-                          <TableHead>Amount</TableHead>
-                          <TableHead className='w-[400px]'>
-                            Cashu Token
-                          </TableHead>
-                          <TableHead className='w-[60px]'>Actions</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {transactions.map((transaction) => (
-                          <TableRow key={transaction.id}>
-                            <TableCell className='font-mono text-xs'>
-                              {transaction.id.slice(0, 8)}
-                            </TableCell>
-                            <TableCell>
-                              <div className='text-sm'>
-                                {formatDate(transaction.created_at)}
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <Badge variant='secondary'>
-                                {formatAmount(transaction.amount)}
-                              </Badge>
-                            </TableCell>
-                            <TableCell>
-                              <div className='flex items-center gap-2'>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <p className='max-w-[300px] cursor-pointer truncate rounded px-1 py-0.5 font-mono text-xs hover:bg-gray-100'>
-                                      {truncateToken(transaction.token)}
-                                    </p>
-                                  </TooltipTrigger>
-                                  <TooltipContent className='max-w-md break-all'>
-                                    <p className='font-mono text-xs'>
-                                      {transaction.token}
-                                    </p>
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                onClick={() =>
-                                  copyToClipboard(transaction.token)
-                                }
-                                className='h-8 w-8 p-0'
-                              >
-                                <Copy className='h-4 w-4' />
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-
-                  {/* Pagination Controls */}
-                  {totalPages > 1 && (
-                    <div className='flex items-center justify-between'>
-                      <div className='text-muted-foreground text-sm'>
-                        Page {currentPage} of {totalPages}
-                      </div>
-                      <div className='flex items-center space-x-2'>
-                        <Button
-                          variant='outline'
-                          size='sm'
-                          onClick={goToPrevious}
-                          disabled={currentPage === 1}
-                        >
-                          <ChevronLeft className='mr-1 h-4 w-4' />
-                          Previous
-                        </Button>
-
-                        {/* Page Numbers */}
-                        <div className='flex items-center space-x-1'>
-                          {Array.from(
-                            { length: Math.min(5, totalPages) },
-                            (_, i) => {
-                              const pageNumber =
-                                currentPage <= 3
-                                  ? i + 1
-                                  : currentPage >= totalPages - 2
-                                    ? totalPages - 4 + i
-                                    : currentPage - 2 + i;
-
-                              if (pageNumber < 1 || pageNumber > totalPages)
-                                return null;
-
-                              return (
-                                <Button
-                                  key={pageNumber}
-                                  variant={
-                                    currentPage === pageNumber
-                                      ? 'default'
-                                      : 'outline'
-                                  }
-                                  size='sm'
-                                  onClick={() => goToPage(pageNumber)}
-                                  className='h-9 w-9 p-0'
-                                >
-                                  {pageNumber}
-                                </Button>
-                              );
-                            }
-                          )}
-                        </div>
-
-                        <Button
-                          variant='outline'
-                          size='sm'
-                          onClick={goToNext}
-                          disabled={currentPage === totalPages}
-                        >
-                          Next
-                          <ChevronRight className='ml-1 h-4 w-4' />
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
+        <Card>
+          <CardHeader>
+            <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+              <CardTitle>Transaction History</CardTitle>
+              {data && (
+                <Badge variant='secondary'>
+                  {data.transactions.length} entries
+                </Badge>
               )}
             </div>
-          </div>
-        </SidebarInset>
-      </SidebarProvider>
-    </TooltipProvider>
+            {hasActiveFilters && (
+              <CardDescription>
+                Showing transactions filtered by {activeFilterDescription}
+              </CardDescription>
+            )}
+          </CardHeader>
+          <CardContent className='overflow-hidden'>
+            {isLoading ? (
+              <div className='space-y-2'>
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton
+                    key={`tx-loading-${index}`}
+                    className='h-16 w-full rounded-lg'
+                  />
+                ))}
+              </div>
+            ) : data?.transactions && data.transactions.length > 0 ? (
+              <ScrollArea className='h-[55svh] min-h-[420px] w-full sm:h-[600px]'>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Type</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Request ID</TableHead>
+                      <TableHead>Mint</TableHead>
+                      <TableHead>Date</TableHead>
+                      <TableHead className='text-right'>Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.transactions.map((tx) => (
+                      <TableRow key={tx.id}>
+                        <TableCell>
+                          <div className='flex items-center gap-2'>
+                            {tx.type === 'in' ? (
+                              <ArrowDownLeft className='h-4 w-4 text-green-500' />
+                            ) : (
+                              <ArrowUpRight className='h-4 w-4 text-blue-500' />
+                            )}
+                            <span className='capitalize'>{tx.type}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className='font-mono'>
+                          {tx.amount} {tx.unit}
+                        </TableCell>
+                        <TableCell>{getStatusBadge(tx)}</TableCell>
+                        <TableCell>
+                          {tx.request_id ? (
+                            <div className='flex items-center gap-1 text-xs'>
+                              <span className='max-w-[150px] truncate font-mono'>
+                                {tx.request_id}
+                              </span>
+                              <Button
+                                variant='ghost'
+                                size='icon'
+                                className='h-4 w-4'
+                                onClick={() =>
+                                  copyToClipboard(
+                                    tx.request_id!,
+                                    tx.id + '-req'
+                                  )
+                                }
+                              >
+                                {copiedId === tx.id + '-req' ? (
+                                  <Check className='h-3 w-3' />
+                                ) : (
+                                  <Copy className='h-3 w-3' />
+                                )}
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className='text-muted-foreground text-xs'>
+                              —
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className='flex max-w-[150px] items-center gap-1 truncate text-xs'>
+                            <span className='truncate'>{tx.mint_url}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className='text-xs whitespace-nowrap'>
+                          {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
+                        </TableCell>
+                        <TableCell className='text-right'>
+                          <Button
+                            variant='ghost'
+                            size='icon'
+                            className='h-8 w-8'
+                            onClick={() =>
+                              copyToClipboard(tx.token, tx.id + '-token')
+                            }
+                            title='Copy Token'
+                          >
+                            {copiedId === tx.id + '-token' ? (
+                              <Check className='h-4 w-4' />
+                            ) : (
+                              <Copy className='h-4 w-4' />
+                            )}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            ) : (
+              <Empty className='py-8'>
+                <EmptyHeader>
+                  <EmptyMedia variant='icon'>
+                    <Receipt className='h-4 w-4' />
+                  </EmptyMedia>
+                  <EmptyTitle>No transactions found</EmptyTitle>
+                  <EmptyDescription>
+                    Try adjusting your filters or check back later.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </AppPageShell>
   );
 }

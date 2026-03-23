@@ -35,96 +35,116 @@ export function UsageSummaryCards({ summary }: UsageSummaryCardsProps) {
 
   const formatAmount = (msat: number) =>
     formatFromMsat(msat, displayUnit, usdPerSat);
+  const totalTokens = Number(summary.total_tokens ?? 0);
+  const avgTotalTokensPerCompletion = Number(
+    summary.avg_total_tokens_per_completion ?? 0
+  );
 
   const cards = [
     {
       title: 'Total Requests',
       value: summary.total_requests.toLocaleString(),
       icon: Activity,
-      color: 'text-blue-500',
+      iconClassName: 'text-blue-600 dark:text-blue-300',
     },
     {
       title: 'Successful Completions',
       value: summary.successful_chat_completions.toLocaleString(),
       icon: CheckCircle2,
-      color: 'text-green-500',
+      iconClassName: 'text-emerald-600 dark:text-emerald-300',
+    },
+    {
+      title: 'Total Tokens',
+      value: totalTokens.toLocaleString(),
+      icon: Database,
+      iconClassName: 'text-cyan-600 dark:text-cyan-300',
+    },
+    {
+      title: 'Avg Tokens/Completion',
+      value: avgTotalTokensPerCompletion.toLocaleString(undefined, {
+        maximumFractionDigits: 1,
+      }),
+      icon: Activity,
+      iconClassName: 'text-indigo-600 dark:text-indigo-300',
     },
     {
       title: 'Revenue',
       value: formatAmount(summary.revenue_msats),
       icon: Coins,
-      color: 'text-green-600',
+      iconClassName: 'text-amber-600 dark:text-amber-300',
     },
     {
-      title: 'Net Revenue',
+      title: 'Operational Net',
       value: formatAmount(summary.net_revenue_msats),
       icon: DollarSign,
-      color: 'text-emerald-600',
+      iconClassName: 'text-lime-600 dark:text-lime-300',
     },
     {
-      title: 'Refunds',
+      title: 'Reverted Holds',
       value: formatAmount(summary.refunds_msats),
       icon: TrendingDown,
-      color: 'text-red-500',
+      iconClassName: 'text-rose-600 dark:text-rose-300',
     },
     {
       title: 'Avg Revenue/Request',
       value: formatAmount(summary.avg_revenue_per_request_msats),
       icon: CreditCard,
-      color: 'text-cyan-500',
+      iconClassName: 'text-violet-600 dark:text-violet-300',
     },
     {
       title: 'Success Rate',
       value: `${summary.success_rate.toFixed(1)}%`,
       icon: TrendingUp,
-      color: 'text-emerald-500',
+      iconClassName: 'text-teal-600 dark:text-teal-300',
     },
     {
       title: 'Refund Rate',
       value: `${summary.refund_rate.toFixed(1)}%`,
       icon: XCircle,
-      color: 'text-orange-500',
+      iconClassName: 'text-fuchsia-600 dark:text-fuchsia-300',
     },
     {
       title: 'Failed Requests',
       value: summary.failed_requests.toLocaleString(),
       icon: XCircle,
-      color: 'text-red-400',
+      iconClassName: 'text-red-600 dark:text-red-300',
     },
     {
       title: 'Errors',
       value: summary.total_errors.toLocaleString(),
       icon: AlertTriangle,
-      color: 'text-orange-500',
+      iconClassName: 'text-orange-600 dark:text-orange-300',
     },
     {
       title: 'Unique Models',
       value: summary.unique_models_count.toLocaleString(),
       icon: Database,
-      color: 'text-purple-500',
+      iconClassName: 'text-cyan-600 dark:text-cyan-300',
     },
     {
       title: 'Upstream Errors',
       value: summary.upstream_errors.toLocaleString(),
       icon: AlertTriangle,
-      color: 'text-yellow-500',
+      iconClassName: 'text-pink-600 dark:text-pink-300',
     },
   ];
 
   return (
-    <div className='grid gap-6 md:grid-cols-2 lg:grid-cols-4'>
+    <div className='grid grid-cols-1 gap-2.5 px-1 min-[380px]:grid-cols-2 sm:gap-4 sm:px-0 xl:grid-cols-4'>
       {cards.map((card) => (
-        <Card key={card.title} className='hover:bg-muted/50 transition-colors'>
-          <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
-            <CardTitle className='text-muted-foreground text-sm font-medium'>
+        <Card key={card.title} size='sm'>
+          <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-1'>
+            <CardTitle className='text-muted-foreground text-[11px] font-medium sm:text-sm'>
               {card.title}
             </CardTitle>
-            <div className={`bg-secondary rounded-full p-2`}>
-              <card.icon className={`h-4 w-4 ${card.color}`} />
-            </div>
+            <span className='inline-flex size-6 items-center justify-center sm:size-7'>
+              <card.icon
+                className={`size-3.5 sm:size-4 ${card.iconClassName}`}
+              />
+            </span>
           </CardHeader>
-          <CardContent>
-            <div className='text-2xl font-bold tracking-tight'>
+          <CardContent className='pt-0'>
+            <div className='text-base font-semibold break-words tabular-nums sm:text-2xl'>
               {card.value}
             </div>
           </CardContent>

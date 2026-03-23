@@ -1,21 +1,18 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
-import { Copy, KeyRound, RefreshCcw, Trash2 } from 'lucide-react';
+import { Copy, RefreshCcw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
+import { KeyOptions } from '@/components/key-options';
+import { WalletBalanceStats } from './wallet-balance-stats';
+import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
 
-type WalletSnapshot = {
-  apiKey: string;
-  balanceMsats: number;
-  reservedMsats: number;
-};
-
-type RefundReceipt = {
+export type RefundReceipt = {
   token?: string;
   recipient?: string;
   sats?: string;
@@ -53,17 +50,29 @@ async function fetchWalletInfo(
     api_key: string;
     balance: number;
     reserved?: number;
+    is_child: boolean;
+    parent_key: string | null;
+    total_requests: number;
+    total_spent: number;
+    balance_limit: number | null;
+    balance_limit_reset: string | null;
+    validity_date: number | null;
+    child_keys?: ChildKeyInfo[];
   };
 
   return {
     apiKey: payload.api_key || apiKey,
     balanceMsats: payload.balance ?? 0,
     reservedMsats: payload.reserved ?? 0,
+    isChild: payload.is_child,
+    parentKey: payload.parent_key,
+    totalRequests: payload.total_requests,
+    totalSpent: payload.total_spent,
+    balanceLimit: payload.balance_limit,
+    balanceLimitReset: payload.balance_limit_reset,
+    validityDate: payload.validity_date,
+    childKeys: payload.child_keys,
   };
-}
-
-function formatMsats(msats: number): string {
-  return new Intl.NumberFormat('en-US').format(msats);
 }
 
 function formatSats(msats: number): string {
@@ -86,9 +95,11 @@ export function CashuPaymentWorkflow({
   const [isTopupLoading, setIsTopupLoading] = useState(false);
   const [isRefunding, setIsRefunding] = useState(false);
   const [isSyncingBalance, setIsSyncingBalance] = useState(false);
-  const [hasInteractedCreate, setHasInteractedCreate] = useState(false);
   const [hasInteractedManage, setHasInteractedManage] = useState(false);
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
+  const [balanceLimit, setBalanceLimit] = useState<string>('');
+  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
+  const [validityDate, setValidityDate] = useState<string>('');
 
   const activeApiKey = apiKeyInput.trim();
 
@@ -121,6 +132,15 @@ export function CashuPaymentWorkflow({
       const params = new URLSearchParams({
         initial_balance_token: initialToken.trim(),
       });
+      if (balanceLimit) params.append('balance_limit', balanceLimit);
+      if (balanceLimitReset)
+        params.append('balance_limit_reset', balanceLimitReset);
+      if (validityDate) {
+        const timestamp = Math.floor(
+          new Date(validityDate + 'T23:59:59').getTime() / 1000
+        );
+        params.append('validity_date', timestamp.toString());
+      }
       const response = await fetch(
         `${baseUrl}/v1/balance/create?${params.toString()}`,
         {
@@ -135,11 +155,25 @@ export function CashuPaymentWorkflow({
       const payload = (await response.json()) as {
         api_key: string;
         balance: number;
+        is_child: boolean;
+        parent_key: string | null;
+        total_requests: number;
+        total_spent: number;
+        balance_limit: number | null;
+        balance_limit_reset: string | null;
+        validity_date: number | null;
       };
       const snapshot: WalletSnapshot = {
         apiKey: payload.api_key,
         balanceMsats: payload.balance ?? 0,
         reservedMsats: 0,
+        isChild: payload.is_child ?? false,
+        parentKey: payload.parent_key ?? null,
+        totalRequests: payload.total_requests ?? 0,
+        totalSpent: payload.total_spent ?? 0,
+        balanceLimit: payload.balance_limit ?? null,
+        balanceLimitReset: payload.balance_limit_reset ?? null,
+        validityDate: payload.validity_date ?? null,
       };
 
       setApiKeyInput(snapshot.apiKey);
@@ -154,7 +188,14 @@ export function CashuPaymentWorkflow({
     } finally {
       setIsCreatingKey(false);
     }
-  }, [initialToken, baseUrl, onApiKeyCreated]);
+  }, [
+    initialToken,
+    baseUrl,
+    onApiKeyCreated,
+    balanceLimit,
+    balanceLimitReset,
+    validityDate,
+  ]);
 
   const handleSyncBalance = useCallback(async (): Promise<void> => {
     if (!activeApiKey) {
@@ -256,26 +297,22 @@ export function CashuPaymentWorkflow({
     [apiKey, onApiKeyChanged, onWalletInfoUpdated]
   );
 
-  const showCreateDetails =
-    hasInteractedCreate || initialToken.trim().length > 0;
   const showManageDetails = hasInteractedManage || Boolean(walletInfo);
   const showTopupDetails = hasInteractedTopup || topupToken.trim().length > 0;
   const canTopup = Boolean(activeApiKey);
+  const showCreateDetails = initialToken.trim().length > 0;
 
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <KeyRound className='text-primary h-5 w-5' />
-          API key workflow
-        </CardTitle>
-        <p className='text-muted-foreground text-xs tracking-wide uppercase'>
+        <CardTitle className='text-xl'>API key workflow</CardTitle>
+        <p className='text-muted-foreground text-xs tracking-wide'>
           Sections expand as soon as you interact
         </p>
       </CardHeader>
       <CardContent className='space-y-6'>
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>1 · Create key</span>
             {showCreateDetails && (
               <span className='text-primary'>Cashu token detected</span>
@@ -285,12 +322,21 @@ export function CashuPaymentWorkflow({
             value={initialToken}
             onChange={(event) => setInitialToken(event.target.value)}
             placeholder='cashuA1...'
-            rows={showCreateDetails ? 4 : 2}
+            rows={4}
             className='font-mono text-sm transition-all duration-200'
-            onFocus={() => setHasInteractedCreate(true)}
           />
-          {showCreateDetails && (
-            <div className='flex flex-wrap gap-2'>
+          <div className='space-y-4'>
+            <KeyOptions
+              balanceLimit={balanceLimit}
+              setBalanceLimit={setBalanceLimit}
+              validityDate={validityDate}
+              setValidityDate={setValidityDate}
+              balanceLimitReset={balanceLimitReset}
+              setBalanceLimitReset={setBalanceLimitReset}
+              showBalanceLimit={false}
+            />
+
+            <div className='flex flex-wrap items-center gap-3'>
               <Button
                 onClick={handleCreateKey}
                 disabled={isCreatingKey}
@@ -298,17 +344,19 @@ export function CashuPaymentWorkflow({
               >
                 {isCreatingKey ? 'Creating…' : 'Create API key'}
               </Button>
-              <span className='text-muted-foreground text-xs'>
+              <span className='text-muted-foreground text-[0.7rem] leading-relaxed'>
                 Redeems instantly and returns <code>sk-</code> key.
+                <br />
+                Optional limits can be set above for enhanced security.
               </span>
             </div>
-          )}
+          </div>
         </section>
 
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>2 · Manage key</span>
             {walletInfo && (
               <span className='text-primary'>
@@ -347,45 +395,17 @@ export function CashuPaymentWorkflow({
             </div>
           </div>
           {showManageDetails && (
-            <div className='grid gap-3 sm:grid-cols-2'>
-              <div className='rounded-lg border p-3'>
-                <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                  Spendable
-                </p>
-                <p className='text-xl font-semibold'>
-                  {walletInfo
-                    ? `${formatSats(walletInfo.balanceMsats)} sats`
-                    : '—'}
-                </p>
-                {walletInfo && (
-                  <p className='text-muted-foreground text-xs'>
-                    {formatMsats(walletInfo.balanceMsats)} msats
-                  </p>
-                )}
-              </div>
-              <div className='rounded-lg border p-3'>
-                <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                  Reserved
-                </p>
-                <p className='text-xl font-semibold'>
-                  {walletInfo
-                    ? `${formatSats(walletInfo.reservedMsats)} sats`
-                    : '—'}
-                </p>
-                {walletInfo && (
-                  <p className='text-muted-foreground text-xs'>
-                    {formatMsats(walletInfo.reservedMsats)} msats
-                  </p>
-                )}
-              </div>
-            </div>
+            <WalletBalanceStats
+              balanceMsats={walletInfo?.balanceMsats}
+              reservedMsats={walletInfo?.reservedMsats}
+            />
           )}
         </section>
 
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>3 · Top up</span>
             {showTopupDetails && (
               <span className={canTopup ? 'text-primary' : 'text-destructive'}>
@@ -428,7 +448,7 @@ export function CashuPaymentWorkflow({
         <Separator />
 
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>4 · Refund</span>
           </header>
           <div className='flex flex-wrap gap-2'>

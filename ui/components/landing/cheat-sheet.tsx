@@ -2,38 +2,35 @@
 
 import { type JSX, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Bolt, Copy, RefreshCcw, ShieldCheck, Terminal } from 'lucide-react';
+import { Bolt, Copy, RefreshCcw, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ConfigurationService } from '@/lib/api/services/configuration';
-import { CashuPaymentWorkflow } from './cashu-payment-workflow';
+import {
+  CashuPaymentWorkflow,
+  type RefundReceipt,
+} from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
 import { ApiKeyManager } from './api-key-manager';
+import { KeyInfoDetails, type WalletSnapshot } from './key-info-details';
 import { ChildKeyCreator } from '@/components/child-key-creator';
 
 type NodeInfo = {
-  name: string;
-  description: string;
-  version: string;
-  npub?: string | null;
-  mints: string[];
-  http_url?: string | null;
-  onion_url?: string | null;
+  name?: string;
+  description?: string;
+  version?: string;
+  http_url?: string;
+  onion_url?: string;
+  npub?: string;
+  mints?: string[];
   child_key_cost_msats?: number;
-};
-
-type WalletSnapshot = {
-  apiKey: string;
-  balanceMsats: number;
-  reservedMsats: number;
-};
-
-type RefundReceipt = {
   token?: string;
   recipient?: string;
   sats?: string;
@@ -170,7 +167,7 @@ export function CheatSheet(): JSX.Element {
   const refundToken = refundReceipt?.token ?? null;
 
   return (
-    <div className='from-background via-background to-muted min-h-screen bg-gradient-to-b'>
+    <div className='bg-background min-h-screen'>
       <main className='mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-10 sm:px-6 lg:px-8'>
         <section className='relative space-y-3 text-center md:text-left'>
           <div className='absolute top-0 right-0 hidden md:block'>
@@ -178,7 +175,7 @@ export function CheatSheet(): JSX.Element {
               <a href='/login'>Admin</a>
             </Button>
           </div>
-          <div className='text-muted-foreground inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[0.65rem] tracking-wider uppercase'>
+          <div className='text-muted-foreground inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[0.65rem] tracking-wider'>
             <Bolt className='text-primary h-4 w-4' />
             Routstr cheat sheet
           </div>
@@ -196,11 +193,8 @@ export function CheatSheet(): JSX.Element {
           <Card>
             <CardHeader className='flex flex-row items-start justify-between gap-4'>
               <div>
-                <CardTitle className='flex items-center gap-2 text-lg'>
-                  <ShieldCheck className='text-primary h-4 w-4' />
-                  Node identity
-                </CardTitle>
-                <p className='text-muted-foreground text-xs tracking-wide uppercase'>
+                <CardTitle className='text-lg'>Node identity</CardTitle>
+                <p className='text-muted-foreground text-xs tracking-wide'>
                   /v1/info snapshot
                 </p>
               </div>
@@ -217,9 +211,44 @@ export function CheatSheet(): JSX.Element {
             </CardHeader>
             <CardContent className='space-y-4'>
               {isInfoLoading && (
-                <p className='text-muted-foreground text-sm'>
-                  Loading node profile…
-                </p>
+                <div className='space-y-4'>
+                  <div className='space-y-2'>
+                    <Skeleton className='h-8 w-56 max-w-full' />
+                    <Skeleton className='h-4 w-80 max-w-full' />
+                  </div>
+                  <dl className='grid gap-4 sm:grid-cols-2'>
+                    <div className='space-y-2'>
+                      <Skeleton className='h-3 w-16' />
+                      <Skeleton className='h-5 w-24' />
+                    </div>
+                    <div className='space-y-2'>
+                      <Skeleton className='h-3 w-12' />
+                      <Skeleton className='h-5 w-40 max-w-full' />
+                    </div>
+                    <div className='space-y-2 sm:col-span-2'>
+                      <Skeleton className='h-3 w-12' />
+                      <Skeleton className='h-5 w-full max-w-[26rem]' />
+                    </div>
+                    <div className='space-y-2 sm:col-span-2'>
+                      <Skeleton className='h-3 w-10' />
+                      <div className='flex items-center gap-2'>
+                        <Skeleton className='h-5 max-w-[28rem] flex-1' />
+                        <Skeleton className='h-7 w-7 rounded-md' />
+                      </div>
+                    </div>
+                  </dl>
+                  <div className='space-y-2'>
+                    <Skeleton className='h-3 w-20' />
+                    <div className='flex flex-wrap gap-2'>
+                      {Array.from({ length: 4 }).map((_, index) => (
+                        <Skeleton
+                          key={`mint-skeleton-${index}`}
+                          className='h-6 w-28 rounded-full'
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
               )}
               {isInfoError && !isInfoLoading && (
                 <p className='text-destructive text-sm'>
@@ -236,7 +265,7 @@ export function CheatSheet(): JSX.Element {
                   </div>
                   <dl className='grid gap-4 sm:grid-cols-2'>
                     <div>
-                      <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
+                      <dt className='text-muted-foreground text-xs tracking-wide'>
                         Version
                       </dt>
                       <dd className='text-base font-medium'>
@@ -244,7 +273,7 @@ export function CheatSheet(): JSX.Element {
                       </dd>
                     </div>
                     <div>
-                      <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
+                      <dt className='text-muted-foreground text-xs tracking-wide'>
                         HTTP
                       </dt>
                       <dd className='text-base font-medium break-all'>
@@ -253,7 +282,7 @@ export function CheatSheet(): JSX.Element {
                     </div>
                     {nodeInfo.onion_url && (
                       <div className='sm:col-span-2'>
-                        <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
+                        <dt className='text-muted-foreground text-xs tracking-wide'>
                           Onion
                         </dt>
                         <dd className='text-base font-medium break-all'>
@@ -263,7 +292,7 @@ export function CheatSheet(): JSX.Element {
                     )}
                     {nodeInfo.npub && (
                       <div className='sm:col-span-2'>
-                        <dt className='text-muted-foreground text-xs tracking-wide uppercase'>
+                        <dt className='text-muted-foreground text-xs tracking-wide'>
                           npub
                         </dt>
                         <dd className='flex items-center gap-2 font-mono text-sm break-all'>
@@ -281,11 +310,11 @@ export function CheatSheet(): JSX.Element {
                     )}
                   </dl>
                   <div className='space-y-2'>
-                    <p className='text-muted-foreground text-xs tracking-wide uppercase'>
+                    <p className='text-muted-foreground text-xs tracking-wide'>
                       Cashu mints
                     </p>
                     <div className='flex flex-wrap gap-2'>
-                      {nodeInfo.mints.length ? (
+                      {nodeInfo.mints?.length ? (
                         nodeInfo.mints.map((mint) => (
                           <Badge
                             key={mint}
@@ -309,11 +338,8 @@ export function CheatSheet(): JSX.Element {
 
           <Card>
             <CardHeader className='flex flex-row items-center justify-between'>
-              <CardTitle className='flex items-center gap-2 text-lg'>
-                <Terminal className='text-primary h-4 w-4' />
-                Quick docs
-              </CardTitle>
-              <span className='text-muted-foreground text-xs tracking-wide uppercase'>
+              <CardTitle className='text-lg'>Quick docs</CardTitle>
+              <span className='text-muted-foreground text-xs tracking-wide'>
                 curl-ready
               </span>
             </CardHeader>
@@ -334,11 +360,12 @@ export function CheatSheet(): JSX.Element {
                   <Copy className='h-4 w-4' />
                 </Button>
               </div>
-              <div className='bg-muted rounded-lg p-4 font-mono text-sm leading-6'>
-                <pre className='break-all whitespace-pre-wrap'>
+              <ScrollArea className='bg-muted w-full rounded-lg border'>
+                <pre className='w-max min-w-full p-4 font-mono text-sm leading-6 whitespace-pre'>
                   {curlSnippet}
                 </pre>
-              </div>
+                <ScrollBar orientation='horizontal' />
+              </ScrollArea>
               <div className='flex gap-2'>
                 <Button
                   variant='secondary'
@@ -364,10 +391,11 @@ export function CheatSheet(): JSX.Element {
         </section>
 
         <Tabs defaultValue='cashu' className='w-full'>
-          <TabsList className='grid w-full grid-cols-4'>
-            <TabsTrigger value='cashu'>Cashu Payments</TabsTrigger>
-            <TabsTrigger value='lightning'>Lightning Payments</TabsTrigger>
+          <TabsList className='grid w-full grid-cols-5'>
+            <TabsTrigger value='cashu'>Cashu</TabsTrigger>
+            <TabsTrigger value='lightning'>Lightning</TabsTrigger>
             <TabsTrigger value='manage'>Manage Keys</TabsTrigger>
+            <TabsTrigger value='details'>Key Details</TabsTrigger>
             <TabsTrigger value='child-keys'>Child Keys</TabsTrigger>
           </TabsList>
 
@@ -402,7 +430,7 @@ export function CheatSheet(): JSX.Element {
                 </CardHeader>
                 <CardContent className='space-y-2'>
                   <div className='bg-muted/30 space-y-2 rounded-lg border p-4'>
-                    <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+                    <div className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
                       <span>Cashu refund token</span>
                       <Button
                         variant='outline'
@@ -424,6 +452,16 @@ export function CheatSheet(): JSX.Element {
                 </CardContent>
               </Card>
             )}
+          </TabsContent>
+
+          <TabsContent value='details' className='space-y-4'>
+            <KeyInfoDetails
+              baseUrl={normalizedBaseUrl}
+              apiKey={apiKeyInput}
+              walletInfo={walletInfo}
+              onApiKeyChanged={handleApiKeyChanged}
+              onWalletInfoUpdated={handleWalletInfoUpdated}
+            />
           </TabsContent>
 
           <TabsContent value='child-keys' className='space-y-4'>

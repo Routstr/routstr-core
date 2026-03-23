@@ -1,25 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import traceback
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Mapping
+from typing import Mapping
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from sqlmodel import select
 
-from ..auth import adjust_payment_for_tokens, revert_pay_for_request
+from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
-from ..core.db import ApiKey, AsyncSession, create_session
+from ..core.db import (
+    ApiKey,
+    AsyncSession,
+    UpstreamProviderRow,
+    create_session,
+    store_cashu_transaction,
+)
 from ..core.exceptions import UpstreamError
-
-if TYPE_CHECKING:
-    from ..core.db import UpstreamProviderRow
-
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -32,6 +36,7 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    list_models,
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
@@ -198,6 +203,21 @@ class BaseUpstreamProvider:
             Transformed model ID for this provider
         """
         return model_id
+
+    def normalize_request_path(self, path: str, model_obj: Model | None = None) -> str:
+        """Normalize request path before forwarding to upstream."""
+        if path.startswith("v1/"):
+            return path.replace("v1/", "", 1)
+        return path
+
+    def get_request_base_url(self, path: str, model_obj: Model | None = None) -> str:
+        """Get upstream base URL used when building forwarding URL."""
+        return self.base_url.rstrip("/")
+
+    def build_request_url(self, path: str, model_obj: Model | None = None) -> str:
+        """Build full upstream URL from normalized path."""
+        clean_path = path.lstrip("/")
+        return f"{self.get_request_base_url(path, model_obj)}/{clean_path}"
 
     def prepare_responses_request_body(
         self, body: bytes | None, model_obj: Model
@@ -427,7 +447,11 @@ class BaseUpstreamProvider:
         )
 
     async def handle_streaming_chat_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        max_cost_for_model: int,
+        background_tasks: BackgroundTasks,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -521,9 +545,16 @@ class BaseUpstreamProvider:
                                     session,
                                     max_cost_for_model,
                                 )
+                                remaining_balance_msats = fresh_key.balance
                                 # Merge cost into usage
                                 usage_chunk_data["usage"]["cost"] = cost_data.get(
                                     "total_usd", 0.0
+                                )
+                                usage_chunk_data["usage"]["cost_sats"] = (
+                                    cost_data.get("total_msats", 0) // 1000
+                                )
+                                usage_chunk_data["usage"]["remaining_balance_msats"] = (
+                                    remaining_balance_msats
                                 )
                                 # Keep detailed cost in metadata
                                 usage_chunk_data["metadata"] = usage_chunk_data.get(
@@ -532,9 +563,22 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["metadata"]["routstr"] = {
                                     "cost": cost_data
                                 }
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "sats_cost"
+                                ] = cost_data.get("total_msats", 0) // 1000
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "remaining_balance_msats"
+                                ] = remaining_balance_msats
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
-                            except Exception:
+                            except Exception as e:
+                                logger.exception(
+                                    "Error during usage finalization",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(e),
+                                    },
+                                )
                                 # Fallback: yield original usage chunk if adjustment fails
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
 
@@ -555,7 +599,9 @@ class BaseUpstreamProvider:
                 raise
             finally:
                 if not usage_finalized:
-                    await finalize_db_only()
+                    # Create a background task to ensure finalization happens
+                    # even if the generator is closed early
+                    background_tasks.add_task(finalize_db_only)
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -613,14 +659,31 @@ class BaseUpstreamProvider:
                 key, response_json, session, deducted_max_cost
             )
 
+            await session.refresh(key)
+            remaining_balance_msats = key.balance
+
             # Merge cost into usage for OpenCode
             if "usage" in response_json:
                 response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+                response_json["usage"]["cost_sats"] = (
+                    cost_data.get("total_msats", 0) // 1000
+                )
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
             response_json["metadata"]["routstr"] = {"cost": cost_data}
+            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
+                cost_data.get("total_msats", 0) // 1000
+            )
+            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
+                remaining_balance_msats
+            )
             response_json["cost"] = cost_data
+            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
+            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
 
             logger.info(
                 "Payment adjustment completed for non-streaming",
@@ -790,6 +853,7 @@ class BaseUpstreamProvider:
                                     session,
                                     max_cost_for_model,
                                 )
+                                remaining_balance_msats = fresh_key.balance
                                 # Merge cost into usage chunk
                                 if (
                                     "response" in usage_chunk_data
@@ -798,10 +862,22 @@ class BaseUpstreamProvider:
                                     usage_chunk_data["response"]["usage"]["cost"] = (
                                         cost_data.get("total_usd", 0.0)
                                     )
+                                    usage_chunk_data["response"]["usage"][
+                                        "cost_sats"
+                                    ] = cost_data.get("total_msats", 0) // 1000
+                                    usage_chunk_data["response"]["usage"][
+                                        "remaining_balance_msats"
+                                    ] = remaining_balance_msats
                                 elif "usage" in usage_chunk_data:
                                     usage_chunk_data["usage"]["cost"] = cost_data.get(
                                         "total_usd", 0.0
                                     )
+                                    usage_chunk_data["usage"]["cost_sats"] = (
+                                        cost_data.get("total_msats", 0) // 1000
+                                    )
+                                    usage_chunk_data["usage"][
+                                        "remaining_balance_msats"
+                                    ] = remaining_balance_msats
 
                                 # Keep detailed cost in metadata
                                 usage_chunk_data["metadata"] = usage_chunk_data.get(
@@ -810,6 +886,12 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["metadata"]["routstr"] = {
                                     "cost": cost_data
                                 }
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "sats_cost"
+                                ] = cost_data.get("total_msats", 0) // 1000
+                                usage_chunk_data["metadata"]["routstr"]["cost"][
+                                    "remaining_balance_msats"
+                                ] = remaining_balance_msats
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
                             except Exception:
@@ -894,14 +976,31 @@ class BaseUpstreamProvider:
                 key, response_json, session, deducted_max_cost
             )
 
+            await session.refresh(key)
+            remaining_balance_msats = key.balance
+
             # Merge cost into usage for OpenCode
             if "usage" in response_json:
                 response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+                response_json["usage"]["cost_sats"] = (
+                    cost_data.get("total_msats", 0) // 1000
+                )
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
             response_json["metadata"]["routstr"] = {"cost": cost_data}
+            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
+                cost_data.get("total_msats", 0) // 1000
+            )
+            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
+                remaining_balance_msats
+            )
             response_json["cost"] = cost_data
+            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
+            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
 
             logger.info(
                 "Payment adjustment completed for non-streaming Responses API",
@@ -1024,10 +1123,8 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path, model_obj)
+        url = self.build_request_url(path, model_obj)
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1136,12 +1233,12 @@ class BaseUpstreamProvider:
                     )
 
                     if is_streaming and response.status_code == 200:
-                        result = await self.handle_streaming_chat_completion(
-                            response, key, max_cost_for_model
-                        )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
                         background_tasks.add_task(client.aclose)
+                        result = await self.handle_streaming_chat_completion(
+                            response, key, max_cost_for_model, background_tasks
+                        )
                         result.background = background_tasks
                         return result
 
@@ -1202,8 +1299,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1233,14 +1329,8 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
-            )
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
+            raise UpstreamError("An unexpected server error occurred", status_code=500)
 
     async def forward_responses_request(
         self,
@@ -1268,11 +1358,8 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        # Remove v1/ prefix if present for Responses API
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path, model_obj)
+        url = self.build_request_url(path, model_obj)
 
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
@@ -1424,8 +1511,7 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1455,14 +1541,8 @@ class BaseUpstreamProvider:
                 },
             )
 
-            await revert_pay_for_request(key, session, max_cost_for_model)
-
-            return create_error_response(
-                "internal_error",
-                "An unexpected server error occurred",
-                500,
-                request=request,
-            )
+            # Don't revert here — proxy.py owns payment revert to avoid double-revert
+            raise UpstreamError("An unexpected server error occurred", status_code=500)
 
     async def forward_get_request(
         self,
@@ -1480,10 +1560,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse from upstream
         """
-        if path.startswith("v1/"):
-            path = path.replace("v1/", "")
-
-        url = f"{self.base_url}/{path}"
+        path = self.normalize_request_path(path)
+        url = self.build_request_url(path)
 
         logger.info(
             "Forwarding GET request to upstream",
@@ -1602,13 +1680,22 @@ class BaseUpstreamProvider:
                     )
         return None
 
-    async def send_refund(self, amount: int, unit: str, mint: str | None = None) -> str:
+    async def send_refund(
+        self,
+        amount: int,
+        unit: str,
+        mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
+    ) -> str:
         """Create and send a refund token to the user.
 
         Args:
             amount: Refund amount
             unit: Unit of the refund (sat or msat)
             mint: Optional mint URL for the refund token
+            payment_token_hash: Optional SHA-256 hash of the original payment token for storage
+            request_id: Optional HTTP request ID for tracking
 
         Returns:
             Refund token string
@@ -1637,6 +1724,18 @@ class BaseUpstreamProvider:
                         else refund_token,
                     },
                 )
+
+                try:
+                    await store_cashu_transaction(
+                        token=refund_token,
+                        amount=amount,
+                        unit=unit,
+                        mint_url=mint,
+                        typ="out",
+                        request_id=request_id,
+                    )
+                except Exception:
+                    pass  # store_cashu_transaction already logs
 
                 return refund_token
             except Exception as e:
@@ -1687,6 +1786,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1696,6 +1797,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            payment_token_hash: Optional hash of original payment token for refund storage
 
         Returns:
             StreamingResponse with refund token in header if applicable
@@ -1767,7 +1869,10 @@ class BaseUpstreamProvider:
                             },
                         )
 
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
+                        refund_token = await self.send_refund(
+                            refund_amount, unit, mint, payment_token_hash,
+                            request_id=request_id,
+                        )
                         response_headers["X-Cashu"] = refund_token
 
                         logger.info(
@@ -1820,6 +1925,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -1829,6 +1936,7 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
+            payment_token_hash: Optional hash of original payment token for refund storage
 
         Returns:
             Response with refund token in header if applicable
@@ -1890,7 +1998,10 @@ class BaseUpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit, mint)
+                refund_token = await self.send_refund(
+                    refund_amount, unit, mint, payment_token_hash,
+                    request_id=request_id,
+                )
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -1926,6 +2037,17 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
+            try:
+                await store_cashu_transaction(
+                    token=refund_token,
+                    amount=emergency_refund,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="out",
+                    request_id=request_id,
+                )
+            except Exception:
+                pass
 
             logger.warning(
                 "Emergency refund issued due to JSON parse error",
@@ -1950,6 +2072,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -1986,11 +2110,25 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
+                    request_id=request_id,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
+                    request_id=request_id,
                 )
 
         except Exception as e:
@@ -2019,6 +2157,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward request paid with X-Cashu token to upstream service.
 
@@ -2089,7 +2228,10 @@ class BaseUpstreamProvider:
                         },
                     )
 
-                    refund_token = await self.send_refund(amount - 60, unit, mint)
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
+                    )
 
                     logger.info(
                         "Refund processed for failed upstream request",
@@ -2127,7 +2269,13 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_chat_completion(
-                        response, amount, unit, max_cost_for_model, mint
+                        response,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        mint,
+                        payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -2202,9 +2350,24 @@ class BaseUpstreamProvider:
         )
 
         try:
+            payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
+
+            request_id = getattr(request.state, "request_id", None)
+            try:
+                await store_cashu_transaction(
+                    token=x_cashu_token,
+                    amount=amount,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="in",
+                    request_id=request_id,
+                    collected=True,
+                )
+            except Exception:
+                pass
 
             logger.info(
                 "X-Cashu token redeemed for Responses API",
@@ -2220,6 +2383,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
+                payment_token_hash,
             )
         except Exception as e:
             error_message = str(e)
@@ -2279,6 +2443,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward Responses API request paid with X-Cashu token to upstream service.
 
@@ -2350,7 +2515,10 @@ class BaseUpstreamProvider:
                         },
                     )
 
-                    refund_token = await self.send_refund(amount - 60, unit, mint)
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
+                    )
 
                     logger.info(
                         "Refund processed for failed upstream Responses API request",
@@ -2388,7 +2556,13 @@ class BaseUpstreamProvider:
                     )
 
                     result = await self.handle_x_cashu_responses_completion(
-                        response, amount, unit, max_cost_for_model, mint
+                        response,
+                        amount,
+                        unit,
+                        max_cost_for_model,
+                        mint,
+                        payment_token_hash,
+                        request_id=getattr(request.state, "request_id", None),
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -2438,6 +2612,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle Responses API completion response for X-Cashu payment.
 
@@ -2475,11 +2651,25 @@ class BaseUpstreamProvider:
 
             if is_streaming:
                 return await self.handle_x_cashu_streaming_responses_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
+                    request_id=request_id,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_responses_response(
-                    content_str, response, amount, unit, max_cost_for_model, mint
+                    content_str,
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
+                    request_id=request_id,
                 )
 
         except Exception as e:
@@ -2506,6 +2696,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API response for X-Cashu payment.
 
@@ -2587,7 +2779,10 @@ class BaseUpstreamProvider:
                             },
                         )
 
-                        refund_token = await self.send_refund(refund_amount, unit, mint)
+                        refund_token = await self.send_refund(
+                            refund_amount, unit, mint, payment_token_hash,
+                            request_id=request_id,
+                        )
                         response_headers["X-Cashu"] = refund_token
 
                         logger.info(
@@ -2640,6 +2835,8 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
     ) -> Response:
         """Handle non-streaming Responses API response for X-Cashu payment."""
         logger.debug(
@@ -2699,7 +2896,10 @@ class BaseUpstreamProvider:
             )
 
             if refund_amount > 0:
-                refund_token = await self.send_refund(refund_amount, unit, mint)
+                refund_token = await self.send_refund(
+                    refund_amount, unit, mint, payment_token_hash,
+                    request_id=request_id,
+                )
                 response_headers["X-Cashu"] = refund_token
 
                 logger.info(
@@ -2735,6 +2935,17 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
+            try:
+                await store_cashu_transaction(
+                    token=refund_token,
+                    amount=emergency_refund,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="out",
+                    request_id=request_id,
+                )
+            except Exception:
+                pass
 
             logger.warning(
                 "Emergency refund issued for Responses API due to JSON parse error",
@@ -2784,9 +2995,24 @@ class BaseUpstreamProvider:
         )
 
         try:
+            payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
+
+            request_id = getattr(request.state, "request_id", None)
+            try:
+                await store_cashu_transaction(
+                    token=x_cashu_token,
+                    amount=amount,
+                    unit=unit,
+                    mint_url=mint,
+                    typ="in",
+                    request_id=request_id,
+                    collected=True,
+                )
+            except Exception:
+                pass
 
             logger.info(
                 "X-Cashu token redeemed successfully",
@@ -2802,6 +3028,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
+                payment_token_hash,
             )
         except Exception as e:
             error_message = str(e)
@@ -3010,18 +3237,53 @@ class BaseUpstreamProvider:
     async def refresh_models_cache(self) -> None:
         """Refresh the in-memory models cache from upstream API."""
         try:
-            models = await self.fetch_models()
-            models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
+            async with create_session() as session:
+                stmt = select(UpstreamProviderRow).where(
+                    UpstreamProviderRow.base_url == self.base_url,
+                    UpstreamProviderRow.api_key == self.api_key,
+                )
+                result = await session.exec(stmt)
 
-            try:
-                sats_to_usd = sats_usd_price()
-                self._models_cache = [
-                    _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
+                # .first() returns the object or None if not found
+                provider = result.first()
+                if not provider or not provider.id:
+                    raise HTTPException(status_code=404, detail="Provider not found")
+
+                db_models = await list_models(
+                    session=session,
+                    upstream_id=provider.id,
+                    include_disabled=False,
+                    apply_fees=False,
+                )
+                db_model_ids: set[str] = {model.id for model in db_models}
+                models = await self.fetch_models()
+                model_ids = [model.id for model in models]
+                diff = set(db_model_ids) - set(model_ids)
+
+                for db_model_id in diff:
+                    found_db_model = next(
+                        (
+                            model_obj
+                            for model_obj in db_models
+                            if model_obj.id == db_model_id
+                        )
+                    )
+                    models.append(found_db_model)
+
+                models_with_fees = [
+                    self._apply_provider_fee_to_model(m) for m in models
                 ]
-            except Exception:
-                self._models_cache = models_with_fees
 
-            self._models_by_id = {m.id: m for m in self._models_cache}
+                try:
+                    sats_to_usd = sats_usd_price()
+                    self._models_cache = [
+                        _update_model_sats_pricing(m, sats_to_usd)
+                        for m in models_with_fees
+                    ]
+                except Exception:
+                    self._models_cache = models_with_fees
+
+                self._models_by_id = {m.id: m for m in self._models_cache}
 
         except Exception as e:
             logger.error(

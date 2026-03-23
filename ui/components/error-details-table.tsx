@@ -38,8 +38,8 @@ export function ErrorDetailsTable({ errors }: ErrorDetailsTableProps) {
         <CardTitle>Recent Errors ({errors.length})</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className='max-h-[400px] overflow-y-auto'>
-          <Table>
+        <div className='max-h-[420px] max-w-full overflow-y-auto'>
+          <Table className='min-w-[640px] sm:min-w-[760px]'>
             <TableHeader>
               <TableRow>
                 <TableHead>Timestamp</TableHead>

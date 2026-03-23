@@ -1,13 +1,15 @@
 import asyncio
 import hashlib
+import time
 from time import monotonic
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlmodel import select
 
-from .auth import validate_bearer_key
-from .core.db import ApiKey, AsyncSession, get_session
+from .auth import get_billing_key, validate_bearer_key
+from .core.db import ApiKey, AsyncSession, CashuTransaction, get_session
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
@@ -33,10 +35,8 @@ async def get_key_from_header(
 
 
 async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
-    from .auth import get_billing_key
-
     billing_key = await get_billing_key(key, session)
-    return {
+    info = {
         "api_key": "sk-" + key.hashed_key,
         "balance": billing_key.balance,
         "reserved": billing_key.reserved_balance,
@@ -44,7 +44,30 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
         "total_requests": key.total_requests,
         "total_spent": key.total_spent,
+        "balance_limit": key.balance_limit,
+        "balance_limit_reset": key.balance_limit_reset,
+        "validity_date": key.validity_date,
     }
+
+    if not key.parent_key_hash:
+        # Fetch child keys if this is a parent key
+        statement = select(ApiKey).where(ApiKey.parent_key_hash == key.hashed_key)
+        results = await session.exec(statement)
+        child_keys = results.all()
+        if child_keys:
+            info["child_keys"] = [
+                {
+                    "api_key": "sk-" + ck.hashed_key,
+                    "total_requests": ck.total_requests,
+                    "total_spent": ck.total_spent,
+                    "balance_limit": ck.balance_limit,
+                    "balance_limit_reset": ck.balance_limit_reset,
+                    "validity_date": ck.validity_date,
+                }
+                for ck in child_keys
+            ]
+
+    return info
 
 
 # TODO: remove this endpoint when frontend is updated
@@ -70,9 +93,24 @@ async def account_info(
 
 @router.get("/create")
 async def create_balance(
-    initial_balance_token: str, session: AsyncSession = Depends(get_session)
+    initial_balance_token: str,
+    balance_limit: int | None = None,
+    balance_limit_reset: str | None = None,
+    validity_date: int | None = None,
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
     key = await validate_bearer_key(initial_balance_token, session)
+
+    if balance_limit is not None or balance_limit_reset or validity_date:
+        key.balance_limit = balance_limit
+        key.balance_limit_reset = balance_limit_reset
+        key.validity_date = validity_date
+        if balance_limit_reset:
+            key.balance_limit_reset_date = int(time.time())
+        session.add(key)
+        await session.commit()
+        await session.refresh(key)
+
     return {
         "api_key": "sk-" + key.hashed_key,
         "balance": key.balance,
@@ -98,8 +136,6 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
-    from .auth import get_billing_key
-
     billing_key = await get_billing_key(key, session)
 
     if topup_request is not None:
@@ -118,9 +154,23 @@ async def topup_wallet_endpoint(
             raise HTTPException(status_code=400, detail="Token already spent")
         elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
             raise HTTPException(status_code=400, detail="Invalid token format")
+        elif "insufficient" in error_msg.lower() or "melt fee" in error_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Token value is too small to cover swap fees. {error_msg}",
+            )
+        elif "failed to melt" in error_msg.lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to swap foreign mint token. {error_msg}",
+            )
         else:
-            raise HTTPException(status_code=400, detail="Failed to redeem token")
-    except Exception:
+            raise HTTPException(status_code=400, detail=f"Failed to redeem token: {error_msg}")
+    except Exception as e:
+        logger.error(
+            "topup_wallet_endpoint: unhandled error",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
         raise HTTPException(status_code=500, detail="Internal server error")
     return {"msats": amount_msats}
 
@@ -167,10 +217,11 @@ async def refund_wallet_endpoint(
 
     bearer_value: str = authorization[7:]
 
-    if cached := await _refund_cache_get(bearer_value):
-        return cached
-
     key: ApiKey = await validate_bearer_key(bearer_value, session)
+
+    if key.total_balance <= 0:
+        if cached := await _refund_cache_get(bearer_value):
+            return cached
 
     if key.parent_key_hash:
         raise HTTPException(
@@ -232,7 +283,9 @@ async def refund_wallet_endpoint(
 
     await _refund_cache_set(bearer_value, result)
 
-    await session.delete(key)
+    key.balance = 0
+    key.reserved_balance = 0
+    session.add(key)
     await session.commit()
 
     return result
@@ -253,6 +306,9 @@ async def donate(token: str, ref: str | None = None) -> str:
 
 class ChildKeyRequest(BaseModel):
     count: int
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
 
 
 @router.post("/child-key")
@@ -302,6 +358,12 @@ async def create_child_key(
             hashed_key=new_key_hash,
             balance=0,
             parent_key_hash=key.hashed_key,
+            balance_limit=payload.balance_limit,
+            balance_limit_reset=payload.balance_limit_reset,
+            balance_limit_reset_date=int(time.time())
+            if payload.balance_limit_reset
+            else None,
+            validity_date=payload.validity_date,
         )
         session.add(child_key)
         new_keys.append("sk-" + new_key_hash)
@@ -318,6 +380,60 @@ async def create_child_key(
     }
     logger.debug(f"Child key creation response: {response_data}")
     return response_data
+
+
+class ChildKeyResetRequest(BaseModel):
+    child_key: str
+
+
+@router.post("/child-key/reset")
+async def reset_child_key_spent(
+    payload: ChildKeyResetRequest,
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Resets the total_spent of a child key. Must be called by the parent."""
+    child_key_raw = payload.child_key
+    if child_key_raw.startswith("sk-"):
+        child_key_raw = child_key_raw[3:]
+
+    child_key = await session.get(ApiKey, child_key_raw)
+    if not child_key:
+        raise HTTPException(status_code=404, detail="Child key not found.")
+
+    if child_key.parent_key_hash != key.hashed_key:
+        raise HTTPException(
+            status_code=403, detail="Unauthorized. You are not the parent of this key."
+        )
+
+    child_key.total_spent = 0
+    if child_key.balance_limit_reset:
+        child_key.balance_limit_reset_date = int(time.time())
+    session.add(child_key)
+    await session.commit()
+
+    return {"success": True, "message": "Child key balance reset successfully."}
+
+
+@router.get("/cashu-refund/{payment_token_hash}")
+async def get_cashu_refund(
+    payment_token_hash: str,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Retrieve a stored Cashu refund token by the hash of the original payment token."""
+    result = await session.get(CashuTransaction, payment_token_hash)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Refund not found")
+    if result.swept:
+        raise HTTPException(status_code=410, detail="Refund has been swept")
+    result.collected = True
+    session.add(result)
+    await session.commit()
+    return {
+        "refund_token": result.token,
+        "amount": result.amount,
+        "unit": result.unit,
+    }
 
 
 @router.api_route(
