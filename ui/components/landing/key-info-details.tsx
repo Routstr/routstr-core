@@ -5,6 +5,7 @@ import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 import type { RefundReceipt } from './cashu-payment-workflow';
 import { toast } from 'sonner';
 import { ApiKeyInput } from '../api-key-input';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
   Card,
   CardContent,
@@ -60,6 +61,7 @@ export function KeyInfoDetails({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isResetting, setIsResetting] = useState<string | null>(null);
   const [isRefunding, setIsRefunding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Sync internal state with props if they change
   useEffect(() => {
@@ -69,12 +71,24 @@ export function KeyInfoDetails({
   const fetchDetails = useCallback(
     async (keyToFetch: string) => {
       setIsRefreshing(true);
+      setError(null);
       try {
         const response = await fetch(`${baseUrl}/v1/balance/info`, {
           headers: { Authorization: `Bearer ${keyToFetch}` },
         });
         if (!response.ok) {
-          throw new Error('Failed to fetch key info');
+          const errorText = await response.text();
+          let errorMessage = errorText || 'Failed to fetch key info';
+          try {
+            const parsed = JSON.parse(errorText);
+            // The error structure seems to be { detail: { error: { message: ... } } }
+            errorMessage =
+              parsed.detail?.error?.message ||
+              (typeof parsed.detail === 'string'
+                ? parsed.detail
+                : errorMessage);
+          } catch {}
+          throw new Error(errorMessage);
         }
         const payload = await response.json();
         const snapshot: WalletSnapshot = {
@@ -93,9 +107,9 @@ export function KeyInfoDetails({
         onWalletInfoUpdated?.(snapshot);
         toast.success('Key details synced');
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : 'Failed to fetch details'
-        );
+        const message =
+          error instanceof Error ? error.message : 'Failed to fetch details';
+        setError(message);
       } finally {
         setIsRefreshing(false);
       }
@@ -103,13 +117,16 @@ export function KeyInfoDetails({
     [baseUrl, onWalletInfoUpdated]
   );
 
-  const handleRefresh = async () => {
+  const handleRefresh = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     if (!apiKeyInput) return;
     await fetchDetails(apiKeyInput);
   };
 
   const handleKeyChange = (newKey: string) => {
     setApiKeyInput(newKey);
+    setError(null);
     onApiKeyChanged?.(newKey);
     // Optionally clear info when key changes
     if (newKey !== apiKey) {
@@ -204,6 +221,7 @@ export function KeyInfoDetails({
                 className='min-w-[80px] gap-1'
                 onClick={handleRefresh}
                 disabled={isRefreshing || !apiKeyInput}
+                type='button'
               >
                 <RefreshCcw
                   className={`h-8 w-4 ${isRefreshing ? 'animate-spin' : ''}`}
@@ -212,6 +230,12 @@ export function KeyInfoDetails({
               </Button>
             </div>
           </div>
+          {error && (
+            <Alert variant='destructive' className='mt-2'>
+              <AlertTitle>Error</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
         </CardContent>
       </Card>
 

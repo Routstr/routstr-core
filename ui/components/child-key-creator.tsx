@@ -159,7 +159,9 @@ export function ChildKeyCreator({
         error instanceof Error ? error.message : 'Failed to create child key';
       try {
         const parsed = JSON.parse(errorMessage);
-        errorMessage = parsed.detail || parsed.message || errorMessage;
+        errorMessage =
+          parsed.detail?.error?.message ||
+          (typeof parsed.detail === 'string' ? parsed.detail : errorMessage);
       } catch {}
       setError(errorMessage);
       toast.error(errorMessage);
