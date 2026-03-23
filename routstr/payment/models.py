@@ -403,7 +403,9 @@ async def update_sats_pricing() -> None:
 
 
 @models_router.get("/v1/models")
-@models_router.get("/models", include_in_schema=False)
+@models_router.get("/v1/models/", include_in_schema=False)
+@models_router.get("/models")
+@models_router.get("/models/", include_in_schema=False)
 async def models(session: AsyncSession = Depends(get_session)) -> dict:
     """Get all available models from all providers with database overrides applied."""
     from ..proxy import get_unique_models
