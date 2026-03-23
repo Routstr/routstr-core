@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
 import { WalletBalanceStats } from './wallet-balance-stats';
+import { ApiKeyInput } from '../api-key-input';
 import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
 
 export type RefundReceipt = {
@@ -271,7 +272,7 @@ export function CashuPaymentWorkflow({
         onWalletInfoUpdated?.(null);
       }
     },
-    [apiKey]
+    [apiKey, onWalletInfoUpdated]
   );
 
   const showManageDetails = hasInteractedManage || Boolean(walletInfo);
@@ -342,11 +343,9 @@ export function CashuPaymentWorkflow({
             )}
           </header>
           <div className='flex flex-col gap-2 sm:flex-row'>
-            <Input
+            <ApiKeyInput
               value={apiKeyInput}
-              onChange={(event) => handleApiKeyChange(event.target.value)}
-              placeholder='sk-...'
-              className='font-mono text-sm'
+              onApiKeyChange={handleApiKeyChange}
               onFocus={() => setHasInteractedManage(true)}
             />
             <div className='flex gap-2'>

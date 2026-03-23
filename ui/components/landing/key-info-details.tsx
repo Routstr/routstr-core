@@ -4,6 +4,7 @@ import { type JSX, useState, useCallback, useEffect } from 'react';
 import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 import type { RefundReceipt } from './cashu-payment-workflow';
 import { toast } from 'sonner';
+import { ApiKeyInput } from '../api-key-input';
 import {
   Card,
   CardContent,
@@ -13,7 +14,6 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
 import { WalletService } from '@/lib/api/services/wallet';
 
 export type ChildKeyInfo = {
@@ -188,12 +188,7 @@ export function KeyInfoDetails({
         </CardHeader>
         <CardContent>
           <div className='flex flex-col gap-2 sm:flex-row'>
-            <Input
-              value={apiKeyInput}
-              onChange={(e) => handleKeyChange(e.target.value)}
-              placeholder='sk-...'
-              className='font-mono text-sm'
-            />
+            <ApiKeyInput value={apiKeyInput} onApiKeyChange={handleKeyChange} />
             <div className='flex gap-2'>
               <Button
                 variant='outline'
@@ -425,18 +420,6 @@ export function KeyInfoDetails({
             )}
 
           <div className='flex justify-center gap-4'>
-            <Button
-              variant='ghost'
-              size='sm'
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className='text-muted-foreground'
-            >
-              <RefreshCcw
-                className={`mr-2 h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`}
-              />
-              Last synced: {new Date().toLocaleTimeString()}
-            </Button>
             <Button
               onClick={handleRefund}
               disabled={isRefunding || !apiKeyInput}

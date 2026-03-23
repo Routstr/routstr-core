@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { WalletService } from '@/lib/api/services/wallet';
+import { ApiKeyInput } from './api-key-input';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -250,12 +251,22 @@ export function ChildKeyCreator({
                 <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
                   Parent API Key
                 </Label>
-                <Input
-                  value={activeApiKey}
-                  onChange={(e) => handleApiKeyChange(e.target.value)}
-                  placeholder='sk-...'
-                  className='font-mono text-sm'
-                />
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <ApiKeyInput
+                      value={activeApiKey}
+                      onApiKeyChange={handleApiKeyChange}
+                    />
+                  </div>
+                  <Button
+                    variant='outline'
+                    size='icon'
+                    onClick={() => navigator.clipboard.writeText(activeApiKey)}
+                    disabled={!activeApiKey}
+                  >
+                    <Copy className='h-4 w-4' />
+                  </Button>
+                </div>
               </div>
             )}
 
