@@ -50,6 +50,7 @@ export function ChildKeyCreator({
 }: ChildKeyCreatorProps) {
   const [internalApiKey, setInternalApiKey] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [configs, setConfigs] = useState<KeyConfig[]>([
     {
       id: crypto.randomUUID(),
@@ -112,6 +113,7 @@ export function ChildKeyCreator({
     }
 
     setLoading(true);
+    setError(null);
     try {
       let allNewKeys: string[] = [];
       let totalCost = 0;
@@ -152,9 +154,14 @@ export function ChildKeyCreator({
       );
     } catch (error) {
       console.error('Failed to create child key:', error);
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to create child key'
-      );
+      let errorMessage =
+        error instanceof Error ? error.message : 'Failed to create child key';
+      try {
+        const parsed = JSON.parse(errorMessage);
+        errorMessage = parsed.detail || parsed.message || errorMessage;
+      } catch {}
+      setError(errorMessage);
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -362,11 +369,18 @@ export function ChildKeyCreator({
                   )}
                 </Button>
               </div>
-            </div>
 
-            <p className='text-muted-foreground text-xs'>
-              Each key creation has a small one-time fee.
-            </p>
+              {error && (
+                <Alert variant='destructive'>
+                  <AlertTitle>Error</AlertTitle>
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+
+              <p className='text-muted-foreground text-xs'>
+                Each key creation has a small one-time fee.
+              </p>
+            </div>
 
             {newKeys.length > 0 && (
               <div className='mt-6 space-y-4'>
@@ -453,89 +467,6 @@ export function ChildKeyCreator({
                     </div>
                   </div>
                 )}
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className='text-lg'>Check Child Key Status</CardTitle>
-          <CardDescription>
-            View the current spending, limit, and expiration status of any child
-            key.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className='space-y-4'>
-            <div className='space-y-2'>
-              <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
-                Child API Key
-              </Label>
-              <Input
-                value={childKeyToCheck}
-                onChange={(e) => setChildKeyToCheck(e.target.value)}
-                placeholder='sk-...'
-                className='font-mono text-sm'
-              />
-            </div>
-            <Button
-              onClick={handleCheckKey}
-              disabled={checking || !childKeyToCheck}
-              variant='outline'
-              className='w-full'
-            >
-              {checking ? (
-                <>
-                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                  Checking...
-                </>
-              ) : (
-                <>
-                  <RotateCcw className='mr-2 h-4 w-4' />
-                  Check Status
-                </>
-              )}
-            </Button>
-
-            {keyStatus && (
-              <div className='bg-muted/30 mt-4 space-y-3 rounded-lg border p-4 text-sm'>
-                <div className='flex justify-between'>
-                  <span className='text-muted-foreground'>Total Spent:</span>
-                  <span className='font-mono font-medium'>
-                    {keyStatus.total_spent} mSats
-                  </span>
-                </div>
-                {keyStatus.balance_limit !== null && (
-                  <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>Limit:</span>
-                    <span className='font-mono font-medium'>
-                      {keyStatus.balance_limit} mSats
-                    </span>
-                  </div>
-                )}
-                {keyStatus.validity_date !== null && (
-                  <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>Expires:</span>
-                    <span className='font-mono font-medium'>
-                      {new Date(
-                        keyStatus.validity_date * 1000
-                      ).toLocaleDateString()}
-                    </span>
-                  </div>
-                )}
-                <div className='flex gap-2 pt-2'>
-                  {keyStatus.is_drained && (
-                    <Badge variant='destructive'>Drained</Badge>
-                  )}
-                  {keyStatus.is_expired && (
-                    <Badge variant='destructive'>Expired</Badge>
-                  )}
-                  {!keyStatus.is_drained && !keyStatus.is_expired && (
-                    <Badge>Active</Badge>
-                  )}
-                </div>
               </div>
             )}
           </div>

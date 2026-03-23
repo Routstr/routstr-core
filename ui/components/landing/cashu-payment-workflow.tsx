@@ -2,6 +2,7 @@
 
 import { type JSX, useCallback, useState } from 'react';
 import { Copy, RefreshCcw, Trash2 } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -43,7 +44,15 @@ async function fetchWalletInfo(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(errorText || 'Unable to load wallet info');
+    let errorMessage = errorText || 'Unable to load wallet info';
+    try {
+      const parsed = JSON.parse(errorText);
+      // The error structure seems to be { detail: { error: { message: ... } } }
+      errorMessage =
+        parsed.detail?.error?.message ||
+        (typeof parsed.detail === 'string' ? parsed.detail : errorMessage);
+    } catch {}
+    throw new Error(errorMessage);
   }
 
   const payload = (await response.json()) as {
@@ -84,22 +93,20 @@ export function CashuPaymentWorkflow({
   apiKey = '',
   walletInfo = null,
   onApiKeyCreated,
-  onApiKeyChanged,
   onWalletInfoUpdated,
-  onRefundComplete,
 }: CashuPaymentWorkflowProps): JSX.Element {
   const [initialToken, setInitialToken] = useState('');
   const [topupToken, setTopupToken] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [isCreatingKey, setIsCreatingKey] = useState(false);
   const [isTopupLoading, setIsTopupLoading] = useState(false);
-  const [isRefunding, setIsRefunding] = useState(false);
   const [isSyncingBalance, setIsSyncingBalance] = useState(false);
   const [hasInteractedManage, setHasInteractedManage] = useState(false);
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
   const [balanceLimit, setBalanceLimit] = useState<string>('');
   const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
   const [validityDate, setValidityDate] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
 
   const activeApiKey = apiKeyInput.trim();
 
@@ -204,15 +211,17 @@ export function CashuPaymentWorkflow({
     }
 
     setIsSyncingBalance(true);
+    setError(null);
     try {
       const snapshot = await fetchWalletInfo(baseUrl, activeApiKey);
       onWalletInfoUpdated?.(snapshot);
       toast.success('Balance synced');
     } catch (error) {
       console.error(error);
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to sync balance'
-      );
+      const message =
+        error instanceof Error ? error.message : 'Failed to sync balance';
+      setError(message);
+      toast.error(message);
     } finally {
       setIsSyncingBalance(false);
     }
@@ -255,46 +264,14 @@ export function CashuPaymentWorkflow({
     }
   }, [activeApiKey, baseUrl, topupToken, onApiKeyCreated]);
 
-  const handleRefund = useCallback(async (): Promise<void> => {
-    if (!activeApiKey) {
-      toast.error('Paste an API key first');
-      return;
-    }
-
-    setIsRefunding(true);
-    try {
-      const response = await fetch(`${baseUrl}/v1/balance/refund`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${activeApiKey}`,
-        },
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Refund failed');
-      }
-      const payload = (await response.json()) as RefundReceipt;
-      onRefundComplete?.(payload);
-      onWalletInfoUpdated?.(null);
-      setApiKeyInput('');
-      toast.success('Refund requested');
-    } catch (error) {
-      console.error(error);
-      toast.error(error instanceof Error ? error.message : 'Refund failed');
-    } finally {
-      setIsRefunding(false);
-    }
-  }, [activeApiKey, baseUrl, onRefundComplete, onWalletInfoUpdated]);
-
   const handleApiKeyChange = useCallback(
     (newKey: string) => {
       setApiKeyInput(newKey);
-      onApiKeyChanged?.(newKey);
       if (newKey !== apiKey) {
         onWalletInfoUpdated?.(null);
       }
     },
-    [apiKey, onApiKeyChanged, onWalletInfoUpdated]
+    [apiKey]
   );
 
   const showManageDetails = hasInteractedManage || Boolean(walletInfo);
@@ -376,12 +353,12 @@ export function CashuPaymentWorkflow({
               <Button
                 variant='outline'
                 size='icon'
-                className='h-10 w-10'
                 onClick={() => handleCopy(activeApiKey)}
                 disabled={!activeApiKey}
               >
                 <Copy className='h-4 w-4' />
               </Button>
+
               <Button
                 variant='secondary'
                 size='sm'
@@ -394,11 +371,11 @@ export function CashuPaymentWorkflow({
               </Button>
             </div>
           </div>
-          {showManageDetails && (
-            <WalletBalanceStats
-              balanceMsats={walletInfo?.balanceMsats}
-              reservedMsats={walletInfo?.reservedMsats}
-            />
+          {error && (
+            <Alert variant='destructive' className='mt-2'>
+              <AlertTitle>Error</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
         </section>
 
@@ -443,28 +420,6 @@ export function CashuPaymentWorkflow({
               </span>
             </div>
           )}
-        </section>
-
-        <Separator />
-
-        <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
-            <span>4 · Refund</span>
-          </header>
-          <div className='flex flex-wrap gap-2'>
-            <Button
-              onClick={handleRefund}
-              disabled={isRefunding || !activeApiKey}
-              variant='destructive'
-              className='gap-2'
-            >
-              <Trash2 className='h-4 w-4' />
-              {isRefunding ? 'Processing…' : 'Refund remaining balance'}
-            </Button>
-            <span className='text-muted-foreground text-xs'>
-              Burns the key and returns a fresh Cashu token.
-            </span>
-          </div>
         </section>
       </CardContent>
     </Card>

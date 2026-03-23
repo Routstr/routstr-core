@@ -1,7 +1,8 @@
 'use client';
 
 import { type JSX, useState, useCallback, useEffect } from 'react';
-import { Copy, RefreshCcw, RotateCcw } from 'lucide-react';
+import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
+import type { RefundReceipt } from './cashu-payment-workflow';
 import { toast } from 'sonner';
 import {
   Card,
@@ -44,6 +45,7 @@ interface KeyInfoDetailsProps {
   walletInfo?: WalletSnapshot | null;
   onApiKeyChanged?: (apiKey: string) => void;
   onWalletInfoUpdated?: (walletInfo: WalletSnapshot | null) => void;
+  onRefundComplete?: (receipt: RefundReceipt) => void;
 }
 
 export function KeyInfoDetails({
@@ -52,10 +54,12 @@ export function KeyInfoDetails({
   walletInfo = null,
   onApiKeyChanged,
   onWalletInfoUpdated,
+  onRefundComplete,
 }: KeyInfoDetailsProps): JSX.Element {
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isResetting, setIsResetting] = useState<string | null>(null);
+  const [isRefunding, setIsRefunding] = useState(false);
 
   // Sync internal state with props if they change
   useEffect(() => {
@@ -135,6 +139,37 @@ export function KeyInfoDetails({
     }
   };
 
+  const handleRefund = useCallback(async (): Promise<void> => {
+    if (!apiKeyInput) {
+      toast.error('Paste an API key first');
+      return;
+    }
+
+    setIsRefunding(true);
+    try {
+      const response = await fetch(`${baseUrl}/v1/balance/refund`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKeyInput}`,
+        },
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Refund failed');
+      }
+      const receipt = (await response.json()) as RefundReceipt;
+      onRefundComplete?.(receipt);
+      // Removed onWalletInfoUpdated?.(null); // Prevents card disappearance
+      toast.success('Refund completed');
+      await fetchDetails(apiKeyInput); // Refresh to show burned status
+    } catch (error) {
+      console.error(error);
+      toast.error(error instanceof Error ? error.message : 'Refund failed');
+    } finally {
+      setIsRefunding(false);
+    }
+  }, [apiKeyInput, baseUrl, onRefundComplete, onWalletInfoUpdated]);
+
   const formatSats = (msats: number) =>
     new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
   const formatMsats = (msats: number) =>
@@ -163,7 +198,6 @@ export function KeyInfoDetails({
               <Button
                 variant='outline'
                 size='icon'
-                className='h-10 w-10 shrink-0'
                 onClick={() => handleCopy(apiKeyInput)}
                 disabled={!apiKeyInput}
               >
@@ -177,7 +211,7 @@ export function KeyInfoDetails({
                 disabled={isRefreshing || !apiKeyInput}
               >
                 <RefreshCcw
-                  className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`}
+                  className={`h-8 w-4 ${isRefreshing ? 'animate-spin' : ''}`}
                 />
                 {isRefreshing ? 'Syncing...' : 'Sync'}
               </Button>
@@ -228,6 +262,14 @@ export function KeyInfoDetails({
                     {formatDate(walletInfo.validityDate)}
                   </span>
                 </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardTitle className='text-lg'>Infos</CardTitle>
+              </CardHeader>
+              <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
                   <span className='text-muted-foreground text-sm'>
                     Spendable Balance
@@ -236,14 +278,6 @@ export function KeyInfoDetails({
                     {formatSats(walletInfo.balanceMsats)} sats
                   </span>
                 </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className='pb-2'>
-                <CardTitle className='text-lg'>Consumption</CardTitle>
-              </CardHeader>
-              <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
                   <span className='text-muted-foreground text-sm'>
                     Total Requests
@@ -390,7 +424,7 @@ export function KeyInfoDetails({
               </Card>
             )}
 
-          <div className='flex justify-center'>
+          <div className='flex justify-center gap-4'>
             <Button
               variant='ghost'
               size='sm'
@@ -402,6 +436,16 @@ export function KeyInfoDetails({
                 className={`mr-2 h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`}
               />
               Last synced: {new Date().toLocaleTimeString()}
+            </Button>
+            <Button
+              onClick={handleRefund}
+              disabled={isRefunding || !apiKeyInput}
+              variant='destructive'
+              size='sm'
+              className='gap-2'
+            >
+              <Trash2 className='h-4 w-4' />
+              {isRefunding ? 'Processing...' : 'Refund Key'}
             </Button>
           </div>
         </>
