@@ -10,9 +10,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
-import { WalletBalanceStats } from './wallet-balance-stats';
 import { ApiKeyInput } from '../api-key-input';
 import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
+import { useWalletInfo } from '@/hooks/use-wallet-info';
 
 export type RefundReceipt = {
   token?: string;
@@ -31,68 +31,18 @@ interface CashuPaymentWorkflowProps {
   onRefundComplete?: (receipt: RefundReceipt) => void;
 }
 
-async function fetchWalletInfo(
-  baseUrl: string,
-  apiKey: string
-): Promise<WalletSnapshot> {
-  const response = await fetch(`${baseUrl}/v1/balance/info`, {
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = errorText || 'Unable to load wallet info';
-    try {
-      const parsed = JSON.parse(errorText);
-      // The error structure seems to be { detail: { error: { message: ... } } }
-      errorMessage =
-        parsed.detail?.error?.message ||
-        (typeof parsed.detail === 'string' ? parsed.detail : errorMessage);
-    } catch {}
-    throw new Error(errorMessage);
-  }
-
-  const payload = (await response.json()) as {
-    api_key: string;
-    balance: number;
-    reserved?: number;
-    is_child: boolean;
-    parent_key: string | null;
-    total_requests: number;
-    total_spent: number;
-    balance_limit: number | null;
-    balance_limit_reset: string | null;
-    validity_date: number | null;
-    child_keys?: ChildKeyInfo[];
-  };
-
-  return {
-    apiKey: payload.api_key || apiKey,
-    balanceMsats: payload.balance ?? 0,
-    reservedMsats: payload.reserved ?? 0,
-    isChild: payload.is_child,
-    parentKey: payload.parent_key,
-    totalRequests: payload.total_requests,
-    totalSpent: payload.total_spent,
-    balanceLimit: payload.balance_limit,
-    balanceLimitReset: payload.balance_limit_reset,
-    validityDate: payload.validity_date,
-    childKeys: payload.child_keys,
-  };
-}
-
 function formatSats(msats: number): string {
   return new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
+}
+
+function formatMsats(msats: number): string {
+  return new Intl.NumberFormat('en-US').format(msats);
 }
 
 export function CashuPaymentWorkflow({
   baseUrl,
   apiKey = '',
-  walletInfo = null,
+  walletInfo: propWalletInfo = null,
   onApiKeyCreated,
   onWalletInfoUpdated,
 }: CashuPaymentWorkflowProps): JSX.Element {
@@ -101,7 +51,6 @@ export function CashuPaymentWorkflow({
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [isCreatingKey, setIsCreatingKey] = useState(false);
   const [isTopupLoading, setIsTopupLoading] = useState(false);
-  const [isSyncingBalance, setIsSyncingBalance] = useState(false);
   const [hasInteractedManage, setHasInteractedManage] = useState(false);
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
   const [balanceLimit, setBalanceLimit] = useState<string>('');
@@ -110,6 +59,13 @@ export function CashuPaymentWorkflow({
   const [error, setError] = useState<string | null>(null);
 
   const activeApiKey = apiKeyInput.trim();
+
+  const {
+    data: queryWalletInfo,
+    refetch,
+    isFetching,
+  } = useWalletInfo(baseUrl, activeApiKey);
+  const walletInfo = propWalletInfo ?? queryWalletInfo ?? null;
 
   const handleCopy = useCallback(async (value: string): Promise<void> => {
     if (!value) {
@@ -211,11 +167,9 @@ export function CashuPaymentWorkflow({
       return;
     }
 
-    setIsSyncingBalance(true);
     setError(null);
     try {
-      const snapshot = await fetchWalletInfo(baseUrl, activeApiKey);
-      onWalletInfoUpdated?.(snapshot);
+      await refetch();
       toast.success('Balance synced');
     } catch (error) {
       console.error(error);
@@ -223,10 +177,8 @@ export function CashuPaymentWorkflow({
         error instanceof Error ? error.message : 'Failed to sync balance';
       setError(message);
       toast.error(message);
-    } finally {
-      setIsSyncingBalance(false);
     }
-  }, [activeApiKey, baseUrl, onWalletInfoUpdated]);
+  }, [activeApiKey, refetch]);
 
   const handleTopup = useCallback(async (): Promise<void> => {
     if (!activeApiKey) {
@@ -255,15 +207,14 @@ export function CashuPaymentWorkflow({
       const payload = (await response.json()) as { msats: number };
       toast.success(`Added ${formatSats(payload.msats)} sats`);
       setTopupToken('');
-      const snapshot = await fetchWalletInfo(baseUrl, activeApiKey);
-      onApiKeyCreated?.(snapshot.apiKey, snapshot);
+      await refetch();
     } catch (error) {
       console.error(error);
       toast.error(error instanceof Error ? error.message : 'Top-up failed');
     } finally {
       setIsTopupLoading(false);
     }
-  }, [activeApiKey, baseUrl, topupToken, onApiKeyCreated]);
+  }, [activeApiKey, baseUrl, topupToken, refetch]);
 
   const handleApiKeyChange = useCallback(
     (newKey: string) => {
@@ -363,13 +314,48 @@ export function CashuPaymentWorkflow({
                 size='sm'
                 className='gap-1'
                 onClick={handleSyncBalance}
-                disabled={isSyncingBalance || !activeApiKey}
+                disabled={isFetching || !activeApiKey}
               >
-                <RefreshCcw className='h-4 w-4' />
+                <RefreshCcw
+                  className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`}
+                />
                 Sync
               </Button>
             </div>
           </div>
+          {walletInfo && (
+            <div className='bg-muted/30 mt-2 space-y-2 rounded-lg p-3'>
+              <div className='flex items-center justify-between'>
+                <span className='text-muted-foreground text-sm'>
+                  Spendable Balance
+                </span>
+                <span className='text-primary font-mono text-sm font-medium'>
+                  {formatSats(walletInfo.balanceMsats)} sats
+                </span>
+              </div>
+              <div className='flex items-center justify-between'>
+                <span className='text-muted-foreground text-sm'>
+                  Total Requests
+                </span>
+                <span className='font-mono text-sm font-medium'>
+                  {walletInfo.totalRequests}
+                </span>
+              </div>
+              <div className='flex items-center justify-between'>
+                <span className='text-muted-foreground text-sm'>
+                  Total Spent
+                </span>
+                <div className='text-right'>
+                  <p className='font-mono text-sm font-medium'>
+                    {formatSats(walletInfo.totalSpent)} sats
+                  </p>
+                  <p className='text-muted-foreground font-mono text-[0.6rem]'>
+                    {formatMsats(walletInfo.totalSpent)} msats
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
           {error && (
             <Alert variant='destructive' className='mt-2'>
               <AlertTitle>Error</AlertTitle>

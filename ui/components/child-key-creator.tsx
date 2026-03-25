@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useWalletInfo } from '@/hooks/use-wallet-info';
 import { WalletService } from '@/lib/api/services/wallet';
 import { ApiKeyInput } from './api-key-input';
 import { Button } from '@/components/ui/button';
@@ -15,17 +16,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
-import {
-  Key,
-  Copy,
-  Check,
-  Loader2,
-  RotateCcw,
-  Plus,
-  Trash2,
-} from 'lucide-react';
+import { Key, Copy, Check, Loader2, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { Badge } from '@/components/ui/badge';
 import { KeyOptions } from './key-options';
 
 interface KeyConfig {
@@ -41,6 +33,14 @@ interface ChildKeyCreatorProps {
   apiKey?: string;
   onApiKeyChange?: (apiKey: string) => void;
   costPerKeyMsats?: number;
+}
+
+function formatSats(msats: number): string {
+  return new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
+}
+
+function formatMsats(msats: number): string {
+  return new Intl.NumberFormat('en-US').format(msats);
 }
 
 export function ChildKeyCreator({
@@ -62,27 +62,24 @@ export function ChildKeyCreator({
     },
   ]);
   const [childKeyToCheck, setChildKeyToCheck] = useState('');
-  const [checking, setChecking] = useState(false);
-  const [keyStatus, setKeyStatus] = useState<{
-    total_spent: number;
-    balance_limit: number | null;
-    validity_date: number | null;
-    is_expired: boolean;
-    is_drained: boolean;
-  } | null>(null);
+
+  const activeApiKey = propApiKey ?? internalApiKey;
+  const { data: walletInfo, refetch: refetchWalletInfo } = useWalletInfo(
+    baseUrl ?? '',
+    activeApiKey
+  );
+
+  const handleApiKeyChange = (val: string) => {
+    setInternalApiKey(val);
+    onApiKeyChange?.(val);
+  };
+
   const [newKeys, setNewKeys] = useState<string[]>([]);
   const [resultInfo, setResultInfo] = useState<{
     cost_msats: number;
     parent_balance: number;
   } | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  const activeApiKey = propApiKey ?? internalApiKey;
-
-  const handleApiKeyChange = (val: string) => {
-    setInternalApiKey(val);
-    onApiKeyChange?.(val);
-  };
 
   const addConfig = () => {
     setConfigs([
@@ -269,6 +266,39 @@ export function ChildKeyCreator({
                     <Copy className='h-4 w-4' />
                   </Button>
                 </div>
+                {walletInfo && (
+                  <div className='bg-muted/30 mt-2 space-y-2 rounded-lg p-3'>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-muted-foreground text-sm'>
+                        Spendable Balance
+                      </span>
+                      <span className='text-primary font-mono text-sm font-medium'>
+                        {formatSats(walletInfo.balanceMsats)} sats
+                      </span>
+                    </div>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-muted-foreground text-sm'>
+                        Total Requests
+                      </span>
+                      <span className='font-mono text-sm font-medium'>
+                        {walletInfo.totalRequests}
+                      </span>
+                    </div>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-muted-foreground text-sm'>
+                        Total Spent
+                      </span>
+                      <div className='text-right'>
+                        <p className='font-mono text-sm font-medium'>
+                          {formatSats(walletInfo.totalSpent)} sats
+                        </p>
+                        <p className='text-muted-foreground font-mono text-[0.6rem]'>
+                          {formatMsats(walletInfo.totalSpent)} msats
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

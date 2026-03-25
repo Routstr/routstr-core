@@ -1,7 +1,6 @@
 'use client';
 
-import { type JSX, useState, useCallback, useEffect } from 'react';
-import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
+import { useWalletInfo } from '@/hooks/use-wallet-info';
 import type { RefundReceipt } from './cashu-payment-workflow';
 import { toast } from 'sonner';
 import { ApiKeyInput } from '../api-key-input';
@@ -16,6 +15,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { WalletService } from '@/lib/api/services/wallet';
+import { useState, useCallback, useEffect } from 'react';
+import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 
 export type ChildKeyInfo = {
   api_key: string;
@@ -52,76 +53,33 @@ interface KeyInfoDetailsProps {
 export function KeyInfoDetails({
   baseUrl,
   apiKey = '',
-  walletInfo = null,
+  walletInfo: propWalletInfo = null,
   onApiKeyChanged,
   onWalletInfoUpdated,
   onRefundComplete,
 }: KeyInfoDetailsProps): JSX.Element {
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isResetting, setIsResetting] = useState<string | null>(null);
   const [isRefunding, setIsRefunding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const {
+    data: queryWalletInfo,
+    refetch,
+    isFetching,
+  } = useWalletInfo(baseUrl, apiKeyInput);
+  const walletInfo = propWalletInfo ?? queryWalletInfo ?? null;
 
   // Sync internal state with props if they change
   useEffect(() => {
     setApiKeyInput(apiKey);
   }, [apiKey]);
 
-  const fetchDetails = useCallback(
-    async (keyToFetch: string) => {
-      setIsRefreshing(true);
-      setError(null);
-      try {
-        const response = await fetch(`${baseUrl}/v1/balance/info`, {
-          headers: { Authorization: `Bearer ${keyToFetch}` },
-        });
-        if (!response.ok) {
-          const errorText = await response.text();
-          let errorMessage = errorText || 'Failed to fetch key info';
-          try {
-            const parsed = JSON.parse(errorText);
-            // The error structure seems to be { detail: { error: { message: ... } } }
-            errorMessage =
-              parsed.detail?.error?.message ||
-              (typeof parsed.detail === 'string'
-                ? parsed.detail
-                : errorMessage);
-          } catch {}
-          throw new Error(errorMessage);
-        }
-        const payload = await response.json();
-        const snapshot: WalletSnapshot = {
-          apiKey: payload.api_key || keyToFetch,
-          balanceMsats: payload.balance ?? 0,
-          reservedMsats: payload.reserved ?? 0,
-          isChild: payload.is_child,
-          parentKey: payload.parent_key,
-          totalRequests: payload.total_requests,
-          totalSpent: payload.total_spent,
-          balanceLimit: payload.balance_limit,
-          balanceLimitReset: payload.balance_limit_reset,
-          validityDate: payload.validity_date,
-          childKeys: payload.child_keys,
-        };
-        onWalletInfoUpdated?.(snapshot);
-        toast.success('Key details synced');
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : 'Failed to fetch details';
-        setError(message);
-      } finally {
-        setIsRefreshing(false);
-      }
-    },
-    [baseUrl, onWalletInfoUpdated]
-  );
-
   const handleRefresh = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     if (!apiKeyInput) return;
-    await fetchDetails(apiKeyInput);
+    await refetch();
   };
 
   const handleKeyChange = (newKey: string) => {
@@ -146,7 +104,7 @@ export function KeyInfoDetails({
     try {
       await WalletService.resetChildKeySpent(baseUrl, apiKeyInput, childKey);
       toast.success('Child key spent reset');
-      await fetchDetails(apiKeyInput);
+      await refetch();
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : 'Failed to reset child key'
@@ -176,16 +134,15 @@ export function KeyInfoDetails({
       }
       const receipt = (await response.json()) as RefundReceipt;
       onRefundComplete?.(receipt);
-      // Removed onWalletInfoUpdated?.(null); // Prevents card disappearance
       toast.success('Refund completed');
-      await fetchDetails(apiKeyInput); // Refresh to show burned status
+      await refetch();
     } catch (error) {
       console.error(error);
       toast.error(error instanceof Error ? error.message : 'Refund failed');
     } finally {
       setIsRefunding(false);
     }
-  }, [apiKeyInput, baseUrl, onRefundComplete, onWalletInfoUpdated]);
+  }, [apiKeyInput, baseUrl, onRefundComplete, refetch]);
 
   const formatSats = (msats: number) =>
     new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
@@ -220,13 +177,13 @@ export function KeyInfoDetails({
                 size='sm'
                 className='min-w-[80px] gap-1'
                 onClick={handleRefresh}
-                disabled={isRefreshing || !apiKeyInput}
+                disabled={isFetching || !apiKeyInput}
                 type='button'
               >
                 <RefreshCcw
-                  className={`h-8 w-4 ${isRefreshing ? 'animate-spin' : ''}`}
+                  className={`h-8 w-4 ${isFetching ? 'animate-spin' : ''}`}
                 />
-                {isRefreshing ? 'Syncing...' : 'Sync'}
+                {isFetching ? 'Syncing...' : 'Sync'}
               </Button>
             </div>
           </div>
