@@ -18,7 +18,6 @@ import {
   type RefundReceipt,
 } from './cashu-payment-workflow';
 import { LightningPaymentWorkflow } from './lightning-payment-workflow';
-import { ApiKeyManager } from './api-key-manager';
 import { KeyInfoDetails, type WalletSnapshot } from './key-info-details';
 import { ChildKeyCreator } from '@/components/child-key-creator';
 
@@ -135,8 +134,8 @@ export function CheatSheet(): JSX.Element {
 
   const handleRefundComplete = useCallback((receipt: RefundReceipt) => {
     setRefundReceipt(receipt);
-    setWalletInfo(null);
-    setApiKeyInput('');
+    // setWalletInfo(null); // Keep info
+    // setApiKeyInput(''); // Keep input
   }, []);
 
   const handleRefreshInfo = useCallback(async (): Promise<void> => {
@@ -391,12 +390,11 @@ export function CheatSheet(): JSX.Element {
         </section>
 
         <Tabs defaultValue='cashu' className='w-full'>
-          <TabsList className='grid w-full grid-cols-5'>
+          <TabsList className='grid w-full grid-cols-4'>
             <TabsTrigger value='cashu'>Cashu</TabsTrigger>
             <TabsTrigger value='lightning'>Lightning</TabsTrigger>
-            <TabsTrigger value='manage'>Manage Keys</TabsTrigger>
-            <TabsTrigger value='details'>Key Details</TabsTrigger>
             <TabsTrigger value='child-keys'>Child Keys</TabsTrigger>
+            <TabsTrigger value='management'>Key Management</TabsTrigger>
           </TabsList>
 
           <TabsContent value='cashu' className='space-y-4'>
@@ -413,8 +411,8 @@ export function CheatSheet(): JSX.Element {
             />
           </TabsContent>
 
-          <TabsContent value='manage' className='space-y-4'>
-            <ApiKeyManager
+          <TabsContent value='management' className='space-y-4'>
+            <KeyInfoDetails
               baseUrl={normalizedBaseUrl}
               apiKey={apiKeyInput}
               walletInfo={walletInfo}
@@ -445,23 +443,13 @@ export function CheatSheet(): JSX.Element {
                     <Textarea
                       value={refundToken}
                       readOnly
-                      rows={4}
+                      rows={15}
                       className='font-mono text-xs'
                     />
                   </div>
                 </CardContent>
               </Card>
             )}
-          </TabsContent>
-
-          <TabsContent value='details' className='space-y-4'>
-            <KeyInfoDetails
-              baseUrl={normalizedBaseUrl}
-              apiKey={apiKeyInput}
-              walletInfo={walletInfo}
-              onApiKeyChanged={handleApiKeyChanged}
-              onWalletInfoUpdated={handleWalletInfoUpdated}
-            />
           </TabsContent>
 
           <TabsContent value='child-keys' className='space-y-4'>

@@ -239,7 +239,7 @@ export function ApiKeyManager({
                     className='gap-2'
                   >
                     <Trash2 className='h-4 w-4' />
-                    {isRefunding ? 'Processing...' : 'Refund & Delete Key'}
+                    {isRefunding ? 'Processing...' : 'Refund Key'}
                   </Button>
                   <span className='text-muted-foreground text-xs'>
                     Burns the key and returns a fresh Cashu token.
