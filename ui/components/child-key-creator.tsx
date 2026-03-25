@@ -28,6 +28,14 @@ interface KeyConfig {
   validityDate: string;
 }
 
+interface KeyStatus {
+  total_spent: number;
+  balance_limit: number | null;
+  validity_date: number | null;
+  is_expired: boolean;
+  is_drained: boolean;
+}
+
 interface ChildKeyCreatorProps {
   baseUrl?: string;
   apiKey?: string;
@@ -52,6 +60,8 @@ export function ChildKeyCreator({
   const [internalApiKey, setInternalApiKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
   const [configs, setConfigs] = useState<KeyConfig[]>([
     {
       id: crypto.randomUUID(),
@@ -64,10 +74,7 @@ export function ChildKeyCreator({
   const [childKeyToCheck, setChildKeyToCheck] = useState('');
 
   const activeApiKey = propApiKey ?? internalApiKey;
-  const { data: walletInfo, refetch: refetchWalletInfo } = useWalletInfo(
-    baseUrl ?? '',
-    activeApiKey
-  );
+  const { data: walletInfo } = useWalletInfo(baseUrl ?? '', activeApiKey);
 
   const handleApiKeyChange = (val: string) => {
     setInternalApiKey(val);

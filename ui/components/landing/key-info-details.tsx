@@ -15,7 +15,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { WalletService } from '@/lib/api/services/wallet';
-import { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 
 export type ChildKeyInfo = {
@@ -57,7 +57,7 @@ export function KeyInfoDetails({
   onApiKeyChanged,
   onWalletInfoUpdated,
   onRefundComplete,
-}: KeyInfoDetailsProps): JSX.Element {
+}: KeyInfoDetailsProps): React.ReactNode {
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [isResetting, setIsResetting] = useState<string | null>(null);
   const [isRefunding, setIsRefunding] = useState(false);
