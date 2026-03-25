@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 
 # Routstr platform fee constants
 ROUTSTR_FEE_PERCENT: float = 2.1
-ROUTSTR_LN_ADDRESS: str = "routstr@npub.cash"
+ROUTSTR_LN_ADDRESS: str = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
 
 # TODO: implement prepaid api key (not like it was before)
