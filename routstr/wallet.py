@@ -1,5 +1,4 @@
 import asyncio
-import math
 import time
 from typing import TypedDict
 
@@ -60,6 +59,76 @@ async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str
     return token
 
 
+async def _calculate_swap_amount(
+    amount_msat: int,
+    token_unit: str,
+    token_mint_url: str,
+    token_wallet: Wallet,
+    primary_wallet: Wallet,
+) -> int:
+    """
+    Calculate the amount to mint on the primary mint after accounting for
+    potential swap fees (melt fees) on the foreign mint.
+    """
+    if settings.primary_mint_unit == "sat":
+        receive_amount = amount_msat // 1000
+    else:
+        receive_amount = amount_msat
+
+    if token_mint_url == settings.primary_mint:
+        logger.info(
+            "swap_to_primary_mint: skipping fee estimation (same mint)",
+            extra={"minted_amount": receive_amount},
+        )
+        return int(receive_amount)
+
+    logger.info(
+        "swap_to_primary_mint: estimating fees",
+        extra={
+            "dummy_amount": receive_amount,
+            "unit": settings.primary_mint_unit,
+        },
+    )
+
+    try:
+        dummy_mint_quote = await primary_wallet.request_mint(receive_amount)
+        dummy_melt_quote = await token_wallet.melt_quote(dummy_mint_quote.request)
+
+        fee_reserve = dummy_melt_quote.fee_reserve
+        if token_unit == "sat":
+            fee_msat = fee_reserve * 1000
+        else:
+            fee_msat = fee_reserve
+
+        amount_msat_after_fee = amount_msat - fee_msat
+
+        if settings.primary_mint_unit == "sat":
+            minted_amount = int(amount_msat_after_fee // 1000)
+        else:
+            minted_amount = int(amount_msat_after_fee)
+
+        if minted_amount <= 0:
+            raise ValueError(f"Fees ({fee_reserve} {token_unit}) exceed token amount")
+
+        logger.info(
+            "swap_to_primary_mint: fee estimation result",
+            extra={
+                "token_amount_sat": amount_msat // 1000,
+                "estimated_fee_sat": fee_msat // 1000,
+                "minted_amount": minted_amount,
+                "minted_unit": settings.primary_mint_unit,
+            },
+        )
+        return minted_amount
+
+    except Exception as e:
+        logger.error(
+            "swap_to_primary_mint: fee estimation failed",
+            extra={"error": str(e)},
+        )
+        raise ValueError(f"Failed to estimate fees: {e}") from e
+
+
 async def swap_to_primary_mint(
     token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, str, str]:
@@ -84,23 +153,14 @@ async def swap_to_primary_mint(
         amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
-    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2)) + 1
-    amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
     primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
 
-    if settings.primary_mint_unit == "sat":
-        minted_amount = int(amount_msat_after_fee // 1000)
-    else:
-        minted_amount = int(amount_msat_after_fee)
-
-    logger.info(
-        "swap_to_primary_mint: fee estimation",
-        extra={
-            "token_amount_sat": amount_msat // 1000,
-            "estimated_fee_sat": estimated_fee_sat,
-            "minted_amount": minted_amount,
-            "minted_unit": settings.primary_mint_unit,
-        },
+    minted_amount = await _calculate_swap_amount(
+        amount_msat,
+        token_obj.unit,
+        token_obj.mint,
+        token_wallet,
+        primary_wallet,
     )
 
     mint_quote = await primary_wallet.request_mint(minted_amount)
