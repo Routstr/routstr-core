@@ -7,19 +7,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
-
-type WalletSnapshot = {
-  apiKey: string;
-  balanceMsats: number;
-  reservedMsats: number;
-};
-
-type RefundReceipt = {
-  token?: string;
-  recipient?: string;
-  sats?: string;
-  msats?: string;
-};
+import { WalletBalanceStats } from './wallet-balance-stats';
+import type { WalletSnapshot, ChildKeyInfo } from './key-info-details';
+import type { RefundReceipt } from './cashu-payment-workflow';
 
 interface ApiKeyManagerProps {
   baseUrl: string;
@@ -51,17 +41,29 @@ async function fetchWalletInfo(
     api_key: string;
     balance: number;
     reserved?: number;
+    is_child: boolean;
+    parent_key: string | null;
+    total_requests: number;
+    total_spent: number;
+    balance_limit: number | null;
+    balance_limit_reset: string | null;
+    validity_date: number | null;
+    child_keys?: ChildKeyInfo[];
   };
 
   return {
     apiKey: payload.api_key || apiKey,
     balanceMsats: payload.balance ?? 0,
     reservedMsats: payload.reserved ?? 0,
+    isChild: payload.is_child,
+    parentKey: payload.parent_key,
+    totalRequests: payload.total_requests,
+    totalSpent: payload.total_spent,
+    balanceLimit: payload.balance_limit,
+    balanceLimitReset: payload.balance_limit_reset,
+    validityDate: payload.validity_date,
+    childKeys: payload.child_keys,
   };
-}
-
-function formatMsats(msats: number): string {
-  return new Intl.NumberFormat('en-US').format(msats);
 }
 
 function formatSats(msats: number): string {
@@ -170,17 +172,14 @@ export function ApiKeyManager({
   return (
     <Card>
       <CardHeader className='space-y-1'>
-        <CardTitle className='flex items-center gap-2 text-xl'>
-          <RefreshCcw className='text-primary h-5 w-5' />
-          API Key Management
-        </CardTitle>
-        <p className='text-muted-foreground text-xs tracking-wide uppercase'>
+        <CardTitle className='text-xl'>API Key Management</CardTitle>
+        <p className='text-muted-foreground text-xs tracking-wide'>
           Manage your existing API keys and balances
         </p>
       </CardHeader>
       <CardContent className='space-y-6'>
         <section className='space-y-2'>
-          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+          <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
             <span>Manage existing key</span>
             {walletInfo && (
               <span className='text-primary'>
@@ -221,43 +220,15 @@ export function ApiKeyManager({
 
           {showManageDetails && (
             <div className='space-y-4'>
-              <div className='grid gap-3 sm:grid-cols-2'>
-                <div className='rounded-lg border p-3'>
-                  <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                    Spendable
-                  </p>
-                  <p className='text-xl font-semibold'>
-                    {walletInfo
-                      ? `${formatSats(walletInfo.balanceMsats)} sats`
-                      : '—'}
-                  </p>
-                  {walletInfo && (
-                    <p className='text-muted-foreground text-xs'>
-                      {formatMsats(walletInfo.balanceMsats)} msats
-                    </p>
-                  )}
-                </div>
-                <div className='rounded-lg border p-3'>
-                  <p className='text-muted-foreground text-[0.65rem] tracking-wide uppercase'>
-                    Reserved
-                  </p>
-                  <p className='text-xl font-semibold'>
-                    {walletInfo
-                      ? `${formatSats(walletInfo.reservedMsats)} sats`
-                      : '—'}
-                  </p>
-                  {walletInfo && (
-                    <p className='text-muted-foreground text-xs'>
-                      {formatMsats(walletInfo.reservedMsats)} msats
-                    </p>
-                  )}
-                </div>
-              </div>
+              <WalletBalanceStats
+                balanceMsats={walletInfo?.balanceMsats}
+                reservedMsats={walletInfo?.reservedMsats}
+              />
 
               <Separator />
 
               <div className='space-y-2'>
-                <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider uppercase'>
+                <header className='text-muted-foreground flex items-center justify-between text-[0.7rem] tracking-wider'>
                   <span>Refund remaining balance</span>
                 </header>
                 <div className='flex flex-wrap gap-2'>

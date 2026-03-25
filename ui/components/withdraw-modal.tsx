@@ -13,6 +13,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
   Select,
   SelectContent,
@@ -108,22 +110,24 @@ export function WithdrawModal({
           </DialogHeader>
 
           <div className='space-y-4'>
-            <div className='rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-950'>
-              <div className='mb-2 flex items-center gap-2'>
-                <CheckCircle className='h-5 w-5 text-green-600' />
-                <span className='font-semibold text-green-900 dark:text-green-100'>
-                  Withdrawal Token
-                </span>
-              </div>
-              <div className='rounded-md bg-gray-900 p-3 font-mono text-xs break-all text-green-400'>
-                {withdrawnToken}
-              </div>
-            </div>
+            <Alert>
+              <CheckCircle className='h-5 w-5' />
+              <AlertTitle>Withdrawal Token</AlertTitle>
+              <AlertDescription>
+                Save this token now. It represents your withdrawn balance.
+              </AlertDescription>
+            </Alert>
+            <Textarea
+              readOnly
+              value={withdrawnToken}
+              className='font-mono text-xs leading-relaxed'
+              rows={6}
+            />
 
-            <div className='flex gap-2'>
+            <div className='flex flex-col gap-2 sm:flex-row'>
               <Button
                 onClick={handleCopyToken}
-                className='flex-1'
+                className='w-full flex-1'
                 variant={copiedToken ? 'outline' : 'default'}
               >
                 {copiedToken ? (
@@ -138,7 +142,11 @@ export function WithdrawModal({
                   </>
                 )}
               </Button>
-              <Button onClick={() => onOpenChange(false)} variant='outline'>
+              <Button
+                onClick={() => onOpenChange(false)}
+                variant='outline'
+                className='w-full sm:w-auto'
+              >
                 Close
               </Button>
             </div>
@@ -213,25 +221,25 @@ export function WithdrawModal({
           </div>
 
           {showWarning && (
-            <div className='bg-destructive/10 text-destructive flex items-start gap-2 rounded-md p-3 text-sm'>
-              <AlertCircle className='mt-0.5 h-5 w-5 flex-shrink-0' />
-              <span>
-                Warning: Withdrawing more than your balance will use user funds!
-              </span>
-            </div>
+            <Alert variant='destructive'>
+              <AlertCircle className='h-5 w-5' />
+              <AlertDescription>
+                Warning: Withdrawing more than your balance will use user funds.
+              </AlertDescription>
+            </Alert>
           )}
 
           {withdrawMutation.isError && (
-            <div className='bg-destructive/10 text-destructive flex items-start gap-2 rounded-md p-3 text-sm'>
-              <AlertCircle className='mt-0.5 h-5 w-5 flex-shrink-0' />
-              <span>
+            <Alert variant='destructive'>
+              <AlertCircle className='h-5 w-5' />
+              <AlertDescription>
                 {(withdrawMutation.error as Error).message ||
                   'Failed to withdraw'}
-              </span>
-            </div>
+              </AlertDescription>
+            </Alert>
           )}
 
-          <div className='flex gap-2'>
+          <div className='flex flex-col gap-2 sm:flex-row'>
             <Button
               onClick={() => withdrawMutation.mutate()}
               disabled={
@@ -249,6 +257,7 @@ export function WithdrawModal({
               onClick={() => onOpenChange(false)}
               variant='outline'
               disabled={withdrawMutation.isPending}
+              className='w-full sm:w-auto'
             >
               Cancel
             </Button>

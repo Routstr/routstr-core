@@ -10,13 +10,19 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
+from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
-from ..nostr import announce_provider, providers_cache_refresher
+from ..nostr import (
+    announce_provider,
+    providers_cache_refresher,
+    publish_usage_analytics,
+)
 from ..nostr.discovery import providers_router
 from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
-from ..wallet import periodic_payout
+from ..upstream.auto_topup import periodic_auto_topup
+from ..wallet import periodic_payout, periodic_refund_sweep
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
@@ -30,9 +36,9 @@ setup_logging()
 logger = get_logger(__name__)
 
 if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.3.0-{os.getenv('VERSION_SUFFIX')}"
+    __version__ = f"0.4.0-{os.getenv('VERSION_SUFFIX')}"
 else:
-    __version__ = "0.3.0"
+    __version__ = "0.4.0"
 
 
 @asynccontextmanager
@@ -43,9 +49,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     pricing_task = None
     payout_task = None
     nip91_task = None
+    analytics_task = None
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
+    key_reset_task = None
+    auto_topup_task = None
+    refund_sweep_task = None
 
     try:
         # Run database migrations on startup
@@ -99,8 +109,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         payout_task = asyncio.create_task(periodic_payout())
         if global_settings.nsec:
             nip91_task = asyncio.create_task(announce_provider())
+        analytics_task = asyncio.create_task(publish_usage_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
+        key_reset_task = asyncio.create_task(periodic_key_reset())
+        auto_topup_task = asyncio.create_task(periodic_auto_topup())
+        refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
 
         yield
 
@@ -124,12 +138,20 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             payout_task.cancel()
         if nip91_task is not None:
             nip91_task.cancel()
+        if analytics_task is not None:
+            analytics_task.cancel()
         if providers_task is not None:
             providers_task.cancel()
         if models_refresh_task is not None:
             models_refresh_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
+        if key_reset_task is not None:
+            key_reset_task.cancel()
+        if auto_topup_task is not None:
+            auto_topup_task.cancel()
+        if refund_sweep_task is not None:
+            refund_sweep_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -141,12 +163,20 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(payout_task)
             if nip91_task is not None:
                 tasks_to_wait.append(nip91_task)
+            if analytics_task is not None:
+                tasks_to_wait.append(analytics_task)
             if providers_task is not None:
                 tasks_to_wait.append(providers_task)
             if models_refresh_task is not None:
                 tasks_to_wait.append(models_refresh_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
+            if key_reset_task is not None:
+                tasks_to_wait.append(key_reset_task)
+            if auto_topup_task is not None:
+                tasks_to_wait.append(auto_topup_task)
+            if refund_sweep_task is not None:
+                tasks_to_wait.append(refund_sweep_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -167,7 +197,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["x-routstr-request-id"],
+    expose_headers=["x-routstr-request-id", "x-cashu"],
 )
 
 # Add logging middleware

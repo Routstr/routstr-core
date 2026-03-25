@@ -42,3 +42,4 @@ next-env.d.ts
 
 # favicon conflicts
 /app/favicon.ico
+.pnpm-store/

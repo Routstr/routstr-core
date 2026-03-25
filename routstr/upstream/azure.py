@@ -4,6 +4,7 @@ from .base import BaseUpstreamProvider
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
+    from ..payment.models import Model
 
 
 class AzureUpstreamProvider(BaseUpstreamProvider):
@@ -58,19 +59,52 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
             "platform_url": cls.platform_url,
         }
 
+    def prepare_headers(self, request_headers: dict) -> dict:
+        """Prepare headers for Azure OpenAI, adding api-key."""
+        headers = super().prepare_headers(request_headers)
+        if self.api_key:
+            headers["api-key"] = self.api_key
+            headers.pop("Authorization", None)
+            headers.pop("authorization", None)
+        return headers
+
     def prepare_params(
         self, path: str, query_params: Mapping[str, str] | None
     ) -> Mapping[str, str]:
-        """Prepare query parameters for Azure OpenAI, adding API version.
-
-        Args:
-            path: Request path
-            query_params: Original query parameters from the client
-
-        Returns:
-            Query parameters dict with Azure API version added for chat completions
-        """
+        """Prepare query parameters for Azure OpenAI, adding API version."""
         params = dict(query_params or {})
-        if path.endswith("chat/completions"):
-            params["api-version"] = self.api_version
+        version = (self.api_version or "").replace("\ufeff", "").strip()
+        if not version or version.lower() == "v1":
+            version = "2024-02-15-preview"
+        params["api-version"] = version
         return params
+
+    def normalize_request_path(
+        self, path: str, model_obj: "Model | None" = None
+    ) -> str:
+        """Build Azure deployment-specific request path."""
+        clean_path = super().normalize_request_path(path, model_obj).lstrip("/")
+        if model_obj is None:
+            return clean_path
+
+        deployment_id = getattr(
+            model_obj, "canonical_slug", None
+        ) or self.transform_model_name(model_obj.id)
+        deployment_id = deployment_id.split("/")[-1]
+        return f"openai/deployments/{deployment_id}/{clean_path}"
+
+    def get_request_base_url(
+        self, path: str, model_obj: "Model | None" = None
+    ) -> str:
+        """Use endpoint root, stripping accidental /openai/v1 suffix if present."""
+        base_url = self.base_url.rstrip("/")
+        marker = "/openai/v1"
+        if marker in base_url:
+            base_url = base_url.split(marker, 1)[0].rstrip("/")
+        return base_url
+
+    def transform_model_name(self, model_id: str) -> str:
+        """Extract deployment name from model ID."""
+        if "/" in model_id:
+            return model_id.split("/")[-1]
+        return model_id

@@ -20,6 +20,7 @@ export const UpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean(),
   provider_fee: z.number().optional(),
+  provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
 export const CreateUpstreamProviderSchema = z.object({
@@ -29,6 +30,7 @@ export const CreateUpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().default(true),
   provider_fee: z.number().optional(),
+  provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
 export const UpdateUpstreamProviderSchema = z.object({
@@ -38,6 +40,7 @@ export const UpdateUpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().optional(),
   provider_fee: z.number().optional(),
+  provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
 export const AdminModelPricingSchema = z.object({
@@ -63,10 +66,12 @@ export const AdminModelSchema = z.object({
   description: z.string(),
   created: z.number(),
   context_length: z.number(),
-  architecture: AdminModelArchitectureSchema.or(z.record(z.any())),
-  pricing: AdminModelPricingSchema.or(z.record(z.any())),
-  per_request_limits: z.record(z.any()).nullable().optional(),
-  top_provider: z.record(z.any()).nullable().optional(),
+  architecture: AdminModelArchitectureSchema.or(
+    z.record(z.string(), z.unknown())
+  ),
+  pricing: AdminModelPricingSchema.or(z.record(z.string(), z.unknown())),
+  per_request_limits: z.record(z.string(), z.unknown()).nullable().optional(),
+  top_provider: z.record(z.string(), z.unknown()).nullable().optional(),
   upstream_provider_id: z.union([z.string(), z.number()]).nullable().optional(),
   canonical_slug: z.string().nullable().optional(),
   alias_ids: z.array(z.string()).nullable().optional(),
@@ -191,7 +196,9 @@ export class AdminService {
     adminModel: AdminModel,
     providerName?: string
   ): AdminModelAsModel {
-    const pricing = this.convertPricingToPerMillionTokens(adminModel.pricing);
+    // Callers normalize prompt/completion to the UI's "per 1M tokens" unit
+    // before they pass models into this mapper.
+    const pricing = adminModel.pricing as Record<string, unknown>;
     const inputCost = (pricing?.prompt as number) || 0;
     const outputCost = (pricing?.completion as number) || 0;
     const requestCost = (pricing?.request as number) || 0;
@@ -327,10 +334,6 @@ export class AdminService {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
-    console.log('Creating provider model - pricing conversion:', {
-      original: data.pricing,
-      converted: payload.pricing,
-    });
     const model = await apiClient.post<AdminModel>(
       `/admin/api/upstream-providers/${providerId}/models`,
       payload
@@ -390,14 +393,11 @@ export class AdminService {
     modelId: string,
     data: AdminModel
   ): Promise<AdminModel> {
+    void modelId;
     const payload = {
       ...data,
       pricing: this.convertPricingToPerToken(data.pricing),
     };
-    console.log('Updating provider model - pricing conversion:', {
-      original: data.pricing,
-      converted: payload.pricing,
-    });
     // Use the same POST endpoint for both create and update (upsert)
     const model = await apiClient.post<AdminModel>(
       `/admin/api/upstream-providers/${providerId}/models`,
@@ -415,14 +415,6 @@ export class AdminService {
   ): Promise<{ ok: boolean; deleted_id: string }> {
     return await apiClient.delete<{ ok: boolean; deleted_id: string }>(
       `/admin/api/upstream-providers/${providerId}/models/${encodeURIComponent(modelId)}`
-    );
-  }
-
-  static async deleteAllProviderModels(
-    providerId: number
-  ): Promise<{ ok: boolean; deleted: number }> {
-    return await apiClient.delete<{ ok: boolean; deleted: number }>(
-      `/admin/api/upstream-providers/${providerId}/models`
     );
   }
 
@@ -718,12 +710,11 @@ export class AdminService {
     if (!providerId) {
       throw new Error('provider_id is required for bulk updates');
     }
+    void updates;
 
     const errors: string[] = [];
     let updated_count = 0;
     const providerIdNum = parseInt(providerId);
-
-    console.log('Bulk update not implemented, ignoring updates:', updates);
 
     for (const id of modelIds) {
       try {
@@ -742,34 +733,6 @@ export class AdminService {
       total_count: modelIds.length,
       message: 'Bulk update completed',
       errors,
-    };
-  }
-
-  static async deleteAllModels(): Promise<{
-    deleted_count: number;
-    message: string;
-  }> {
-    const providers = await this.getUpstreamProviders();
-    let totalDeleted = 0;
-
-    for (const provider of providers) {
-      const result = await this.deleteAllProviderModels(provider.id);
-      totalDeleted += result.deleted;
-    }
-
-    return {
-      deleted_count: totalDeleted,
-      message: 'All models deleted successfully',
-    };
-  }
-
-  static async deleteModelsByProvider(
-    providerId: string
-  ): Promise<{ deleted_count: number; message: string }> {
-    const result = await this.deleteAllProviderModels(parseInt(providerId));
-    return {
-      deleted_count: result.deleted,
-      message: 'Provider models deleted successfully',
     };
   }
 
@@ -801,10 +764,7 @@ export class AdminService {
   static async refreshModels(data: {
     provider_id: string;
   }): Promise<{ message: string }> {
-    console.log(
-      'Refresh models not implemented for admin API, ignoring data:',
-      data
-    );
+    void data;
     return { message: 'Refresh not implemented for admin API' };
   }
 
@@ -885,6 +845,23 @@ export class AdminService {
     );
   }
 
+  static async getUsageDashboard(
+    hours: number = 24,
+    interval: number = 15,
+    errorLimit: number = 100,
+    modelLimit: number = 20
+  ): Promise<UsageDashboardResponse> {
+    const params = new URLSearchParams();
+    params.set('interval', String(interval));
+    params.set('hours', String(hours));
+    params.set('error_limit', String(errorLimit));
+    params.set('model_limit', String(modelLimit));
+
+    return await apiClient.get<UsageDashboardResponse>(
+      `/admin/api/usage/dashboard?${params.toString()}`
+    );
+  }
+
   static async getUsageSummary(hours: number = 24): Promise<UsageSummary> {
     return await apiClient.get<UsageSummary>(
       `/admin/api/usage/summary?hours=${hours}`
@@ -906,6 +883,23 @@ export class AdminService {
   ): Promise<RevenueByModel> {
     return await apiClient.get<RevenueByModel>(
       `/admin/api/usage/revenue-by-model?hours=${hours}&limit=${limit}`
+    );
+  }
+
+  static async getTransactions(
+    type?: string,
+    status?: string,
+    search?: string,
+    limit: number = 100
+  ): Promise<TransactionsResponse> {
+    const params = new URLSearchParams();
+    if (type) params.append('type', type);
+    if (status) params.append('status', status);
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+
+    return await apiClient.get<TransactionsResponse>(
+      `/admin/api/transactions?${params.toString()}`
     );
   }
 
@@ -935,9 +929,17 @@ export class AdminService {
       ok: boolean;
       topup_data: Record<string, unknown>;
       message: string;
-    }>(`/admin/api/upstream-providers/${providerId}/topup`, {
-      amount: amount,
-    });
+    }>(`/admin/api/upstream-providers/${providerId}/topup`, { amount });
+  }
+
+  static async topupProviderWithToken(
+    providerId: number,
+    token: string
+  ): Promise<{ ok: boolean; message?: string }> {
+    return await apiClient.post<{ ok: boolean; message?: string }>(
+      `/admin/api/upstream-providers/${providerId}/topup-token`,
+      { token }
+    );
   }
 
   static async checkTopupStatus(
@@ -984,6 +986,9 @@ export interface UsageMetricData {
   upstream_errors: number;
   revenue_msats: number;
   refunds_msats: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
   [key: string]: unknown;
 }
 
@@ -992,6 +997,20 @@ export interface UsageMetrics {
   interval_minutes: number;
   hours_back: number;
   total_buckets: number;
+  totals?: {
+    total_requests: number;
+    successful_chat_completions: number;
+    failed_requests: number;
+    errors: number;
+    warnings: number;
+    payment_processed: number;
+    upstream_errors: number;
+    revenue_msats: number;
+    refunds_msats: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  };
 }
 
 export interface UsageSummary {
@@ -1006,6 +1025,12 @@ export interface UsageSummary {
   unique_models_count: number;
   unique_models: string[];
   error_types: Record<string, number>;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  avg_input_tokens_per_completion: number;
+  avg_output_tokens_per_completion: number;
+  avg_total_tokens_per_completion: number;
   success_rate: number;
   revenue_msats: number;
   refunds_msats: number;
@@ -1048,6 +1073,35 @@ export interface RevenueByModel {
   total_models: number;
 }
 
+export interface ModelUsageMixMetric {
+  timestamp: string;
+  total_successful: number;
+  total_revenue_msats: number;
+  total_tokens: number;
+  others: number;
+  others_revenue_msats: number;
+  others_tokens: number;
+  model_counts: Record<string, number>;
+  model_revenue_msats: Record<string, number>;
+  model_tokens: Record<string, number>;
+}
+
+export interface ModelUsageMix {
+  top_models: string[];
+  metrics: ModelUsageMixMetric[];
+  interval_minutes: number;
+  hours_back: number;
+  total_buckets: number;
+}
+
+export interface UsageDashboardResponse {
+  metrics: UsageMetrics;
+  summary: UsageSummary;
+  error_details: ErrorDetails;
+  revenue_by_model: RevenueByModel;
+  model_usage_mix?: ModelUsageMix;
+}
+
 export interface LogEntry {
   asctime: string;
   name: string;
@@ -1067,4 +1121,22 @@ export interface LogResponse {
   request_id: string | null;
   search: string | null;
   limit: number;
+}
+
+export interface Transaction {
+  id: string;
+  token: string;
+  amount: number;
+  unit: string;
+  mint_url: string;
+  type: 'in' | 'out';
+  request_id?: string;
+  created_at: number;
+  collected: boolean;
+  swept: boolean;
+}
+
+export interface TransactionsResponse {
+  transactions: Transaction[];
+  total: number;
 }

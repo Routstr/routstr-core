@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { apiClient } from '../client';
 import { ConfigurationService } from './configuration';
 import axios from 'axios';
 

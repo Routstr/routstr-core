@@ -23,6 +23,9 @@ class InvoiceCreateRequest(BaseModel):
     api_key: str | None = Field(
         default=None, description="Required for topup operations"
     )
+    balance_limit: int | None = Field(default=None)
+    balance_limit_reset: str | None = Field(default=None)
+    validity_date: int | None = Field(default=None)
 
 
 class InvoiceCreateResponse(BaseModel):
@@ -94,6 +97,9 @@ async def create_invoice(
             status="pending",
             api_key_hash=request.api_key[3:] if request.api_key else None,
             purpose=request.purpose,
+            balance_limit=request.balance_limit,
+            balance_limit_reset=request.balance_limit_reset,
+            validity_date=request.validity_date,
             expires_at=expires_at,
         )
 

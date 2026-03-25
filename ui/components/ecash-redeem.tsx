@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Loader2, Copy, Check, SendIcon } from 'lucide-react';
+import { Loader2, Copy, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { useQueryClient } from '@tanstack/react-query';
 import { QRCodeSVG } from 'qrcode.react';
@@ -101,10 +101,7 @@ export function EcashRedeem() {
   return (
     <Card className='h-full w-full shadow-sm'>
       <CardHeader>
-        <div className='flex items-center space-x-2'>
-          <SendIcon className='text-primary h-5 w-5' />
-          <CardTitle>Send eCash</CardTitle>
-        </div>
+        <CardTitle>Send eCash</CardTitle>
         <CardDescription>
           Generate a token to send eCash to someone
         </CardDescription>
