@@ -217,3 +217,77 @@ async def test_recieve_token_untrusted_mint() -> None:
                 assert amount == 900
                 assert unit == "sat"
                 assert mint == "http://mint:3338"
+
+
+@pytest.mark.asyncio
+async def test_swap_to_primary_mint_success() -> None:
+    """Test successful swap with dynamic fee calculation."""
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token = Mock()
+    mock_token.mint = "http://foreign:3338"
+    mock_token.unit = "sat"
+    mock_token.amount = 1000
+    mock_token.keysets = ["keyset1"]
+    mock_token.proofs = [{"amount": 1000}]
+
+    mock_token_wallet = Mock()
+    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_proofs = AsyncMock()
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.load_mint = AsyncMock()
+    mock_primary_wallet.load_proofs = AsyncMock()
+
+    # Mocks for the estimation phase
+    # 1. request_mint(dummy_amount=1000) -> invoice_dummy
+    # 2. melt_quote(invoice_dummy) -> fee=10
+
+    # Mocks for the execution phase
+    # 3. request_mint(minted_amount=990) -> invoice_real
+    # 4. melt_quote(invoice_real) -> amount=990, fee=10
+    # 5. melt() -> success
+    # 6. mint() -> success
+
+    mock_mint_quote_dummy = Mock(quote="dummy_quote", request="lnbc_dummy")
+    mock_mint_quote_real = Mock(quote="real_quote", request="lnbc_real")
+
+    # side_effect for request_mint to return dummy then real
+    mock_primary_wallet.request_mint = AsyncMock(
+        side_effect=[mock_mint_quote_dummy, mock_mint_quote_real]
+    )
+
+    mock_melt_quote_dummy = Mock(amount=1000, fee_reserve=10)
+    mock_melt_quote_real = Mock(amount=990, fee_reserve=10)
+
+    # side_effect for melt_quote
+    mock_token_wallet.melt_quote = AsyncMock(
+        side_effect=[mock_melt_quote_dummy, mock_melt_quote_real]
+    )
+
+    mock_token_wallet.melt = AsyncMock(return_value="melted_proofs")
+    mock_primary_wallet.mint = AsyncMock(return_value="minted_proofs")
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "primary_mint", "http://primary:3338"):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
+                amount, unit, mint = await swap_to_primary_mint(
+                    mock_token, mock_token_wallet
+                )
+
+                assert amount == 990  # 1000 - 10
+                assert unit == "sat"
+                assert mint == "http://primary:3338"
+
+                # Verify call order/counts
+                assert mock_primary_wallet.request_mint.call_count == 2
+                # First call with full amount for estimation
+                mock_primary_wallet.request_mint.assert_any_call(1000)
+                # Second call with calculated amount
+                mock_primary_wallet.request_mint.assert_any_call(990)
+
+                assert mock_token_wallet.melt_quote.call_count == 2
+                assert mock_token_wallet.melt.called
+                assert mock_primary_wallet.mint.called
