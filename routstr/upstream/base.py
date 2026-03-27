@@ -447,11 +447,7 @@ class BaseUpstreamProvider:
         )
 
     async def handle_streaming_chat_completion(
-        self,
-        response: httpx.Response,
-        key: ApiKey,
-        max_cost_for_model: int,
-        background_tasks: BackgroundTasks,
+        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -471,137 +467,169 @@ class BaseUpstreamProvider:
                 "response_status": response.status_code,
             },
         )
+        background_tasks = BackgroundTasks()
 
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
+            stored_chunks: list[bytes] = []
             usage_finalized: bool = False
             last_model_seen: str | None = None
-            usage_chunk_data: dict | None = None
-            done_seen: bool = False
 
-            async def finalize_db_only() -> None:
+            async def finalize_without_usage() -> bytes | None:
                 nonlocal usage_finalized
                 if usage_finalized:
-                    return
+                    return None
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
-                        return
-                    try:
-                        await adjust_payment_for_tokens(
-                            fresh_key,
-                            {"model": last_model_seen or "unknown", "usage": None},
-                            new_session,
-                            max_cost_for_model,
+                        logger.warning(
+                            "Key not found when finalizing streaming payment",
+                            extra={"key_hash": key.hashed_key[:8] + "..."},
                         )
                         usage_finalized = True
-                    except Exception:
-                        pass
+                        return None
+                    try:
+                        fallback: dict = {
+                            "model": last_model_seen or "unknown",
+                            "usage": None,
+                        }
+                        cost_data = await adjust_payment_for_tokens(
+                            fresh_key, fallback, new_session, max_cost_for_model
+                        )
+                        usage_finalized = True
+                        logger.info(
+                            "Finalized streaming payment without explicit usage",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "cost_data": cost_data,
+                                "balance_after_adjustment": fresh_key.balance,
+                            },
+                        )
+                        return f"data: {json.dumps({'cost': cost_data})}\n\n".encode()
+                    except Exception as cost_error:
+                        logger.error(
+                            "Error finalizing payment without usage",
+                            extra={
+                                "error": str(cost_error),
+                                "error_type": type(cost_error).__name__,
+                                "key_hash": key.hashed_key[:8] + "...",
+                            },
+                        )
+                        usage_finalized = True
+                        return None
 
             try:
                 async for chunk in response.aiter_bytes():
-                    # Split chunk into SSE events
-                    parts = re.split(b"data: ", chunk)
-                    for i, part in enumerate(parts):
-                        if not part:
-                            continue
-
-                        stripped_part = part.strip()
-                        if not stripped_part:
-                            continue
-
-                        if stripped_part == b"[DONE]":
-                            done_seen = True
-                            continue
-
-                        try:
-                            obj = json.loads(part)
-                            if isinstance(obj, dict):
-                                if obj.get("model"):
-                                    last_model_seen = str(obj.get("model"))
-
-                                if isinstance(obj.get("usage"), dict):
-                                    # Hold this chunk back to merge cost later
-                                    usage_chunk_data = obj
-                                    continue
-                        except json.JSONDecodeError:
-                            pass
-
-                        prefix = (
-                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
-                        )
-                        yield prefix + part
-
-                # Stream finished, process usage if found
-                if usage_chunk_data:
-                    async with create_session() as session:
-                        fresh_key = await session.get(key.__class__, key.hashed_key)
-                        if fresh_key:
+                    stored_chunks.append(chunk)
+                    try:
+                        for part in re.split(b"data: ", chunk):
+                            if not part or part.strip() in (b"[DONE]", b""):
+                                continue
                             try:
-                                cost_data = await adjust_payment_for_tokens(
-                                    fresh_key,
-                                    usage_chunk_data,
-                                    session,
-                                    max_cost_for_model,
-                                )
-                                remaining_balance_msats = fresh_key.balance
-                                # Merge cost into usage
-                                usage_chunk_data["usage"]["cost"] = cost_data.get(
-                                    "total_usd", 0.0
-                                )
-                                usage_chunk_data["usage"]["cost_sats"] = (
-                                    cost_data.get("total_msats", 0) // 1000
-                                )
-                                usage_chunk_data["usage"]["remaining_balance_msats"] = (
-                                    remaining_balance_msats
-                                )
-                                # Keep detailed cost in metadata
-                                usage_chunk_data["metadata"] = usage_chunk_data.get(
-                                    "metadata", {}
-                                )
-                                usage_chunk_data["metadata"]["routstr"] = {
-                                    "cost": cost_data
-                                }
-                                usage_chunk_data["metadata"]["routstr"]["cost"][
-                                    "sats_cost"
-                                ] = cost_data.get("total_msats", 0) // 1000
-                                usage_chunk_data["metadata"]["routstr"]["cost"][
-                                    "remaining_balance_msats"
-                                ] = remaining_balance_msats
-                                yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
-                                usage_finalized = True
-                            except Exception as e:
-                                logger.exception(
-                                    "Error during usage finalization",
-                                    extra={
-                                        "key_hash": key.hashed_key[:8] + "...",
-                                        "error": str(e),
-                                    },
-                                )
-                                # Fallback: yield original usage chunk if adjustment fails
-                                yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                                obj = json.loads(part)
+                                if isinstance(obj, dict) and obj.get("model"):
+                                    last_model_seen = str(obj.get("model"))
+                            except json.JSONDecodeError:
+                                pass
+                    except Exception:
+                        pass
+
+                    yield chunk
+
+                logger.debug(
+                    "Streaming completed, analyzing usage data",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "chunks_count": len(stored_chunks),
+                    },
+                )
+
+                for i in range(len(stored_chunks) - 1, -1, -1):
+                    chunk = stored_chunks[i]
+                    if not chunk:
+                        continue
+                    try:
+                        events = re.split(b"data: ", chunk)
+                        for event_data in events:
+                            if not event_data or event_data.strip() in (b"[DONE]", b""):
+                                continue
+                            try:
+                                data = json.loads(event_data)
+                                if isinstance(data, dict) and data.get("model"):
+                                    last_model_seen = str(data.get("model"))
+                                if isinstance(data, dict) and isinstance(
+                                    data.get("usage"), dict
+                                ):
+                                    async with create_session() as new_session:
+                                        fresh_key = await new_session.get(
+                                            key.__class__, key.hashed_key
+                                        )
+                                        if fresh_key:
+                                            try:
+                                                cost_data = (
+                                                    await adjust_payment_for_tokens(
+                                                        fresh_key,
+                                                        data,
+                                                        new_session,
+                                                        max_cost_for_model,
+                                                    )
+                                                )
+                                                usage_finalized = True
+                                                logger.info(
+                                                    "Payment adjustment completed for streaming",
+                                                    extra={
+                                                        "key_hash": key.hashed_key[:8]
+                                                        + "...",
+                                                        "cost_data": cost_data,
+                                                        "model": last_model_seen,
+                                                        "balance_after_adjustment": fresh_key.balance,
+                                                    },
+                                                )
+                                                yield f"data: {json.dumps({'cost': cost_data})}\n\n".encode()
+                                            except Exception as cost_error:
+                                                logger.error(
+                                                    "Error adjusting payment for streaming tokens",
+                                                    extra={
+                                                        "error": str(cost_error),
+                                                        "error_type": type(
+                                                            cost_error
+                                                        ).__name__,
+                                                        "key_hash": key.hashed_key[:8]
+                                                        + "...",
+                                                    },
+                                                )
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                    except Exception as e:
+                        logger.error(
+                            "Error processing streaming response chunk",
+                            extra={
+                                "error": str(e),
+                                "error_type": type(e).__name__,
+                                "key_hash": key.hashed_key[:8] + "...",
+                            },
+                        )
 
                 if not usage_finalized:
-                    await finalize_db_only()
-
-                if done_seen:
-                    yield b"data: [DONE]\n\n"
+                    maybe_cost_event = await finalize_without_usage()
+                    if maybe_cost_event is not None:
+                        yield maybe_cost_event
 
             except Exception as stream_error:
                 logger.warning(
-                    "Streaming interrupted; finalizing in background",
+                    "Streaming interrupted; finalizing without usage",
                     extra={
                         "error": str(stream_error),
+                        "error_type": type(stream_error).__name__,
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
                 raise
             finally:
                 if not usage_finalized:
-                    # Create a background task to ensure finalization happens
-                    # even if the generator is closed early
-                    background_tasks.add_task(finalize_db_only)
+                    await finalize_without_usage()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -612,7 +640,172 @@ class BaseUpstreamProvider:
             stream_with_cost(max_cost_for_model),
             status_code=response.status_code,
             headers=response_headers,
+            background=background_tasks,
         )
+
+    async def handle_streaming_messages_completion(
+        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
+    ) -> StreamingResponse:
+        async def stream_with_cost(
+            max_cost_for_model: int,
+        ) -> AsyncGenerator[bytes, None]:
+            stored_chunks: list[bytes] = []
+            usage_finalized: bool = False
+            last_model_seen: str | None = None
+            input_tokens: int = 0
+            output_tokens: int = 0
+
+            async def finalize_without_usage() -> bytes | None:
+                nonlocal usage_finalized
+                if usage_finalized:
+                    return None
+                async with create_session() as new_session:
+                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                    if not fresh_key:
+                        usage_finalized = True
+                        return None
+                    try:
+                        fallback: dict = {
+                            "model": last_model_seen or "unknown",
+                            "usage": None,
+                        }
+                        cost_data = await adjust_payment_for_tokens(
+                            fresh_key, fallback, new_session, max_cost_for_model
+                        )
+                        usage_finalized = True
+                        return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
+                    except Exception:
+                        usage_finalized = True
+                        return None
+
+            try:
+                async for chunk in response.aiter_bytes():
+                    stored_chunks.append(chunk)
+                    try:
+                        decoded_chunk = chunk.decode("utf-8", errors="ignore")
+                        for line in decoded_chunk.split("\n"):
+                            if line.startswith("data: "):
+                                try:
+                                    data = json.loads(line[6:])
+                                    if isinstance(data, dict):
+                                        msg = data.get("message", {})
+                                        if msg and msg.get("model"):
+                                            last_model_seen = str(msg.get("model"))
+
+                                        if usage := msg.get("usage"):
+                                            input_tokens += usage.get("input_tokens", 0)
+                                            output_tokens += usage.get(
+                                                "output_tokens", 0
+                                            )
+
+                                        if usage := data.get("usage"):
+                                            input_tokens += usage.get("input_tokens", 0)
+                                            output_tokens += usage.get(
+                                                "output_tokens", 0
+                                            )
+                                except json.JSONDecodeError:
+                                    pass
+                    except Exception:
+                        pass
+
+                    yield chunk
+
+                usage_data = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                }
+
+                if input_tokens > 0 or output_tokens > 0:
+                    async with create_session() as new_session:
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                        if fresh_key:
+                            try:
+                                combined_data = {
+                                    "model": last_model_seen or "unknown",
+                                    "usage": usage_data,
+                                }
+                                cost_data = await adjust_payment_for_tokens(
+                                    fresh_key,
+                                    combined_data,
+                                    new_session,
+                                    max_cost_for_model,
+                                )
+                                usage_finalized = True
+                                yield f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
+                            except Exception:
+                                pass
+
+                if not usage_finalized:
+                    maybe_cost_event = await finalize_without_usage()
+                    if maybe_cost_event is not None:
+                        yield maybe_cost_event
+
+            except Exception:
+                if not usage_finalized:
+                    await finalize_without_usage()
+                raise
+            finally:
+                if not usage_finalized:
+                    await finalize_without_usage()
+
+        response_headers = dict(response.headers)
+        response_headers.pop("content-encoding", None)
+        response_headers.pop("content-length", None)
+
+        return StreamingResponse(
+            stream_with_cost(max_cost_for_model),
+            status_code=response.status_code,
+            headers=response_headers,
+        )
+
+    async def handle_non_streaming_messages_completion(
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        session: AsyncSession,
+        deducted_max_cost: int,
+        path: str,
+    ) -> Response:
+        try:
+            content = await response.aread()
+            response_json = json.loads(content)
+
+            if path.endswith("count_tokens") and "usage" not in response_json:
+                input_tokens = response_json.get("input_tokens", 0)
+                response_json["usage"] = {"input_tokens": input_tokens}
+
+            cost_data = await adjust_payment_for_tokens(
+                key, response_json, session, deducted_max_cost
+            )
+            response_json["cost"] = cost_data
+
+            allowed_headers = {
+                "content-type",
+                "cache-control",
+                "date",
+                "vary",
+                "access-control-allow-origin",
+                "access-control-allow-methods",
+                "access-control-allow-headers",
+                "access-control-allow-credentials",
+                "access-control-expose-headers",
+                "access-control-max-age",
+            }
+
+            response_headers = {
+                k: v
+                for k, v in response.headers.items()
+                if k.lower() in allowed_headers
+            }
+
+            return Response(
+                content=json.dumps(response_json).encode(),
+                status_code=response.status_code,
+                headers=response_headers,
+                media_type="application/json",
+            )
+        except Exception:
+            raise
 
     async def handle_non_streaming_chat_completion(
         self,
@@ -1123,8 +1316,10 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
-        path = self.normalize_request_path(path, model_obj)
-        url = self.build_request_url(path, model_obj)
+        if path.startswith("v1/"):
+            path = path.replace("v1/", "")
+
+        url = f"{self.base_url}/{path}"
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1180,14 +1375,6 @@ class BaseUpstreamProvider:
             )
 
             if response.status_code != 200:
-                if response.status_code >= 500:
-                    await response.aclose()
-                    await client.aclose()
-                    raise UpstreamError(
-                        f"Upstream returned status {response.status_code}",
-                        status_code=response.status_code,
-                    )
-
                 try:
                     mapped_error = await self.map_upstream_error_response(
                         request, path, response
@@ -1197,7 +1384,54 @@ class BaseUpstreamProvider:
                     await client.aclose()
                 return mapped_error
 
-            if path.endswith("chat/completions") or path.endswith("embeddings"):
+            if (
+                path.endswith("chat/completions")
+                or path.endswith("embeddings")
+                or path.endswith("messages")
+                or path.endswith("messages/count_tokens")
+            ):
+                if path.endswith("messages"):
+                    client_wants_streaming = False
+                    if request_body:
+                        try:
+                            request_data = json.loads(request_body)
+                            client_wants_streaming = request_data.get("stream", False)
+                        except json.JSONDecodeError:
+                            pass
+
+                    content_type = response.headers.get("content-type", "")
+                    upstream_is_streaming = "text/event-stream" in content_type
+                    is_streaming = client_wants_streaming and upstream_is_streaming
+
+                    if is_streaming and response.status_code == 200:
+                        result = await self.handle_streaming_messages_completion(
+                            response, key, max_cost_for_model
+                        )
+                        background_tasks = BackgroundTasks()
+                        background_tasks.add_task(response.aclose)
+                        background_tasks.add_task(client.aclose)
+                        result.background = background_tasks
+                        return result
+
+                    if response.status_code == 200:
+                        try:
+                            return await self.handle_non_streaming_messages_completion(
+                                response, key, session, max_cost_for_model, path
+                            )
+                        finally:
+                            await response.aclose()
+                            await client.aclose()
+
+                if path.endswith("messages/count_tokens"):
+                    if response.status_code == 200:
+                        try:
+                            return await self.handle_non_streaming_messages_completion(
+                                response, key, session, max_cost_for_model, path
+                            )
+                        finally:
+                            await response.aclose()
+                            await client.aclose()
+
                 if path.endswith("chat/completions"):
                     client_wants_streaming = False
                     if request_body:
@@ -1233,12 +1467,12 @@ class BaseUpstreamProvider:
                     )
 
                     if is_streaming and response.status_code == 200:
+                        result = await self.handle_streaming_chat_completion(
+                            response, key, max_cost_for_model
+                        )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
                         background_tasks.add_task(client.aclose)
-                        result = await self.handle_streaming_chat_completion(
-                            response, key, max_cost_for_model, background_tasks
-                        )
                         result.background = background_tasks
                         return result
 
@@ -1278,9 +1512,6 @@ class BaseUpstreamProvider:
                 background=background_tasks,
             )
 
-        except UpstreamError:
-            raise
-
         except httpx.RequestError as exc:
             await client.aclose()
             error_type = type(exc).__name__
@@ -1299,7 +1530,6 @@ class BaseUpstreamProvider:
                 },
             )
 
-            # Don't revert here — proxy.py owns payment revert to avoid double-revert
             if isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
             elif isinstance(exc, httpx.TimeoutException):
@@ -1309,7 +1539,9 @@ class BaseUpstreamProvider:
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
 
-            raise UpstreamError(error_message, status_code=502)
+            return create_error_response(
+                "upstream_error", error_message, 502, request=request
+            )
 
         except Exception as exc:
             await client.aclose()
@@ -1329,8 +1561,12 @@ class BaseUpstreamProvider:
                 },
             )
 
-            # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            raise UpstreamError("An unexpected server error occurred", status_code=500)
+            return create_error_response(
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
+            )
 
     async def forward_responses_request(
         self,
@@ -1870,7 +2106,10 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash,
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -1999,7 +2238,10 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash,
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -2229,7 +2471,10 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
+                        amount - 60,
+                        unit,
+                        mint,
+                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -2516,7 +2761,10 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
+                        amount - 60,
+                        unit,
+                        mint,
+                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -2780,7 +3028,10 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash,
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -2897,7 +3148,10 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash,
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
