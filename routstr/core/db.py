@@ -241,11 +241,112 @@ async def create_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+def _get_table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
+    """Return the set of column names for a table, or empty set if table doesn't exist."""
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    )
+    if not cursor.fetchone():
+        return set()
+    cursor.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def _detect_schema_version(cursor: sqlite3.Cursor) -> int:
+    """
+    Detect the actual schema version of a cashu wallet database by inspecting
+    which columns/tables exist, matching them to migration milestones.
+
+    Cashu wallet migrations (m000-m015) add columns non-idempotently.
+    We detect the highest migration that has already been fully applied.
+    """
+    proofs_cols = _get_table_columns(cursor, "proofs")
+    keysets_cols = _get_table_columns(cursor, "keysets")
+
+    if not proofs_cols:
+        return 0  # no proofs table means nothing has run
+
+    # Walk backwards from the highest migration to find the actual version.
+    # Each check tests for schema artifacts introduced by that migration.
+
+    # m015: mints table
+    mints_cols = _get_table_columns(cursor, "mints")
+    if mints_cols:
+        return 15
+
+    # m014: bolt11_mint_quotes.key column
+    mint_quotes_cols = _get_table_columns(cursor, "bolt11_mint_quotes")
+    if "key" in mint_quotes_cols:
+        return 14
+
+    # m013: bolt11_mint_quotes table
+    if mint_quotes_cols:
+        return 13
+
+    # m012: keysets.input_fee_ppk
+    if "input_fee_ppk" in keysets_cols:
+        return 12
+
+    # m011: keysets.unit
+    if "unit" in keysets_cols:
+        return 11
+
+    # m010: proofs.dleq, proofs.mint_id
+    if "mint_id" in proofs_cols:
+        return 10
+    if "dleq" in proofs_cols:
+        return 10
+
+    # m009: keysets.counter, proofs.derivation_path
+    if "derivation_path" in proofs_cols:
+        return 9
+
+    # m008: keysets.public_keys
+    if "public_keys" in keysets_cols:
+        return 8
+
+    # m007: nostr table
+    nostr_cols = _get_table_columns(cursor, "nostr")
+    if nostr_cols:
+        return 7
+
+    # m006: invoices table
+    invoices_cols = _get_table_columns(cursor, "invoices")
+    if invoices_cols:
+        return 6
+
+    # m005: proofs.id column, keysets table
+    if "id" in proofs_cols and keysets_cols:
+        return 5
+
+    # m004: p2sh table
+    p2sh_cols = _get_table_columns(cursor, "p2sh")
+    if p2sh_cols:
+        return 4
+
+    # m003: proofs.send_id
+    if "send_id" in proofs_cols:
+        return 3
+
+    # m002: proofs.reserved
+    if "reserved" in proofs_cols:
+        return 2
+
+    # m001: proofs table exists
+    return 1
+
+
 def fix_cashu_migrations() -> None:
     """
     Fixes Cashu wallet migrations that are not idempotent.
-    This specifically addresses the 'duplicate column name: public_keys' error
-    in the keysets table of Cashu's internal SQLite databases.
+
+    Cashu's migration runner uses ALTER TABLE ADD COLUMN without checking
+    if the column already exists. If the dbversions table is out of sync
+    with the actual schema, re-running migrations crashes.
+
+    This function detects the real schema version by inspecting existing
+    columns/tables and updates dbversions accordingly so cashu skips
+    already-applied migrations.
     """
     project_root = pathlib.Path(__file__).resolve().parents[2]
     wallet_dir = project_root / ".wallet"
@@ -260,21 +361,35 @@ def fix_cashu_migrations() -> None:
             conn = sqlite3.connect(db_file)
             cursor = conn.cursor()
 
-            # Check if keysets table exists
+            detected_version = _detect_schema_version(cursor)
+            if detected_version == 0:
+                conn.close()
+                continue
+
+            # Ensure dbversions table and row exist
             cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='keysets'"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='dbversions'"
             )
             if not cursor.fetchone():
                 conn.close()
                 continue
 
-            # Check if public_keys column exists
-            cursor.execute("PRAGMA table_info(keysets)")
-            columns = [info[1] for info in cursor.fetchall()]
+            cursor.execute("SELECT version FROM dbversions WHERE db = 'wallet'")
+            row = cursor.fetchone()
+            if row is None:
+                conn.close()
+                continue
 
-            if "public_keys" not in columns:
-                logger.info(f"Adding missing public_keys column to {db_file.name}")
-                cursor.execute("ALTER TABLE keysets ADD COLUMN public_keys TEXT")
+            recorded_version = row[0]
+            if recorded_version < detected_version:
+                logger.info(
+                    f"Fixing {db_file.name}: dbversions says v{recorded_version} "
+                    f"but schema is v{detected_version}"
+                )
+                cursor.execute(
+                    "UPDATE dbversions SET version = ? WHERE db = 'wallet'",
+                    (detected_version,),
+                )
                 conn.commit()
 
             conn.close()
