@@ -1,17 +1,16 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
-import { Copy, RefreshCcw, Trash2 } from 'lucide-react';
+import { Copy, RefreshCcw } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { KeyOptions } from '@/components/key-options';
 import { ApiKeyInput } from '../api-key-input';
-import type { ChildKeyInfo, WalletSnapshot } from './key-info-details';
+import type { WalletSnapshot } from './key-info-details';
 import { useWalletInfo } from '@/hooks/use-wallet-info';
 
 export type RefundReceipt = {
@@ -226,7 +225,6 @@ export function CashuPaymentWorkflow({
     [apiKey, onWalletInfoUpdated]
   );
 
-  const showManageDetails = hasInteractedManage || Boolean(walletInfo);
   const showTopupDetails = hasInteractedTopup || topupToken.trim().length > 0;
   const canTopup = Boolean(activeApiKey);
   const showCreateDetails = initialToken.trim().length > 0;

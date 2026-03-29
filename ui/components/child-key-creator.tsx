@@ -28,14 +28,6 @@ interface KeyConfig {
   validityDate: string;
 }
 
-interface KeyStatus {
-  total_spent: number;
-  balance_limit: number | null;
-  validity_date: number | null;
-  is_expired: boolean;
-  is_drained: boolean;
-}
-
 interface ChildKeyCreatorProps {
   baseUrl?: string;
   apiKey?: string;
@@ -60,8 +52,6 @@ export function ChildKeyCreator({
   const [internalApiKey, setInternalApiKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [keyStatus, setKeyStatus] = useState<KeyStatus | null>(null);
   const [configs, setConfigs] = useState<KeyConfig[]>([
     {
       id: crypto.randomUUID(),
@@ -71,7 +61,6 @@ export function ChildKeyCreator({
       validityDate: '',
     },
   ]);
-  const [childKeyToCheck, setChildKeyToCheck] = useState('');
 
   const activeApiKey = propApiKey ?? internalApiKey;
   const { data: walletInfo } = useWalletInfo(baseUrl ?? '', activeApiKey);
@@ -171,47 +160,6 @@ export function ChildKeyCreator({
       toast.error(errorMessage);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleCheckKey = async () => {
-    if (!childKeyToCheck) {
-      toast.error('Please provide a Child API key to check');
-      return;
-    }
-
-    setChecking(true);
-    setKeyStatus(null);
-    try {
-      const baseUrlToUse = baseUrl || '';
-      const response = await fetch(`${baseUrlToUse}/v1/balance/info`, {
-        headers: {
-          Authorization: `Bearer ${childKeyToCheck}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch key info');
-      }
-
-      const info = await response.json();
-      const now = Math.floor(Date.now() / 1000);
-
-      setKeyStatus({
-        total_spent: info.total_spent,
-        balance_limit: info.balance_limit,
-        validity_date: info.validity_date,
-        is_expired: info.validity_date ? now > info.validity_date : false,
-        is_drained: info.balance_limit
-          ? info.total_spent >= info.balance_limit
-          : false,
-      });
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to check child key'
-      );
-    } finally {
-      setChecking(false);
     }
   };
 
