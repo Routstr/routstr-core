@@ -732,22 +732,20 @@ async def adjust_payment_for_tokens(
                 update(ApiKey)
                 .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                 .values(
-                    reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
                     balance=col(ApiKey.balance) - cost.total_msats,
                     total_spent=col(ApiKey.total_spent) + cost.total_msats,
                 )
             )
             result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
 
-            # Also update total_spent and reserved_balance on the child key if it's different
+            # Also update total_spent and balance on the child key if it's different
             if billing_key.hashed_key != key.hashed_key:
                 child_stmt = (
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == key.hashed_key)
                     .values(
                         total_spent=col(ApiKey.total_spent) + cost.total_msats,
-                        reserved_balance=col(ApiKey.reserved_balance)
-                        - deducted_max_cost,
+                        balance=col(ApiKey.balance) - cost.total_msats,
                     )
                 )
                 await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -819,23 +817,20 @@ async def adjust_payment_for_tokens(
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                     .values(
-                        reserved_balance=col(ApiKey.reserved_balance)
-                        - deducted_max_cost,
                         balance=col(ApiKey.balance) - total_cost_msats,
                         total_spent=col(ApiKey.total_spent) + total_cost_msats,
                     )
                 )
                 await session.exec(finalize_stmt)  # type: ignore[call-overload]
 
-                # Also update total_spent and reserved_balance on the child key if it's different
+                # Also update total_spent and balance on the child key if it's different
                 if billing_key.hashed_key != key.hashed_key:
                     child_stmt = (
                         update(ApiKey)
                         .where(col(ApiKey.hashed_key) == key.hashed_key)
                         .values(
                             total_spent=col(ApiKey.total_spent) + total_cost_msats,
-                            reserved_balance=col(ApiKey.reserved_balance)
-                            - deducted_max_cost,
+                            balance=col(ApiKey.balance) - total_cost_msats,
                         )
                     )
                     await session.exec(child_stmt)  # type: ignore[call-overload]
