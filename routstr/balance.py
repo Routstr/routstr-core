@@ -5,6 +5,7 @@ from time import monotonic
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlmodel import select
 
@@ -207,6 +208,7 @@ async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
 @router.post("/refund")
 async def refund_wallet_endpoint(
     authorization: Annotated[str, Header(...)],
+    x_cashu: Annotated[str | None, Header()] = None,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     if not authorization.startswith("Bearer "):
@@ -216,6 +218,23 @@ async def refund_wallet_endpoint(
         )
 
     bearer_value: str = authorization[7:]
+
+    if x_cashu:
+        payment_token_hash = hashlib.sha256(x_cashu.strip().encode()).hexdigest()
+        result = await session.get(CashuTransaction, payment_token_hash)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Refund not found")
+        if result.swept:
+            raise HTTPException(status_code=410, detail="Refund has been swept")
+        result.collected = True
+        session.add(result)
+        await session.commit()
+        body: dict[str, str] = {"token": result.token}
+        if result.unit == "sat":
+            body["sats"] = str(result.amount)
+        else:
+            body["msats"] = str(result.amount)
+        return JSONResponse(content=body, headers={"X-Cashu": result.token})
 
     key: ApiKey = await validate_bearer_key(bearer_value, session)
 
