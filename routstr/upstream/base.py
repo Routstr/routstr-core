@@ -2091,6 +2091,7 @@ class BaseUpstreamProvider:
             extra={"amount": amount, "unit": unit, "status_code": response.status_code},
         )
 
+        content = None
         try:
             content = await response.aread()
             content_str = (
@@ -2141,10 +2142,46 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
-            return StreamingResponse(
-                response.aiter_bytes(),
+            if content is None:
+                # upstream response was never received
+                try:
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash, request_id=request_id
+                    )
+                    return Response(
+                        content=json.dumps({
+                            "error": {
+                                "message": "Failed to read upstream response",
+                                "type": "upstream_error",
+                                "code": 500,
+                            }
+                        }),
+                        status_code=500,
+                        media_type="application/json",
+                        headers={"X-Cashu": refund_token},
+                    )
+                except Exception:
+                    return Response(
+                        content=json.dumps({
+                            "error": {
+                                "message": "Failed to read upstream response",
+                                "type": "upstream_error",
+                                "code": 500,
+                            }
+                        }),
+                        status_code=500,
+                        media_type="application/json",
+                    )
+
+            # Content was received but processing failed — return content as-is;
+            # user got their response so no refund is issued
+            resp_headers = dict(response.headers)
+            resp_headers.pop("transfer-encoding", None)
+            resp_headers.pop("content-encoding", None)
+            return Response(
+                content=content,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=resp_headers,
             )
 
     async def forward_x_cashu_request(
@@ -2181,6 +2218,16 @@ class BaseUpstreamProvider:
         request_body = await request.body()
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
+        # X-Cashu does not support streaming — force non-streaming so we always
+        # receive a complete JSON response for accurate cost calculation and refund.
+        body_for_upstream = transformed_body if transformed_body else request_body
+        try:
+            body_json = json.loads(body_for_upstream)
+            if body_json.pop("stream", None) is not None:
+                body_for_upstream = json.dumps(body_json).encode()
+        except Exception:
+            pass
+
         logger.debug(
             "Forwarding request to upstream",
             extra={
@@ -2192,125 +2239,145 @@ class BaseUpstreamProvider:
             },
         )
 
-        async with httpx.AsyncClient(
+        client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
             timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body if transformed_body else request_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
+        )
+        try:
+            response = await client.send(
+                client.build_request(
+                    request.method,
+                    url,
+                    headers=headers,
+                    content=body_for_upstream,
+                    params=self.prepare_params(path, request.query_params),
+                ),
+                stream=True,
+            )
 
-                logger.debug(
-                    "Received upstream response",
+            logger.debug(
+                "Received upstream response",
+                extra={
+                    "status_code": response.status_code,
+                    "path": path,
+                    "response_headers": dict(response.headers),
+                },
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Upstream request failed, processing refund",
                     extra={
                         "status_code": response.status_code,
                         "path": path,
-                        "response_headers": dict(response.headers),
+                        "amount": amount,
+                        "unit": unit,
                     },
                 )
 
-                if response.status_code != 200:
-                    logger.warning(
-                        "Upstream request failed, processing refund",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "amount": amount,
-                            "unit": unit,
-                        },
-                    )
+                refund_token = await self.send_refund(
+                    amount - 60, unit, mint, payment_token_hash,
+                    request_id=getattr(request.state, "request_id", None),
+                )
 
-                    refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
-                        request_id=getattr(request.state, "request_id", None),
-                    )
+                logger.info(
+                    "Refund processed for failed upstream request",
+                    extra={
+                        "status_code": response.status_code,
+                        "refund_amount": amount,
+                        "unit": unit,
+                        "refund_token_preview": refund_token[:20] + "..."
+                        if len(refund_token) > 20
+                        else refund_token,
+                    },
+                )
 
-                    logger.info(
-                        "Refund processed for failed upstream request",
-                        extra={
-                            "status_code": response.status_code,
-                            "refund_amount": amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-
-                    error_response = Response(
-                        content=json.dumps(
-                            {
-                                "error": {
-                                    "message": "Error forwarding request to upstream",
-                                    "type": "upstream_error",
-                                    "code": response.status_code,
-                                    "refund_token": refund_token,
-                                }
+                await client.aclose()
+                error_response = Response(
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "message": "Error forwarding request to upstream",
+                                "type": "upstream_error",
+                                "code": response.status_code,
+                                "refund_token": refund_token,
                             }
-                        ),
-                        status_code=response.status_code,
-                        media_type="application/json",
-                    )
-                    error_response.headers["X-Cashu"] = refund_token
-                    return error_response
+                        }
+                    ),
+                    status_code=response.status_code,
+                    media_type="application/json",
+                )
+                error_response.headers["X-Cashu"] = refund_token
+                return error_response
 
-                if path.endswith("chat/completions") or path.endswith("embeddings"):
-                    logger.debug(
-                        "Processing completion/embeddings response",
-                        extra={"path": path, "amount": amount, "unit": unit},
-                    )
+            if (
+                path.endswith("chat/completions")
+                or path.endswith("embeddings")
+                or path.endswith("messages")
+            ):
+                logger.debug(
+                    "Processing completion/embeddings/messages response",
+                    extra={"path": path, "amount": amount, "unit": unit},
+                )
 
-                    result = await self.handle_x_cashu_chat_completion(
-                        response,
-                        amount,
-                        unit,
-                        max_cost_for_model,
-                        mint,
-                        payment_token_hash,
-                        request_id=getattr(request.state, "request_id", None),
-                    )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    result.background = background_tasks
-                    return result
-
+                result = await self.handle_x_cashu_chat_completion(
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
+                    request_id=getattr(request.state, "request_id", None),
+                )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
                 background_tasks.add_task(client.aclose)
+                result.background = background_tasks
+                return result
 
-                logger.debug(
-                    "Streaming non-chat response",
-                    extra={"path": path, "status_code": response.status_code},
-                )
+            background_tasks = BackgroundTasks()
+            background_tasks.add_task(response.aclose)
+            background_tasks.add_task(client.aclose)
 
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    background=background_tasks,
+            logger.debug(
+                "Streaming non-chat response",
+                extra={"path": path, "status_code": response.status_code},
+            )
+
+            return StreamingResponse(
+                response.aiter_bytes(),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                background=background_tasks,
+            )
+        except Exception as exc:
+            await client.aclose()
+            tb = traceback.format_exc()
+            logger.error(
+                "Unexpected error in upstream forwarding",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "method": request.method,
+                    "url": url,
+                    "path": path,
+                    "query_params": dict(request.query_params),
+                    "traceback": tb,
+                },
+            )
+            try:
+                refund_token = await self.send_refund(
+                    amount - 60, unit, mint, payment_token_hash,
+                    request_id=getattr(request.state, "request_id", None),
                 )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Unexpected error in upstream forwarding",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
+                return create_error_response(
+                    "internal_error",
+                    "An unexpected server error occurred",
+                    500,
+                    request=request,
+                    token=refund_token,
                 )
+            except Exception:
                 return create_error_response(
                     "internal_error",
                     "An unexpected server error occurred",
@@ -2349,10 +2416,17 @@ class BaseUpstreamProvider:
             },
         )
 
+        token_redeemed = False
+        amount: int = 0
+        unit: str = "msat"
+        mint: str | None = None
+        payment_token_hash: str | None = None
+
         try:
             payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
+            token_redeemed = True
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
@@ -2425,6 +2499,22 @@ class BaseUpstreamProvider:
                     token=x_cashu_token,
                 )
 
+            if token_redeemed:
+                try:
+                    request_id = getattr(request.state, "request_id", None)
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash, request_id=request_id
+                    )
+                    return create_error_response(
+                        "cashu_error",
+                        f"CASHU token processing failed: {error_message}",
+                        500,
+                        request=request,
+                        token=refund_token,
+                    )
+                except Exception:
+                    pass
+
             return create_error_response(
                 "cashu_error",
                 f"CASHU token processing failed: {error_message}",
@@ -2468,6 +2558,16 @@ class BaseUpstreamProvider:
         request_body = await request.body()
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
+        # X-Cashu does not support streaming — force non-streaming so we always
+        # receive a complete JSON response for accurate cost calculation and refund.
+        body_for_upstream = transformed_body if transformed_body else request_body
+        try:
+            body_json = json.loads(body_for_upstream)
+            if body_json.pop("stream", None) is not None:
+                body_for_upstream = json.dumps(body_json).encode()
+        except Exception:
+            pass
+
         logger.debug(
             "Forwarding Responses API request to upstream with X-Cashu payment",
             extra={
@@ -2479,125 +2579,141 @@ class BaseUpstreamProvider:
             },
         )
 
-        async with httpx.AsyncClient(
+        client = httpx.AsyncClient(
             transport=httpx.AsyncHTTPTransport(retries=1),
             timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body if transformed_body else request_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
+        )
+        try:
+            response = await client.send(
+                client.build_request(
+                    request.method,
+                    url,
+                    headers=headers,
+                    content=body_for_upstream,
+                    params=self.prepare_params(path, request.query_params),
+                ),
+                stream=True,
+            )
 
-                logger.debug(
-                    "Received upstream Responses API response",
+            logger.debug(
+                "Received upstream Responses API response",
+                extra={
+                    "status_code": response.status_code,
+                    "path": path,
+                    "response_headers": dict(response.headers),
+                },
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Upstream Responses API request failed, processing refund",
                     extra={
                         "status_code": response.status_code,
                         "path": path,
-                        "response_headers": dict(response.headers),
+                        "amount": amount,
+                        "unit": unit,
                     },
                 )
 
-                if response.status_code != 200:
-                    logger.warning(
-                        "Upstream Responses API request failed, processing refund",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "amount": amount,
-                            "unit": unit,
-                        },
-                    )
+                refund_token = await self.send_refund(
+                    amount - 60, unit, mint, payment_token_hash,
+                    request_id=getattr(request.state, "request_id", None),
+                )
 
-                    refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
-                        request_id=getattr(request.state, "request_id", None),
-                    )
+                logger.info(
+                    "Refund processed for failed upstream Responses API request",
+                    extra={
+                        "status_code": response.status_code,
+                        "refund_amount": amount,
+                        "unit": unit,
+                        "refund_token_preview": refund_token[:20] + "..."
+                        if len(refund_token) > 20
+                        else refund_token,
+                    },
+                )
 
-                    logger.info(
-                        "Refund processed for failed upstream Responses API request",
-                        extra={
-                            "status_code": response.status_code,
-                            "refund_amount": amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-
-                    error_response = Response(
-                        content=json.dumps(
-                            {
-                                "error": {
-                                    "message": "Error forwarding Responses API request to upstream",
-                                    "type": "upstream_error",
-                                    "code": response.status_code,
-                                    "refund_token": refund_token,
-                                }
+                await client.aclose()
+                error_response = Response(
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "message": "Error forwarding Responses API request to upstream",
+                                "type": "upstream_error",
+                                "code": response.status_code,
+                                "refund_token": refund_token,
                             }
-                        ),
-                        status_code=response.status_code,
-                        media_type="application/json",
-                    )
-                    error_response.headers["X-Cashu"] = refund_token
-                    return error_response
+                        }
+                    ),
+                    status_code=response.status_code,
+                    media_type="application/json",
+                )
+                error_response.headers["X-Cashu"] = refund_token
+                return error_response
 
-                if path.startswith("responses"):
-                    logger.debug(
-                        "Processing Responses API response",
-                        extra={"path": path, "amount": amount, "unit": unit},
-                    )
+            if path.startswith("responses"):
+                logger.debug(
+                    "Processing Responses API response",
+                    extra={"path": path, "amount": amount, "unit": unit},
+                )
 
-                    result = await self.handle_x_cashu_responses_completion(
-                        response,
-                        amount,
-                        unit,
-                        max_cost_for_model,
-                        mint,
-                        payment_token_hash,
-                        request_id=getattr(request.state, "request_id", None),
-                    )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    result.background = background_tasks
-                    return result
-
+                result = await self.handle_x_cashu_responses_completion(
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    payment_token_hash,
+                    request_id=getattr(request.state, "request_id", None),
+                )
                 background_tasks = BackgroundTasks()
                 background_tasks.add_task(response.aclose)
                 background_tasks.add_task(client.aclose)
+                result.background = background_tasks
+                return result
 
-                logger.debug(
-                    "Streaming non-responses response",
-                    extra={"path": path, "status_code": response.status_code},
-                )
+            background_tasks = BackgroundTasks()
+            background_tasks.add_task(response.aclose)
+            background_tasks.add_task(client.aclose)
 
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    background=background_tasks,
+            logger.debug(
+                "Streaming non-responses response",
+                extra={"path": path, "status_code": response.status_code},
+            )
+
+            return StreamingResponse(
+                response.aiter_bytes(),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                background=background_tasks,
+            )
+        except Exception as exc:
+            await client.aclose()
+            tb = traceback.format_exc()
+            logger.error(
+                "Unexpected error in upstream Responses API forwarding",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "method": request.method,
+                    "url": url,
+                    "path": path,
+                    "query_params": dict(request.query_params),
+                    "traceback": tb,
+                },
+            )
+            try:
+                refund_token = await self.send_refund(
+                    amount - 60, unit, mint, payment_token_hash,
+                    request_id=getattr(request.state, "request_id", None),
                 )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Unexpected error in upstream Responses API forwarding",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
+                return create_error_response(
+                    "internal_error",
+                    "An unexpected server error occurred",
+                    500,
+                    request=request,
+                    token=refund_token,
                 )
+            except Exception:
                 return create_error_response(
                     "internal_error",
                     "An unexpected server error occurred",
@@ -2632,6 +2748,7 @@ class BaseUpstreamProvider:
             extra={"amount": amount, "unit": unit, "status_code": response.status_code},
         )
 
+        content = None
         try:
             content = await response.aread()
             content_str = (
@@ -2682,10 +2799,44 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
-            return StreamingResponse(
-                response.aiter_bytes(),
+            if content is None:
+                # aread() failed — upstream response was never received; issue full refund
+                try:
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash, request_id=request_id
+                    )
+                    return Response(
+                        content=json.dumps({
+                            "error": {
+                                "message": "Failed to read upstream response",
+                                "type": "upstream_error",
+                                "code": 500,
+                            }
+                        }),
+                        status_code=500,
+                        media_type="application/json",
+                        headers={"X-Cashu": refund_token},
+                    )
+                except Exception:
+                    return Response(
+                        content=json.dumps({
+                            "error": {
+                                "message": "Failed to read upstream response",
+                                "type": "upstream_error",
+                                "code": 500,
+                            }
+                        }),
+                        status_code=500,
+                        media_type="application/json",
+                    )
+            # Content was received but processing failed — return content as-is
+            resp_headers = dict(response.headers)
+            resp_headers.pop("transfer-encoding", None)
+            resp_headers.pop("content-encoding", None)
+            return Response(
+                content=content,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=resp_headers,
             )
 
     async def handle_x_cashu_streaming_responses_response(
@@ -2994,10 +3145,17 @@ class BaseUpstreamProvider:
             },
         )
 
+        token_redeemed = False
+        amount: int = 0
+        unit: str = "msat"
+        mint: str | None = None
+        payment_token_hash: str | None = None
+
         try:
             payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
+            token_redeemed = True
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
@@ -3068,6 +3226,22 @@ class BaseUpstreamProvider:
                     request=request,
                     token=x_cashu_token,
                 )
+
+            if token_redeemed:
+                try:
+                    request_id = getattr(request.state, "request_id", None)
+                    refund_token = await self.send_refund(
+                        amount - 60, unit, mint, payment_token_hash, request_id=request_id
+                    )
+                    return create_error_response(
+                        "cashu_error",
+                        f"CASHU token processing failed: {error_message}",
+                        500,
+                        request=request,
+                        token=refund_token,
+                    )
+                except Exception:
+                    pass
 
             return create_error_response(
                 "cashu_error",
