@@ -191,9 +191,16 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(version=__version__, lifespan=lifespan)
 
 
+cors_origins = list(global_settings.cors_origins or [])
+cors_allow_origin_regex: str | None = None
+if "*" in cors_origins:
+    cors_origins = [origin for origin in cors_origins if origin != "*"]
+    cors_allow_origin_regex = ".*"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=global_settings.cors_origins,
+    allow_origins=cors_origins,
+    allow_origin_regex=cors_allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
