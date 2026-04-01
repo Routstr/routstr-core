@@ -207,35 +207,55 @@ async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
 
 @router.post("/refund")
 async def refund_wallet_endpoint(
-    authorization: Annotated[str, Header(...)],
+    authorization: Annotated[str | None, Header()] = None,
     x_cashu: Annotated[str | None, Header()] = None,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, str]:
-    if not authorization.startswith("Bearer "):
+) -> JSONResponse | dict[str, str]:
+    if x_cashu:
+        # Find the "in" transaction by the original payment token
+        in_tx_result = await session.exec(
+            select(CashuTransaction).where(
+                CashuTransaction.token == x_cashu,
+                CashuTransaction.type == "in",
+            )
+        )
+        in_tx = in_tx_result.first()
+        if in_tx is None:
+            raise HTTPException(status_code=404, detail="Refund not found")
+
+        # Use the request_id to find the associated "out" (refund) transaction
+        if in_tx.request_id is None:
+            raise HTTPException(status_code=404, detail="Refund not found")
+
+        out_tx_result = await session.exec(
+            select(CashuTransaction).where(
+                CashuTransaction.request_id == in_tx.request_id,
+                CashuTransaction.type == "out",
+            )
+        )
+        out_tx = out_tx_result.first()
+        if out_tx is None:
+            raise HTTPException(status_code=404, detail="Refund not found")
+        if out_tx.swept:
+            raise HTTPException(status_code=410, detail="Refund has been swept")
+
+        out_tx.collected = True
+        session.add(out_tx)
+        await session.commit()
+        body: dict[str, str] = {"token": out_tx.token}
+        if out_tx.unit == "sat":
+            body["sats"] = str(out_tx.amount)
+        else:
+            body["msats"] = str(out_tx.amount)
+        return JSONResponse(content=body, headers={"X-Cashu": out_tx.token})
+
+    if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
             detail="Invalid authorization. Use 'Bearer <cashu-token>' or 'Bearer <api-key>'",
         )
 
     bearer_value: str = authorization[7:]
-
-    if x_cashu:
-        payment_token_hash = hashlib.sha256(x_cashu.strip().encode()).hexdigest()
-        result = await session.get(CashuTransaction, payment_token_hash)
-        if result is None:
-            raise HTTPException(status_code=404, detail="Refund not found")
-        if result.swept:
-            raise HTTPException(status_code=410, detail="Refund has been swept")
-        result.collected = True
-        session.add(result)
-        await session.commit()
-        body: dict[str, str] = {"token": result.token}
-        if result.unit == "sat":
-            body["sats"] = str(result.amount)
-        else:
-            body["msats"] = str(result.amount)
-        return JSONResponse(content=body, headers={"X-Cashu": result.token})
-
     key: ApiKey = await validate_bearer_key(bearer_value, session)
 
     if key.total_balance <= 0:

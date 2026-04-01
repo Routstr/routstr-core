@@ -33,6 +33,9 @@ async def test_refund_x_cashu_returns_token() -> None:
 
     session.get.assert_awaited_once_with(CashuTransaction, expected_hash)
     import json
+
+    from fastapi.responses import JSONResponse
+    assert isinstance(result, JSONResponse)
     body = json.loads(result.body)
     assert body["token"] == "cashuArefund_token"
     assert body["msats"] == "1000"
@@ -57,6 +60,9 @@ async def test_refund_x_cashu_sat_unit() -> None:
     )
 
     import json
+
+    from fastapi.responses import JSONResponse
+    assert isinstance(result, JSONResponse)
     body = json.loads(result.body)
     assert body["token"] == "cashuArefund_sat"
     assert body["sats"] == "500"
