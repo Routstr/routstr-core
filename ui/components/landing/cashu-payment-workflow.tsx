@@ -50,7 +50,6 @@ export function CashuPaymentWorkflow({
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [isCreatingKey, setIsCreatingKey] = useState(false);
   const [isTopupLoading, setIsTopupLoading] = useState(false);
-  const [hasInteractedManage, setHasInteractedManage] = useState(false);
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
   const [balanceLimit, setBalanceLimit] = useState<string>('');
   const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
@@ -295,7 +294,6 @@ export function CashuPaymentWorkflow({
             <ApiKeyInput
               value={apiKeyInput}
               onApiKeyChange={handleApiKeyChange}
-              onFocus={() => setHasInteractedManage(true)}
             />
             <div className='flex gap-2'>
               <Button
