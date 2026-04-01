@@ -1,27 +1,42 @@
-import hashlib
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.responses import JSONResponse
 
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import CashuTransaction
 
 
-def _make_cashu_tx(token: str, amount: int, unit: str, swept: bool = False) -> CashuTransaction:
-    tx = CashuTransaction(token=token, amount=amount, unit=unit)
+def _make_cashu_tx(
+    token: str,
+    amount: int,
+    unit: str,
+    type: str = "out",
+    request_id: str | None = "req-abc",
+    swept: bool = False,
+    collected: bool = False,
+) -> CashuTransaction:
+    tx = CashuTransaction(token=token, amount=amount, unit=unit, type=type, request_id=request_id)
     tx.swept = swept
-    tx.collected = False
+    tx.collected = collected
     return tx
+
+
+def _exec_result(tx: CashuTransaction | None) -> MagicMock:
+    result = MagicMock()
+    result.first.return_value = tx
+    return result
 
 
 @pytest.mark.asyncio
 async def test_refund_x_cashu_returns_token() -> None:
     x_cashu_token = "cashuAtest_token_value"
-    expected_hash = hashlib.sha256(x_cashu_token.strip().encode()).hexdigest()
-    tx = _make_cashu_tx(token="cashuArefund_token", amount=1000, unit="msat")
+    in_tx = _make_cashu_tx(token=x_cashu_token, amount=0, unit="msat", type="in", request_id="req-abc")
+    out_tx = _make_cashu_tx(token="cashuArefund_token", amount=1000, unit="msat", type="out", request_id="req-abc")
 
     session = MagicMock()
-    session.get = AsyncMock(return_value=tx)
+    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
     session.add = MagicMock()
     session.commit = AsyncMock()
 
@@ -31,25 +46,22 @@ async def test_refund_x_cashu_returns_token() -> None:
         session=session,
     )
 
-    session.get.assert_awaited_once_with(CashuTransaction, expected_hash)
-    import json
-
-    from fastapi.responses import JSONResponse
     assert isinstance(result, JSONResponse)
     body = json.loads(result.body)
     assert body["token"] == "cashuArefund_token"
     assert body["msats"] == "1000"
     assert result.headers["X-Cashu"] == "cashuArefund_token"
-    assert tx.collected is True
+    assert out_tx.collected is True
 
 
 @pytest.mark.asyncio
 async def test_refund_x_cashu_sat_unit() -> None:
     x_cashu_token = "cashuAsat_token"
-    tx = _make_cashu_tx(token="cashuArefund_sat", amount=500, unit="sat")
+    in_tx = _make_cashu_tx(token=x_cashu_token, amount=0, unit="sat", type="in", request_id="req-sat")
+    out_tx = _make_cashu_tx(token="cashuArefund_sat", amount=500, unit="sat", type="out", request_id="req-sat")
 
     session = MagicMock()
-    session.get = AsyncMock(return_value=tx)
+    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
     session.add = MagicMock()
     session.commit = AsyncMock()
 
@@ -59,9 +71,6 @@ async def test_refund_x_cashu_sat_unit() -> None:
         session=session,
     )
 
-    import json
-
-    from fastapi.responses import JSONResponse
     assert isinstance(result, JSONResponse)
     body = json.loads(result.body)
     assert body["token"] == "cashuArefund_sat"
@@ -75,7 +84,7 @@ async def test_refund_x_cashu_not_found_raises_404() -> None:
     from fastapi import HTTPException
 
     session = MagicMock()
-    session.get = AsyncMock(return_value=None)
+    session.exec = AsyncMock(return_value=_exec_result(None))
 
     with pytest.raises(HTTPException) as exc_info:
         await refund_wallet_endpoint(
@@ -91,10 +100,11 @@ async def test_refund_x_cashu_not_found_raises_404() -> None:
 async def test_refund_x_cashu_swept_raises_410() -> None:
     from fastapi import HTTPException
 
-    tx = _make_cashu_tx(token="cashuAswept", amount=100, unit="msat", swept=True)
+    in_tx = _make_cashu_tx(token="cashuAswept_token", amount=0, unit="msat", type="in", request_id="req-swept")
+    out_tx = _make_cashu_tx(token="cashuAswept", amount=100, unit="msat", type="out", request_id="req-swept", swept=True)
 
     session = MagicMock()
-    session.get = AsyncMock(return_value=tx)
+    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
 
     with pytest.raises(HTTPException) as exc_info:
         await refund_wallet_endpoint(

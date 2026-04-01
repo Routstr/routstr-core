@@ -205,7 +205,7 @@ async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
         _refund_cache[key] = (expiry, value)
 
 
-@router.post("/refund")
+@router.post("/refund", response_model=None)
 async def refund_wallet_endpoint(
     authorization: Annotated[str | None, Header()] = None,
     x_cashu: Annotated[str | None, Header()] = None,
