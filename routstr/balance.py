@@ -268,6 +268,12 @@ async def refund_wallet_endpoint(
             detail="Cannot refund child key. Please refund the parent key instead.",
         )
 
+    if key.reserved_balance > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot refund key. There are ongoing requests for this api key.",
+        )
+
     remaining_balance_msats: int = key.total_balance
 
     if key.refund_currency == "sat":
