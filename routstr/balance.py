@@ -328,10 +328,19 @@ async def refund_wallet_endpoint(
 
     await _refund_cache_set(bearer_value, result)
 
+    previous_reserved_balance = key.reserved_balance
     key.balance = 0
     key.reserved_balance = 0
     session.add(key)
     await session.commit()
+
+    logger.info(
+        "refund_wallet_endpoint: refund successful",
+        extra={
+            "refunded_msats": remaining_balance_msats,
+            "previous_reserved_balance": previous_reserved_balance,
+        },
+    )
 
     return result
 
