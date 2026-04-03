@@ -109,11 +109,19 @@ async def calculate_cost(  # todo: can be sync
     )
 
     usd_cost = 0.0
+    input_usd = 0.0
+    output_usd = 0.0
 
-    # Prioritize cost_details.upstream_inference_cost
     if "cost_details" in usage_data:
         usd_cost = float(
             usage_data["cost_details"].get("upstream_inference_cost", 0) or 0
+        )
+        input_usd = float(
+            usage_data["cost_details"].get("upstream_inference_prompt_cost", 0) or 0
+        )
+        output_usd = float(
+            usage_data["cost_details"].get("upstream_inference_completions_cost", 0)
+            or 0
         )
 
     # Fallback to cost field if upstream_inference_cost is 0
@@ -123,11 +131,33 @@ async def calculate_cost(  # todo: can be sync
         except Exception:
             pass
 
+    MSATS_PER_1K_INPUT_TOKENS: float = (
+        float(settings.fixed_per_1k_input_tokens) * 1000.0
+    )
+    MSATS_PER_1K_OUTPUT_TOKENS: float = (
+        float(settings.fixed_per_1k_output_tokens) * 1000.0
+    )
+
     if usd_cost > 0:
         try:
             sats_per_usd = 1.0 / sats_usd_price()
             cost_in_sats = usd_cost * sats_per_usd
             cost_in_msats = math.ceil(cost_in_sats * 1000)
+
+            input_msats = 0
+            output_msats = 0
+
+            if input_usd > 0 or output_usd > 0:
+                input_msats = int((input_usd * sats_per_usd) * 1000)
+                output_msats = int((output_usd * sats_per_usd) * 1000)
+            else:
+                total_tokens = input_tokens + output_tokens
+                if total_tokens > 0:
+                    input_ratio = input_tokens / total_tokens
+                    input_msats = int(cost_in_msats * input_ratio)
+                    output_msats = cost_in_msats - input_msats
+                else:
+                    output_msats = cost_in_msats
 
             logger.info(
                 "Using cost from usage data/details",
@@ -140,9 +170,9 @@ async def calculate_cost(  # todo: can be sync
             )
 
             return CostData(
-                base_msats=-1,
-                input_msats=-1,  # Cost field doesn't break down by token type
-                output_msats=-1,
+                base_msats=0,
+                input_msats=input_msats,
+                output_msats=output_msats,
                 total_msats=cost_in_msats,
                 total_usd=usd_cost,
                 input_tokens=input_tokens,
@@ -158,13 +188,6 @@ async def calculate_cost(  # todo: can be sync
                 },
             )
             # Fall through to token-based calculation
-
-    MSATS_PER_1K_INPUT_TOKENS: float = (
-        float(settings.fixed_per_1k_input_tokens) * 1000.0
-    )
-    MSATS_PER_1K_OUTPUT_TOKENS: float = (
-        float(settings.fixed_per_1k_output_tokens) * 1000.0
-    )
 
     if not settings.fixed_pricing:
         response_model = response_data.get("model", "")
@@ -231,10 +254,10 @@ async def calculate_cost(  # todo: can be sync
             output_tokens=output_tokens,
         )
 
-    input_msats = round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 3)
+    calc_input_msats = round(input_tokens / 1000 * MSATS_PER_1K_INPUT_TOKENS, 3)
 
-    output_msats = round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 3)
-    token_based_cost = math.ceil(input_msats + output_msats)
+    calc_output_msats = round(output_tokens / 1000 * MSATS_PER_1K_OUTPUT_TOKENS, 3)
+    token_based_cost = math.ceil(calc_input_msats + calc_output_msats)
     total_usd = (token_based_cost / 1000.0) * sats_usd_price()
 
     logger.info(
@@ -242,8 +265,8 @@ async def calculate_cost(  # todo: can be sync
         extra={
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "input_cost_msats": input_msats,
-            "output_cost_msats": output_msats,
+            "input_cost_msats": calc_input_msats,
+            "output_cost_msats": calc_output_msats,
             "total_cost_msats": token_based_cost,
             "total_usd": total_usd,
             "model": response_data.get("model", "unknown"),
@@ -252,8 +275,8 @@ async def calculate_cost(  # todo: can be sync
 
     return CostData(
         base_msats=0,
-        input_msats=int(input_msats),
-        output_msats=int(output_msats),
+        input_msats=int(calc_input_msats),
+        output_msats=int(calc_output_msats),
         total_msats=token_based_cost,
         total_usd=total_usd,
         input_tokens=input_tokens,
