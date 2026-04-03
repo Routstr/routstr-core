@@ -301,6 +301,8 @@ class BaseUpstreamProvider:
                 original_model = model_obj.id
                 transformed_model = self.transform_model_name(original_model)
                 data["model"] = transformed_model
+                print("[routstr DEBUG] REQUEST BODY:", json.dumps(data, indent=2), flush=True)
+                print("[routstr DEBUG] MODEL OBJECT:", model_obj.model_dump() if hasattr(model_obj, 'model_dump') else vars(model_obj), flush=True)
                 logger.debug(
                     "Transformed model name in request",
                     extra={
@@ -452,6 +454,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         background_tasks: BackgroundTasks,
+        requested_model: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -520,11 +523,15 @@ class BaseUpstreamProvider:
                             if isinstance(obj, dict):
                                 if obj.get("model"):
                                     last_model_seen = str(obj.get("model"))
+                                if requested_model:
+                                    obj["model"] = requested_model
 
                                 if isinstance(obj.get("usage"), dict):
                                     # Hold this chunk back to merge cost later
                                     usage_chunk_data = obj
                                     continue
+                                yield b"data: " + json.dumps(obj).encode() + b"\n\n"
+                                continue
                         except json.JSONDecodeError:
                             pass
 
@@ -556,6 +563,14 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["usage"]["remaining_balance_msats"] = (
                                     remaining_balance_msats
                                 )
+                                # Normalize to OpenAI format so AI SDK maps prompt_tokens->inputTokens
+                                u = usage_chunk_data["usage"]
+                                if "prompt_tokens" not in u:
+                                    u["prompt_tokens"] = u.get("input_tokens", cost_data.get("input_tokens", 0))
+                                if "completion_tokens" not in u:
+                                    u["completion_tokens"] = u.get("output_tokens", cost_data.get("output_tokens", 0))
+                                if "total_tokens" not in u:
+                                    u["total_tokens"] = u.get("prompt_tokens", 0) + u.get("completion_tokens", 0)
                                 # Keep detailed cost in metadata
                                 usage_chunk_data["metadata"] = usage_chunk_data.get(
                                     "metadata", {}
@@ -569,6 +584,7 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
                                     "remaining_balance_msats"
                                 ] = remaining_balance_msats
+                                print("[routstr DEBUG] STREAMING USAGE CHUNK:", json.dumps(usage_chunk_data, indent=2), flush=True)
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
                             except Exception as e:
@@ -620,6 +636,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         session: AsyncSession,
         deducted_max_cost: int,
+        requested_model: str | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -662,15 +679,22 @@ class BaseUpstreamProvider:
             await session.refresh(key)
             remaining_balance_msats = key.balance
 
-            # Merge cost into usage for OpenCode
-            if "usage" in response_json:
-                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
-                response_json["usage"]["cost_sats"] = (
-                    cost_data.get("total_msats", 0) // 1000
-                )
-                response_json["usage"]["remaining_balance_msats"] = (
-                    remaining_balance_msats
-                )
+            # Ensure usage exists with token counts and cost data for OpenCode
+            if "usage" not in response_json:
+                response_json["usage"] = {}
+            usage = response_json["usage"]
+            # Normalize to OpenAI format so AI SDK maps prompt_tokens->inputTokens
+            if "prompt_tokens" not in usage:
+                usage["prompt_tokens"] = usage.get("input_tokens", cost_data.get("input_tokens", 0))
+            if "completion_tokens" not in usage:
+                usage["completion_tokens"] = usage.get("output_tokens", cost_data.get("output_tokens", 0))
+            if "total_tokens" not in usage:
+                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+            response_json["usage"]["cost_sats"] = (
+                cost_data.get("total_msats", 0) // 1000
+            )
+            response_json["usage"]["remaining_balance_msats"] = remaining_balance_msats
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -714,6 +738,9 @@ class BaseUpstreamProvider:
                 if k.lower() in allowed_headers
             }
 
+            if requested_model:
+                response_json["model"] = requested_model
+            print("[routstr DEBUG] NON-STREAMING RESPONSE:", json.dumps(response_json, indent=2), flush=True)
             return Response(
                 content=json.dumps(response_json).encode(),
                 status_code=response.status_code,
@@ -744,7 +771,7 @@ class BaseUpstreamProvider:
             raise
 
     async def handle_streaming_responses_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
+        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int, requested_model: str | None = None
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -868,7 +895,18 @@ class BaseUpstreamProvider:
                                     usage_chunk_data["response"]["usage"][
                                         "remaining_balance_msats"
                                     ] = remaining_balance_msats
-                                elif "usage" in usage_chunk_data:
+                                else:
+                                    # Ensure usage exists with token counts and cost data
+                                    if "usage" not in usage_chunk_data:
+                                        usage_chunk_data["usage"] = {}
+                                    u2 = usage_chunk_data["usage"]
+                                    # Normalize to OpenAI format so AI SDK maps prompt_tokens->inputTokens
+                                    if "prompt_tokens" not in u2:
+                                        u2["prompt_tokens"] = u2.get("input_tokens", cost_data.get("input_tokens", 0))
+                                    if "completion_tokens" not in u2:
+                                        u2["completion_tokens"] = u2.get("output_tokens", cost_data.get("output_tokens", 0))
+                                    if "total_tokens" not in u2:
+                                        u2["total_tokens"] = u2.get("prompt_tokens", 0) + u2.get("completion_tokens", 0)
                                     usage_chunk_data["usage"]["cost"] = cost_data.get(
                                         "total_usd", 0.0
                                     )
@@ -892,6 +930,7 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
                                     "remaining_balance_msats"
                                 ] = remaining_balance_msats
+                                print("[routstr DEBUG] STREAMING USAGE CHUNK (responses API):", json.dumps(usage_chunk_data, indent=2), flush=True)
                                 yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
                                 usage_finalized = True
                             except Exception:
@@ -934,6 +973,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         session: AsyncSession,
         deducted_max_cost: int,
+        requested_model: str | None = None,
     ) -> Response:
         """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -979,15 +1019,22 @@ class BaseUpstreamProvider:
             await session.refresh(key)
             remaining_balance_msats = key.balance
 
-            # Merge cost into usage for OpenCode
-            if "usage" in response_json:
-                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
-                response_json["usage"]["cost_sats"] = (
-                    cost_data.get("total_msats", 0) // 1000
-                )
-                response_json["usage"]["remaining_balance_msats"] = (
-                    remaining_balance_msats
-                )
+            # Ensure usage exists with token counts and cost data for OpenCode
+            if "usage" not in response_json:
+                response_json["usage"] = {}
+            usage = response_json["usage"]
+            # Normalize to OpenAI format so AI SDK maps prompt_tokens->inputTokens
+            if "prompt_tokens" not in usage:
+                usage["prompt_tokens"] = usage.get("input_tokens", cost_data.get("input_tokens", 0))
+            if "completion_tokens" not in usage:
+                usage["completion_tokens"] = usage.get("output_tokens", cost_data.get("output_tokens", 0))
+            if "total_tokens" not in usage:
+                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
+            response_json["usage"]["cost_sats"] = (
+                cost_data.get("total_msats", 0) // 1000
+            )
+            response_json["usage"]["remaining_balance_msats"] = remaining_balance_msats
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -1031,6 +1078,9 @@ class BaseUpstreamProvider:
                 if k.lower() in allowed_headers
             }
 
+            if requested_model:
+                response_json["model"] = requested_model
+            print("[routstr DEBUG] NON-STREAMING RESPONSE (responses API):", json.dumps(response_json, indent=2), flush=True)
             return Response(
                 content=json.dumps(response_json).encode(),
                 status_code=response.status_code,
@@ -1294,6 +1344,13 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
+        original_model_id: str | None = None
+        if request_body:
+            try:
+                original_model_id = json.loads(request_body).get("model")
+            except Exception:
+                pass
+
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
         logger.info(
@@ -1452,7 +1509,8 @@ class BaseUpstreamProvider:
                         background_tasks.add_task(response.aclose)
                         background_tasks.add_task(client.aclose)
                         result = await self.handle_streaming_chat_completion(
-                            response, key, max_cost_for_model, background_tasks
+                            response, key, max_cost_for_model, background_tasks,
+                            requested_model=original_model_id,
                         )
                         result.background = background_tasks
                         return result
@@ -1461,7 +1519,8 @@ class BaseUpstreamProvider:
                 if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_chat_completion(
-                            response, key, session, max_cost_for_model
+                            response, key, session, max_cost_for_model,
+                            requested_model=original_model_id,
                         )
                     finally:
                         await response.aclose()
@@ -1662,7 +1721,8 @@ class BaseUpstreamProvider:
 
                 if is_streaming and response.status_code == 200:
                     result = await self.handle_streaming_responses_completion(
-                        response, key, max_cost_for_model
+                        response, key, max_cost_for_model,
+                        requested_model=original_model_id,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -1673,7 +1733,8 @@ class BaseUpstreamProvider:
                 if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_responses_completion(
-                            response, key, session, max_cost_for_model
+                            response, key, session, max_cost_for_model,
+                            requested_model=original_model_id,
                         )
                     finally:
                         await response.aclose()
