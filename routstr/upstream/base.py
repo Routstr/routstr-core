@@ -2152,6 +2152,17 @@ class BaseUpstreamProvider:
                     },
                 )
 
+        if cost_data:
+            for i, line in enumerate(lines):
+                if line.startswith("data: "):
+                    try:
+                        data_json = json.loads(line[6:])
+                        if "usage" in data_json and data_json["usage"]:
+                            data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                            lines[i] = "data: " + json.dumps(data_json)
+                    except json.JSONDecodeError:
+                        pass
+
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
                 yield (line + "\n").encode("utf-8")
@@ -2195,6 +2206,9 @@ class BaseUpstreamProvider:
         try:
             response_json = json.loads(content_str)
             cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+
+            if cost_data and "usage" in response_json:
+                response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
 
             if not cost_data:
                 logger.error(
@@ -2262,7 +2276,7 @@ class BaseUpstreamProvider:
                 )
 
             return Response(
-                content=content_str,
+                content=json.dumps(response_json),
                 status_code=response.status_code,
                 headers=response_headers,
                 media_type="application/json",
@@ -3067,6 +3081,17 @@ class BaseUpstreamProvider:
                     },
                 )
 
+        if cost_data:
+            for i, line in enumerate(lines):
+                if line.startswith("data: "):
+                    try:
+                        data_json = json.loads(line[6:])
+                        if "usage" in data_json and data_json["usage"]:
+                            data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                            lines[i] = "data: " + json.dumps(data_json)
+                    except json.JSONDecodeError:
+                        pass
+
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
                 yield (line + "\\n").encode("utf-8")
@@ -3098,6 +3123,9 @@ class BaseUpstreamProvider:
         try:
             response_json = json.loads(content_str)
             cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+
+            if cost_data and "usage" in response_json:
+                response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
 
             if not cost_data:
                 logger.error(
@@ -3165,7 +3193,7 @@ class BaseUpstreamProvider:
                 )
 
             return Response(
-                content=content_str,
+                content=json.dumps(response_json),
                 status_code=response.status_code,
                 headers=response_headers,
                 media_type="application/json",
