@@ -560,7 +560,11 @@ async def periodic_refund_sweep() -> None:
 
 
 async def periodic_routstr_fee_payout() -> None:
-    from .auth import ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS, ROUTSTR_LN_ADDRESS
+    from .auth import (
+        ROUTSTR_FEE_DEFAULT_PAYOUT,
+        ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS,
+        ROUTSTR_LN_ADDRESS,
+    )
 
     if not ROUTSTR_LN_ADDRESS:
         logger.info("ROUTSTR_LN_ADDRESS not set, skipping fee payout")
@@ -571,7 +575,7 @@ async def periodic_routstr_fee_payout() -> None:
             async with db.create_session() as session:
                 fee = await db.get_routstr_fee(session)
                 accumulated_sats = fee.accumulated_msats // 1000
-                if accumulated_sats >= 10:
+                if accumulated_sats >= ROUTSTR_FEE_DEFAULT_PAYOUT:
                     wallet = await get_wallet(settings.primary_mint, "sat")
                     proofs = get_proofs_per_mint_and_unit(
                         wallet, settings.primary_mint, "sat", not_reserved=True

@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 ROUTSTR_FEE_PERCENT: float = 2.1
 ROUTSTR_LN_ADDRESS: str = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
+ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
 
 # TODO: implement prepaid api key (not like it was before)
 # PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
