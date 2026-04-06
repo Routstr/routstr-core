@@ -217,6 +217,10 @@ def create_model_mappings(
                 if prefixed_id not in aliases:
                     aliases.append(prefixed_id)
 
+            # Register forwarded_model_id as a routable alias
+            if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
+                aliases.append(model_to_use.forwarded_model_id)
+
             # Try to set each alias
             for alias in aliases:
                 _add_candidate(alias, model_to_use, upstream)
@@ -304,6 +308,10 @@ def create_model_mappings(
             prefixed_id = f"{upstream_prefix}/{model_to_use.id}"
             if prefixed_id not in aliases:
                 aliases.append(prefixed_id)
+
+        # Register forwarded_model_id as a routable alias
+        if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
+            aliases.append(model_to_use.forwarded_model_id)
 
         for alias in aliases:
             _add_candidate(alias, model_to_use, upstream_for_override)

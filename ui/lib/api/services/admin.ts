@@ -76,6 +76,7 @@ export const AdminModelSchema = z.object({
   canonical_slug: z.string().nullable().optional(),
   alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
+  forwarded_model_id: z.string().nullable().optional(),
 });
 
 export const ProviderModelsSchema = z.object({

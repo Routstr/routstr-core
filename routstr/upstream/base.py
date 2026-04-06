@@ -661,6 +661,9 @@ class BaseUpstreamProvider:
                 },
             )
 
+            if requested_model:
+                response_json["model"] = requested_model
+
             cost_data = await adjust_payment_for_tokens(
                 key, response_json, session, deducted_max_cost
             )
@@ -980,6 +983,9 @@ class BaseUpstreamProvider:
                     and "reasoning_tokens" in response_json["usage"],
                 },
             )
+
+            if requested_model:
+                response_json["model"] = requested_model
 
             cost_data = await adjust_payment_for_tokens(
                 key, response_json, session, deducted_max_cost
@@ -1303,7 +1309,7 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
-        original_model_id = model_obj.id if model_obj else None
+        original_model_id = (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1589,7 +1595,7 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
-        original_model_id = model_obj.id if model_obj else None
+        original_model_id = (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
 
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
@@ -3384,6 +3390,7 @@ class BaseUpstreamProvider:
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
+            forwarded_model_id=model.forwarded_model_id,
         )
 
         (
@@ -3407,6 +3414,7 @@ class BaseUpstreamProvider:
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
+            forwarded_model_id=model.forwarded_model_id,
         )
 
     async def fetch_models(self) -> list[Model]:
