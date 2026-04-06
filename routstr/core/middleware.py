@@ -38,11 +38,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             except Exception:
                 pass
 
-        # Extract request info
-        client_host = None
-        if request.client:
-            client_host = request.client.host
-
         # Log incoming request
         logger.info(
             "Incoming request",
@@ -51,7 +46,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "method": request.method,
                 "path": request.url.path,
                 "query_params": dict(request.query_params),
-                "client_host": client_host,
                 "headers": {
                     k: v
                     for k, v in request.headers.items()
@@ -100,7 +94,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "path": request.url.path,
                     "status_code": response.status_code,
                     "duration_ms": round(duration * 1000, 2),
-                    "client_host": client_host,
                 },
             )
             if hasattr(response, "headers"):
@@ -120,7 +113,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "method": request.method,
                     "path": request.url.path,
                     "duration_ms": round(duration * 1000, 2),
-                    "client_host": client_host,
                     "error": str(e),
                     "error_type": type(e).__name__,
                 },
