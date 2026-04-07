@@ -846,7 +846,7 @@ async def adjust_payment_for_tokens(
                     await session.refresh(key)
                 return cost.dict()
 
-            # this should never happen why do we handle this???
+            # actual cost exceeded discounted reservation (due to tolerance_percentage)
             if cost_difference > 0:
                 # Need to charge more than reserved, finalize by releasing reservation and charging total
                 logger.info(
@@ -856,7 +856,7 @@ async def adjust_payment_for_tokens(
                         "billing_key_hash": billing_key.hashed_key[:8] + "...",
                         "additional_charge": cost_difference,
                         "current_balance": billing_key.balance,
-                        "sufficient_balance": billing_key.balance >= cost_difference,
+                        "sufficient_balance": billing_key.balance >= total_cost_msats,
                         "model": model,
                     },
                 )
@@ -864,6 +864,7 @@ async def adjust_payment_for_tokens(
                 finalize_stmt = (
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+                    .where(col(ApiKey.balance) >= total_cost_msats)
                     .values(
                         reserved_balance=col(ApiKey.reserved_balance)
                         - deducted_max_cost,
@@ -905,16 +906,58 @@ async def adjust_payment_for_tokens(
                         },
                     )
                 else:
+                    # Balance insufficient for the overrun — charge only the reserved amount.
+                    # Guard balance again: concurrent finalizations may have reduced it
+                    # below deducted_max_cost since reservation time.
                     logger.warning(
-                        "Failed to finalize additional charge - releasing reservation",
+                        "Balance insufficient for token overrun - charging reserved amount only",
                         extra={
                             "key_hash": key.hashed_key[:8] + "...",
                             "billing_key_hash": billing_key.hashed_key[:8] + "...",
                             "attempted_charge": total_cost_msats,
+                            "fallback_charge": deducted_max_cost,
                             "model": model,
                         },
                     )
-                    await release_reservation_only()
+                    fallback_stmt = (
+                        update(ApiKey)
+                        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+                        .where(col(ApiKey.balance) >= deducted_max_cost)
+                        .values(
+                            reserved_balance=col(ApiKey.reserved_balance)
+                            - deducted_max_cost,
+                            balance=col(ApiKey.balance) - deducted_max_cost,
+                            total_spent=col(ApiKey.total_spent) + deducted_max_cost,
+                        )
+                    )
+                    fallback_result = await session.exec(fallback_stmt)  # type: ignore[call-overload]
+                    if billing_key.hashed_key != key.hashed_key:
+                        child_fallback_stmt = (
+                            update(ApiKey)
+                            .where(col(ApiKey.hashed_key) == key.hashed_key)
+                            .values(
+                                reserved_balance=col(ApiKey.reserved_balance)
+                                - deducted_max_cost,
+                                total_spent=col(ApiKey.total_spent) + deducted_max_cost,
+                            )
+                        )
+                        await session.exec(child_fallback_stmt)  # type: ignore[call-overload]
+                    await session.commit()
+                    if fallback_result.rowcount:
+                        cost.total_msats = deducted_max_cost
+                    else:
+                        # Balance also insufficient for the reservation charge —
+                        # just release the reservation without charging.
+                        logger.warning(
+                            "Balance insufficient even for reserved amount - releasing reservation only",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                                "deducted_max_cost": deducted_max_cost,
+                                "model": model,
+                            },
+                        )
+                        await release_reservation_only()
             else:
                 # Refund some of the base cost
                 refund = abs(cost_difference)
