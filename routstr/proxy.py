@@ -207,7 +207,7 @@ async def proxy(
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(
-            headers, path, session, auth, max_cost_for_model
+            headers, path, session, auth, max_cost_for_model, model_id
         )
 
     else:
@@ -387,7 +387,12 @@ async def proxy(
 
 
 async def get_bearer_token_key(
-    headers: dict, path: str, session: AsyncSession, auth: str, min_cost: int = 0
+    headers: dict,
+    path: str,
+    session: AsyncSession,
+    auth: str,
+    min_cost: int = 0,
+    model_id: str = "unknown",
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
     parts = auth.split()
@@ -457,11 +462,13 @@ async def get_bearer_token_key(
     except Exception as e:
         key_preview = bearer_key[:20] + "..." if len(bearer_key) > 20 else bearer_key
         logger.error(
-            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} key={key_preview!r}",
+            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} model={model_id!r} min_cost={min_cost} key={key_preview!r}",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "path": path,
+                "model_id": model_id,
+                "min_cost_msat": min_cost,
                 "bearer_key_preview": key_preview,
             },
         )
