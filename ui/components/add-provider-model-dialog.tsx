@@ -105,6 +105,7 @@ export function AddProviderModelDialog({
   const [isPresetOpen, setIsPresetOpen] = useState(false);
   const [selectedPresetLabel, setSelectedPresetLabel] =
     useState('Select a preset');
+  const [forwardedModelIdCopied, setForwardedModelIdCopied] = useState(false);
 
   const form = useForm<FormData>({
     resolver: zodResolver(FormSchema) as never,
@@ -530,14 +531,13 @@ export function AddProviderModelDialog({
                 control={form.control}
                 name='forwarded_model_id'
                 render={({ field }) => {
-                  const [copied, setCopied] = useState(false);
-                  const handleCopy = useCallback(() => {
+                  const handleCopy = () => {
                     const value = field.value || form.getValues('id');
                     if (!value) return;
                     navigator.clipboard.writeText(value);
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1500);
-                  }, [field.value]);
+                    setForwardedModelIdCopied(true);
+                    setTimeout(() => setForwardedModelIdCopied(false), 1500);
+                  };
                   return (
                     <FormItem>
                       <FormLabel>Upstream Model ID</FormLabel>
@@ -556,7 +556,7 @@ export function AddProviderModelDialog({
                             onClick={handleCopy}
                             title='Copy model ID'
                           >
-                            {copied ? (
+                            {forwardedModelIdCopied ? (
                               <Check className='h-4 w-4 text-green-500' />
                             ) : (
                               <Copy className='h-4 w-4' />
