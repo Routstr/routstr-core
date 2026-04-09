@@ -245,6 +245,11 @@ async def test_concurrent_cost_overruns_never_negative(
     assert final_key.total_spent <= starting_balance, (
         f"Total spent ({final_key.total_spent}) exceeds starting balance ({starting_balance})"
     )
+    # Every request must have been charged at least deducted_max_cost — no free inference.
+    assert final_key.total_spent == starting_balance, (
+        f"Expected total_spent={starting_balance} (all {n_requests} reservations charged), "
+        f"got {final_key.total_spent} — at least one request got free inference"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +284,84 @@ async def test_zero_free_balance_overrun_is_safe(
 
     assert key.balance >= 0, f"Balance went negative: {key.balance}"
     assert key.reserved_balance >= 0, f"Reserved balance went negative: {key.reserved_balance}"
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — parallel requests: second finalization must not get free inference
+#
+# Root cause of the bug fixed in auth.py:
+#   `.where(col(ApiKey.balance) >= total_cost_msats)` ignores other requests'
+#   reservations, so after Request A charges total_cost_msats, balance can drop
+#   below deducted_max_cost, causing Request B's fallback to release for free.
+#
+# Fix: use `balance - reserved_balance + deducted_max_cost >= total_cost_msats`
+#   so the check accounts for concurrent reservations.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parallel_requests_no_free_inference(
+    integration_session: AsyncSession,
+) -> None:
+    """Second parallel finalization must be charged even when first depleted free balance."""
+    import asyncio
+
+    from routstr.auth import adjust_payment_for_tokens
+    from routstr.core.db import create_session
+
+    deducted_max_cost = 100
+    actual_token_cost = 150  # overrun: 50 more than reserved
+
+    # Fund the key with exactly 2 * deducted_max_cost.
+    # Both requests pre-reserved 100 each → balance=200, reserved=200, free=0.
+    # Old check (balance >= total_cost_msats):
+    #   Request A: 200 >= 150 ✓ → charges 150 → balance=50, reserved=100
+    #   Request B: 50 >= 150 ✗ → fallback: 50 >= 100 ✗ → releases FREE
+    # New check (balance - reserved + deducted >= total_cost_msats):
+    #   Both fall to fallback (0 free balance).
+    #   Both charge deducted_max_cost=100 → total_spent=200, balance=0.
+    starting_balance = deducted_max_cost * 2
+    key_hash = f"test_parallel_no_free_{uuid.uuid4().hex}"
+
+    async with create_session() as session:
+        key = ApiKey(
+            hashed_key=key_hash,
+            balance=starting_balance,
+            reserved_balance=deducted_max_cost * 2,  # both slots pre-reserved
+            total_spent=0,
+            total_requests=2,
+        )
+        session.add(key)
+        await session.commit()
+
+    async def finalize() -> None:
+        response_data = {
+            "model": "test-model",
+            "usage": {"prompt_tokens": 50, "completion_tokens": 100},
+        }
+        async with create_session() as session:
+            fresh_key = await session.get(ApiKey, key_hash)
+            assert fresh_key is not None
+            with patch(
+                "routstr.auth.calculate_cost",
+                return_value=_cost_data(actual_token_cost),
+            ):
+                await adjust_payment_for_tokens(
+                    fresh_key, response_data, session, deducted_max_cost
+                )
+
+    await asyncio.gather(finalize(), finalize())
+
+    async with create_session() as session:
+        final_key = await session.get(ApiKey, key_hash)
+        assert final_key is not None
+
+    assert final_key.balance >= 0, f"Balance went negative: {final_key.balance}"
+    assert final_key.reserved_balance == 0, (
+        f"Reserved balance not released: {final_key.reserved_balance}"
+    )
+    # Both requests must have been charged — no free inference.
+    assert final_key.total_spent == starting_balance, (
+        f"Expected total_spent={starting_balance} (both reservations charged), "
+        f"got {final_key.total_spent} — one request got free inference"
+    )
