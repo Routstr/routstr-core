@@ -179,6 +179,7 @@ async def test_full_cost_charged_when_balance_sufficient_for_overrun(
 @pytest.mark.asyncio
 async def test_concurrent_cost_overruns_never_negative(
     integration_session: AsyncSession,
+    patched_db_engine: None,
 ) -> None:
     """Concurrent finalization with cost overruns must never produce negative balance."""
     import asyncio
@@ -302,6 +303,7 @@ async def test_zero_free_balance_overrun_is_safe(
 @pytest.mark.asyncio
 async def test_parallel_requests_no_free_inference(
     integration_session: AsyncSession,
+    patched_db_engine: None,
 ) -> None:
     """Second parallel finalization must be charged even when first depleted free balance."""
     import asyncio

@@ -134,7 +134,9 @@ async def test_finalise_releases_reservation_and_charges_balance(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_concurrent_second_reserve_blocked_when_balance_exhausted() -> None:
+async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
+    patched_db_engine: None,
+) -> None:
     """When two requests race for the same balance, only one succeeds; the other gets 402."""
     cost = 300
     key_hash = f"test_concurrent_{uuid.uuid4().hex}"
@@ -185,7 +187,9 @@ async def test_concurrent_second_reserve_blocked_when_balance_exhausted() -> Non
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_three_parallel_reserves_third_blocked() -> None:
+async def test_three_parallel_reserves_third_blocked(
+    patched_db_engine: None,
+) -> None:
     """Balance covers two reservations exactly; the third concurrent request must be blocked."""
     cost = 100
     key_hash = f"test_three_parallel_{uuid.uuid4().hex}"

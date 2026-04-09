@@ -380,6 +380,13 @@ async def integration_session(
         yield session
 
 
+@pytest_asyncio.fixture
+async def patched_db_engine(integration_engine: Any) -> AsyncGenerator[None, None]:
+    """Patch the global db engine so create_session() uses the test engine."""
+    with patch("routstr.core.db.engine", integration_engine):
+        yield
+
+
 class DatabaseSnapshot:
     """Utility to capture and compare database states"""
 
