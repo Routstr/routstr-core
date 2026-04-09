@@ -22,7 +22,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from routstr.auth import pay_for_request, revert_pay_for_request
 from routstr.core.db import ApiKey, create_session
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
