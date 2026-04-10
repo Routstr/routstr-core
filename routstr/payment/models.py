@@ -182,11 +182,16 @@ def _row_to_model(
     )
 
     if apply_provider_fee:
-        (
-            parsed_pricing.max_prompt_cost,
-            parsed_pricing.max_completion_cost,
-            parsed_pricing.max_cost,
-        ) = _calculate_usd_max_costs(model)
+        max_prompt, max_completion, max_cost = _calculate_usd_max_costs(model)
+        parsed_pricing = Pricing(
+            **{
+                **parsed_pricing.dict(),
+                "max_prompt_cost": max_prompt,
+                "max_completion_cost": max_completion,
+                "max_cost": max_cost,
+            }
+        )
+        model = Model(**{**model.dict(), "pricing": parsed_pricing, "sats_pricing": None})
 
     try:
         sats_to_usd = sats_usd_price()
