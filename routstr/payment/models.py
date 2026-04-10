@@ -60,6 +60,7 @@ class Model(BaseModel):
     upstream_provider_id: int | str | None = None
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
+    forwarded_model_id: str | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -177,6 +178,7 @@ def _row_to_model(
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
+        forwarded_model_id=getattr(row, "forwarded_model_id", None) or row.id,
     )
 
     if apply_provider_fee:
@@ -329,6 +331,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
+            forwarded_model_id=model.forwarded_model_id,
         )
     except Exception as e:
         logger.error(
@@ -411,4 +414,10 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     from ..proxy import get_unique_models
 
     items = get_unique_models()
-    return {"data": items}
+    data = []
+    for model in items:
+        m = model.dict()
+        if model.forwarded_model_id:
+            m["id"] = model.forwarded_model_id
+        data.append(m)
+    return {"data": data}

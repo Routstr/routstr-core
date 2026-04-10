@@ -295,6 +295,7 @@ class ModelCreate(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     enabled: bool = True
+    forwarded_model_id: str | None = None
 
 
 @admin_router.post(
@@ -339,6 +340,7 @@ async def upsert_provider_model(
                 json.dumps(payload.alias_ids) if payload.alias_ids else None
             )
             existing_row.enabled = payload.enabled
+            existing_row.forwarded_model_id = payload.forwarded_model_id or payload.id
 
             session.add(existing_row)
             await session.commit()
@@ -371,6 +373,7 @@ async def upsert_provider_model(
                 ),
                 upstream_provider_id=provider_id,
                 enabled=payload.enabled,
+                forwarded_model_id=payload.forwarded_model_id or payload.id,
             )
             session.add(row)
             await session.commit()

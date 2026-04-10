@@ -105,6 +105,10 @@ class ModelRow(SQLModel, table=True):  # type: ignore
         default=None, description="JSON array of model alias IDs"
     )
     enabled: bool = Field(default=True, description="Whether this model is enabled")
+    forwarded_model_id: str | None = Field(
+        default=None,
+        description="Model ID to use when forwarding requests to upstream provider. Defaults to id if not set.",
+    )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
