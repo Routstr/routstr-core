@@ -35,6 +35,7 @@ ADMIN_PASSWORD=mysecretpassword
 # Node Identity
 NAME="My AI Node"
 DESCRIPTION="Fast access to models"
+NSEC=yournsec
 
 # Lightning Payouts
 RECEIVE_LN_ADDRESS=yourname@wallet.com
@@ -43,38 +44,25 @@ RECEIVE_LN_ADDRESS=yourname@wallet.com
 
 ## 2. Start the Node
 
-You can run the pre-built image directly:
+The recommended way to run Routstr is using Docker Compose, which handles the node, the UI, and optional services like Tor.
 
 ```bash
-docker run -d \
-  --name routstr \
-  -p 8000:8000 \
-  --env-file .env \
-  -v routstr-data:/app/data \
-  ghcr.io/routstr/proxy:latest
-```
-
-*Note: The pre-built image does not contain the UI. For the all-in-one experience with the Admin Dashboard, use the Build from Source instructions below.*
-
-### Build from Source (Recommended)
-
-If you want to build the node and UI yourself from source, use the unified Dockerfile:
-
-```bash
-git clone https://github.com/routstr/routstr-core.git
-cd routstr-core
-# Edit your .env with ADMIN_PASSWORD and API keys
-cp .env.example .env
-nano .env
-
-docker build -f Dockerfile.full -t routstr-local .
-docker run -d -p 8000:8000 --env-file .env --name routstr routstr-local
+docker compose up -d
 ```
 
 Verify it's running:
 
 ```bash
 curl http://localhost:8000/v1/info
+```
+
+### Build from Source (Optional)
+
+If you've cloned the repository and want to build the images yourself:
+
+```bash
+docker compose build
+docker compose up -d
 ```
 
 ---
