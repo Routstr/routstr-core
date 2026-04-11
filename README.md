@@ -51,14 +51,26 @@ curl https://api.routstr.com/v1/chat/completions \
 
 ## Quick Start (Docker)
 
-If you are a node runner, start a Routstr Core instance and configure upstream access in the dashboard.
+If you are a node runner, start a Routstr Core instance using Docker Compose:
 
-```bash
-docker run -d \
-  --name routstr-proxy \
-  -p 8000:8000 \
-  ghcr.io/routstr/proxy:latest
-```
+1. **Prepare your `.env`**:
+   ```bash
+   ADMIN_PASSWORD=mysecretpassword
+   NAME="My AI Node"
+   DESCRIPTION="Fast access to models"
+   NSEC=yournsec
+   RECEIVE_LN_ADDRESS=yourname@wallet.com
+   ```
+
+2. **Start the services**:
+   ```bash
+   docker compose up -d
+   ```
+
+3. **Configure**:
+   Open [http://localhost:8000/admin/](http://localhost:8000/admin/) to connect your AI providers and set pricing.
+
+For full instructions, see the **[Provider Quick Start Guide](https://docs.routstr.com/provider/quickstart/)**.
 
 ## Development
 
