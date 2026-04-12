@@ -10,7 +10,13 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from .auth import get_billing_key, validate_bearer_key
-from .core.db import ApiKey, AsyncSession, CashuTransaction, get_session
+from .core.db import (
+    ApiKey,
+    AsyncSession,
+    CashuTransaction,
+    get_session,
+    store_cashu_transaction,
+)
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
@@ -310,6 +316,17 @@ async def refund_wallet_endpoint(
         else:
             result["msats"] = str(remaining_balance_msats)
 
+        if "token" in result:
+            logger.info(
+                "refund_wallet_endpoint: cashu token issued",
+                extra={
+                    "path": "/v1/wallet/refund",
+                    "token": result["token"],
+                    "amount": remaining_balance,
+                    "currency": key.refund_currency or "sat",
+                },
+            )
+
     except HTTPException:
         # Re-raise HTTP exceptions (like 400 for balance too small)
         raise
@@ -333,6 +350,20 @@ async def refund_wallet_endpoint(
     key.reserved_balance = 0
     session.add(key)
     await session.commit()
+
+    if "token" in result:
+        try:
+            await store_cashu_transaction(
+                token=result["token"],
+                amount=remaining_balance,
+                unit=key.refund_currency or "sat",
+                mint_url=key.refund_mint_url,
+                typ="out",
+                collected=False,
+                source="apikey",
+            )
+        except Exception:
+            pass  # store_cashu_transaction already logs
 
     logger.info(
         "refund_wallet_endpoint: refund successful",

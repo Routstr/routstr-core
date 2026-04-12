@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table,
   TableBody,
@@ -47,12 +48,126 @@ import {
   Copy,
   Check,
   Receipt,
+  Key,
+  Zap,
 } from 'lucide-react';
 import { AdminService, type Transaction } from '@/lib/api/services/admin';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 
 const STORAGE_KEY = 'routstr-transaction-filters';
+
+function TransactionTable({
+  transactions,
+  copiedId,
+  onCopy,
+  getStatusBadge,
+}: {
+  transactions: Transaction[];
+  copiedId: string | null;
+  onCopy: (text: string, id: string) => void;
+  getStatusBadge: (tx: Transaction) => React.ReactNode;
+}) {
+  if (transactions.length === 0) {
+    return (
+      <Empty className='py-8'>
+        <EmptyHeader>
+          <EmptyMedia variant='icon'>
+            <Receipt className='h-4 w-4' />
+          </EmptyMedia>
+          <EmptyTitle>No transactions found</EmptyTitle>
+          <EmptyDescription>
+            Try adjusting your filters or check back later.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <ScrollArea className='h-[55svh] min-h-[420px] w-full sm:h-[600px]'>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Type</TableHead>
+            <TableHead>Amount</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Request ID</TableHead>
+            <TableHead>Mint</TableHead>
+            <TableHead>Date</TableHead>
+            <TableHead className='text-right'>Actions</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {transactions.map((tx) => (
+            <TableRow key={tx.id}>
+              <TableCell>
+                <div className='flex items-center gap-2'>
+                  {tx.type === 'in' ? (
+                    <ArrowDownLeft className='h-4 w-4 text-green-500' />
+                  ) : (
+                    <ArrowUpRight className='h-4 w-4 text-blue-500' />
+                  )}
+                  <span className='capitalize'>{tx.type}</span>
+                </div>
+              </TableCell>
+              <TableCell className='font-mono'>
+                {tx.amount} {tx.unit}
+              </TableCell>
+              <TableCell>{getStatusBadge(tx)}</TableCell>
+              <TableCell>
+                {tx.request_id ? (
+                  <div className='flex items-center gap-1 text-xs'>
+                    <span className='max-w-[150px] truncate font-mono'>
+                      {tx.request_id}
+                    </span>
+                    <Button
+                      variant='ghost'
+                      size='icon'
+                      className='h-4 w-4'
+                      onClick={() => onCopy(tx.request_id!, tx.id + '-req')}
+                    >
+                      {copiedId === tx.id + '-req' ? (
+                        <Check className='h-3 w-3' />
+                      ) : (
+                        <Copy className='h-3 w-3' />
+                      )}
+                    </Button>
+                  </div>
+                ) : (
+                  <span className='text-muted-foreground text-xs'>—</span>
+                )}
+              </TableCell>
+              <TableCell>
+                <div className='flex max-w-[150px] items-center gap-1 truncate text-xs'>
+                  <span className='truncate'>{tx.mint_url}</span>
+                </div>
+              </TableCell>
+              <TableCell className='text-xs whitespace-nowrap'>
+                {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
+              </TableCell>
+              <TableCell className='text-right'>
+                <Button
+                  variant='ghost'
+                  size='icon'
+                  className='h-8 w-8'
+                  onClick={() => onCopy(tx.token, tx.id + '-token')}
+                  title='Copy Token'
+                >
+                  {copiedId === tx.id + '-token' ? (
+                    <Check className='h-4 w-4' />
+                  ) : (
+                    <Copy className='h-4 w-4' />
+                  )}
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </ScrollArea>
+  );
+}
 
 export default function TransactionsPage() {
   const [search, setSearch] = useState('');
@@ -145,12 +260,41 @@ export default function TransactionsPage() {
     .filter(Boolean)
     .join(' • ');
 
+  const xcashuTxs =
+    data?.transactions.filter((tx) => !tx.source || tx.source === 'x-cashu') ??
+    [];
+  const apikeyTxs =
+    data?.transactions.filter((tx) => tx.source === 'apikey') ?? [];
+
+  const renderCardContent = (txs: Transaction[]) => {
+    if (isLoading) {
+      return (
+        <div className='space-y-2'>
+          {Array.from({ length: 8 }).map((_, index) => (
+            <Skeleton
+              key={`tx-loading-${index}`}
+              className='h-16 w-full rounded-lg'
+            />
+          ))}
+        </div>
+      );
+    }
+    return (
+      <TransactionTable
+        transactions={txs}
+        copiedId={copiedId}
+        onCopy={copyToClipboard}
+        getStatusBadge={getStatusBadge}
+      />
+    );
+  };
+
   return (
     <AppPageShell contentClassName='mx-auto w-full max-w-5xl overflow-x-hidden'>
       <div className='space-y-6'>
         <PageHeader
-          title='X-Cashu Transactions'
-          description='View all incoming and outgoing X-Cashu token transactions.'
+          title='Cashu Transactions'
+          description='View all incoming and outgoing Cashu token transactions.'
           actions={
             <Button
               onClick={() => refetch()}
@@ -228,138 +372,64 @@ export default function TransactionsPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
-              <CardTitle>Transaction History</CardTitle>
+        <Tabs defaultValue='x-cashu'>
+          <TabsList className='mb-4'>
+            <TabsTrigger value='x-cashu' className='flex items-center gap-2'>
+              <Zap className='h-4 w-4' />
+              X-Cashu
               {data && (
-                <Badge variant='secondary'>
-                  {data.transactions.length} entries
+                <Badge variant='secondary' className='ml-1'>
+                  {xcashuTxs.length}
                 </Badge>
               )}
-            </div>
-            {hasActiveFilters && (
-              <CardDescription>
-                Showing transactions filtered by {activeFilterDescription}
-              </CardDescription>
-            )}
-          </CardHeader>
-          <CardContent className='overflow-hidden'>
-            {isLoading ? (
-              <div className='space-y-2'>
-                {Array.from({ length: 8 }).map((_, index) => (
-                  <Skeleton
-                    key={`tx-loading-${index}`}
-                    className='h-16 w-full rounded-lg'
-                  />
-                ))}
-              </div>
-            ) : data?.transactions && data.transactions.length > 0 ? (
-              <ScrollArea className='h-[55svh] min-h-[420px] w-full sm:h-[600px]'>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Type</TableHead>
-                      <TableHead>Amount</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Request ID</TableHead>
-                      <TableHead>Mint</TableHead>
-                      <TableHead>Date</TableHead>
-                      <TableHead className='text-right'>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.transactions.map((tx) => (
-                      <TableRow key={tx.id}>
-                        <TableCell>
-                          <div className='flex items-center gap-2'>
-                            {tx.type === 'in' ? (
-                              <ArrowDownLeft className='h-4 w-4 text-green-500' />
-                            ) : (
-                              <ArrowUpRight className='h-4 w-4 text-blue-500' />
-                            )}
-                            <span className='capitalize'>{tx.type}</span>
-                          </div>
-                        </TableCell>
-                        <TableCell className='font-mono'>
-                          {tx.amount} {tx.unit}
-                        </TableCell>
-                        <TableCell>{getStatusBadge(tx)}</TableCell>
-                        <TableCell>
-                          {tx.request_id ? (
-                            <div className='flex items-center gap-1 text-xs'>
-                              <span className='max-w-[150px] truncate font-mono'>
-                                {tx.request_id}
-                              </span>
-                              <Button
-                                variant='ghost'
-                                size='icon'
-                                className='h-4 w-4'
-                                onClick={() =>
-                                  copyToClipboard(
-                                    tx.request_id!,
-                                    tx.id + '-req'
-                                  )
-                                }
-                              >
-                                {copiedId === tx.id + '-req' ? (
-                                  <Check className='h-3 w-3' />
-                                ) : (
-                                  <Copy className='h-3 w-3' />
-                                )}
-                              </Button>
-                            </div>
-                          ) : (
-                            <span className='text-muted-foreground text-xs'>
-                              —
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <div className='flex max-w-[150px] items-center gap-1 truncate text-xs'>
-                            <span className='truncate'>{tx.mint_url}</span>
-                          </div>
-                        </TableCell>
-                        <TableCell className='text-xs whitespace-nowrap'>
-                          {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
-                        </TableCell>
-                        <TableCell className='text-right'>
-                          <Button
-                            variant='ghost'
-                            size='icon'
-                            className='h-8 w-8'
-                            onClick={() =>
-                              copyToClipboard(tx.token, tx.id + '-token')
-                            }
-                            title='Copy Token'
-                          >
-                            {copiedId === tx.id + '-token' ? (
-                              <Check className='h-4 w-4' />
-                            ) : (
-                              <Copy className='h-4 w-4' />
-                            )}
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
-            ) : (
-              <Empty className='py-8'>
-                <EmptyHeader>
-                  <EmptyMedia variant='icon'>
-                    <Receipt className='h-4 w-4' />
-                  </EmptyMedia>
-                  <EmptyTitle>No transactions found</EmptyTitle>
-                  <EmptyDescription>
-                    Try adjusting your filters or check back later.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            )}
-          </CardContent>
-        </Card>
+            </TabsTrigger>
+            <TabsTrigger value='apikey' className='flex items-center gap-2'>
+              <Key className='h-4 w-4' />
+              API Key Refunds
+              {data && (
+                <Badge variant='secondary' className='ml-1'>
+                  {apikeyTxs.length}
+                </Badge>
+              )}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value='x-cashu'>
+            <Card>
+              <CardHeader>
+                <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                  <CardTitle>X-Cashu Transaction History</CardTitle>
+                  {hasActiveFilters && (
+                    <CardDescription>
+                      Filtered by {activeFilterDescription}
+                    </CardDescription>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className='overflow-hidden'>
+                {renderCardContent(xcashuTxs)}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value='apikey'>
+            <Card>
+              <CardHeader>
+                <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                  <CardTitle>API Key Refund History</CardTitle>
+                  {hasActiveFilters && (
+                    <CardDescription>
+                      Filtered by {activeFilterDescription}
+                    </CardDescription>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className='overflow-hidden'>
+                {renderCardContent(apikeyTxs)}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </div>
     </AppPageShell>
   );

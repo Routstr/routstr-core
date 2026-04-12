@@ -535,7 +535,7 @@ async def periodic_refund_sweep() -> None:
                     except Exception as e:
                         error_msg = str(e).lower()
                         if "already spent" in error_msg:
-                            refund.swept = True
+                            refund.collected = True
                             session.add(refund)
                             logger.info(
                                 "Refund already spent (client collected), marking swept",
