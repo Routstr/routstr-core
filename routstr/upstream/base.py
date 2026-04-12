@@ -66,6 +66,7 @@ class BaseUpstreamProvider:
     api_key: str
     provider_fee: float = 1.05
     _models_cache: list[Model] = []
+    _raw_models_cache: list[Model] = []
     _models_by_id: dict[str, Model] = {}
 
     def __init__(self, base_url: str, api_key: str, provider_fee: float = 1.01):
@@ -80,6 +81,7 @@ class BaseUpstreamProvider:
         self.api_key = api_key
         self.provider_fee = provider_fee
         self._models_cache = []
+        self._raw_models_cache = []
         self._models_by_id = {}
 
     @classmethod
@@ -677,7 +679,9 @@ class BaseUpstreamProvider:
                 response_json["usage"]["cost_sats"] = (
                     cost_data.get("total_msats", 0) // 1000
                 )
-                response_json["usage"]["remaining_balance_msats"] = remaining_balance_msats
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -753,7 +757,11 @@ class BaseUpstreamProvider:
             raise
 
     async def handle_streaming_responses_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int, requested_model: str | None = None
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        max_cost_for_model: int,
+        requested_model: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1000,7 +1008,9 @@ class BaseUpstreamProvider:
                 response_json["usage"]["cost_sats"] = (
                     cost_data.get("total_msats", 0) // 1000
                 )
-                response_json["usage"]["remaining_balance_msats"] = remaining_balance_msats
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -1309,7 +1319,9 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
-        original_model_id = (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        original_model_id = (
+            (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        )
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1469,7 +1481,10 @@ class BaseUpstreamProvider:
                         background_tasks.add_task(response.aclose)
                         background_tasks.add_task(client.aclose)
                         result = await self.handle_streaming_chat_completion(
-                            response, key, max_cost_for_model, background_tasks,
+                            response,
+                            key,
+                            max_cost_for_model,
+                            background_tasks,
                             requested_model=original_model_id,
                         )
                         result.background = background_tasks
@@ -1479,7 +1494,10 @@ class BaseUpstreamProvider:
                 if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_chat_completion(
-                            response, key, session, max_cost_for_model,
+                            response,
+                            key,
+                            session,
+                            max_cost_for_model,
                             requested_model=original_model_id,
                         )
                     finally:
@@ -1595,7 +1613,9 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
-        original_model_id = (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        original_model_id = (
+            (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        )
 
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
@@ -1683,7 +1703,9 @@ class BaseUpstreamProvider:
 
                 if is_streaming and response.status_code == 200:
                     result = await self.handle_streaming_responses_completion(
-                        response, key, max_cost_for_model,
+                        response,
+                        key,
+                        max_cost_for_model,
                         requested_model=original_model_id,
                     )
                     background_tasks = BackgroundTasks()
@@ -1695,7 +1717,10 @@ class BaseUpstreamProvider:
                 if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_responses_completion(
-                            response, key, session, max_cost_for_model,
+                            response,
+                            key,
+                            session,
+                            max_cost_for_model,
                             requested_model=original_model_id,
                         )
                     finally:
@@ -2122,7 +2147,10 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash,
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -2164,7 +2192,9 @@ class BaseUpstreamProvider:
                     try:
                         data_json = json.loads(line[6:])
                         if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                            data_json["usage"]["cost_sats"] = (
+                                cost_data.total_msats // 1000
+                            )
                             lines[i] = "data: " + json.dumps(data_json)
                     except json.JSONDecodeError:
                         pass
@@ -2265,7 +2295,10 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash,
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -2495,7 +2528,10 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
+                        amount - 60,
+                        unit,
+                        mint,
+                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -2787,7 +2823,10 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
+                        amount - 60,
+                        unit,
+                        mint,
+                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -3051,7 +3090,10 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash,
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -3093,7 +3135,9 @@ class BaseUpstreamProvider:
                     try:
                         data_json = json.loads(line[6:])
                         if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                            data_json["usage"]["cost_sats"] = (
+                                cost_data.total_msats // 1000
+                            )
                             lines[i] = "data: " + json.dumps(data_json)
                     except json.JSONDecodeError:
                         pass
@@ -3182,7 +3226,10 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash,
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -3521,8 +3568,28 @@ class BaseUpstreamProvider:
             None,
         )
 
-    async def refresh_models_cache(self) -> None:
-        """Refresh the in-memory models cache from upstream API."""
+    def apply_fee_to_cache(self) -> None:
+        """Apply current provider_fee to raw models and update active cache."""
+        models_with_fees = [
+            self._apply_provider_fee_to_model(m) for m in self._raw_models_cache
+        ]
+
+        try:
+            sats_to_usd = sats_usd_price()
+            self._models_cache = [
+                _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
+            ]
+        except Exception:
+            self._models_cache = models_with_fees
+
+        self._models_by_id = {m.id: m for m in self._models_cache}
+
+    async def refresh_models_cache(self, skip_network: bool = False) -> None:
+        """Refresh the in-memory models cache from upstream API and database.
+
+        Args:
+            skip_network: If True, only refresh from database, skip hitting upstream API.
+        """
         try:
             async with create_session() as session:
                 stmt = select(UpstreamProviderRow).where(
@@ -3536,6 +3603,9 @@ class BaseUpstreamProvider:
                 if not provider or not provider.id:
                     raise HTTPException(status_code=404, detail="Provider not found")
 
+                # Update fee from DB if it changed
+                self.provider_fee = provider.provider_fee
+
                 db_models = await list_models(
                     session=session,
                     upstream_id=provider.id,
@@ -3543,34 +3613,37 @@ class BaseUpstreamProvider:
                     apply_fees=False,
                 )
                 db_model_ids: set[str] = {model.id for model in db_models}
-                models = await self.fetch_models()
-                model_ids = [model.id for model in models]
-                diff = set(db_model_ids) - set(model_ids)
 
-                for db_model_id in diff:
-                    found_db_model = next(
-                        (
-                            model_obj
-                            for model_obj in db_models
-                            if model_obj.id == db_model_id
+                if skip_network:
+                    # Use existing raw models but filter/merge with DB models
+                    # This avoids hitting the network
+                    current_raw = {m.id: m for m in self._raw_models_cache}
+                    # Keep only those still in current_raw (if we wanted to be strict)
+                    # but actually we want to merge with db_models
+                    models = []
+                    # Add all db_models (they take precedence as overrides)
+                    models.extend(db_models)
+                    # Add current raw models that are not in DB
+                    for m_id, m in current_raw.items():
+                        if m_id not in db_model_ids:
+                            models.append(m)
+                else:
+                    models = await self.fetch_models()
+                    model_ids = [model.id for model in models]
+                    diff = set(db_model_ids) - set(model_ids)
+
+                    for db_model_id in diff:
+                        found_db_model = next(
+                            (
+                                model_obj
+                                for model_obj in db_models
+                                if model_obj.id == db_model_id
+                            )
                         )
-                    )
-                    models.append(found_db_model)
+                        models.append(found_db_model)
 
-                models_with_fees = [
-                    self._apply_provider_fee_to_model(m) for m in models
-                ]
-
-                try:
-                    sats_to_usd = sats_usd_price()
-                    self._models_cache = [
-                        _update_model_sats_pricing(m, sats_to_usd)
-                        for m in models_with_fees
-                    ]
-                except Exception:
-                    self._models_cache = models_with_fees
-
-                self._models_by_id = {m.id: m for m in self._models_cache}
+                self._raw_models_cache = models
+                self.apply_fee_to_cache()
 
         except Exception as e:
             logger.error(

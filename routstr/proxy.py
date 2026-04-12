@@ -44,6 +44,7 @@ async def initialize_upstreams() -> None:
     global _upstreams
     _upstreams = await init_upstreams()
     logger.info(f"Initialized {len(_upstreams)} upstream providers")
+    await sync_provider_fees()
     await refresh_model_maps()
 
 
@@ -55,6 +56,7 @@ async def reinitialize_upstreams() -> None:
         "Re-initialized upstream providers from admin action",
         extra={"provider_count": len(_upstreams)},
     )
+    await sync_provider_fees()
     await refresh_model_maps()
 
 
@@ -100,6 +102,12 @@ async def refresh_model_maps() -> None:
     disabled_model_ids: set[str] = set()
 
     for provider in provider_rows:
+        # Match with instance in _upstreams to update its state from DB
+        for upstream in _upstreams:
+            if getattr(upstream, "db_id", None) == provider.id:
+                # This updates fee and merges DB models WITHOUT hitting network
+                await upstream.refresh_models_cache(skip_network=True)
+
         if not provider.enabled:
             continue
         for model in provider.models:
@@ -115,6 +123,39 @@ async def refresh_model_maps() -> None:
     )
 
 
+async def sync_provider_fees() -> None:
+    """Update active provider_fee in database based on schedules and defaults."""
+    from .payment.fee_schedule import FeeTimeRange, get_active_fee
+
+    async with create_session() as session:
+        result = await session.exec(select(UpstreamProviderRow))
+        provider_rows = result.all()
+
+        updated = False
+        for p in provider_rows:
+            schedules = None
+            if p.provider_fee_schedules:
+                try:
+                    schedules = [
+                        FeeTimeRange(**s) for s in json.loads(p.provider_fee_schedules)
+                    ]
+                except Exception:
+                    pass
+
+            active_fee = get_active_fee(schedules, p.provider_fee_default)
+            if p.provider_fee != active_fee:
+                logger.info(
+                    f"Updating active fee for provider {p.id}: {p.provider_fee} -> {active_fee}",
+                    extra={"provider_id": p.id, "active_fee": active_fee},
+                )
+                p.provider_fee = active_fee
+                session.add(p)
+                updated = True
+
+        if updated:
+            await session.commit()
+
+
 async def refresh_model_maps_periodically() -> None:
     """Background task to refresh model maps every minute."""
     import asyncio
@@ -122,6 +163,7 @@ async def refresh_model_maps_periodically() -> None:
     while True:
         try:
             await asyncio.sleep(60)
+            await sync_provider_fees()
             await refresh_model_maps()
         except asyncio.CancelledError:
             break

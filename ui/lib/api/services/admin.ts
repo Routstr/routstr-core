@@ -12,6 +12,12 @@ export const ProviderTypeSchema = z.object({
   can_show_balance: z.boolean(),
 });
 
+export const FeeTimeRangeSchema = z.object({
+  start_time: z.string(),
+  end_time: z.string(),
+  provider_fee: z.number(),
+});
+
 export const UpstreamProviderSchema = z.object({
   id: z.number(),
   provider_type: z.string(),
@@ -20,7 +26,9 @@ export const UpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean(),
   provider_fee: z.number().optional(),
+  provider_fee_default: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
+  provider_fee_schedules: z.array(FeeTimeRangeSchema).optional().default([]),
 });
 
 export const CreateUpstreamProviderSchema = z.object({
@@ -30,6 +38,7 @@ export const CreateUpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().default(true),
   provider_fee: z.number().optional(),
+  provider_fee_default: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
@@ -40,6 +49,7 @@ export const UpdateUpstreamProviderSchema = z.object({
   api_version: z.string().nullable().optional(),
   enabled: z.boolean().optional(),
   provider_fee: z.number().optional(),
+  provider_fee_default: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
 });
 
@@ -97,6 +107,7 @@ export type CreateUpstreamProvider = z.infer<
 export type UpdateUpstreamProvider = z.infer<
   typeof UpdateUpstreamProviderSchema
 >;
+export type FeeTimeRange = z.infer<typeof FeeTimeRangeSchema>;
 export type AdminModel = z.infer<typeof AdminModelSchema>;
 export type AdminModelPricing = z.infer<typeof AdminModelPricingSchema>;
 export type AdminModelArchitecture = z.infer<
@@ -305,6 +316,30 @@ export class AdminService {
   ): Promise<{ ok: boolean; deleted_id: number }> {
     return await apiClient.delete<{ ok: boolean; deleted_id: number }>(
       `/admin/api/upstream-providers/${id}`
+    );
+  }
+
+  static async getFeeSchedules(providerId: number): Promise<FeeTimeRange[]> {
+    return await apiClient.get<FeeTimeRange[]>(
+      `/admin/api/upstream-providers/${providerId}/fee-schedules`
+    );
+  }
+
+  static async updateFeeSchedules(
+    providerId: number,
+    schedules: FeeTimeRange[]
+  ): Promise<FeeTimeRange[]> {
+    return await apiClient.put<FeeTimeRange[]>(
+      `/admin/api/upstream-providers/${providerId}/fee-schedules`,
+      { schedules }
+    );
+  }
+
+  static async deleteFeeSchedules(
+    providerId: number
+  ): Promise<{ ok: boolean }> {
+    return await apiClient.delete<{ ok: boolean }>(
+      `/admin/api/upstream-providers/${providerId}/fee-schedules`
     );
   }
 

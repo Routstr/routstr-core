@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
-from ..proxy import refresh_model_maps, reinitialize_upstreams
+from ..proxy import refresh_model_maps, reinitialize_upstreams, sync_provider_fees
 from ..wallet import (
     fetch_all_balances,
     get_proofs_per_mint_and_unit,
@@ -556,6 +556,7 @@ class UpstreamProviderCreate(BaseModel):
     api_version: str | None = None
     enabled: bool = True
     provider_fee: float = 1.01
+    provider_fee_default: float | None = None
     provider_settings: dict | None = None
 
 
@@ -566,7 +567,29 @@ class UpstreamProviderUpdate(BaseModel):
     api_version: str | None = None
     enabled: bool | None = None
     provider_fee: float | None = None
+    provider_fee_default: float | None = None
     provider_settings: dict | None = None
+
+
+def _provider_to_dict(
+    p: UpstreamProviderRow, redact_key: bool = True
+) -> dict[str, object]:
+    return {
+        "id": p.id,
+        "provider_type": p.provider_type,
+        "base_url": p.base_url,
+        "api_key": "[REDACTED]" if (redact_key and p.api_key) else (p.api_key or ""),
+        "api_version": p.api_version,
+        "enabled": p.enabled,
+        "provider_fee": p.provider_fee,
+        "provider_fee_default": p.provider_fee_default,
+        "provider_settings": json.loads(p.provider_settings)
+        if p.provider_settings
+        else None,
+        "provider_fee_schedules": json.loads(p.provider_fee_schedules)
+        if p.provider_fee_schedules
+        else [],
+    }
 
 
 @admin_router.get("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
@@ -574,21 +597,7 @@ async def get_upstream_providers() -> list[dict[str, object]]:
     async with create_session() as session:
         result = await session.exec(select(UpstreamProviderRow))
         providers = result.all()
-        return [
-            {
-                "id": p.id,
-                "provider_type": p.provider_type,
-                "base_url": p.base_url,
-                "api_key": "[REDACTED]" if p.api_key else "",
-                "api_version": p.api_version,
-                "enabled": p.enabled,
-                "provider_fee": p.provider_fee,
-                "provider_settings": json.loads(p.provider_settings)
-                if p.provider_settings
-                else None,
-            }
-            for p in providers
-        ]
+        return [_provider_to_dict(p) for p in providers]
 
 
 @admin_router.post("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
@@ -615,6 +624,9 @@ async def create_upstream_provider(
             api_version=payload.api_version,
             enabled=payload.enabled,
             provider_fee=payload.provider_fee,
+            provider_fee_default=payload.provider_fee_default
+            if payload.provider_fee_default is not None
+            else payload.provider_fee,
             provider_settings=json.dumps(payload.provider_settings)
             if payload.provider_settings
             else None,
@@ -624,17 +636,7 @@ async def create_upstream_provider(
         await session.refresh(provider)
 
     await reinitialize_upstreams()
-    await refresh_model_maps()
-    return {
-        "id": provider.id,
-        "provider_type": provider.provider_type,
-        "base_url": provider.base_url,
-        "api_key": "[REDACTED]",
-        "api_version": provider.api_version,
-        "enabled": provider.enabled,
-        "provider_fee": provider.provider_fee,
-        "provider_settings": payload.provider_settings,
-    }
+    return _provider_to_dict(provider)
 
 
 @admin_router.get(
@@ -645,18 +647,7 @@ async def get_upstream_provider(provider_id: int) -> dict[str, object]:
         provider = await session.get(UpstreamProviderRow, provider_id)
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
-        return {
-            "id": provider.id,
-            "provider_type": provider.provider_type,
-            "base_url": provider.base_url,
-            "api_key": "[REDACTED]" if provider.api_key else "",
-            "api_version": provider.api_version,
-            "enabled": provider.enabled,
-            "provider_fee": provider.provider_fee,
-            "provider_settings": json.loads(provider.provider_settings)
-            if provider.provider_settings
-            else None,
-        }
+        return _provider_to_dict(provider)
 
 
 @admin_router.patch(
@@ -682,6 +673,8 @@ async def update_upstream_provider(
             provider.enabled = payload.enabled
         if payload.provider_fee is not None:
             provider.provider_fee = payload.provider_fee
+        if payload.provider_fee_default is not None:
+            provider.provider_fee_default = payload.provider_fee_default
         if payload.provider_settings is not None:
             provider.provider_settings = json.dumps(payload.provider_settings)
 
@@ -690,19 +683,7 @@ async def update_upstream_provider(
         await session.refresh(provider)
 
     await reinitialize_upstreams()
-    await refresh_model_maps()
-    return {
-        "id": provider.id,
-        "provider_type": provider.provider_type,
-        "base_url": provider.base_url,
-        "api_key": "[REDACTED]",
-        "api_version": provider.api_version,
-        "enabled": provider.enabled,
-        "provider_fee": provider.provider_fee,
-        "provider_settings": json.loads(provider.provider_settings)
-        if provider.provider_settings
-        else None,
-    }
+    return _provider_to_dict(provider)
 
 
 @admin_router.delete(
@@ -718,6 +699,78 @@ async def delete_upstream_provider(provider_id: int) -> dict[str, object]:
     await reinitialize_upstreams()
     await refresh_model_maps()
     return {"ok": True, "deleted_id": provider_id}
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/fee-schedules",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_fee_schedules(provider_id: int) -> list[dict]:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        return (
+            json.loads(provider.provider_fee_schedules)
+            if provider.provider_fee_schedules
+            else []
+        )
+
+
+class FeeScheduleUpdate(BaseModel):
+    schedules: list[dict]
+
+
+@admin_router.put(
+    "/api/upstream-providers/{provider_id}/fee-schedules",
+    dependencies=[Depends(require_admin_api)],
+)
+async def update_fee_schedules(
+    provider_id: int, payload: FeeScheduleUpdate
+) -> list[dict]:
+    from ..payment.fee_schedule import FeeTimeRange, validate_no_overlaps
+
+    try:
+        ranges = [FeeTimeRange(**s) for s in payload.schedules]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid schedule data: {e}")
+
+    try:
+        validate_no_overlaps(ranges)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    serialized = [r.dict() for r in ranges]
+
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        provider.provider_fee_schedules = json.dumps(serialized)
+        session.add(provider)
+        await session.commit()
+
+    await sync_provider_fees()
+    await refresh_model_maps()
+    return serialized
+
+
+@admin_router.delete(
+    "/api/upstream-providers/{provider_id}/fee-schedules",
+    dependencies=[Depends(require_admin_api)],
+)
+async def delete_fee_schedules(provider_id: int) -> dict:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+        provider.provider_fee_schedules = None
+        session.add(provider)
+        await session.commit()
+
+    await sync_provider_fees()
+    await refresh_model_maps()
+    return {"ok": True}
 
 
 @admin_router.get("/api/provider-types", dependencies=[Depends(require_admin_api)])

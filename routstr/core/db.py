@@ -205,10 +205,16 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     )
     enabled: bool = Field(default=True, description="Whether this provider is enabled")
     provider_fee: float = Field(
-        default=1.01, description="Provider fee multiplier (default 1%)"
+        default=1.01, description="Active fee multiplier (can be set by schedule)"
+    )
+    provider_fee_default: float = Field(
+        default=1.01, description="Default fee multiplier (outside schedules)"
     )
     provider_settings: str | None = Field(
         default=None, description="JSON string for provider-specific settings"
+    )
+    provider_fee_schedules: str | None = Field(
+        default=None, description="JSON array of fee time ranges (HH:MM UTC)"
     )
     models: list["ModelRow"] = Relationship(
         back_populates="upstream_provider",

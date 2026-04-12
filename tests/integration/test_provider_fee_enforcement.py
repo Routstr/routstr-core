@@ -101,7 +101,7 @@ async def test_enforce_lowest_provider_fee_for_same_url(
                 )
             ]
 
-        async def refresh_models_cache(self) -> None:
+        async def refresh_models_cache(self, skip_network: bool = False) -> None:
             pass
 
         def prepare_headers(self, request_headers: dict[str, str]) -> dict[str, str]:

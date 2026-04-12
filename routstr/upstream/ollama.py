@@ -65,9 +65,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         """Strip 'ollama/' prefix for Ollama API compatibility."""
         return model_id.removeprefix("ollama/")
 
-    def get_request_base_url(
-        self, path: str, model_obj: Model | None = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: Model | None = None) -> str:
         """Route proxy traffic through Ollama's OpenAI-compatible /v1 endpoint."""
         return f"{self.base_url.rstrip('/')}/v1"
 
@@ -166,103 +164,3 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                 },
             )
             return []
-
-    async def refresh_models_cache(self) -> None:
-        """Refresh the in-memory models cache from upstream API."""
-        try:
-            from ..payment.models import _update_model_sats_pricing
-            from ..payment.price import sats_usd_price
-
-            models = await self.fetch_models()
-            models_with_fees = [self._apply_provider_fee_to_model(m) for m in models]
-
-            try:
-                sats_to_usd = sats_usd_price()
-                self._models_cache = [
-                    _update_model_sats_pricing(m, sats_to_usd) for m in models_with_fees
-                ]
-            except Exception:
-                self._models_cache = models_with_fees
-
-            self._models_by_id = {m.id: m for m in self._models_cache}
-            logger.info(
-                f"Refreshed models cache for {self.base_url}",
-                extra={"model_count": len(models)},
-            )
-        except Exception as e:
-            logger.error(
-                f"Failed to refresh models cache for {self.base_url}",
-                extra={"error": str(e), "error_type": type(e).__name__},
-            )
-
-    def get_cached_models(self) -> list[Model]:
-        """Get cached models for this provider.
-
-        Returns:
-            List of cached Model objects
-        """
-        return self._models_cache
-
-    def get_cached_model_by_id(self, model_id: str) -> Model | None:
-        """Get a specific cached model by ID.
-
-        Args:
-            model_id: Model identifier
-
-        Returns:
-            Model object or None if not found
-        """
-        return self._models_by_id.get(model_id)
-
-    def _apply_provider_fee_to_model(self, model: Model) -> Model:
-        """Apply provider fee to model's USD pricing and calculate max costs.
-
-        Args:
-            model: Model object to update
-
-        Returns:
-            Model with provider fee applied to pricing and max costs calculated
-        """
-        from ..payment.models import Model, Pricing, _calculate_usd_max_costs
-
-        adjusted_pricing = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
-        )
-
-        temp_model = Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=None,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-        )
-
-        (
-            adjusted_pricing.max_prompt_cost,
-            adjusted_pricing.max_completion_cost,
-            adjusted_pricing.max_cost,
-        ) = _calculate_usd_max_costs(temp_model)
-
-        return Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=model.sats_pricing,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-        )
