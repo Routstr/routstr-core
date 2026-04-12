@@ -1170,6 +1170,7 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
+  source: 'x-cashu' | 'apikey';
 }
 
 export interface TransactionsResponse {

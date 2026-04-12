@@ -1,11 +1,11 @@
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.responses import JSONResponse
 
 from routstr.balance import refund_wallet_endpoint
-from routstr.core.db import CashuTransaction
+from routstr.core.db import ApiKey, CashuTransaction
 
 
 def _make_cashu_tx(
@@ -114,3 +114,137 @@ async def test_refund_x_cashu_swept_raises_410() -> None:
         )
 
     assert exc_info.value.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# source field defaults
+# ---------------------------------------------------------------------------
+
+
+def test_cashu_transaction_source_defaults_to_x_cashu() -> None:
+    tx = CashuTransaction(token="cashuAtest", amount=100, unit="msat")
+    assert tx.source == "x-cashu"
+
+
+def test_cashu_transaction_source_can_be_apikey() -> None:
+    tx = CashuTransaction(token="cashuAtest", amount=100, unit="msat", source="apikey")
+    assert tx.source == "apikey"
+
+
+# ---------------------------------------------------------------------------
+# apikey-based refund: token logging and CashuTransaction storage
+# ---------------------------------------------------------------------------
+
+
+def _make_api_key(
+    balance: int = 5000,
+    refund_currency: str | None = "sat",
+    refund_mint_url: str | None = "https://mint.example.com",
+    refund_address: str | None = None,
+    parent_key_hash: str | None = None,
+) -> ApiKey:
+    key = ApiKey(hashed_key="testhash")
+    key.balance = balance
+    key.reserved_balance = 0
+    key.refund_currency = refund_currency
+    key.refund_mint_url = refund_mint_url
+    key.refund_address = refund_address
+    key.parent_key_hash = parent_key_hash
+    key.total_spent = 0
+    key.total_requests = 0
+    return key
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> None:
+    key = _make_api_key(balance=5000, refund_currency="sat")
+    refund_token = "cashuArefund_apikey_token"
+
+    session = MagicMock()
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()) as mock_store,
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+    ):
+        result = await refund_wallet_endpoint(
+            authorization="Bearer sk-testhash",
+            x_cashu=None,
+            session=session,
+        )
+
+    assert isinstance(result, dict)
+    assert result["token"] == refund_token
+
+    mock_store.assert_awaited_once()
+    call_kwargs = mock_store.call_args.kwargs
+    assert call_kwargs["source"] == "apikey"
+    assert call_kwargs["token"] == refund_token
+    assert call_kwargs["typ"] == "out"
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_logs_token() -> None:
+    key = _make_api_key(balance=5000, refund_currency="sat")
+    refund_token = "cashuAlogged_token"
+
+    session = MagicMock()
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch("routstr.balance.logger") as mock_logger,
+    ):
+        await refund_wallet_endpoint(
+            authorization="Bearer sk-testhash",
+            x_cashu=None,
+            session=session,
+        )
+
+    calls = [str(c) for c in mock_logger.info.call_args_list]
+    assert any("cashu token issued" in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_log_includes_path() -> None:
+    key = _make_api_key(balance=5000, refund_currency="sat")
+    refund_token = "cashuApath_token"
+
+    session = MagicMock()
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch("routstr.balance.logger") as mock_logger,
+    ):
+        await refund_wallet_endpoint(
+            authorization="Bearer sk-testhash",
+            x_cashu=None,
+            session=session,
+        )
+
+    # Find the "cashu token issued" call and verify extra contains the path
+    token_issued_calls = [
+        c for c in mock_logger.info.call_args_list
+        if c.args and "cashu token issued" in c.args[0]
+    ]
+    assert len(token_issued_calls) == 1
+    extra = token_issued_calls[0].kwargs.get("extra", {})
+    assert extra.get("path") == "/v1/wallet/refund"
