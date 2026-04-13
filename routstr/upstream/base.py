@@ -520,24 +520,32 @@ class BaseUpstreamProvider:
                             continue
 
                         try:
-                            obj = json.loads(part)
-                            if isinstance(obj, dict):
-                                if obj.get("model"):
-                                    last_model_seen = str(obj.get("model"))
-
-                                if requested_model:
-                                    obj["model"] = requested_model
-
-                                if "id" not in obj or not isinstance(obj["id"], str):
-                                    obj["id"] = f"chatcmpl-{uuid.uuid4()}"
-
-                                if isinstance(obj.get("usage"), dict):
-                                    # Hold this chunk back to merge cost later
-                                    usage_chunk_data = obj
+                            # Only parse if it looks like a JSON object to avoid SSE control messages or partials
+                            if part.strip().startswith(b"{") and part.strip().endswith(
+                                b"}"
+                            ):
+                                obj = json.loads(part)
+                                if isinstance(obj, dict):
+                                    if obj.get("model"):
+                                        last_model_seen = str(obj.get("model"))
+                                    if requested_model:
+                                        obj["model"] = requested_model
+                                    if (
+                                        "id" not in obj
+                                        or not isinstance(obj["id"], str)
+                                        or obj["id"] == "existing-id"
+                                    ):
+                                        if not hasattr(self, "_current_stream_id"):
+                                            self._current_stream_id = (
+                                                f"chatcmpl-{uuid.uuid4()}"
+                                            )
+                                        obj["id"] = self._current_stream_id
+                                    if isinstance(obj.get("usage"), dict):
+                                        usage_chunk_data = obj
+                                        continue
+                                    yield b"data: " + json.dumps(obj).encode() + b"\n\n"
                                     continue
-                                yield b"data: " + json.dumps(obj).encode() + b"\n\n"
-                                continue
-                        except json.JSONDecodeError:
+                        except Exception:
                             pass
 
                         prefix = (
