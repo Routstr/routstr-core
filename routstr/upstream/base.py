@@ -677,7 +677,9 @@ class BaseUpstreamProvider:
                 response_json["usage"]["cost_sats"] = (
                     cost_data.get("total_msats", 0) // 1000
                 )
-                response_json["usage"]["remaining_balance_msats"] = remaining_balance_msats
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -753,7 +755,11 @@ class BaseUpstreamProvider:
             raise
 
     async def handle_streaming_responses_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int, requested_model: str | None = None
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        max_cost_for_model: int,
+        requested_model: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1000,7 +1006,9 @@ class BaseUpstreamProvider:
                 response_json["usage"]["cost_sats"] = (
                     cost_data.get("total_msats", 0) // 1000
                 )
-                response_json["usage"]["remaining_balance_msats"] = remaining_balance_msats
+                response_json["usage"]["remaining_balance_msats"] = (
+                    remaining_balance_msats
+                )
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -1309,7 +1317,9 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
-        original_model_id = (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        original_model_id = (
+            (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        )
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
@@ -1469,7 +1479,10 @@ class BaseUpstreamProvider:
                         background_tasks.add_task(response.aclose)
                         background_tasks.add_task(client.aclose)
                         result = await self.handle_streaming_chat_completion(
-                            response, key, max_cost_for_model, background_tasks,
+                            response,
+                            key,
+                            max_cost_for_model,
+                            background_tasks,
                             requested_model=original_model_id,
                         )
                         result.background = background_tasks
@@ -1479,7 +1492,10 @@ class BaseUpstreamProvider:
                 if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_chat_completion(
-                            response, key, session, max_cost_for_model,
+                            response,
+                            key,
+                            session,
+                            max_cost_for_model,
                             requested_model=original_model_id,
                         )
                     finally:
@@ -1595,7 +1611,9 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
         url = self.build_request_url(path, model_obj)
 
-        original_model_id = (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        original_model_id = (
+            (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
+        )
 
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
@@ -1683,7 +1701,9 @@ class BaseUpstreamProvider:
 
                 if is_streaming and response.status_code == 200:
                     result = await self.handle_streaming_responses_completion(
-                        response, key, max_cost_for_model,
+                        response,
+                        key,
+                        max_cost_for_model,
                         requested_model=original_model_id,
                     )
                     background_tasks = BackgroundTasks()
@@ -1695,7 +1715,10 @@ class BaseUpstreamProvider:
                 if response.status_code == 200:
                     try:
                         return await self.handle_non_streaming_responses_completion(
-                            response, key, session, max_cost_for_model,
+                            response,
+                            key,
+                            session,
+                            max_cost_for_model,
                             requested_model=original_model_id,
                         )
                     finally:
@@ -2122,7 +2145,10 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash,
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -2164,7 +2190,9 @@ class BaseUpstreamProvider:
                     try:
                         data_json = json.loads(line[6:])
                         if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                            data_json["usage"]["cost_sats"] = (
+                                cost_data.total_msats // 1000
+                            )
                             lines[i] = "data: " + json.dumps(data_json)
                     except json.JSONDecodeError:
                         pass
@@ -2265,7 +2293,10 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash,
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -2320,7 +2351,6 @@ class BaseUpstreamProvider:
                 extra={
                     "original_amount": amount,
                     "refund_amount": emergency_refund,
-                    "deduction": 60,
                 },
             )
 
@@ -2495,7 +2525,10 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
+                        amount,
+                        unit,
+                        mint,
+                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -2787,7 +2820,10 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60, unit, mint, payment_token_hash,
+                        amount,
+                        unit,
+                        mint,
+                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -3051,7 +3087,10 @@ class BaseUpstreamProvider:
                         )
 
                         refund_token = await self.send_refund(
-                            refund_amount, unit, mint, payment_token_hash,
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -3093,7 +3132,9 @@ class BaseUpstreamProvider:
                     try:
                         data_json = json.loads(line[6:])
                         if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                            data_json["usage"]["cost_sats"] = (
+                                cost_data.total_msats // 1000
+                            )
                             lines[i] = "data: " + json.dumps(data_json)
                     except json.JSONDecodeError:
                         pass
@@ -3182,7 +3223,10 @@ class BaseUpstreamProvider:
 
             if refund_amount > 0:
                 refund_token = await self.send_refund(
-                    refund_amount, unit, mint, payment_token_hash,
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -3237,7 +3281,6 @@ class BaseUpstreamProvider:
                 extra={
                     "original_amount": amount,
                     "refund_amount": emergency_refund,
-                    "deduction": 60,
                 },
             )
 
