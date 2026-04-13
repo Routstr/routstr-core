@@ -155,6 +155,20 @@ async def swap_to_primary_mint(
         raise ValueError("Invalid unit")
     primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
 
+    # If the token is already from the primary mint, we don't need to swap
+    # and we definitely don't want to calculate or pay fees.
+    if token_obj.mint == settings.primary_mint:
+        logger.info(
+            "swap_to_primary_mint: token already on primary mint, skipping swap",
+            extra={
+                "mint": token_obj.mint,
+                "amount": token_amount,
+                "unit": token_obj.unit,
+            },
+        )
+        await token_wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
+        return token_amount, token_obj.unit, token_obj.mint
+
     minted_amount = await _calculate_swap_amount(
         amount_msat,
         token_obj.unit,
