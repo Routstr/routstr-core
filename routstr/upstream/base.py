@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import traceback
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Mapping
 
@@ -523,8 +524,12 @@ class BaseUpstreamProvider:
                             if isinstance(obj, dict):
                                 if obj.get("model"):
                                     last_model_seen = str(obj.get("model"))
+
                                 if requested_model:
                                     obj["model"] = requested_model
+
+                                if "id" not in obj or not isinstance(obj["id"], str):
+                                    obj["id"] = f"chatcmpl-{uuid.uuid4()}"
 
                                 if isinstance(obj.get("usage"), dict):
                                     # Hold this chunk back to merge cost later
@@ -665,6 +670,8 @@ class BaseUpstreamProvider:
 
             if requested_model:
                 response_json["model"] = requested_model
+            if "id" not in response_json or not isinstance(response_json["id"], str):
+                response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
 
             cost_data = await adjust_payment_for_tokens(
                 key, response_json, session, deducted_max_cost
@@ -994,6 +1001,8 @@ class BaseUpstreamProvider:
 
             if requested_model:
                 response_json["model"] = requested_model
+            if "id" not in response_json or not isinstance(response_json["id"], str):
+                response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
 
             cost_data = await adjust_payment_for_tokens(
                 key, response_json, session, deducted_max_cost
@@ -2353,7 +2362,6 @@ class BaseUpstreamProvider:
                 extra={
                     "original_amount": amount,
                     "refund_amount": emergency_refund,
-                    "deduction": 60,
                 },
             )
 
@@ -2528,7 +2536,7 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60,
+                        amount,
                         unit,
                         mint,
                         payment_token_hash,
@@ -2823,7 +2831,7 @@ class BaseUpstreamProvider:
                     )
 
                     refund_token = await self.send_refund(
-                        amount - 60,
+                        amount,
                         unit,
                         mint,
                         payment_token_hash,
@@ -3284,7 +3292,6 @@ class BaseUpstreamProvider:
                 extra={
                     "original_amount": amount,
                     "refund_amount": emergency_refund,
-                    "deduction": 60,
                 },
             )
 
