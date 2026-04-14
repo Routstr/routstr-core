@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing, async_fetch_openrouter_models
@@ -16,18 +16,20 @@ logger = get_logger(__name__)
 
 
 class PPQAIModelPricing(BaseModel):
-    ui: dict[str, float]
-    api: dict[str, float]
+    ui: Optional[dict[str, float]] = None
+    api: Optional[dict[str, float]] = None
+    input_per_1M_tokens: Optional[float] = Field(None, alias="input_per_1M_tokens")
+    output_per_1M_tokens: Optional[float] = Field(None, alias="output_per_1M_tokens")
 
 
 class PPQAIModel(BaseModel):
     id: str
-    provider: str
+    provider: Optional[str] = None
     name: str
     created_at: int
     context_length: int
     pricing: PPQAIModelPricing
-    popular: bool
+    popular: bool = False
 
 
 class PPQAIUpstreamProvider(BaseUpstreamProvider):
@@ -134,31 +136,54 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                         )
 
                         if or_model:
-                            if input_price := ppqai_model.pricing.api.get(
-                                "input_per_1M"
-                            ):
+                            input_price = None
+                            if ppqai_model.pricing.api:
+                                input_price = ppqai_model.pricing.api.get(
+                                    "input_per_1M"
+                                )
+                            elif ppqai_model.pricing.input_per_1M_tokens:
+                                input_price = ppqai_model.pricing.input_per_1M_tokens
+
+                            if input_price is not None:
                                 or_model.pricing.prompt = input_price / 1_000_000
-                            if output_price := ppqai_model.pricing.api.get(
-                                "output_per_1M"
-                            ):
+
+                            output_price = None
+                            if ppqai_model.pricing.api:
+                                output_price = ppqai_model.pricing.api.get(
+                                    "output_per_1M"
+                                )
+                            elif ppqai_model.pricing.output_per_1M_tokens:
+                                output_price = ppqai_model.pricing.output_per_1M_tokens
+
+                            if output_price is not None:
                                 or_model.pricing.completion = output_price / 1_000_000
+
                             if cl := ppqai_model.context_length:
                                 or_model.context_length = cl
                             models.append(or_model)
                         else:
-                            input_price = ppqai_model.pricing.api.get(
-                                "input_per_1M", 0.0
-                            )
-                            output_price = ppqai_model.pricing.api.get(
-                                "output_per_1M", 0.0
-                            )
+                            input_price = 0.0
+                            if ppqai_model.pricing.api:
+                                input_price = ppqai_model.pricing.api.get(
+                                    "input_per_1M", 0.0
+                                )
+                            elif ppqai_model.pricing.input_per_1M_tokens:
+                                input_price = ppqai_model.pricing.input_per_1M_tokens
+
+                            output_price = 0.0
+                            if ppqai_model.pricing.api:
+                                output_price = ppqai_model.pricing.api.get(
+                                    "output_per_1M", 0.0
+                                )
+                            elif ppqai_model.pricing.output_per_1M_tokens:
+                                output_price = ppqai_model.pricing.output_per_1M_tokens
 
                             models.append(
                                 Model(
                                     id=ppqai_model.id,
                                     name=ppqai_model.name,
                                     created=ppqai_model.created_at // 1000,
-                                    description=f"{ppqai_model.provider} model",
+                                    description=f"{ppqai_model.provider or 'PPQ.AI'} model",
                                     context_length=ppqai_model.context_length,
                                     architecture=Architecture(
                                         modality="text->text",
