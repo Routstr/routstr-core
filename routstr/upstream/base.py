@@ -140,7 +140,7 @@ class BaseUpstreamProvider:
         # Inject into top-level usage block (OpenAI/Anthropic style)
         if "usage" in response_json:
             response_json["usage"]["cost"] = total_usd
-            response_json["usage"]["sats_cost"] = sats_cost
+            response_json["usage"]["cost_sats"] = sats_cost
             response_json["usage"]["remaining_balance_msats"] = key.balance
 
         # Inject into Anthropic nested usage block if present
@@ -613,7 +613,7 @@ class BaseUpstreamProvider:
                                 usage_chunk_data["usage"]["cost"] = cost_data.get(
                                     "total_usd", 0.0
                                 )
-                                usage_chunk_data["usage"]["sats_cost"] = (
+                                usage_chunk_data["usage"]["cost_sats"] = (
                                     cost_data.get("total_msats", 0) // 1000
                                 )
                                 usage_chunk_data["usage"]["remaining_balance_msats"] = (
@@ -1160,7 +1160,11 @@ class BaseUpstreamProvider:
                 )
 
     async def handle_streaming_messages_completion(
-        self, response: httpx.Response, key: ApiKey, max_cost_for_model: int
+        self,
+        response: httpx.Response,
+        key: ApiKey,
+        max_cost_for_model: int,
+        requested_model: str | None = None,
     ) -> StreamingResponse:
         async def stream_with_cost(
             max_cost_for_model: int,
@@ -1199,6 +1203,8 @@ class BaseUpstreamProvider:
                     stored_chunks.append(chunk)
                     try:
                         decoded_chunk = chunk.decode("utf-8", errors="ignore")
+                        modified_lines = []
+                        changed = False
                         for line in decoded_chunk.split("\n"):
                             if line.startswith("data: "):
                                 try:
@@ -1207,6 +1213,20 @@ class BaseUpstreamProvider:
                                         msg = data.get("message", {})
                                         if msg and msg.get("model"):
                                             last_model_seen = str(msg.get("model"))
+
+                                        if requested_model:
+                                            # Apply requested_model override
+                                            model_updated = False
+                                            if msg:
+                                                msg["model"] = requested_model
+                                                model_updated = True
+                                            if data.get("model"):
+                                                data["model"] = requested_model
+                                                model_updated = True
+
+                                            if model_updated:
+                                                line = "data: " + json.dumps(data)
+                                                changed = True
 
                                         if usage := msg.get("usage"):
                                             input_tokens += usage.get("input_tokens", 0)
@@ -1221,10 +1241,14 @@ class BaseUpstreamProvider:
                                             )
                                 except json.JSONDecodeError:
                                     pass
-                    except Exception:
-                        pass
+                            modified_lines.append(line)
 
-                    yield chunk
+                        if changed:
+                            yield "\n".join(modified_lines).encode("utf-8")
+                        else:
+                            yield chunk
+                    except Exception:
+                        yield chunk
 
                 usage_data = {
                     "input_tokens": input_tokens,
@@ -1290,10 +1314,21 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
         path: str,
+        requested_model: str | None = None,
     ) -> Response:
         try:
             content = await response.aread()
             response_json = json.loads(content)
+
+            if requested_model:
+                if "model" in response_json:
+                    response_json["model"] = requested_model
+                if (
+                    "message" in response_json
+                    and isinstance(response_json["message"], dict)
+                    and "model" in response_json["message"]
+                ):
+                    response_json["message"]["model"] = requested_model
 
             if path.endswith("count_tokens") and "usage" not in response_json:
                 input_tokens = response_json.get("input_tokens", 0)
@@ -1457,7 +1492,10 @@ class BaseUpstreamProvider:
 
                     if is_streaming and response.status_code == 200:
                         result = await self.handle_streaming_messages_completion(
-                            response, key, max_cost_for_model
+                            response,
+                            key,
+                            max_cost_for_model,
+                            requested_model=original_model_id,
                         )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
@@ -1468,7 +1506,12 @@ class BaseUpstreamProvider:
                     if response.status_code == 200:
                         try:
                             return await self.handle_non_streaming_messages_completion(
-                                response, key, session, max_cost_for_model, path
+                                response,
+                                key,
+                                session,
+                                max_cost_for_model,
+                                path,
+                                requested_model=original_model_id,
                             )
                         finally:
                             await response.aclose()
@@ -1478,7 +1521,12 @@ class BaseUpstreamProvider:
                     if response.status_code == 200:
                         try:
                             return await self.handle_non_streaming_messages_completion(
-                                response, key, session, max_cost_for_model, path
+                                response,
+                                key,
+                                session,
+                                max_cost_for_model,
+                                path,
+                                requested_model=original_model_id,
                             )
                         finally:
                             await response.aclose()
