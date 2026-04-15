@@ -149,19 +149,19 @@ class BaseUpstreamProvider:
             and isinstance(response_json["message"], dict)
             and "usage" in response_json["message"]
         ):
-            response_json["message"]["usage"]["sats_cost"] = sats_cost
+            response_json["message"]["usage"]["cost_sats"] = sats_cost
 
         # Unified Routstr metadata
         response_json["metadata"] = response_json.get("metadata", {})
         response_json["metadata"]["routstr"] = {
             "cost": cost_dict,
-            "sats_cost": sats_cost,
+            "cost_sats": sats_cost,
             "remaining_balance_msats": key.balance,
         }
 
         # Legacy/Compatibility fields
         response_json["cost"] = cost_dict.copy()
-        response_json["cost"]["sats_cost"] = sats_cost
+        response_json["cost"]["cost_sats"] = sats_cost
         response_json["cost"]["remaining_balance_msats"] = key.balance
 
     def prepare_headers(self, request_headers: dict) -> dict:
@@ -627,7 +627,7 @@ class BaseUpstreamProvider:
                                     "cost": cost_data
                                 }
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
-                                    "sats_cost"
+                                    "cost_sats"
                                 ] = cost_data.get("total_msats", 0) // 1000
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
                                     "remaining_balance_msats"
@@ -916,7 +916,7 @@ class BaseUpstreamProvider:
                                         cost_data.get("total_usd", 0.0)
                                     )
                                     usage_chunk_data["response"]["usage"][
-                                        "sats_cost"
+                                        "cost_sats"
                                     ] = cost_data.get("total_msats", 0) // 1000
                                     usage_chunk_data["response"]["usage"][
                                         "remaining_balance_msats"
@@ -925,7 +925,7 @@ class BaseUpstreamProvider:
                                     usage_chunk_data["usage"]["cost"] = cost_data.get(
                                         "total_usd", 0.0
                                     )
-                                    usage_chunk_data["usage"]["sats_cost"] = (
+                                    usage_chunk_data["usage"]["cost_sats"] = (
                                         cost_data.get("total_msats", 0) // 1000
                                     )
                                     usage_chunk_data["usage"][
@@ -940,7 +940,7 @@ class BaseUpstreamProvider:
                                     "cost": cost_data
                                 }
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
-                                    "sats_cost"
+                                    "cost_sats"
                                 ] = cost_data.get("total_msats", 0) // 1000
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
                                     "remaining_balance_msats"
@@ -1041,7 +1041,7 @@ class BaseUpstreamProvider:
             # Merge cost into usage for OpenCode
             if "usage" in response_json:
                 response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
-                response_json["usage"]["sats_cost"] = (
+                response_json["usage"]["cost_sats"] = (
                     cost_data.get("total_msats", 0) // 1000
                 )
                 response_json["usage"]["remaining_balance_msats"] = (
@@ -1051,14 +1051,14 @@ class BaseUpstreamProvider:
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
             response_json["metadata"]["routstr"] = {"cost": cost_data}
-            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
+            response_json["metadata"]["routstr"]["cost"]["cost_sats"] = (
                 cost_data.get("total_msats", 0) // 1000
             )
             response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
                 remaining_balance_msats
             )
             response_json["cost"] = cost_data
-            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
+            response_json["cost"]["cost_sats"] = cost_data.get("total_msats", 0) // 1000
             response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
 
             logger.info(
