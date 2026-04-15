@@ -10,6 +10,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -105,6 +106,10 @@ class ModelRow(SQLModel, table=True):  # type: ignore
         default=None, description="JSON array of model alias IDs"
     )
     enabled: bool = Field(default=True, description="Whether this model is enabled")
+    forwarded_model_id: str | None = Field(
+        default=None,
+        description="Model ID to use when forwarding requests to upstream provider. Defaults to id if not set.",
+    )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
@@ -150,6 +155,10 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
     )
     collected: bool = Field(default=False)
     swept: bool = Field(default=False)
+    source: str = Field(
+        default="x-cashu",
+        description="Payment source: x-cashu or apikey",
+    )
 
 
 async def store_cashu_transaction(
@@ -161,6 +170,7 @@ async def store_cashu_transaction(
     request_id: str | None = None,
     collected: bool = False,
     created_at: int | None = None,
+    source: str = "x-cashu",
 ) -> None:
     try:
         async with create_session() as session:
@@ -173,6 +183,7 @@ async def store_cashu_transaction(
                 request_id=request_id,
                 collected=collected,
                 created_at=created_at or int(time.time()),
+                source=source,
             )
             session.add(tx)
             await session.commit()
@@ -365,6 +376,17 @@ def run_migrations() -> None:
                 logger.warning(
                     "Database stamped with unknown revision (likely from another branch). "
                     "Re-stamping to current head.",
+                    extra={"error": str(e)},
+                )
+                _clear_alembic_version()
+                command.stamp(alembic_cfg, "head")
+            else:
+                raise
+        except OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                logger.warning(
+                    "Migration hit a column that already exists (likely added via "
+                    "create_all on another branch). Stamping to current head.",
                     extra={"error": str(e)},
                 )
                 _clear_alembic_version()

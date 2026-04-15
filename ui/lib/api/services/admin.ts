@@ -76,6 +76,7 @@ export const AdminModelSchema = z.object({
   canonical_slug: z.string().nullable().optional(),
   alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
+  forwarded_model_id: z.string().nullable().optional(),
 });
 
 export const ProviderModelsSchema = z.object({
@@ -1134,6 +1135,7 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
+  source: 'x-cashu' | 'apikey';
 }
 
 export interface TransactionsResponse {

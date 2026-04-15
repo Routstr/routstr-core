@@ -220,6 +220,33 @@ async def test_recieve_token_untrusted_mint() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_swap_to_primary_mint_already_on_primary() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token = Mock()
+    mock_token.mint = settings.primary_mint
+    mock_token.amount = 1000
+    mock_token.unit = "sat"
+    mock_token.proofs = []
+
+    mock_token_wallet = Mock()
+    mock_token_wallet.split = AsyncMock(return_value=None)
+    mock_token_wallet.request_mint = AsyncMock()
+    mock_token_wallet.melt_quote = AsyncMock()
+
+    with patch("routstr.wallet.get_wallet", AsyncMock(return_value=mock_token_wallet)):
+        amount, unit, mint = await swap_to_primary_mint(mock_token, mock_token_wallet)
+
+    assert amount == 1000
+    assert unit == "sat"
+    assert mint == settings.primary_mint
+    mock_token_wallet.split.assert_called_once()
+    mock_token_wallet.request_mint.assert_not_called()
+    mock_token_wallet.melt_quote.assert_not_called()
+
+
 async def test_swap_to_primary_mint_success() -> None:
     """Test successful swap with dynamic fee calculation."""
     from routstr.wallet import swap_to_primary_mint

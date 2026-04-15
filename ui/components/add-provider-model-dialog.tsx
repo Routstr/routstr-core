@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -39,7 +39,7 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Switch } from '@/components/ui/switch';
-import { Loader2, Plus } from 'lucide-react';
+import { Check, Copy, Loader2, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { AdminService, type AdminModel } from '@/lib/api/services/admin';
 
@@ -64,6 +64,7 @@ const FormSchema = z.object({
   instruct_type: z.string().default(''),
   canonical_slug: z.string().default(''),
   alias_ids_raw: z.string().default(''),
+  forwarded_model_id: z.string().default(''),
   upstream_provider_id: z.string().default(''),
   input_cost: z.coerce.number().min(0).default(0),
   output_cost: z.coerce.number().min(0).default(0),
@@ -104,6 +105,7 @@ export function AddProviderModelDialog({
   const [isPresetOpen, setIsPresetOpen] = useState(false);
   const [selectedPresetLabel, setSelectedPresetLabel] =
     useState('Select a preset');
+  const [forwardedModelIdCopied, setForwardedModelIdCopied] = useState(false);
 
   const form = useForm<FormData>({
     resolver: zodResolver(FormSchema) as never,
@@ -119,6 +121,7 @@ export function AddProviderModelDialog({
       instruct_type: '',
       canonical_slug: '',
       alias_ids_raw: '',
+      forwarded_model_id: '',
       upstream_provider_id: '',
       input_cost: 0,
       output_cost: 0,
@@ -180,6 +183,7 @@ export function AddProviderModelDialog({
             : '',
         canonical_slug: initialData.canonical_slug || '',
         alias_ids_raw: listToString(initialData.alias_ids),
+        forwarded_model_id: initialData.forwarded_model_id || initialData.id,
         upstream_provider_id:
           typeof initialData.upstream_provider_id === 'string'
             ? initialData.upstream_provider_id
@@ -223,6 +227,7 @@ export function AddProviderModelDialog({
         instruct_type: '',
         canonical_slug: '',
         alias_ids_raw: '',
+        forwarded_model_id: '',
         upstream_provider_id: '',
         input_cost: 0,
         output_cost: 0,
@@ -280,6 +285,7 @@ export function AddProviderModelDialog({
     );
     form.setValue('canonical_slug', model.canonical_slug || '');
     form.setValue('alias_ids_raw', listToString(model.alias_ids));
+    form.setValue('forwarded_model_id', model.forwarded_model_id || model.id);
     form.setValue(
       'upstream_provider_id',
       typeof model.upstream_provider_id === 'string'
@@ -385,6 +391,7 @@ export function AddProviderModelDialog({
         canonical_slug: data.canonical_slug?.trim() || null,
         alias_ids: listFromString(data.alias_ids_raw || ''),
         enabled: data.enabled,
+        forwarded_model_id: data.forwarded_model_id?.trim() || data.id,
       };
 
       if (isEdit) {
@@ -518,6 +525,53 @@ export function AddProviderModelDialog({
                     <FormMessage />
                   </FormItem>
                 )}
+              />
+
+              <FormField
+                control={form.control}
+                name='forwarded_model_id'
+                render={({ field }) => {
+                  const handleCopy = () => {
+                    const value = field.value || form.getValues('id');
+                    if (!value) return;
+                    navigator.clipboard.writeText(value);
+                    setForwardedModelIdCopied(true);
+                    setTimeout(() => setForwardedModelIdCopied(false), 1500);
+                  };
+                  return (
+                    <FormItem>
+                      <FormLabel>Upstream Model ID</FormLabel>
+                      <FormControl>
+                        <div className='flex gap-2'>
+                          <Input
+                            placeholder={
+                              form.watch('id') || 'e.g., openai/gpt-4o'
+                            }
+                            {...field}
+                          />
+                          <Button
+                            type='button'
+                            variant='outline'
+                            size='icon'
+                            onClick={handleCopy}
+                            title='Copy model ID'
+                          >
+                            {forwardedModelIdCopied ? (
+                              <Check className='h-4 w-4 text-green-500' />
+                            ) : (
+                              <Copy className='h-4 w-4' />
+                            )}
+                          </Button>
+                        </div>
+                      </FormControl>
+                      <FormDescription>
+                        Model ID sent to the upstream provider. Defaults to the
+                        model&apos;s own ID.
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  );
+                }}
               />
 
               <FormField
