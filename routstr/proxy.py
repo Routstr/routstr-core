@@ -71,7 +71,25 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
 
 def get_model_instance(model_id: str) -> Model | None:
     """Get Model instance by ID from global cache."""
-    return _model_instances.get(model_id.lower())
+    if not model_id:
+        return None
+
+    model_id_lower = model_id.lower()
+    # Try exact match first
+    if model := _model_instances.get(model_id_lower):
+        return model
+
+    # Try stripping common version suffixes (e.g., -20251222)
+    # This handles cases where upstream returns a specific version
+    # but we only track the base model name.
+    import re
+
+    base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
+    if base_model_id != model_id_lower:
+        if model := _model_instances.get(base_model_id):
+            return model
+
+    return None
 
 
 def get_provider_for_model(model_id: str) -> list[BaseUpstreamProvider] | None:
