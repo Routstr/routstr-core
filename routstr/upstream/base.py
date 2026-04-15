@@ -918,7 +918,7 @@ class BaseUpstreamProvider:
                                         cost_data.get("total_usd", 0.0)
                                     )
                                     usage_chunk_data["response"]["usage"][
-                                        "sats_cost"
+                                        "cost_sats"
                                     ] = cost_data.get("total_msats", 0) // 1000
                                     usage_chunk_data["response"]["usage"][
                                         "remaining_balance_msats"
@@ -942,7 +942,7 @@ class BaseUpstreamProvider:
                                     "cost": cost_data
                                 }
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
-                                    "sats_cost"
+                                    "cost_sats"
                                 ] = cost_data.get("total_msats", 0) // 1000
                                 usage_chunk_data["metadata"]["routstr"]["cost"][
                                     "remaining_balance_msats"
