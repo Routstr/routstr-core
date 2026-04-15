@@ -120,14 +120,26 @@ class BaseUpstreamProvider:
         }
 
     def inject_cost_metadata(
-        self, response_json: dict, cost_data: CostData | MaxCostData, key: ApiKey
+        self,
+        response_json: dict,
+        cost_data: CostData | MaxCostData | dict,
+        key: ApiKey,
     ) -> None:
         """Unifies the injection of cost and usage metadata across all completion types."""
-        sats_cost = cost_data.total_msats // 1000
+        if isinstance(cost_data, dict):
+            total_msats = cost_data.get("total_msats", 0)
+            total_usd = cost_data.get("total_usd", 0.0)
+            cost_dict = cost_data
+        else:
+            total_msats = cost_data.total_msats
+            total_usd = cost_data.total_usd
+            cost_dict = cost_data.dict()
+
+        sats_cost = total_msats // 1000
 
         # Inject into top-level usage block (OpenAI/Anthropic style)
         if "usage" in response_json:
-            response_json["usage"]["cost"] = cost_data.total_usd
+            response_json["usage"]["cost"] = total_usd
             response_json["usage"]["sats_cost"] = sats_cost
             response_json["usage"]["remaining_balance_msats"] = key.balance
 
@@ -142,13 +154,13 @@ class BaseUpstreamProvider:
         # Unified Routstr metadata
         response_json["metadata"] = response_json.get("metadata", {})
         response_json["metadata"]["routstr"] = {
-            "cost": cost_data.dict(),
+            "cost": cost_dict,
             "sats_cost": sats_cost,
             "remaining_balance_msats": key.balance,
         }
 
         # Legacy/Compatibility fields
-        response_json["cost"] = cost_data.dict()
+        response_json["cost"] = cost_dict.copy()
         response_json["cost"]["sats_cost"] = sats_cost
         response_json["cost"]["remaining_balance_msats"] = key.balance
 
@@ -716,10 +728,7 @@ class BaseUpstreamProvider:
                 key, response_json, session, deducted_max_cost
             )
 
-            if isinstance(cost_data, (CostData, MaxCostData)):
-                self.inject_cost_metadata(response_json, cost_data, key)
-            else:
-                response_json["cost"] = cost_data
+            self.inject_cost_metadata(response_json, cost_data, key)
 
             logger.info(
                 "Payment adjustment completed for non-streaming",
@@ -1238,10 +1247,9 @@ class BaseUpstreamProvider:
                                     max_cost_for_model,
                                 )
 
-                                if isinstance(cost_data, (CostData, MaxCostData)):
-                                    self.inject_cost_metadata(
-                                        combined_data, cost_data, fresh_key
-                                    )
+                                self.inject_cost_metadata(
+                                    combined_data, cost_data, fresh_key
+                                )
 
                                 usage_finalized = True
                                 yield f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1295,10 +1303,7 @@ class BaseUpstreamProvider:
                 key, response_json, session, deducted_max_cost
             )
 
-            if isinstance(cost_data, (CostData, MaxCostData)):
-                self.inject_cost_metadata(response_json, cost_data, key)
-            else:
-                response_json["cost"] = cost_data
+            self.inject_cost_metadata(response_json, cost_data, key)
 
             allowed_headers = {
                 "content-type",
