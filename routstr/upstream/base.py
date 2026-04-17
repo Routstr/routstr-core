@@ -1467,15 +1467,28 @@ class BaseUpstreamProvider:
                     stream=True,
                 )
 
-            logger.info(
-                "Received upstream response",
-                extra={
-                    "status_code": response.status_code,
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "content_type": response.headers.get("content-type", "unknown"),
-                },
-            )
+            if response.status_code != 200:
+                logger.error(
+                    "Received upstream response",
+                    extra={
+                        "reason_phrase": response.reason_phrase,
+                        "status_code": response.status_code,
+                        "path": path,
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "content_type": response.headers.get("content-type", "unknown"),
+                    },
+                )
+            else:
+                logger.info(
+                    "Received upstream response",
+                    extra={
+                        "reason_phrase": response.reason_phrase,
+                        "status_code": response.status_code,
+                        "path": path,
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "content_type": response.headers.get("content-type", "unknown"),
+                    },
+                )
 
             if response.status_code != 200:
                 if response.status_code >= 500:
@@ -2620,14 +2633,25 @@ class BaseUpstreamProvider:
                     stream=True,
                 )
 
-                logger.debug(
-                    "Received upstream response",
-                    extra={
-                        "status_code": response.status_code,
-                        "path": path,
-                        "response_headers": dict(response.headers),
-                    },
-                )
+                if response.status_code != 200:
+                    logger.error(
+                        "Received upstream response",
+                        extra={
+                            "reason_phrase": response.reason_phrase,
+                            "status_code": response.status_code,
+                            "path": path,
+                            "response_headers": dict(response.headers),
+                        },
+                    )
+                else:
+                    logger.debug(
+                        "Received upstream response",
+                        extra={
+                            "status_code": response.status_code,
+                            "path": path,
+                            "response_headers": dict(response.headers),
+                        },
+                    )
 
                 if response.status_code != 200:
                     logger.warning(
