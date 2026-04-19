@@ -124,12 +124,14 @@ export function ModelsPage() {
             >
               Basic Testing
             </TabsTrigger>
+            {/*
             <TabsTrigger
               value='test-api'
               className='h-9 snap-start px-2 text-[13px] sm:h-10 sm:px-2.5 sm:text-sm'
             >
               API Endpoints
             </TabsTrigger>
+            */}
           </TabsList>
 
           <TabsContent value='manage' className='mt-0'>
