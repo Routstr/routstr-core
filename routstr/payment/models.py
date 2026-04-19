@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from pydantic.v1 import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..core.db import ModelRow, get_session
+from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
@@ -403,6 +403,76 @@ async def update_sats_pricing() -> None:
             break
         except Exception as e:
             logger.error(f"Error updating sats pricing: {e}")
+
+
+class ModelTestRequest(BaseModel):
+    model_id: str
+    endpoint_type: str
+    request_data: dict
+
+
+@models_router.post("/api/models/test")
+async def test_model(
+    payload: ModelTestRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Test a model by sending a request through its configured upstream provider."""
+    from sqlmodel import select
+
+    result = await session.execute(
+        select(ModelRow).where(ModelRow.id == payload.model_id)
+    )
+    model_row = result.scalars().first()
+
+    if not model_row:
+        return {
+            "success": False,
+            "error": f"Model '{payload.model_id}' not found in database",
+            "status_code": 404,
+        }
+
+    provider = await session.get(UpstreamProviderRow, model_row.upstream_provider_id)
+    if not provider:
+        return {
+            "success": False,
+            "error": "Upstream provider not found",
+            "status_code": 404,
+        }
+
+    base_url = provider.base_url.rstrip("/")
+    if payload.endpoint_type == "chat-completions":
+        url = f"{base_url}/chat/completions"
+    else:
+        url = f"{base_url}/{payload.endpoint_type}"
+
+    actual_model_id = model_row.forwarded_model_id or model_row.id
+    request_data = dict(payload.request_data)
+    request_data["model"] = actual_model_id
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {provider.api_key}",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=request_data, headers=headers)
+            try:
+                response_data = response.json()
+            except Exception:
+                response_data = {"raw": response.text}
+
+            return {
+                "success": response.status_code < 400,
+                "data": response_data,
+                "status_code": response.status_code,
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "status_code": 500,
+        }
 
 
 @models_router.get("/v1/models")
