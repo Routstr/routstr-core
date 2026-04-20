@@ -197,7 +197,11 @@ export function ModelTester({ models }: ModelTesterProps) {
     testModelMutation.mutate(request);
   };
 
-  const enabledModels = models.filter((model) => model.isEnabled);
+  const enabledModels = Array.from(
+    new Map(
+      models.filter((model) => model.isEnabled).map((m) => [m.id, m])
+    ).values()
+  );
   const credentials = selectedModel ? getModelCredentials(selectedModel) : null;
 
   return (
