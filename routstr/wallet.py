@@ -8,6 +8,7 @@ from cashu.wallet.wallet import Wallet
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
+from .core.db import store_cashu_transaction
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 
@@ -279,6 +280,8 @@ async def credit_balance(
 
     try:
         amount, unit, mint_url = await recieve_token(cashu_token)
+        original_amount = amount
+        original_unit = unit
         logger.info(
             "credit_balance: Token redeemed successfully",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
@@ -309,6 +312,19 @@ async def credit_balance(
             "credit_balance: Balance updated successfully",
             extra={"new_balance": key.balance},
         )
+
+        try:
+            await store_cashu_transaction(
+                token=cashu_token,
+                amount=original_amount,
+                unit=original_unit,
+                mint_url=mint_url,
+                typ="in",
+                source="apikey",
+                api_key_hashed_key=key.hashed_key,
+            )
+        except Exception:
+            pass
 
         logger.info(
             "Cashu token successfully redeemed and stored",

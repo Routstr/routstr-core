@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import ApiKey, CashuTransaction
+from routstr.wallet import credit_balance
 
 
 def _make_cashu_tx(
@@ -26,6 +27,12 @@ def _make_cashu_tx(
 def _exec_result(tx: CashuTransaction | None) -> MagicMock:
     result = MagicMock()
     result.first.return_value = tx
+    return result
+
+
+def _update_result(rowcount: int) -> MagicMock:
+    result = MagicMock()
+    result.rowcount = rowcount
     return result
 
 
@@ -161,6 +168,7 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
     refund_token = "cashuArefund_apikey_token"
 
     session = MagicMock()
+    session.exec = AsyncMock(return_value=_update_result(1))
     session.add = MagicMock()
     session.commit = AsyncMock()
 
@@ -186,6 +194,7 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
     assert call_kwargs["source"] == "apikey"
     assert call_kwargs["token"] == refund_token
     assert call_kwargs["typ"] == "out"
+    assert call_kwargs["api_key_hashed_key"] == key.hashed_key
 
 
 @pytest.mark.asyncio
@@ -194,6 +203,7 @@ async def test_apikey_refund_logs_token() -> None:
     refund_token = "cashuAlogged_token"
 
     session = MagicMock()
+    session.exec = AsyncMock(return_value=_update_result(1))
     session.add = MagicMock()
     session.commit = AsyncMock()
 
@@ -222,6 +232,7 @@ async def test_apikey_refund_log_includes_path() -> None:
     refund_token = "cashuApath_token"
 
     session = MagicMock()
+    session.exec = AsyncMock(return_value=_update_result(1))
     session.add = MagicMock()
     session.commit = AsyncMock()
 
@@ -248,3 +259,99 @@ async def test_apikey_refund_log_includes_path() -> None:
     assert len(token_issued_calls) == 1
     extra = token_issued_calls[0].kwargs.get("extra", {})
     assert extra.get("path") == "/v1/wallet/refund"
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_rejects_on_concurrent_balance_change() -> None:
+    """When the debit CAS fails (rowcount=0), no token is minted and 409 is returned."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=5000, refund_currency="sat")
+
+    session = MagicMock()
+    # Debit returns rowcount=0 → balance changed concurrently
+    session.exec = AsyncMock(return_value=_update_result(0))
+    session.commit = AsyncMock()
+
+    mock_send_token = AsyncMock(return_value="cashuAshould_not_be_minted")
+
+    with (
+        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", mock_send_token),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    assert exc_info.value.status_code == 409
+    # Crucially: send_token must NOT have been called
+    mock_send_token.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_credit_balance_stores_apikey_transaction_history() -> None:
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_update_result(1))
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+
+    with (
+        patch(
+            "routstr.wallet.recieve_token",
+            AsyncMock(return_value=(100, "sat", "https://mint.example")),
+        ),
+        patch("routstr.wallet.store_cashu_transaction", AsyncMock()) as mock_store,
+    ):
+        amount = await credit_balance("cashuAtopup_token", key, session)
+
+    assert amount == 100_000
+    mock_store.assert_awaited_once()
+    call_kwargs = mock_store.call_args.kwargs
+    assert call_kwargs["typ"] == "in"
+    assert call_kwargs["source"] == "apikey"
+    assert call_kwargs["api_key_hashed_key"] == key.hashed_key
+    assert call_kwargs["amount"] == 100
+    assert call_kwargs["unit"] == "sat"
+    assert call_kwargs["token"] == "cashuAtopup_token"
+    assert call_kwargs["mint_url"] == "https://mint.example"
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
+    """When debit succeeds but minting fails, balance must be restored."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=5000, refund_currency="sat")
+
+    # First exec call = debit (succeeds), second = restore
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[_update_result(1), _update_result(1)])
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", AsyncMock(side_effect=Exception("mint down"))),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch("routstr.balance.logger"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    assert exc_info.value.status_code == 503
+    # Verify two exec calls: debit + restore
+    assert session.exec.await_count == 2

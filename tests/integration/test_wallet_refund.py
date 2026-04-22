@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import ApiKey, CashuTransaction
 
 
 @pytest.mark.integration
@@ -392,6 +392,42 @@ async def test_refund_during_active_usage(
     response = await authenticated_client.get("/v1/wallet/")
     assert response.status_code == 200
     assert response.json()["balance"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_wallet_history_returns_apikey_transactions(
+    authenticated_client: AsyncClient,
+    testmint_wallet: Any,
+    integration_session: Any,
+) -> None:
+    wallet_response = await authenticated_client.get("/v1/wallet/")
+    api_key = wallet_response.json()["api_key"]
+    hashed_key = api_key[3:] if api_key.startswith("sk-") else api_key
+
+    topup_token = await testmint_wallet.mint_tokens(250)
+    topup_response = await authenticated_client.post(
+        "/v1/wallet/topup", params={"cashu_token": topup_token}
+    )
+    assert topup_response.status_code == 200
+
+    refund_response = await authenticated_client.post("/v1/wallet/refund")
+    assert refund_response.status_code == 200
+
+    history_response = await authenticated_client.get("/v1/wallet/history")
+    assert history_response.status_code == 200
+    transactions = history_response.json()["transactions"]
+    assert len(transactions) >= 2
+    assert all("api_key_hashed_key" not in tx for tx in transactions)
+    assert {tx["type"] for tx in transactions} >= {"in", "out"}
+
+    db_result = await integration_session.execute(
+        select(CashuTransaction).where(
+            CashuTransaction.api_key_hashed_key == hashed_key
+        )
+    )
+    db_transactions = db_result.scalars().all()
+    assert len(db_transactions) >= 2
 
 
 @pytest.mark.integration

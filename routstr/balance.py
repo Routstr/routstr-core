@@ -7,7 +7,7 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlmodel import select
+from sqlmodel import col, select, update
 
 from .auth import get_billing_key, validate_bearer_key
 from .core.db import (
@@ -211,6 +211,26 @@ async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
         _refund_cache[key] = (expiry, value)
 
 
+async def _restore_balance(
+    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int
+) -> None:
+    """Restore balance after a failed refund mint attempt."""
+    restore_stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == hashed_key)
+        .values(
+            balance=col(ApiKey.balance) + balance,
+            reserved_balance=col(ApiKey.reserved_balance) + reserved_balance,
+        )
+    )
+    await session.exec(restore_stmt)  # type: ignore[call-overload]
+    await session.commit()
+    logger.info(
+        "refund_wallet_endpoint: balance restored after mint failure",
+        extra={"hashed_key": hashed_key, "restored_balance": balance},
+    )
+
+
 @router.post("/refund", response_model=None)
 async def refund_wallet_endpoint(
     authorization: Annotated[str | None, Header()] = None,
@@ -292,7 +312,27 @@ async def refund_wallet_endpoint(
     elif remaining_balance <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
 
-    # Perform refund operation first, before modifying balance
+    # --- DEBIT FIRST: atomically zero the balance before minting tokens ---
+    # This prevents the race where a concurrent topup/spend happens between
+    # reading the balance and minting the refund token (double-spend).
+    debit_stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.balance) == key.balance)
+        .where(col(ApiKey.reserved_balance) == key.reserved_balance)
+        .values(balance=0, reserved_balance=0)
+    )
+    debit_result = await session.exec(debit_stmt)  # type: ignore[call-overload]
+    await session.commit()
+
+    if debit_result.rowcount == 0:
+        # Balance changed between read and debit — another request is active
+        raise HTTPException(
+            status_code=409,
+            detail="Balance changed concurrently. Please retry the refund.",
+        )
+
+    # --- MINT: balance is locked at zero, safe to create the refund token ---
     try:
         if key.refund_address:
             from .core.settings import settings as global_settings
@@ -328,10 +368,12 @@ async def refund_wallet_endpoint(
             )
 
     except HTTPException:
-        # Re-raise HTTP exceptions (like 400 for balance too small)
+        # Minting failed — restore the debited balance
+        await _restore_balance(session, key.hashed_key, key.balance, key.reserved_balance)
         raise
     except Exception as e:
-        # If refund fails, don't modify the database
+        # Minting failed — restore the debited balance
+        await _restore_balance(session, key.hashed_key, key.balance, key.reserved_balance)
         error_msg = str(e)
         if (
             "mint" in error_msg.lower()
@@ -345,12 +387,6 @@ async def refund_wallet_endpoint(
 
     await _refund_cache_set(bearer_value, result)
 
-    previous_reserved_balance = key.reserved_balance
-    key.balance = 0
-    key.reserved_balance = 0
-    session.add(key)
-    await session.commit()
-
     if "token" in result:
         try:
             await store_cashu_transaction(
@@ -361,6 +397,7 @@ async def refund_wallet_endpoint(
                 typ="out",
                 collected=False,
                 source="apikey",
+                api_key_hashed_key=key.hashed_key,
             )
         except Exception:
             pass  # store_cashu_transaction already logs
@@ -369,11 +406,46 @@ async def refund_wallet_endpoint(
         "refund_wallet_endpoint: refund successful",
         extra={
             "refunded_msats": remaining_balance_msats,
-            "previous_reserved_balance": previous_reserved_balance,
+            "previous_reserved_balance": key.reserved_balance,
         },
     )
 
     return result
+
+
+@router.get("/history")
+async def wallet_history(
+    key: ApiKey = Depends(get_key_from_header),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, list[dict[str, str | int | bool | None]]]:
+    if key.parent_key_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot view child key history. Please use the parent key instead.",
+        )
+
+    result = await session.exec(
+        select(CashuTransaction)
+        .where(CashuTransaction.api_key_hashed_key == key.hashed_key)
+        .order_by(col(CashuTransaction.created_at).desc())
+    )
+    transactions = result.all()
+    return {
+        "transactions": [
+            {
+                "id": tx.id,
+                "type": tx.type,
+                "source": tx.source,
+                "amount": tx.amount,
+                "unit": tx.unit,
+                "mint_url": tx.mint_url,
+                "created_at": tx.created_at,
+                "collected": tx.collected,
+                "swept": tx.swept,
+            }
+            for tx in transactions
+        ]
+    }
 
 
 @router.post("/donate")

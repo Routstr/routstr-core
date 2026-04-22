@@ -1360,6 +1360,7 @@ async def get_transactions_api(
                 (col(CashuTransaction.id).like(search_pattern))
                 | (col(CashuTransaction.token).like(search_pattern))
                 | (col(CashuTransaction.request_id).like(search_pattern))
+                | (col(CashuTransaction.api_key_hashed_key).like(search_pattern))
             )
 
         stmt = stmt.order_by(col(CashuTransaction.created_at).desc()).limit(limit)

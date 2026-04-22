@@ -92,6 +92,7 @@ function TransactionTable({
             <TableHead>Type</TableHead>
             <TableHead>Amount</TableHead>
             <TableHead>Status</TableHead>
+            <TableHead>API Key</TableHead>
             <TableHead>Request ID</TableHead>
             <TableHead>Mint</TableHead>
             <TableHead>Date</TableHead>
@@ -115,6 +116,31 @@ function TransactionTable({
                 {tx.amount} {tx.unit}
               </TableCell>
               <TableCell>{getStatusBadge(tx)}</TableCell>
+              <TableCell>
+                {tx.api_key_hashed_key ? (
+                  <div className='flex items-center gap-1 text-xs'>
+                    <span className='max-w-[120px] truncate font-mono'>
+                      {tx.api_key_hashed_key.slice(0, 12)}...
+                    </span>
+                    <Button
+                      variant='ghost'
+                      size='icon'
+                      className='h-4 w-4'
+                      onClick={() =>
+                        onCopy(tx.api_key_hashed_key!, tx.id + '-apikey')
+                      }
+                    >
+                      {copiedId === tx.id + '-apikey' ? (
+                        <Check className='h-3 w-3' />
+                      ) : (
+                        <Copy className='h-3 w-3' />
+                      )}
+                    </Button>
+                  </div>
+                ) : (
+                  <span className='text-muted-foreground text-xs'>—</span>
+                )}
+              </TableCell>
               <TableCell>
                 {tx.request_id ? (
                   <div className='flex items-center gap-1 text-xs'>
@@ -325,7 +351,7 @@ export default function TransactionsPage() {
                   <Search className='text-muted-foreground absolute top-2.5 left-2.5 h-4 w-4' />
                   <Input
                     id='search'
-                    placeholder='Search by ID, token or request ID...'
+                    placeholder='Search by ID, token, request ID or key hash...'
                     className='pl-8'
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
@@ -385,7 +411,7 @@ export default function TransactionsPage() {
             </TabsTrigger>
             <TabsTrigger value='apikey' className='flex items-center gap-2'>
               <Key className='h-4 w-4' />
-              API Key Refunds
+              API Key
               {data && (
                 <Badge variant='secondary' className='ml-1'>
                   {apikeyTxs.length}
@@ -416,7 +442,7 @@ export default function TransactionsPage() {
             <Card>
               <CardHeader>
                 <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                  <CardTitle>API Key Refund History</CardTitle>
+                  <CardTitle>API Key Transaction History</CardTitle>
                   {hasActiveFilters && (
                     <CardDescription>
                       Filtered by {activeFilterDescription}

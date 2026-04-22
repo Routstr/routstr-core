@@ -1136,6 +1136,7 @@ export interface Transaction {
   collected: boolean;
   swept: boolean;
   source: 'x-cashu' | 'apikey';
+  api_key_hashed_key?: string;
 }
 
 export interface TransactionsResponse {
