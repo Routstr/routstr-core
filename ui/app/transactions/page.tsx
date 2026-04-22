@@ -339,7 +339,6 @@ export default function TransactionsPage() {
     setApikeyPage(0);
   }, [type, status, search]);
 
-  const activeQuery = activeTab === 'x-cashu' ? xcashuQuery : apikeyQuery;
   const isRefetching = xcashuQuery.isRefetching || apikeyQuery.isRefetching;
 
   const renderCardContent = (
