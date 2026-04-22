@@ -891,13 +891,17 @@ export class AdminService {
     type?: string,
     status?: string,
     search?: string,
-    limit: number = 100
+    source?: string,
+    limit: number = 50,
+    offset: number = 0
   ): Promise<TransactionsResponse> {
     const params = new URLSearchParams();
     if (type) params.append('type', type);
     if (status) params.append('status', status);
     if (search) params.append('search', search);
+    if (source) params.append('source', source);
     params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
 
     return await apiClient.get<TransactionsResponse>(
       `/admin/api/transactions?${params.toString()}`

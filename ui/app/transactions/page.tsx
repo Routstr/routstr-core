@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
 import {
@@ -50,6 +50,8 @@ import {
   Receipt,
   Key,
   Zap,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { AdminService, type Transaction } from '@/lib/api/services/admin';
 import { format } from 'date-fns';
@@ -225,21 +227,63 @@ export default function TransactionsPage() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(filters));
   }, [search, type, status]);
 
-  const { data, isLoading, refetch, isRefetching } = useQuery({
-    queryKey: ['transactions', type, status, search],
+  const PAGE_SIZE = 50;
+  const [activeTab, setActiveTab] = useState<string>('x-cashu');
+  const [xcashuPage, setXcashuPage] = useState(0);
+  const [apikeyPage, setApikeyPage] = useState(0);
+
+  const typeParam = type === 'all' ? undefined : type;
+  const statusParam = status === 'all' ? undefined : status;
+  const searchParam = search || undefined;
+
+  const xcashuQuery = useQuery({
+    queryKey: [
+      'transactions',
+      'x-cashu',
+      typeParam,
+      statusParam,
+      searchParam,
+      xcashuPage,
+    ],
     queryFn: () =>
       AdminService.getTransactions(
-        type === 'all' ? undefined : type,
-        status === 'all' ? undefined : status,
-        search || undefined,
-        100
+        typeParam,
+        statusParam,
+        searchParam,
+        'x-cashu',
+        PAGE_SIZE,
+        xcashuPage * PAGE_SIZE
       ),
+    placeholderData: keepPreviousData,
+  });
+
+  const apikeyQuery = useQuery({
+    queryKey: [
+      'transactions',
+      'apikey',
+      typeParam,
+      statusParam,
+      searchParam,
+      apikeyPage,
+    ],
+    queryFn: () =>
+      AdminService.getTransactions(
+        typeParam,
+        statusParam,
+        searchParam,
+        'apikey',
+        PAGE_SIZE,
+        apikeyPage * PAGE_SIZE
+      ),
+    placeholderData: keepPreviousData,
   });
 
   const handleClearFilters = () => {
     setSearch('');
     setType('all');
     setStatus('all');
+    setXcashuPage(0);
+    setApikeyPage(0);
   };
 
   const copyToClipboard = (text: string, id: string) => {
@@ -289,14 +333,21 @@ export default function TransactionsPage() {
     .filter(Boolean)
     .join(' • ');
 
-  const xcashuTxs =
-    data?.transactions.filter((tx) => !tx.source || tx.source === 'x-cashu') ??
-    [];
-  const apikeyTxs =
-    data?.transactions.filter((tx) => tx.source === 'apikey') ?? [];
+  // Reset pages when filters change
+  useEffect(() => {
+    setXcashuPage(0);
+    setApikeyPage(0);
+  }, [type, status, search]);
 
-  const renderCardContent = (txs: Transaction[]) => {
-    if (isLoading) {
+  const activeQuery = activeTab === 'x-cashu' ? xcashuQuery : apikeyQuery;
+  const isRefetching = xcashuQuery.isRefetching || apikeyQuery.isRefetching;
+
+  const renderCardContent = (
+    query: typeof xcashuQuery,
+    page: number,
+    setPage: (p: number) => void
+  ) => {
+    if (query.isLoading) {
       return (
         <div className='space-y-2'>
           {Array.from({ length: 8 }).map((_, index) => (
@@ -308,13 +359,51 @@ export default function TransactionsPage() {
         </div>
       );
     }
+
+    const transactions = query.data?.transactions ?? [];
+    const total = query.data?.total ?? 0;
+    const totalPages = Math.ceil(total / PAGE_SIZE);
+
     return (
-      <TransactionTable
-        transactions={txs}
-        copiedId={copiedId}
-        onCopy={copyToClipboard}
-        getStatusBadge={getStatusBadge}
-      />
+      <>
+        {totalPages > 1 && (
+          <div className='flex flex-col gap-2 border-b pb-3 sm:flex-row sm:items-center sm:justify-between'>
+            <span className='text-muted-foreground text-xs sm:text-sm'>
+              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)}{' '}
+              of {total}
+            </span>
+            <div className='flex items-center gap-2'>
+              <Button
+                variant='outline'
+                size='sm'
+                disabled={page === 0}
+                onClick={() => setPage(page - 1)}
+              >
+                <ChevronLeft className='h-4 w-4' />
+                <span className='hidden sm:inline'>Previous</span>
+              </Button>
+              <span className='text-xs sm:text-sm'>
+                {page + 1} / {totalPages}
+              </span>
+              <Button
+                variant='outline'
+                size='sm'
+                disabled={page >= totalPages - 1}
+                onClick={() => setPage(page + 1)}
+              >
+                <span className='hidden sm:inline'>Next</span>
+                <ChevronRight className='h-4 w-4' />
+              </Button>
+            </div>
+          </div>
+        )}
+        <TransactionTable
+          transactions={transactions}
+          copiedId={copiedId}
+          onCopy={copyToClipboard}
+          getStatusBadge={getStatusBadge}
+        />
+      </>
     );
   };
 
@@ -326,7 +415,10 @@ export default function TransactionsPage() {
           description='View all incoming and outgoing Cashu token transactions.'
           actions={
             <Button
-              onClick={() => refetch()}
+              onClick={() => {
+                xcashuQuery.refetch();
+                apikeyQuery.refetch();
+              }}
               variant='outline'
               size='sm'
               disabled={isRefetching}
@@ -401,23 +493,27 @@ export default function TransactionsPage() {
           </CardContent>
         </Card>
 
-        <Tabs defaultValue='x-cashu'>
+        <Tabs
+          defaultValue='x-cashu'
+          value={activeTab}
+          onValueChange={setActiveTab}
+        >
           <TabsList className='mb-4'>
             <TabsTrigger value='x-cashu' className='flex items-center gap-2'>
               <Zap className='h-4 w-4' />
               X-Cashu
-              {data && (
+              {xcashuQuery.data && (
                 <Badge variant='secondary' className='ml-1'>
-                  {xcashuTxs.length}
+                  {xcashuQuery.data.total}
                 </Badge>
               )}
             </TabsTrigger>
             <TabsTrigger value='apikey' className='flex items-center gap-2'>
               <Key className='h-4 w-4' />
               API Key
-              {data && (
+              {apikeyQuery.data && (
                 <Badge variant='secondary' className='ml-1'>
-                  {apikeyTxs.length}
+                  {apikeyQuery.data.total}
                 </Badge>
               )}
             </TabsTrigger>
@@ -436,7 +532,7 @@ export default function TransactionsPage() {
                 </div>
               </CardHeader>
               <CardContent className='overflow-hidden'>
-                {renderCardContent(xcashuTxs)}
+                {renderCardContent(xcashuQuery, xcashuPage, setXcashuPage)}
               </CardContent>
             </Card>
           </TabsContent>
@@ -454,7 +550,7 @@ export default function TransactionsPage() {
                 </div>
               </CardHeader>
               <CardContent className='overflow-hidden'>
-                {renderCardContent(apikeyTxs)}
+                {renderCardContent(apikeyQuery, apikeyPage, setApikeyPage)}
               </CardContent>
             </Card>
           </TabsContent>
