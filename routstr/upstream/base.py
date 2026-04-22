@@ -421,75 +421,83 @@ class BaseUpstreamProvider:
         """
         pass
 
-    async def map_upstream_error_response(
+    async def forward_upstream_error_response(
         self, request: Request, path: str, upstream_response: httpx.Response
     ) -> Response:
-        """Map upstream error responses to appropriate proxy error responses.
-
-        Args:
-            request: Original FastAPI request
-            path: Request path
-            upstream_response: Response from upstream service
-
-        Returns:
-            Mapped error response with appropriate status code and error type
-        """
+        """Log upstream errors and forward the upstream response unchanged."""
         status_code = upstream_response.status_code
         headers = dict(upstream_response.headers)
-        content_type = headers.get("content-type", "")
+        content_type = headers.get("content-type") or headers.get("Content-Type", "")
+        upstream_request_id = (
+            headers.get("request-id")
+            or headers.get("Request-Id")
+            or headers.get("x-request-id")
+            or headers.get("X-Request-Id")
+            or headers.get("anthropic-request-id")
+            or headers.get("openai-request-id")
+        )
+
+        body_read_error = None
         try:
             body_bytes = await upstream_response.aread()
-        except Exception:
+        except Exception as exc:
             body_bytes = b""
+            body_read_error = f"{type(exc).__name__}: {exc}"
 
         message, upstream_code = self._extract_upstream_error_message(body_bytes)
-        lowered_message = message.lower()
-        lowered_code = (upstream_code or "").lower()
+        body_preview = body_bytes.decode("utf-8", errors="ignore").strip()[:500]
 
-        error_type = "upstream_error"
-        mapped_status = 502
-
-        if status_code in (400, 422):
-            error_type = "invalid_request_error"
-            mapped_status = 400
-        elif status_code in (401, 403):
-            error_type = "upstream_auth_error"
-            mapped_status = 502
-        elif status_code == 404:
-            if path.endswith("chat/completions"):
-                error_type = "invalid_model"
-                mapped_status = 400
-                if not message or message == "Upstream request failed":
-                    message = "Requested model is not available upstream"
-            elif "model" in lowered_message or "model" in lowered_code:
-                error_type = "invalid_model"
-                mapped_status = 400
-                if not message or message == "Upstream request failed":
-                    message = "Requested model is not available upstream"
-            else:
-                error_type = "upstream_error"
-                mapped_status = 502
-        elif status_code == 429:
-            error_type = "rate_limit_exceeded"
-            mapped_status = 429
-        elif status_code >= 500:
-            error_type = "upstream_error"
-            mapped_status = 502
-
-        logger.debug(
-            "Mapped upstream error",
+        logger.warning(
+            "Forwarding upstream error response as-is",
             extra={
                 "path": path,
+                "provider": self.provider_type,
                 "upstream_status": status_code,
-                "mapped_status": mapped_status,
-                "error_type": error_type,
+                "upstream_code": upstream_code,
                 "upstream_content_type": content_type,
+                "upstream_request_id": upstream_request_id,
                 "message_preview": message[:200],
+                "body_preview": body_preview,
+                "body_read_error": body_read_error,
+                "method": request.method,
             },
         )
 
-        return create_error_response(
-            error_type, message, mapped_status, request=request
+        for header_name in (
+            "content-length",
+            "Content-Length",
+            "transfer-encoding",
+            "Transfer-Encoding",
+            "content-encoding",
+            "Content-Encoding",
+            "connection",
+            "Connection",
+            "keep-alive",
+            "Keep-Alive",
+            "proxy-authenticate",
+            "Proxy-Authenticate",
+            "proxy-authorization",
+            "Proxy-Authorization",
+            "te",
+            "TE",
+            "trailer",
+            "Trailer",
+            "upgrade",
+            "Upgrade",
+        ):
+            headers.pop(header_name, None)
+
+        if not content_type:
+            headers.pop("content-type", None)
+            headers.pop("Content-Type", None)
+
+        media_type = content_type or None
+
+        return Response(
+            content=body_bytes,
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
         )
 
     async def handle_streaming_chat_completion(
@@ -1500,7 +1508,7 @@ class BaseUpstreamProvider:
                     )
 
                 try:
-                    mapped_error = await self.map_upstream_error_response(
+                    mapped_error = await self.forward_upstream_error_response(
                         request, path, response
                     )
                 finally:
@@ -1807,7 +1815,7 @@ class BaseUpstreamProvider:
                     )
 
                 try:
-                    mapped_error = await self.map_upstream_error_response(
+                    mapped_error = await self.forward_upstream_error_response(
                         request, path, response
                     )
                 finally:
@@ -1979,7 +1987,7 @@ class BaseUpstreamProvider:
                 )
                 if response.status_code != 200:
                     try:
-                        mapped = await self.map_upstream_error_response(
+                        mapped = await self.forward_upstream_error_response(
                             request, path, response
                         )
                     finally:
