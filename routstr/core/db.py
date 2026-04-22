@@ -159,6 +159,12 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         default="x-cashu",
         description="Payment source: x-cashu or apikey",
     )
+    api_key_hashed_key: str | None = Field(
+        default=None,
+        foreign_key="api_keys.hashed_key",
+        index=True,
+        description="Associated API key hash for wallet history",
+    )
 
 
 async def store_cashu_transaction(
@@ -171,6 +177,7 @@ async def store_cashu_transaction(
     collected: bool = False,
     created_at: int | None = None,
     source: str = "x-cashu",
+    api_key_hashed_key: str | None = None,
 ) -> None:
     try:
         async with create_session() as session:
@@ -184,6 +191,7 @@ async def store_cashu_transaction(
                 collected=collected,
                 created_at=created_at or int(time.time()),
                 source=source,
+                api_key_hashed_key=api_key_hashed_key,
             )
             session.add(tx)
             await session.commit()

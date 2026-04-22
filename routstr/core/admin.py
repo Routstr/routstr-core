@@ -1388,41 +1388,56 @@ async def get_transactions_api(
     type: str | None = None,
     status: str | None = None,
     search: str | None = None,
-    limit: int = 100,
+    source: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     async with create_session() as session:
-        from sqlmodel import col
+        from sqlmodel import col, func
 
-        stmt = select(CashuTransaction)
+        base = select(CashuTransaction)
         if type:
-            stmt = stmt.where(CashuTransaction.type == type)
+            base = base.where(CashuTransaction.type == type)
+        if source:
+            if source == "x-cashu":
+                base = base.where(
+                    (CashuTransaction.source == "x-cashu")
+                    | (CashuTransaction.source == None)  # noqa: E711
+                )
+            else:
+                base = base.where(CashuTransaction.source == source)
         if status:
             if status == "collected":
-                stmt = stmt.where(CashuTransaction.collected == True)  # noqa: E712
+                base = base.where(CashuTransaction.collected == True)  # noqa: E712
             elif status == "swept":
-                stmt = stmt.where(CashuTransaction.swept == True)  # noqa: E712
+                base = base.where(CashuTransaction.swept == True)  # noqa: E712
             elif status == "pending":
-                stmt = stmt.where(
+                base = base.where(
                     CashuTransaction.collected == False,  # noqa: E712
                     CashuTransaction.swept == False,  # noqa: E712
                 )
 
         if search:
             search_pattern = f"%{search}%"
-            stmt = stmt.where(
+            base = base.where(
                 (col(CashuTransaction.id).like(search_pattern))
                 | (col(CashuTransaction.token).like(search_pattern))
                 | (col(CashuTransaction.request_id).like(search_pattern))
+                | (col(CashuTransaction.api_key_hashed_key).like(search_pattern))
             )
 
-        stmt = stmt.order_by(col(CashuTransaction.created_at).desc()).limit(limit)
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
 
+        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
         results = await session.exec(stmt)
         transactions = results.all()
 
         return {
             "transactions": [tx.dict() for tx in transactions],
-            "total": len(transactions),
+            "total": total,
         }
 
 
