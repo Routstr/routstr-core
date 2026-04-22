@@ -316,21 +316,34 @@ async def test_concurrent_refund_requests(
     assert response.status_code == 200
     api_key = response.json()["api_key"]
 
-    # Execute two concurrent refund requests (sufficient to test concurrency)
+    # Create multiple concurrent refund requests
+    [
+        {
+            "method": "POST",
+            "url": "/v1/wallet/refund",
+            "headers": {"Authorization": f"Bearer {api_key}"},
+        }
+        for _ in range(5)
+    ]
+
+    # Execute concurrently with exception handling
     async def refund_request(client: AsyncClient, api_key: str) -> Any:
         try:
             headers = {"Authorization": f"Bearer {api_key}"}
             return await client.post("/v1/wallet/refund", headers=headers)
         except Exception as e:
+            # Return a mock response for exceptions
             class MockResponse:
                 status_code = 500
                 text = str(e)
 
             return MockResponse()
 
-    tasks = [refund_request(integration_client, api_key) for _ in range(2)]
+    # Create tasks
+    tasks = [refund_request(integration_client, api_key) for _ in range(5)]
     responses = await asyncio.gather(*tasks, return_exceptions=False)
 
+    # Count successes and failures
     successful = [
         r for r in responses if hasattr(r, "status_code") and r.status_code == 200
     ]
@@ -338,8 +351,9 @@ async def test_concurrent_refund_requests(
         r for r in responses if hasattr(r, "status_code") and r.status_code != 200
     ]
 
+    # At least one should succeed (the first one)
     assert len(successful) >= 1
-    assert len(successful) + len(failed) == 2
+    assert len(successful) + len(failed) == 5
 
 
 @pytest.mark.integration
@@ -361,11 +375,15 @@ async def test_refund_rejects_concurrent_topup_on_same_key(
     validate_called = asyncio.Event()
     allow_refund_to_continue = asyncio.Event()
     original_validate_bearer_key = balance_module.validate_bearer_key
+    delayed_once = False
 
     async def delayed_validate_bearer_key(*args: Any, **kwargs: Any) -> ApiKey:
+        nonlocal delayed_once
         key = await original_validate_bearer_key(*args, **kwargs)
-        validate_called.set()
-        await allow_refund_to_continue.wait()
+        if not delayed_once:
+            delayed_once = True
+            validate_called.set()
+            await allow_refund_to_continue.wait()
         return key
 
     async def issue_refund() -> Any:
