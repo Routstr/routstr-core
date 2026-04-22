@@ -312,14 +312,18 @@ async def refund_wallet_endpoint(
     elif remaining_balance <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
 
+    # Capture values before debit — the session may refresh key after commit
+    pre_debit_balance = key.balance
+    pre_debit_reserved = key.reserved_balance
+
     # --- DEBIT FIRST: atomically zero the balance before minting tokens ---
     # This prevents the race where a concurrent topup/spend happens between
     # reading the balance and minting the refund token (double-spend).
     debit_stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == key.hashed_key)
-        .where(col(ApiKey.balance) == key.balance)
-        .where(col(ApiKey.reserved_balance) == key.reserved_balance)
+        .where(col(ApiKey.balance) == pre_debit_balance)
+        .where(col(ApiKey.reserved_balance) == pre_debit_reserved)
         .values(balance=0, reserved_balance=0)
     )
     debit_result = await session.exec(debit_stmt)  # type: ignore[call-overload]
@@ -369,11 +373,11 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, key.balance, key.reserved_balance)
+        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, key.balance, key.reserved_balance)
+        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
         error_msg = str(e)
         if (
             "mint" in error_msg.lower()
