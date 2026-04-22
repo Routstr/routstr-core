@@ -31,7 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Empty,
@@ -86,111 +86,114 @@ function TransactionTable({
 
   return (
     <ScrollArea className='h-[55svh] min-h-[420px] w-full sm:h-[600px]'>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Type</TableHead>
-            <TableHead>Amount</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>API Key</TableHead>
-            <TableHead>Request ID</TableHead>
-            <TableHead>Mint</TableHead>
-            <TableHead>Date</TableHead>
-            <TableHead className='text-right'>Actions</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {transactions.map((tx) => (
-            <TableRow key={tx.id}>
-              <TableCell>
-                <div className='flex items-center gap-2'>
-                  {tx.type === 'in' ? (
-                    <ArrowDownLeft className='h-4 w-4 text-green-500' />
-                  ) : (
-                    <ArrowUpRight className='h-4 w-4 text-blue-500' />
-                  )}
-                  <span className='capitalize'>{tx.type}</span>
-                </div>
-              </TableCell>
-              <TableCell className='font-mono'>
-                {tx.amount} {tx.unit}
-              </TableCell>
-              <TableCell>{getStatusBadge(tx)}</TableCell>
-              <TableCell>
-                {tx.api_key_hashed_key ? (
-                  <div className='flex items-center gap-1 text-xs'>
-                    <span className='max-w-[120px] truncate font-mono'>
-                      {tx.api_key_hashed_key.slice(0, 12)}...
-                    </span>
-                    <Button
-                      variant='ghost'
-                      size='icon'
-                      className='h-4 w-4'
-                      onClick={() =>
-                        onCopy(tx.api_key_hashed_key!, tx.id + '-apikey')
-                      }
-                    >
-                      {copiedId === tx.id + '-apikey' ? (
-                        <Check className='h-3 w-3' />
-                      ) : (
-                        <Copy className='h-3 w-3' />
-                      )}
-                    </Button>
-                  </div>
-                ) : (
-                  <span className='text-muted-foreground text-xs'>—</span>
-                )}
-              </TableCell>
-              <TableCell>
-                {tx.request_id ? (
-                  <div className='flex items-center gap-1 text-xs'>
-                    <span className='max-w-[150px] truncate font-mono'>
-                      {tx.request_id}
-                    </span>
-                    <Button
-                      variant='ghost'
-                      size='icon'
-                      className='h-4 w-4'
-                      onClick={() => onCopy(tx.request_id!, tx.id + '-req')}
-                    >
-                      {copiedId === tx.id + '-req' ? (
-                        <Check className='h-3 w-3' />
-                      ) : (
-                        <Copy className='h-3 w-3' />
-                      )}
-                    </Button>
-                  </div>
-                ) : (
-                  <span className='text-muted-foreground text-xs'>—</span>
-                )}
-              </TableCell>
-              <TableCell>
-                <div className='flex max-w-[150px] items-center gap-1 truncate text-xs'>
-                  <span className='truncate'>{tx.mint_url}</span>
-                </div>
-              </TableCell>
-              <TableCell className='text-xs whitespace-nowrap'>
-                {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
-              </TableCell>
-              <TableCell className='text-right'>
-                <Button
-                  variant='ghost'
-                  size='icon'
-                  className='h-8 w-8'
-                  onClick={() => onCopy(tx.token, tx.id + '-token')}
-                  title='Copy Token'
-                >
-                  {copiedId === tx.id + '-token' ? (
-                    <Check className='h-4 w-4' />
-                  ) : (
-                    <Copy className='h-4 w-4' />
-                  )}
-                </Button>
-              </TableCell>
+      <div className='min-w-[800px]'>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Type</TableHead>
+              <TableHead>Amount</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>API Key</TableHead>
+              <TableHead>Request ID</TableHead>
+              <TableHead>Mint</TableHead>
+              <TableHead>Date</TableHead>
+              <TableHead className='text-right'>Actions</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {transactions.map((tx) => (
+              <TableRow key={tx.id}>
+                <TableCell>
+                  <div className='flex items-center gap-2'>
+                    {tx.type === 'in' ? (
+                      <ArrowDownLeft className='h-4 w-4 text-green-500' />
+                    ) : (
+                      <ArrowUpRight className='h-4 w-4 text-blue-500' />
+                    )}
+                    <span className='capitalize'>{tx.type}</span>
+                  </div>
+                </TableCell>
+                <TableCell className='font-mono'>
+                  {tx.amount} {tx.unit}
+                </TableCell>
+                <TableCell>{getStatusBadge(tx)}</TableCell>
+                <TableCell>
+                  {tx.api_key_hashed_key ? (
+                    <div className='flex items-center gap-1 text-xs'>
+                      <span className='max-w-[120px] truncate font-mono'>
+                        {tx.api_key_hashed_key.slice(0, 12)}...
+                      </span>
+                      <Button
+                        variant='ghost'
+                        size='icon'
+                        className='h-4 w-4'
+                        onClick={() =>
+                          onCopy(tx.api_key_hashed_key!, tx.id + '-apikey')
+                        }
+                      >
+                        {copiedId === tx.id + '-apikey' ? (
+                          <Check className='h-3 w-3' />
+                        ) : (
+                          <Copy className='h-3 w-3' />
+                        )}
+                      </Button>
+                    </div>
+                  ) : (
+                    <span className='text-muted-foreground text-xs'>—</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {tx.request_id ? (
+                    <div className='flex items-center gap-1 text-xs'>
+                      <span className='max-w-[150px] truncate font-mono'>
+                        {tx.request_id}
+                      </span>
+                      <Button
+                        variant='ghost'
+                        size='icon'
+                        className='h-4 w-4'
+                        onClick={() => onCopy(tx.request_id!, tx.id + '-req')}
+                      >
+                        {copiedId === tx.id + '-req' ? (
+                          <Check className='h-3 w-3' />
+                        ) : (
+                          <Copy className='h-3 w-3' />
+                        )}
+                      </Button>
+                    </div>
+                  ) : (
+                    <span className='text-muted-foreground text-xs'>—</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <div className='flex max-w-[150px] items-center gap-1 truncate text-xs'>
+                    <span className='truncate'>{tx.mint_url}</span>
+                  </div>
+                </TableCell>
+                <TableCell className='text-xs whitespace-nowrap'>
+                  {format(tx.created_at * 1000, 'yyyy-MM-dd HH:mm:ss')}
+                </TableCell>
+                <TableCell className='text-right'>
+                  <Button
+                    variant='ghost'
+                    size='icon'
+                    className='h-8 w-8'
+                    onClick={() => onCopy(tx.token, tx.id + '-token')}
+                    title='Copy Token'
+                  >
+                    {copiedId === tx.id + '-token' ? (
+                      <Check className='h-4 w-4' />
+                    ) : (
+                      <Copy className='h-4 w-4' />
+                    )}
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+      <ScrollBar orientation='horizontal' />
     </ScrollArea>
   );
 }
