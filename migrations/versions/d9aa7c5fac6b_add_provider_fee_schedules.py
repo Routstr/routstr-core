@@ -1,16 +1,16 @@
 """add provider_fee_schedules to upstream_providers
 
-Revision ID: a3b4c5d6e7f8
-Revises: 614c0a740e68
-Create Date: 2026-04-12 00:00:00.000000
+Revision ID: d9aa7c5fac6b
+Revises: d4e5f6a7b8c9
+Create Date: 2026-04-23 00:00:00.000000
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "a3b4c5d6e7f8"
-down_revision = "c3d4e5f6a7b8"
+revision = "d9aa7c5fac6b"
+down_revision = "d4e5f6a7b8c9"
 branch_labels = None
 depends_on = None
 
