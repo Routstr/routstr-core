@@ -589,6 +589,46 @@ async def periodic_refund_sweep() -> None:
             )
 
 
+async def periodic_routstr_fee_payout() -> None:
+    from .auth import (
+        ROUTSTR_FEE_DEFAULT_PAYOUT,
+        ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS,
+        ROUTSTR_LN_ADDRESS,
+    )
+
+    if not ROUTSTR_LN_ADDRESS:
+        logger.info("ROUTSTR_LN_ADDRESS not set, skipping fee payout")
+        return
+    while True:
+        await asyncio.sleep(ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS)
+        try:
+            async with db.create_session() as session:
+                fee = await db.get_routstr_fee(session)
+                accumulated_sats = fee.accumulated_msats // 1000
+                if accumulated_sats >= ROUTSTR_FEE_DEFAULT_PAYOUT:
+                    wallet = await get_wallet(settings.primary_mint, "sat")
+                    proofs = get_proofs_per_mint_and_unit(
+                        wallet, settings.primary_mint, "sat", not_reserved=True
+                    )
+                    amount_received = await raw_send_to_lnurl(
+                        wallet, proofs, ROUTSTR_LN_ADDRESS, "sat", amount=accumulated_sats
+                    )
+                    paid_msats = accumulated_sats * 1000
+                    await db.reset_routstr_fee(session, paid_msats)
+                    logger.info(
+                        "Routstr fee payout sent",
+                        extra={
+                            "accumulated_sats": accumulated_sats,
+                            "amount_received": amount_received,
+                        },
+                    )
+        except Exception as e:
+            logger.error(
+                f"Error in Routstr fee payout: {type(e).__name__}",
+                extra={"error": str(e)},
+            )
+
+
 async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
     wallet = await get_wallet(mint, unit)
     proofs = wallet._get_proofs_per_keyset(wallet.proofs)[wallet.keyset_id]

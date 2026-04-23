@@ -22,7 +22,7 @@ from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..upstream.auto_topup import periodic_auto_topup
-from ..wallet import periodic_payout, periodic_refund_sweep
+from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
@@ -56,6 +56,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     key_reset_task = None
     auto_topup_task = None
     refund_sweep_task = None
+    routstr_fee_task = None
 
     try:
         # Run database migrations on startup
@@ -115,6 +116,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         key_reset_task = asyncio.create_task(periodic_key_reset())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
+        routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
 
         yield
 
@@ -152,6 +154,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             auto_topup_task.cancel()
         if refund_sweep_task is not None:
             refund_sweep_task.cancel()
+        if routstr_fee_task is not None:
+            routstr_fee_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -177,6 +181,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(auto_topup_task)
             if refund_sweep_task is not None:
                 tasks_to_wait.append(refund_sweep_task)
+            if routstr_fee_task is not None:
+                tasks_to_wait.append(routstr_fee_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)

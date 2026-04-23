@@ -12,7 +12,7 @@ from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
-from sqlmodel import Field, Relationship, SQLModel, func, select, update
+from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
@@ -229,6 +229,50 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         back_populates="upstream_provider",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+
+
+class RoutstrFee(SQLModel, table=True):  # type: ignore
+    __tablename__ = "routstr_fees"
+    id: int = Field(default=1, primary_key=True)
+    accumulated_msats: int = Field(default=0)
+    total_paid_msats: int = Field(default=0)
+    last_paid_at: int | None = Field(default=None)
+
+
+async def accumulate_routstr_fee(session: AsyncSession, amount_msats: int) -> None:
+    stmt = (
+        update(RoutstrFee)
+        .where(col(RoutstrFee.id) == 1)
+        .values(accumulated_msats=RoutstrFee.accumulated_msats + amount_msats)
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    if result.rowcount == 0:
+        session.add(RoutstrFee(id=1, accumulated_msats=amount_msats))
+    await session.commit()
+
+
+async def get_routstr_fee(session: AsyncSession) -> RoutstrFee:
+    fee = await session.get(RoutstrFee, 1)
+    if fee is None:
+        fee = RoutstrFee(id=1, accumulated_msats=0, total_paid_msats=0)
+        session.add(fee)
+        await session.commit()
+        await session.refresh(fee)
+    return fee
+
+
+async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> None:
+    stmt = (
+        update(RoutstrFee)
+        .where(col(RoutstrFee.id) == 1)
+        .values(
+            accumulated_msats=RoutstrFee.accumulated_msats - paid_msats,
+            total_paid_msats=RoutstrFee.total_paid_msats + paid_msats,
+            last_paid_at=int(time.time()),
+        )
+    )
+    await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
 
 
 async def balances_for_mint_and_unit(
