@@ -1,15 +1,15 @@
 """add routstr_fees table
 
-Revision ID: d4e5f6a7b8c9
+Revision ID: 02650cd6f028
 Revises: c3d4e5f6a7b8
-Create Date: 2026-03-20 00:00:00.000000
+Create Date: 2026-04-24 00:00:00.000000
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "d4e5f6a7b8c9"
+revision = "02650cd6f028"
 down_revision = "c3d4e5f6a7b8"
 branch_labels = None
 depends_on = None
