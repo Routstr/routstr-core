@@ -20,6 +20,7 @@ from ..wallet import (
 from .db import (
     ApiKey,
     CashuTransaction,
+    CliToken,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -38,12 +39,27 @@ ADMIN_SESSION_DURATION = 3600
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
-def require_admin_api(request: Request) -> None:
+async def require_admin_api(request: Request) -> None:
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1]
-        expiry = admin_sessions.get(token)
-        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    token = auth_header.split(" ", 1)[1]
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    # 1) Short-lived session token (in-memory)
+    expiry = admin_sessions.get(token)
+    if expiry and expiry > now_ts:
+        return
+
+    # 2) Long-lived CLI token (DB-backed)
+    async with create_session() as session:
+        result = await session.exec(select(CliToken).where(CliToken.token == token))
+        cli_token = result.first()
+        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+            cli_token.last_used_at = now_ts
+            session.add(cli_token)
+            await session.commit()
             return
 
     raise HTTPException(status_code=403, detail="Unauthorized")
@@ -240,6 +256,73 @@ async def admin_logout(request: Request) -> dict[str, object]:
             del admin_sessions[token]
 
     return {"ok": True}
+
+
+# ─── CLI Tokens (long-lived bearer tokens for CLI/agent use) ───
+
+
+class CliTokenCreate(BaseModel):
+    name: str
+    expires_in_days: int | None = None
+
+
+@admin_router.get("/api/cli-tokens", dependencies=[Depends(require_admin_api)])
+async def list_cli_tokens() -> list[dict[str, object]]:
+    async with create_session() as session:
+        result = await session.exec(select(CliToken))
+        tokens = result.all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "token_preview": f"{t.token[:8]}...{t.token[-4:]}",
+            "created_at": t.created_at,
+            "last_used_at": t.last_used_at,
+            "expires_at": t.expires_at,
+        }
+        for t in tokens
+    ]
+
+
+@admin_router.post("/api/cli-tokens", dependencies=[Depends(require_admin_api)])
+async def create_cli_token(payload: CliTokenCreate) -> dict[str, object]:
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    raw_token = secrets.token_urlsafe(32)
+    expires_at: int | None = None
+    if payload.expires_in_days is not None and payload.expires_in_days > 0:
+        expires_at = int(datetime.now(timezone.utc).timestamp()) + (
+            payload.expires_in_days * 86400
+        )
+
+    async with create_session() as session:
+        cli_token = CliToken(token=raw_token, name=name, expires_at=expires_at)
+        session.add(cli_token)
+        await session.commit()
+        await session.refresh(cli_token)
+
+    return {
+        "id": cli_token.id,
+        "name": cli_token.name,
+        "token": raw_token,  # full token returned only on creation
+        "created_at": cli_token.created_at,
+        "expires_at": cli_token.expires_at,
+    }
+
+
+@admin_router.delete(
+    "/api/cli-tokens/{token_id}", dependencies=[Depends(require_admin_api)]
+)
+async def revoke_cli_token(token_id: str) -> dict[str, object]:
+    async with create_session() as session:
+        cli_token = await session.get(CliToken, token_id)
+        if not cli_token:
+            raise HTTPException(status_code=404, detail="Token not found")
+        await session.delete(cli_token)
+        await session.commit()
+    return {"ok": True, "deleted_id": token_id}
 
 
 class WithdrawRequest(BaseModel):
