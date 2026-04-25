@@ -966,6 +966,45 @@ export class AdminService {
       balance_data: number | null | Record<string, unknown>;
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
+
+  // ── CLI Tokens ──
+
+  static async listCliTokens(): Promise<CliTokenListItem[]> {
+    return await apiClient.get<CliTokenListItem[]>('/admin/api/cli-tokens');
+  }
+
+  static async createCliToken(
+    name: string,
+    expiresInDays?: number
+  ): Promise<CliTokenCreated> {
+    return await apiClient.post<CliTokenCreated>('/admin/api/cli-tokens', {
+      name,
+      expires_in_days: expiresInDays ?? null,
+    });
+  }
+
+  static async revokeCliToken(tokenId: string): Promise<{ ok: boolean }> {
+    return await apiClient.delete<{ ok: boolean }>(
+      `/admin/api/cli-tokens/${encodeURIComponent(tokenId)}`
+    );
+  }
+}
+
+export interface CliTokenListItem {
+  id: string;
+  name: string;
+  token_preview: string;
+  created_at: number;
+  last_used_at: number | null;
+  expires_at: number | null;
+}
+
+export interface CliTokenCreated {
+  id: string;
+  name: string;
+  token: string;
+  created_at: number;
+  expires_at: number | null;
 }
 
 export const TemporaryBalanceSchema = z.object({
