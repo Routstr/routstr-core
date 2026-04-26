@@ -2424,7 +2424,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "alembic", specifier = ">=1.13" },
-    { name = "cashu" },
+    { name = "cashu", specifier = ">=0.20" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115" },
     { name = "greenlet", specifier = ">=3.2.1" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.25.2" },

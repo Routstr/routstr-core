@@ -13,7 +13,7 @@ dependencies = [
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
-    "cashu",
+    "cashu>=0.20",
     "secp256k1",
     "marshmallow>=3.13,<4.0",
     "websockets>=12.0",
