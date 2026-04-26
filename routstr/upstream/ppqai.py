@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic.v1 import BaseModel, Field
 
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing, async_fetch_openrouter_models
