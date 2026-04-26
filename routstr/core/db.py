@@ -239,6 +239,22 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     last_paid_at: int | None = Field(default=None)
 
 
+class CliToken(SQLModel, table=True):  # type: ignore
+    """Long-lived authorization token for CLI/agent use against admin endpoints."""
+
+    __tablename__ = "cli_tokens"
+    id: str = Field(
+        primary_key=True, default_factory=lambda: uuid.uuid4().hex
+    )
+    token: str = Field(unique=True, index=True, description="Bearer token value")
+    name: str = Field(description="Human-readable label for this token")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    last_used_at: int | None = Field(default=None)
+    expires_at: int | None = Field(
+        default=None, description="Optional expiry unix timestamp; null = never expires"
+    )
+
+
 async def accumulate_routstr_fee(session: AsyncSession, amount_msats: int) -> None:
     stmt = (
         update(RoutstrFee)
