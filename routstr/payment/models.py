@@ -4,6 +4,7 @@ import random
 
 import httpx
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel as V2BaseModel
 from pydantic.v1 import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -405,7 +406,7 @@ async def update_sats_pricing() -> None:
             logger.error(f"Error updating sats pricing: {e}")
 
 
-class ModelTestRequest(BaseModel):
+class ModelTestRequest(V2BaseModel):
     model_id: str
     endpoint_type: str
     request_data: dict

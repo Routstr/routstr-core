@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic.v1 import BaseModel
+from pydantic import BaseModel, RootModel
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
@@ -142,8 +142,8 @@ async def get_settings(request: Request) -> dict:
     return data
 
 
-class SettingsUpdate(BaseModel):
-    __root__: dict[str, object]
+class SettingsUpdate(RootModel[dict[str, object]]):
+    pass
 
 
 class PasswordUpdate(BaseModel):
@@ -154,7 +154,7 @@ class PasswordUpdate(BaseModel):
 @admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
 async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     # Remove sensitive fields from general settings update
-    settings_data = update.__root__.copy()
+    settings_data = update.root.copy()
     sensitive_fields = ["admin_password", "upstream_api_key", "nsec"]
     for field in sensitive_fields:
         if field in settings_data:

@@ -6,7 +6,7 @@ from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic.v1 import BaseModel
+from pydantic import BaseModel
 from sqlmodel import col, select, update
 
 from .auth import get_billing_key, validate_bearer_key
