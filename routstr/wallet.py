@@ -1,16 +1,31 @@
 import asyncio
 import time
+import typing
 from typing import TypedDict
 
 from cashu.core.base import Proof, Token
+from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
+from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
 from .core.db import store_cashu_transaction
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
+
+# cashu still declares Optional[X] without explicit defaults on MintInfo.
+# Under pydantic v2 those are required, but real mints omit many of them.
+# Default Optional fields to None at import time so balance fetches don't 422.
+for _name, _field in _CashuMintInfo.model_fields.items():
+    _annot = _field.annotation
+    _is_optional = typing.get_origin(_annot) is typing.Union and type(
+        None
+    ) in typing.get_args(_annot)
+    if _is_optional and _field.default is PydanticUndefined:
+        _field.default = None
+_CashuMintInfo.model_rebuild(force=True)
 
 logger = get_logger(__name__)
 
