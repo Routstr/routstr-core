@@ -24,7 +24,6 @@ from sqlmodel import select
 from routstr.core.admin import admin_sessions
 from routstr.core.db import AsyncSession, CliToken
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
