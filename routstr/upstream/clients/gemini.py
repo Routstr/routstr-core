@@ -26,14 +26,14 @@ class GeminiClient(BaseAPIClient):
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        from openai import NOT_GIVEN
+        from openai import omit
 
         response = await self.client.chat.completions.create(
             model=model,
             messages=messages,  # type: ignore
-            temperature=temperature if temperature is not None else NOT_GIVEN,
-            max_tokens=max_tokens if max_tokens is not None else NOT_GIVEN,
-            top_p=kwargs.get("top_p", NOT_GIVEN),
+            temperature=temperature if temperature is not None else omit,
+            max_tokens=max_tokens if max_tokens is not None else omit,
+            top_p=kwargs.get("top_p", omit),
         )
         return response.model_dump()
 
@@ -45,7 +45,7 @@ class GeminiClient(BaseAPIClient):
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        from openai import NOT_GIVEN
+        from openai import omit
 
         usage_callback = kwargs.get("usage_callback")
         completion_callback = kwargs.get("completion_callback")
@@ -55,9 +55,9 @@ class GeminiClient(BaseAPIClient):
             messages=messages,  # type: ignore
             stream=True,
             stream_options={"include_usage": True},
-            temperature=temperature if temperature is not None else NOT_GIVEN,
-            max_tokens=max_tokens if max_tokens is not None else NOT_GIVEN,
-            top_p=kwargs.get("top_p", NOT_GIVEN),
+            temperature=temperature if temperature is not None else omit,
+            max_tokens=max_tokens if max_tokens is not None else omit,
+            top_p=kwargs.get("top_p", omit),
         )
 
         final_usage = None
