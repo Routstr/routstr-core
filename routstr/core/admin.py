@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models

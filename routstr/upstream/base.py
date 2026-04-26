@@ -12,7 +12,7 @@ from typing import Mapping
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 from sqlmodel import select
 
 from ..auth import adjust_payment_for_tokens
