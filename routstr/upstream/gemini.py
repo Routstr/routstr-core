@@ -23,6 +23,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
     provider_type = "gemini"
     default_base_url = "https://generativelanguage.googleapis.com/v1beta"
     platform_url = "https://aistudio.google.com/app/apikey"
+    litellm_provider_prefix = "gemini/"
 
     def __init__(
         self,
