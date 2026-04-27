@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select, update
 
 from .core import get_logger
-from .core.db import ApiKey, AsyncSession
+from .core.db import ApiKey, AsyncSession, accumulate_routstr_fee
 from .core.settings import settings
 from .payment.cost_calculation import (
     CostData,
@@ -24,6 +24,12 @@ from .wallet import credit_balance, deserialize_token_from_string
 
 logger = get_logger(__name__)
 payments_logger = get_logger("routstr.payments")
+
+# Routstr platform fee constants
+ROUTSTR_FEE_PERCENT: float = 2.1
+ROUTSTR_LN_ADDRESS: str = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
+ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
+ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
 
 # TODO: implement prepaid api key (not like it was before)
 # PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
@@ -741,6 +747,17 @@ async def adjust_payment_for_tokens(
                 },
             )
 
+    async def _accumulate_fee(total_cost_msats: int) -> None:
+        if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
+            fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
+            try:
+                await accumulate_routstr_fee(session, fee_msats)
+            except Exception as e:
+                logger.warning(
+                    "Failed to accumulate Routstr fee",
+                    extra={"error": str(e), "fee_msats": fee_msats},
+                )
+
     match await calculate_cost(response_data, deducted_max_cost, session):
         case MaxCostData() as cost:
             logger.debug(
@@ -832,6 +849,7 @@ async def adjust_payment_for_tokens(
                         "model": model,
                     },
                 )
+                await _accumulate_fee(cost.total_msats)
                 payments_logger.info(
                     "FINALIZE",
                     extra={
@@ -935,6 +953,7 @@ async def adjust_payment_for_tokens(
                 await session.refresh(billing_key)
                 if billing_key.hashed_key != key.hashed_key:
                     await session.refresh(key)
+                await _accumulate_fee(total_cost_msats)
                 payments_logger.info(
                     "FINALIZE",
                     extra={
@@ -1005,6 +1024,7 @@ async def adjust_payment_for_tokens(
                             "model": model,
                         },
                     )
+                    await _accumulate_fee(total_cost_msats)
                     payments_logger.info(
                         "FINALIZE",
                         extra={
@@ -1130,6 +1150,7 @@ async def adjust_payment_for_tokens(
                             "model": model,
                         },
                     )
+                    await _accumulate_fee(total_cost_msats)
                     payments_logger.info(
                         "FINALIZE",
                         extra={

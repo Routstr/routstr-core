@@ -540,7 +540,7 @@ export function AddProviderModelDialog({
                   };
                   return (
                     <FormItem>
-                      <FormLabel>Upstream Model ID</FormLabel>
+                      <FormLabel>Client Alias ID</FormLabel>
                       <FormControl>
                         <div className='flex gap-2'>
                           <Input
@@ -565,8 +565,8 @@ export function AddProviderModelDialog({
                         </div>
                       </FormControl>
                       <FormDescription>
-                        Model ID sent to the upstream provider. Defaults to the
-                        model&apos;s own ID.
+                        Alternate ID that clients can use to reference this
+                        model. Defaults to the model&apos;s own ID.
                       </FormDescription>
                       <FormMessage />
                     </FormItem>

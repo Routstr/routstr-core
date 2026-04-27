@@ -1878,7 +1878,7 @@ wheels = [
 
 [[package]]
 name = "routstr"
-version = "0.4.1"
+version = "0.4.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

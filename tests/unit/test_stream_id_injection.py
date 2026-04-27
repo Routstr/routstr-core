@@ -51,7 +51,15 @@ async def test_stream_with_id_injection() -> None:
         base.adjust_payment_for_tokens = AsyncMock(
             return_value={"total_usd": 0.1, "total_msats": 100}
         )
-        base.create_session = MagicMock()
+        # create_session() is used as an async context manager whose entered
+        # value exposes an awaitable .get(). Build a mock that behaves that
+        # way so the post-stream cost-chunk emission can run.
+        mock_session = MagicMock()
+        mock_session.get = AsyncMock(return_value=key)
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=None)
+        base.create_session = MagicMock(return_value=mock_ctx)
 
         streaming_response = await provider.handle_streaming_chat_completion(
             response=mock_response,
