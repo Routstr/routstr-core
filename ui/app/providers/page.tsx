@@ -14,10 +14,11 @@ import {
 } from '@/lib/api/services/admin';
 import { AddProviderModelDialog } from '@/components/add-provider-model-dialog';
 import { BatchOverrideDialog } from '@/components/batch-override-dialog';
+import { ProviderFeeScheduleModal } from '@/components/provider-fee-schedule-modal';
 import { ProviderCard } from '@/components/provider-card';
 import { ProviderFormDialogContent } from '@/components/provider-form-dialog-content';
 import { Skeleton } from '@/components/ui/skeleton';
-import { AlertCircle, Plus, Server } from 'lucide-react';
+import { AlertCircle, Clock, Plus, Server } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogTrigger } from '@/components/ui/dialog';
 import {
@@ -70,6 +71,10 @@ export default function ProvidersPage() {
   const [batchOverrideProviderId, setBatchOverrideProviderId] = useState<
     number | null
   >(null);
+  const [feeScheduleState, setFeeScheduleState] = useState<{
+    open: boolean;
+    initialIds: number[];
+  }>({ open: false, initialIds: [] });
   const [providerDeleteTarget, setProviderDeleteTarget] =
     useState<UpstreamProvider | null>(null);
   const [modelDeleteTarget, setModelDeleteTarget] = useState<{
@@ -242,6 +247,7 @@ export default function ProvidersPage() {
       api_version: provider.api_version || null,
       enabled: provider.enabled,
       provider_fee: provider.provider_fee,
+      provider_fee_default: provider.provider_fee_default,
       provider_settings: provider.provider_settings || {},
     });
     setIsEditDialogOpen(true);
@@ -254,7 +260,7 @@ export default function ProvidersPage() {
       base_url: formData.base_url,
       api_version: formData.api_version,
       enabled: formData.enabled,
-      provider_fee: formData.provider_fee,
+      provider_fee_default: formData.provider_fee_default,
       provider_settings: formData.provider_settings,
     };
     if (formData.api_key) {
@@ -342,6 +348,13 @@ export default function ProvidersPage() {
     setBatchOverrideProviderId(providerId);
   };
 
+  const handleManageFeeSchedules = (providerId?: number) => {
+    setFeeScheduleState({
+      open: true,
+      initialIds: providerId !== undefined ? [providerId] : [],
+    });
+  };
+
   const availableMints = (globalSettings?.cashu_mints as string[]) || [];
 
   return (
@@ -352,12 +365,22 @@ export default function ProvidersPage() {
             title='Upstream Providers'
             description='Manage your AI provider connections and credentials.'
             actions={
-              <DialogTrigger asChild>
-                <Button>
-                  <Plus className='h-4 w-4' />
-                  Add Provider
+              <div className='flex gap-2'>
+                <Button
+                  variant='outline'
+                  onClick={() => handleManageFeeSchedules()}
+                  disabled={providers.length === 0}
+                >
+                  <Clock className='h-4 w-4' />
+                  Fee Schedules
                 </Button>
-              </DialogTrigger>
+                <DialogTrigger asChild>
+                  <Button>
+                    <Plus className='h-4 w-4' />
+                    Add Provider
+                  </Button>
+                </DialogTrigger>
+              </div>
             }
           />
           <ProviderFormDialogContent
@@ -437,6 +460,9 @@ export default function ProvidersPage() {
                 onEditProvider={() => handleEdit(provider)}
                 onDeleteProvider={() => setProviderDeleteTarget(provider)}
                 onBatchOverride={() => handleBatchOverride(provider.id)}
+                onManageFeeSchedules={() =>
+                  handleManageFeeSchedules(provider.id)
+                }
                 onAddModel={() => handleAddModel(provider.id)}
                 onEditModel={(model) => handleEditModel(provider.id, model)}
                 onDeleteModel={(modelId) =>
@@ -562,6 +588,16 @@ export default function ProvidersPage() {
           }}
         />
       )}
+
+      <ProviderFeeScheduleModal
+        providers={providers}
+        initialSelectedIds={feeScheduleState.initialIds}
+        isOpen={feeScheduleState.open}
+        onClose={() => setFeeScheduleState({ open: false, initialIds: [] })}
+        onSuccess={() => {
+          queryClient.invalidateQueries({ queryKey: ['upstream-providers'] });
+        }}
+      />
     </AppPageShell>
   );
 }

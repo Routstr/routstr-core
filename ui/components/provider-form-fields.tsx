@@ -202,26 +202,34 @@ export function ProviderFormFields({
 
       <div className='grid gap-2'>
         <Label htmlFor={`${idPrefix}provider_fee`}>
-          Provider Fee (Multiplier)
+          {mode === 'edit'
+            ? 'Default Provider Fee (Multiplier)'
+            : 'Provider Fee (Multiplier)'}
         </Label>
         <Input
           id={`${idPrefix}provider_fee`}
           type='number'
           step='0.001'
           min='1.0'
-          value={formData.provider_fee || ''}
-          onChange={(e) =>
-            setFormData((prev) => ({
-              ...prev,
-              provider_fee: e.target.value
-                ? parseFloat(e.target.value)
-                : undefined,
-            }))
+          value={
+            (mode === 'edit'
+              ? formData.provider_fee_default
+              : formData.provider_fee) || ''
           }
+          onChange={(e) => {
+            const val = e.target.value ? parseFloat(e.target.value) : undefined;
+            setFormData((prev) =>
+              mode === 'edit'
+                ? { ...prev, provider_fee_default: val }
+                : { ...prev, provider_fee: val }
+            );
+          }}
           placeholder={providerFeePlaceholder}
         />
         <p className='text-muted-foreground text-xs'>
-          1.01 means +1% e.g. currency exchange, card fees, etc.
+          {mode === 'edit'
+            ? 'This is the default fee when no schedule is active. Updates will not affect currently active scheduled fees.'
+            : '1.01 means +1% e.g. currency exchange, card fees, etc.'}
         </p>
       </div>
 

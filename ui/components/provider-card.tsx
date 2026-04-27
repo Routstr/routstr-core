@@ -20,6 +20,7 @@ import {
   Trash2,
   Key,
   RotateCcw,
+  Clock,
 } from 'lucide-react';
 import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
@@ -54,6 +55,7 @@ interface ProviderCardProps {
   onDeleteModel: (modelId: string) => void;
   onOverrideModel: (model: AdminModel) => void;
   onUpdateApiKey: (newKey: string) => void;
+  onManageFeeSchedules: () => void;
   availableMints: string[];
 }
 
@@ -74,6 +76,7 @@ export function ProviderCard({
   onDeleteModel,
   onOverrideModel,
   onUpdateApiKey,
+  onManageFeeSchedules,
 }: ProviderCardProps) {
   const queryClient = useQueryClient();
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
@@ -112,6 +115,14 @@ export function ProviderCard({
                 className='w-fit'
               >
                 {provider.enabled ? 'Enabled' : 'Disabled'}
+              </Badge>
+              <Badge variant='outline' className='w-fit'>
+                Fee: {provider.provider_fee}x
+                {provider.provider_fee !== provider.provider_fee_default && (
+                  <span className='text-muted-foreground ml-1 font-normal'>
+                    (default: {provider.provider_fee_default}x)
+                  </span>
+                )}
               </Badge>
             </div>
             <CardDescription className='break-all'>
@@ -186,6 +197,22 @@ export function ProviderCard({
                 <ChevronUp className='h-4 w-4' />
               ) : (
                 <ChevronDown className='h-4 w-4' />
+              )}
+            </Button>
+
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={onManageFeeSchedules}
+              className='justify-center gap-1.5'
+              title='Manage fee schedules'
+            >
+              <Clock className='h-4 w-4' />
+              <span>Fees</span>
+              {(provider.provider_fee_schedules?.length ?? 0) > 0 && (
+                <Badge variant='secondary' className='ml-0.5 h-4 px-1 text-xs'>
+                  {provider.provider_fee_schedules!.length}
+                </Badge>
               )}
             </Button>
 
