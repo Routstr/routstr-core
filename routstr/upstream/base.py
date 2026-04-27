@@ -6,6 +6,7 @@ import json
 import re
 import traceback
 import uuid
+import warnings
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, Mapping, cast
 
@@ -43,6 +44,18 @@ from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
+
+# litellm response models declare nested fields as pydantic types
+# (e.g. `usage: ResponseAPIUsage`) but populate them with plain dicts at
+# runtime. Whenever such a model is dumped — by us, by litellm, or by a
+# downstream client — pydantic-core emits a benign UserWarning that floods
+# the logs once per request. We re-normalize `usage` ourselves, so the
+# warning is irrelevant; suppress it process-wide.
+warnings.filterwarnings(
+    "ignore",
+    message="Pydantic serializer warnings:",
+    category=UserWarning,
+)
 
 
 class TopupData(BaseModel):
@@ -1408,12 +1421,124 @@ class BaseUpstreamProvider:
         if isinstance(payload, dict):
             return dict(payload)
         if hasattr(payload, "model_dump"):
-            return payload.model_dump()  # type: ignore[no-any-return]
+            # Suppress at source: a downstream `simplefilter("always")`
+            # would otherwise reinstate the benign serializer warning that
+            # litellm's typed-but-dict-valued fields trigger.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Pydantic serializer warnings:",
+                    category=UserWarning,
+                )
+                return payload.model_dump(serialize_as_any=True)  # type: ignore[no-any-return]
         if hasattr(payload, "dict") and callable(payload.dict):  # type: ignore[union-attr]
             return payload.dict()  # type: ignore[no-any-return,union-attr]
         if hasattr(payload, "__dict__"):
             return dict(payload.__dict__)
         raise TypeError(f"Cannot coerce {type(payload).__name__} to dict")
+
+    @staticmethod
+    def _alias_usage(usage: Mapping[str, Any]) -> dict:
+        """Backfill Anthropic-shaped keys (input_tokens/output_tokens)
+        from OpenAI-shaped equivalents (prompt_tokens/completion_tokens).
+        """
+        aliased = dict(usage)
+        for target, source in (
+            ("input_tokens", "prompt_tokens"),
+            ("output_tokens", "completion_tokens"),
+        ):
+            if target not in aliased and source in aliased:
+                aliased[target] = aliased[source]
+        return aliased
+
+    @staticmethod
+    def _normalize_litellm_payload(payload: object) -> dict:
+        """Coerce a litellm response/event into a dict with Anthropic-shaped
+        usage keys at the top level and inside any nested ``message.usage``.
+        """
+        payload_dict = BaseUpstreamProvider._coerce_litellm_payload(payload)
+
+        usage = payload_dict.get("usage")
+        if isinstance(usage, Mapping):
+            payload_dict = {
+                **payload_dict,
+                "usage": BaseUpstreamProvider._alias_usage(usage),
+            }
+
+        message = payload_dict.get("message")
+        if isinstance(message, Mapping):
+            msg_usage = message.get("usage")
+            if isinstance(msg_usage, Mapping):
+                payload_dict = {
+                    **payload_dict,
+                    "message": {
+                        **message,
+                        "usage": BaseUpstreamProvider._alias_usage(msg_usage),
+                    },
+                }
+        return payload_dict
+
+    @staticmethod
+    def _parse_sse_blocks(buffer: bytes) -> tuple[list[dict], bytes]:
+        """Parse complete SSE event blocks out of a byte buffer.
+
+        Returns (events, remaining_buffer). Events are JSON objects parsed
+        from one or more `data:` lines per block. Comments, blank lines, and
+        `[DONE]` sentinels are ignored. Trailing partial block is preserved.
+        """
+        events: list[dict] = []
+        while True:
+            sep = buffer.find(b"\n\n")
+            if sep < 0:
+                # Tolerate \r\n\r\n separators too.
+                sep_rn = buffer.find(b"\r\n\r\n")
+                if sep_rn < 0:
+                    break
+                block = buffer[:sep_rn]
+                buffer = buffer[sep_rn + 4 :]
+            else:
+                block = buffer[:sep]
+                buffer = buffer[sep + 2 :]
+
+            data_lines: list[str] = []
+            for raw_line in block.replace(b"\r\n", b"\n").split(b"\n"):
+                line = raw_line.decode("utf-8", errors="replace")
+                if line.startswith(":"):
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+            if not data_lines:
+                continue
+            payload = "\n".join(data_lines).strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                events.append(obj)
+        return events, buffer
+
+    def _events_from_chunk(
+        self, chunk: object, sse_buffer: bytes
+    ) -> tuple[list[dict], bytes]:
+        """Normalize an upstream stream chunk into one or more event dicts.
+
+        Handles three cases:
+          - dict / pydantic model / object → single coerced event
+          - bytes / bytearray → one or more SSE blocks (buffered)
+          - str → encoded then handled as bytes
+        """
+        if isinstance(chunk, (bytes, bytearray)):
+            sse_buffer += bytes(chunk)
+            events, sse_buffer = self._parse_sse_blocks(sse_buffer)
+            return events, sse_buffer
+        if isinstance(chunk, str):
+            sse_buffer += chunk.encode("utf-8")
+            events, sse_buffer = self._parse_sse_blocks(sse_buffer)
+            return events, sse_buffer
+        return [self._coerce_litellm_payload(chunk)], sse_buffer
 
     async def _forward_messages_via_litellm(
         self,
@@ -1492,7 +1617,7 @@ class BaseUpstreamProvider:
                 requested_model,
             )
 
-        response_json = self._coerce_litellm_payload(result)
+        response_json = self._normalize_litellm_payload(result)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
 
@@ -1554,43 +1679,52 @@ class BaseUpstreamProvider:
                         usage_finalized = True
                         return None
 
+            sse_buffer = b""
             try:
                 async for chunk in iterator:
-                    event = self._coerce_litellm_payload(chunk)
-                    event_type = str(event.get("type") or "")
+                    events, sse_buffer = self._events_from_chunk(
+                        chunk, sse_buffer
+                    )
+                    for raw_event in events:
+                        event = self._normalize_litellm_payload(raw_event)
+                        event_type = str(event.get("type") or "")
 
-                    if requested_model:
-                        msg = event.get("message")
-                        if isinstance(msg, dict) and "model" in msg:
-                            msg["model"] = requested_model
-                        if "model" in event:
-                            event["model"] = requested_model
+                        if requested_model:
+                            msg = event.get("message")
+                            if isinstance(msg, dict) and "model" in msg:
+                                msg["model"] = requested_model
+                            if "model" in event:
+                                event["model"] = requested_model
 
-                    msg_for_meta = event.get("message")
-                    if (
-                        isinstance(msg_for_meta, dict)
-                        and msg_for_meta.get("model")
-                    ):
-                        last_model_seen = str(msg_for_meta["model"])
+                        msg_for_meta = event.get("message")
+                        if (
+                            isinstance(msg_for_meta, dict)
+                            and msg_for_meta.get("model")
+                        ):
+                            last_model_seen = str(msg_for_meta["model"])
 
-                    if isinstance(msg_for_meta, dict) and isinstance(
-                        msg_for_meta.get("usage"), dict
-                    ):
-                        usage = msg_for_meta["usage"]
-                        input_tokens += int(usage.get("input_tokens") or 0)
-                        output_tokens += int(usage.get("output_tokens") or 0)
-                    if isinstance(event.get("usage"), dict):
-                        usage = event["usage"]
-                        input_tokens += int(usage.get("input_tokens") or 0)
-                        output_tokens += int(usage.get("output_tokens") or 0)
+                        if isinstance(msg_for_meta, dict) and isinstance(
+                            msg_for_meta.get("usage"), dict
+                        ):
+                            usage = msg_for_meta["usage"]
+                            input_tokens += int(usage.get("input_tokens") or 0)
+                            output_tokens += int(
+                                usage.get("output_tokens") or 0
+                            )
+                        if isinstance(event.get("usage"), dict):
+                            usage = event["usage"]
+                            input_tokens += int(usage.get("input_tokens") or 0)
+                            output_tokens += int(
+                                usage.get("output_tokens") or 0
+                            )
 
-                    payload = json.dumps(event)
-                    if event_type:
-                        yield (
-                            f"event: {event_type}\ndata: {payload}\n\n"
-                        ).encode()
-                    else:
-                        yield f"data: {payload}\n\n".encode()
+                        payload = json.dumps(event)
+                        if event_type:
+                            yield (
+                                f"event: {event_type}\ndata: {payload}\n\n"
+                            ).encode()
+                        else:
+                            yield f"data: {payload}\n\n".encode()
 
                 if input_tokens > 0 or output_tokens > 0:
                     async with create_session() as new_session:

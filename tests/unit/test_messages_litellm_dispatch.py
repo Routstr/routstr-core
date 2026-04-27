@@ -111,6 +111,156 @@ def test_coerce_litellm_payload_handles_pydantic_v2() -> None:
     assert out == {"x": 42}
 
 
+def test_parse_sse_blocks_extracts_full_events() -> None:
+    buffer = (
+        b"event: message_start\n"
+        b'data: {"type":"message_start","message":{"id":"m1"}}\n\n'
+        b"event: message_stop\n"
+        b'data: {"type":"message_stop"}\n\n'
+    )
+    events, remaining = BaseUpstreamProvider._parse_sse_blocks(buffer)
+    assert remaining == b""
+    assert events == [
+        {"type": "message_start", "message": {"id": "m1"}},
+        {"type": "message_stop"},
+    ]
+
+
+def test_parse_sse_blocks_preserves_partial_trailing_block() -> None:
+    buffer = b'data: {"type":"a"}\n\nevent: b\ndata: {"type":"b"}'
+    events, remaining = BaseUpstreamProvider._parse_sse_blocks(buffer)
+    assert events == [{"type": "a"}]
+    assert remaining == b'event: b\ndata: {"type":"b"}'
+
+
+def test_parse_sse_blocks_skips_done_and_comments() -> None:
+    buffer = b": ping\n\ndata: [DONE]\n\ndata: {\"type\":\"x\"}\n\n"
+    events, remaining = BaseUpstreamProvider._parse_sse_blocks(buffer)
+    assert remaining == b""
+    assert events == [{"type": "x"}]
+
+
+def test_events_from_chunk_handles_bytes_chunks() -> None:
+    provider = _make_provider()
+    chunk = (
+        b"event: a\ndata: {\"type\":\"a\"}\n\n"
+        b"event: b\ndata: {\"type\":\"b\"}"
+    )
+    events, buf = provider._events_from_chunk(chunk, b"")
+    assert events == [{"type": "a"}]
+    # second event still partial because no trailing \n\n
+    assert buf == b'event: b\ndata: {"type":"b"}'
+
+    # Feed remainder of the second event
+    events, buf = provider._events_from_chunk(b"\n\n", buf)
+    assert events == [{"type": "b"}]
+    assert buf == b""
+
+
+def test_events_from_chunk_handles_str_chunks() -> None:
+    provider = _make_provider()
+    events, buf = provider._events_from_chunk(
+        'event: a\ndata: {"type":"a"}\n\n', b""
+    )
+    assert events == [{"type": "a"}]
+    assert buf == b""
+
+
+# ---------------------------------------------------------------------------
+# Pydantic serializer warning + usage normalization
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_litellm_payload_silences_pydantic_serializer_warning() -> None:
+    """litellm response models emit a benign UserWarning when their nested
+    pydantic field (e.g. usage = ResponseAPIUsage) holds a plain dict.
+    _coerce_litellm_payload must silence it locally."""
+    import warnings as _warnings
+
+    obj = MagicMock()
+
+    def _emit_warning(*args: Any, **kwargs: Any) -> dict:
+        _warnings.warn(
+            "Pydantic serializer warnings:\n  Expected `ResponseAPIUsage`",
+            UserWarning,
+            stacklevel=2,
+        )
+        return {"id": "x", "usage": {"completion_tokens": 5}}
+
+    obj.model_dump.side_effect = _emit_warning
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        out = BaseUpstreamProvider._coerce_litellm_payload(obj)
+
+    assert out == {"id": "x", "usage": {"completion_tokens": 5}}
+    serializer_warnings = [
+        w for w in caught if "Pydantic serializer warnings" in str(w.message)
+    ]
+    assert serializer_warnings == [], (
+        "Pydantic serializer warning should be suppressed at source"
+    )
+
+
+def test_normalize_litellm_payload_maps_openai_keys_to_anthropic() -> None:
+    event = {
+        "type": "message_delta",
+        "usage": {
+            "prompt_tokens": 11,
+            "completion_tokens": 22,
+            "total_tokens": 33,
+        },
+        "message": {
+            "model": "x",
+            "usage": {"prompt_tokens": 7, "completion_tokens": 13},
+        },
+    }
+    out = BaseUpstreamProvider._normalize_litellm_payload(event)
+
+    # Top-level usage gets canonical Anthropic keys mirrored in
+    assert out["usage"]["input_tokens"] == 11
+    assert out["usage"]["output_tokens"] == 22
+    # Original keys preserved (non-destructive)
+    assert out["usage"]["prompt_tokens"] == 11
+    assert out["usage"]["completion_tokens"] == 22
+
+    # Nested message.usage normalized too
+    assert out["message"]["usage"]["input_tokens"] == 7
+    assert out["message"]["usage"]["output_tokens"] == 13
+
+    # Original event must not be mutated
+    assert "input_tokens" not in event["usage"]
+
+
+def test_normalize_litellm_payload_keeps_anthropic_keys_intact() -> None:
+    event = {
+        "type": "message_delta",
+        "usage": {"input_tokens": 4, "output_tokens": 9},
+    }
+    out = BaseUpstreamProvider._normalize_litellm_payload(event)
+    assert out["usage"] == {"input_tokens": 4, "output_tokens": 9}
+
+
+def test_normalize_litellm_payload_aliases_dumped_usage() -> None:
+    """A litellm result whose model_dump emits OpenAI-style usage keys
+    should be normalized to Anthropic-style keys for downstream cost
+    reconciliation, with the original keys preserved alongside."""
+    result = MagicMock()
+    result.model_dump.return_value = {
+        "id": "abc",
+        "model": "openai/gpt-4o-mini",
+        "usage": {"prompt_tokens": 12, "completion_tokens": 34},
+    }
+
+    out = BaseUpstreamProvider._normalize_litellm_payload(result)
+
+    assert out["model"] == "openai/gpt-4o-mini"
+    assert out["usage"]["input_tokens"] == 12
+    assert out["usage"]["output_tokens"] == 34
+    # OpenAI keys preserved alongside the canonical mapping
+    assert out["usage"]["prompt_tokens"] == 12
+
+
 # ---------------------------------------------------------------------------
 # Provider gating
 # ---------------------------------------------------------------------------
@@ -317,6 +467,187 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert combined["usage"]["input_tokens"] == 5
     assert combined["usage"]["output_tokens"] == 7
     assert combined["model"] == "openai/gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
+    """Regression: litellm sometimes yields already-SSE-encoded bytes.
+
+    Previously this raised TypeError("Cannot coerce bytes to dict"). The
+    stream loop must parse SSE blocks (even split across chunks) and still
+    perform cost reconciliation.
+    """
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+    body = _anthropic_request_body(stream=True)
+
+    async def fake_byte_chunks() -> AsyncIterator[bytes]:
+        # Whole event in one chunk
+        yield (
+            b"event: message_start\n"
+            b'data: {"type":"message_start","message":{"id":"m1",'
+            b'"model":"openai/gpt-4o-mini",'
+            b'"usage":{"input_tokens":3,"output_tokens":0}}}\n\n'
+        )
+        # Event split across two chunks (boundary inside the data line)
+        yield b'event: message_delta\ndata: {"type":"message_delta",'
+        yield b'"delta":{},"usage":{"output_tokens":4}}\n\n'
+        # SSE comment + DONE sentinel must be ignored
+        yield b": keepalive\n\ndata: [DONE]\n\n"
+        yield b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+    fake_cost = {"total_msats": 999, "total_usd": 0.0001}
+    captured: dict[str, Any] = {}
+
+    async def fake_adjust(
+        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int
+    ) -> dict:
+        captured["combined_data"] = combined_data
+        return fake_cost
+
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=key)
+
+    class FakeSessionCtx:
+        async def __aenter__(self) -> Any:
+            return fake_session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=fake_byte_chunks()),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(side_effect=fake_adjust),
+        ),
+        patch(
+            "routstr.upstream.base.create_session",
+            new=lambda: FakeSessionCtx(),
+        ),
+    ):
+        result = await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+        assert isinstance(result, StreamingResponse)
+        emitted: list[bytes] = []
+        async for chunk in result.body_iterator:
+            if isinstance(chunk, bytes):
+                emitted.append(chunk)
+            elif isinstance(chunk, memoryview):
+                emitted.append(bytes(chunk))
+            else:
+                emitted.append(chunk.encode())
+
+    joined = b"".join(emitted).decode()
+    assert "event: message_start" in joined
+    assert "event: message_delta" in joined
+    assert "event: message_stop" in joined
+    assert "event: cost" in joined
+    # [DONE] sentinel and SSE comments must NOT be re-emitted as data
+    assert "[DONE]" not in joined
+
+    combined = captured["combined_data"]
+    assert combined["usage"]["input_tokens"] == 3
+    assert combined["usage"]["output_tokens"] == 4
+    assert combined["model"] == "openai/gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_streaming_normalizes_openai_usage_keys_for_cost() -> None:
+    """Regression: when litellm yields chunks with OpenAI-style usage keys
+    (prompt_tokens/completion_tokens), the stream loop must map them to
+    Anthropic input_tokens/output_tokens for cost reconciliation."""
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+    body = _anthropic_request_body(stream=True)
+
+    async def fake_chunks() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "openai/gpt-4o-mini",
+                "content": [],
+                # OpenAI-style usage on the message
+                "usage": {"prompt_tokens": 9, "completion_tokens": 0},
+            },
+        }
+        yield {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "hi"},
+        }
+        yield {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            # OpenAI-style usage on the delta
+            "usage": {"prompt_tokens": 0, "completion_tokens": 17},
+        }
+        yield {"type": "message_stop"}
+
+    fake_cost = {"total_msats": 100, "total_usd": 0.0001}
+    captured: dict[str, Any] = {}
+
+    async def fake_adjust(
+        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int
+    ) -> dict:
+        captured["combined_data"] = combined_data
+        return fake_cost
+
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=key)
+
+    class FakeSessionCtx:
+        async def __aenter__(self) -> Any:
+            return fake_session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=fake_chunks()),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(side_effect=fake_adjust),
+        ),
+        patch(
+            "routstr.upstream.base.create_session",
+            new=lambda: FakeSessionCtx(),
+        ),
+    ):
+        result = await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+        assert isinstance(result, StreamingResponse)
+        async for _ in result.body_iterator:
+            pass
+
+    combined = captured["combined_data"]
+    # Token counts come from the OpenAI-style fields after normalization
+    assert combined["usage"]["input_tokens"] == 9
+    assert combined["usage"]["output_tokens"] == 17
 
 
 # ---------------------------------------------------------------------------
