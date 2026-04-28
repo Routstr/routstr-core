@@ -61,6 +61,34 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
             model_id = fixed_transforms[model_id]
         return model_id
 
+    def transform_parameters(self, data: dict) -> dict:
+        """Transform parameters for Anthropic API compatibility."""
+        if "reasoning" in data:
+            reasoning = data.pop("reasoning")
+            if isinstance(reasoning, dict) and "effort" in reasoning:
+                effort = reasoning.pop("effort")
+                if effort == "low":
+                    data["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": 8192,
+                    }
+                elif effort == "medium":
+                    data["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": 16384,
+                    }
+                elif effort == "high":
+                    data["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": 32768,
+                    }
+                elif effort == "none":
+                    data["thinking"] = {
+                        "type": "disabled",
+                    }
+
+        return super().transform_parameters(data)
+
     async def fetch_models(self) -> list[Model]:
         """Fetch Anthropic models from OpenRouter API filtered by anthropic source."""
         models_data = await async_fetch_openrouter_models(source_filter="anthropic")

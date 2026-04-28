@@ -38,6 +38,12 @@ class OpenAIUpstreamProvider(BaseUpstreamProvider):
             "platform_url": cls.platform_url,
         }
 
+    def transform_parameters(self, data: dict) -> dict:
+        """Transform parameters for OpenAI API compatibility."""
+        if "max_tokens" in data:
+            data["max_completion_tokens"] = data.pop("max_tokens")
+        return super().transform_parameters(data)
+
     def transform_model_name(self, model_id: str) -> str:
         """Strip 'openai/' prefix for OpenAI API compatibility."""
         return model_id.removeprefix("openai/")
