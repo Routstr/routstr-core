@@ -14,8 +14,54 @@ logger = get_logger(__name__)
 request_id_context: ContextVar[str | None] = ContextVar("request_id")
 
 
+# Methods that are never logged: HEAD requests are health probes from
+# monitoring/load balancers, OPTIONS are CORS preflights — both are framework
+# chatter, not user-meaningful events.
+_SKIP_LOG_METHODS: frozenset[str] = frozenset({"HEAD", "OPTIONS"})
+
+# Path prefixes to skip. Includes Next.js static chunks and the admin
+# dashboard's internal polling API (/admin/api/*) which the UI hits on a timer
+# to refresh balances, logs, providers, etc. — high volume, low diagnostic
+# value. Mutating admin actions are recorded separately in the audit log.
+_SKIP_LOG_PREFIXES: tuple[str, ...] = (
+    "/_next/",
+    "/admin/api/",
+)
+
+# Exact paths to skip. RSC payload prefetches (`*/index.txt`) fire automatically
+# as the user hovers near `<Link>`s, and `/v1/wallet/info` is polled by the UI.
+_SKIP_LOG_EXACT: frozenset[str] = frozenset(
+    {
+        "/favicon.ico",
+        "/icon.ico",
+        "/v1/wallet/info",
+        "/index.txt",
+        "/login/index.txt",
+        "/model/index.txt",
+        "/providers/index.txt",
+        "/settings/index.txt",
+        "/transactions/index.txt",
+        "/balances/index.txt",
+        "/logs/index.txt",
+        "/usage/index.txt",
+        "/unauthorized/index.txt",
+    }
+)
+
+
+def _should_log(method: str, path: str) -> bool:
+    if method in _SKIP_LOG_METHODS:
+        return False
+    if path in _SKIP_LOG_EXACT:
+        return False
+    return not any(path.startswith(prefix) for prefix in _SKIP_LOG_PREFIXES)
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware to log detailed request and response information."""
+    """Middleware to log proxy interactions and page navigation.
+
+    Skips logging for static assets and Next.js chunks to avoid noise.
+    """
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Generate request ID
@@ -25,56 +71,20 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # Set request ID in context for logging
         token = request_id_context.set(request_id)
 
+        path = request.url.path
+        should_log = _should_log(request.method, path)
+
         # Start timing
         start_time = time.time()
 
-        # Log request details
-        request_body = None
-        if request.method in ["POST", "PUT", "PATCH"]:
-            try:
-                # Only read body for non-streaming requests
-                if hasattr(request, "_body"):
-                    request_body = await request.body()
-            except Exception:
-                pass
-
-        # Log incoming request
-        logger.info(
-            "Incoming request",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "path": request.url.path,
-                "query_params": dict(request.query_params),
-                "headers": {
-                    k: v
-                    for k, v in request.headers.items()
-                    if k.lower()
-                    not in [
-                        "authorization",
-                        "x-cashu",
-                        "cookie",
-                        "cf-connecting-ip",
-                        "cf-ipcountry",
-                        "x-forwarded-for",
-                        "x-real-ip",
-                    ]
-                },
-                "body_size": len(request_body) if request_body else 0,
-            },
-        )
-
-        # Log at TRACE level for full body (security filter will redact sensitive data)
-        if request_body and hasattr(logger, "exception"):
-            logger.exception(
-                "Request body",
+        if should_log:
+            logger.info(
+                "Incoming request",
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
-                    "body": request_body.decode("utf-8", errors="ignore")[
-                        :1000
-                    ],  # Limit size
+                    "path": path,
+                    "query_params": dict(request.query_params),
                 },
             )
 
@@ -82,36 +92,32 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
 
-            # Calculate duration
-            duration = time.time() - start_time
-
-            # Log response
-            logger.info(
-                "Request completed",
-                extra={
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": response.status_code,
-                    "duration_ms": round(duration * 1000, 2),
-                },
-            )
+            if should_log:
+                duration = time.time() - start_time
+                logger.info(
+                    "Request completed",
+                    extra={
+                        "request_id": request_id,
+                        "method": request.method,
+                        "path": path,
+                        "status_code": response.status_code,
+                        "duration_ms": round(duration * 1000, 2),
+                    },
+                )
             if hasattr(response, "headers"):
                 response.headers["x-routstr-request-id"] = request_id
 
             return response
 
         except Exception as e:
-            # Calculate duration
+            # Always log failures, even for skipped paths, so we don't lose errors.
             duration = time.time() - start_time
-
-            # Log error
             logger.error(
                 "Request failed",
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": path,
                     "duration_ms": round(duration * 1000, 2),
                     "error": str(e),
                     "error_type": type(e).__name__,
