@@ -272,108 +272,62 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
             UI_DIST_PATH / "index.txt", media_type="text/x-component"
         )
 
+    # Next.js is built with `trailingSlash: true`, so all UI page URLs end
+    # with a slash (e.g. `/login/`). The proxy router catches `/{path:path}`
+    # before FastAPI's `redirect_slashes` logic can normalize the URL, so we
+    # must register both the with-slash and without-slash variants here.
+    UI_PAGES = (
+        "dashboard",
+        "login",
+        "model",
+        "providers",
+        "settings",
+        "transactions",
+        "balances",
+        "logs",
+        "usage",
+        "unauthorized",
+    )
+
+    def _register_ui_page(name: str) -> None:
+        page_dir = UI_DIST_PATH / name
+        index_html = page_dir / "index.html"
+        index_txt = page_dir / "index.txt"
+
+        async def serve_page() -> FileResponse:
+            return FileResponse(index_html)
+
+        async def serve_page_rsc() -> FileResponse:
+            return FileResponse(index_txt, media_type="text/x-component")
+
+        app.add_api_route(
+            f"/{name}",
+            serve_page,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"serve_{name}_ui",
+        )
+        app.add_api_route(
+            f"/{name}/",
+            serve_page,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"serve_{name}_ui_slash",
+        )
+        app.add_api_route(
+            f"/{name}/index.txt",
+            serve_page_rsc,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"serve_{name}_rsc",
+        )
+
+    for _page in UI_PAGES:
+        _register_ui_page(_page)
+
     @app.get("/admin")
     async def admin_redirect() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
-
-    @app.get("/dashboard", include_in_schema=False)
-    async def serve_dashboard_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "index.html")
-
-    @app.get("/login", include_in_schema=False)
-    async def serve_login_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "login" / "index.html")
-
-    @app.get("/login/index.txt", include_in_schema=False)
-    async def serve_login_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "login" / "index.txt", media_type="text/x-component"
-        )
-
-    @app.get("/model", include_in_schema=False)
-    async def serve_models_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "model" / "index.html")
-
-    @app.get("/model/index.txt", include_in_schema=False)
-    async def serve_model_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "model" / "index.txt", media_type="text/x-component"
-        )
-
-    @app.get("/providers", include_in_schema=False)
-    async def serve_providers_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "providers" / "index.html")
-
-    @app.get("/providers/index.txt", include_in_schema=False)
-    async def serve_providers_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "providers" / "index.txt",
-            media_type="text/x-component",
-        )
-
-    @app.get("/settings", include_in_schema=False)
-    async def serve_settings_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "settings" / "index.html")
-
-    @app.get("/settings/index.txt", include_in_schema=False)
-    async def serve_settings_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "settings" / "index.txt",
-            media_type="text/x-component",
-        )
-
-    @app.get("/transactions", include_in_schema=False)
-    async def serve_transactions_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
-
-    @app.get("/transactions/index.txt", include_in_schema=False)
-    async def serve_transactions_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "transactions" / "index.txt",
-            media_type="text/x-component",
-        )
-
-    @app.get("/balances", include_in_schema=False)
-    async def serve_balances_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "balances" / "index.html")
-
-    @app.get("/balances/index.txt", include_in_schema=False)
-    async def serve_balances_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "balances" / "index.txt",
-            media_type="text/x-component",
-        )
-
-    @app.get("/logs", include_in_schema=False)
-    async def serve_logs_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "logs" / "index.html")
-
-    @app.get("/logs/index.txt", include_in_schema=False)
-    async def serve_logs_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "logs" / "index.txt", media_type="text/x-component"
-        )
-
-    @app.get("/usage", include_in_schema=False)
-    async def serve_usage_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "usage" / "index.html")
-
-    @app.get("/usage/index.txt", include_in_schema=False)
-    async def serve_usage_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "usage" / "index.txt", media_type="text/x-component"
-        )
-
-    @app.get("/unauthorized", include_in_schema=False)
-    async def serve_unauthorized_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
-
-    @app.get("/unauthorized/index.txt", include_in_schema=False)
-    async def serve_unauthorized_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "unauthorized" / "index.txt",
-            media_type="text/x-component",
-        )
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon() -> FileResponse:
