@@ -341,7 +341,7 @@ async def credit_balance(
         except Exception:
             pass
 
-        logger.info(
+        logger.debug(
             "Cashu token successfully redeemed and stored",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
         )
@@ -503,7 +503,7 @@ async def fetch_all_balances(
 
 async def periodic_payout() -> None:
     if not settings.receive_ln_address:
-        logger.error("RECEIVE_LN_ADDRESS is not set, skipping payout")
+        logger.warning("RECEIVE_LN_ADDRESS is not set, periodic payout disabled")
         return
     while True:
         await asyncio.sleep(60 * 15)

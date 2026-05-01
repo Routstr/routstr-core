@@ -317,13 +317,13 @@ async def validate_bearer_key(
                 extra={"key_hash": hashed_key[:8] + "..."},
             )
 
-            logger.info(
+            logger.debug(
                 "AUTH: About to call credit_balance",
                 extra={"token_preview": bearer_key[:50]},
             )
             try:
                 msats = await credit_balance(bearer_key, new_key, session)
-                logger.info(
+                logger.debug(
                     "AUTH: credit_balance returned successfully", extra={"msats": msats}
                 )
             except Exception as credit_error:

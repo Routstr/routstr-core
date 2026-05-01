@@ -22,16 +22,20 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     # Get status code and detail - works for both FastAPI and Starlette HTTPException
     status_code = getattr(exc, "status_code", 500)
     detail = getattr(exc, "detail", str(exc))
+    path = request.url.path
 
-    logger.warning(
-        "HTTP exception",
-        extra={
-            "request_id": request_id,
-            "status_code": status_code,
-            "detail": detail,
-            "path": request.url.path,
-        },
-    )
+    # 4xx is client behaviour; the uvicorn access log already records it.
+    # Only 5xx warrants a server-side warning/error log here.
+    if status_code >= 500:
+        logger.error(
+            f"HTTP {status_code} on {path}: {detail}",
+            extra={
+                "request_id": request_id,
+                "status_code": status_code,
+                "detail": detail,
+                "path": path,
+            },
+        )
 
     return JSONResponse(
         status_code=status_code,
