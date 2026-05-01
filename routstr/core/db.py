@@ -79,11 +79,10 @@ class ApiKey(SQLModel, table=True):  # type: ignore
 
 
 async def reset_all_reserved_balances(session: AsyncSession) -> None:
-    logger.info("Resetting all reserved balances to 0")
     stmt = update(ApiKey).values(reserved_balance=0)
     await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
-    logger.info("Reserved balances reset successfully")
+    logger.info("Reset reserved balances on startup")
 
 
 class ModelRow(SQLModel, table=True):  # type: ignore

@@ -41,13 +41,22 @@ import logging.config
 import logging.handlers
 import os
 import re
+import sys
 import tomllib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from pythonjsonlogger import jsonlogger
+from rich.console import Console
 from rich.logging import RichHandler
+
+# Only use RichHandler when stdout is a real TTY. In non-TTY contexts
+# (docker logs, pipes, CI) Rich pads every line to width and wraps long
+# records, producing visually-empty trailing whitespace and split records.
+# A plain StreamHandler avoids both problems.
+_stdout_is_tty = sys.stdout.isatty()
+_console = Console(soft_wrap=True) if _stdout_is_tty else None
 
 # Define custom TRACE level
 TRACE_LEVEL = 5
@@ -261,6 +270,26 @@ def setup_logging() -> None:
     if console_enabled:
         handlers.append("console")
 
+    if _stdout_is_tty:
+        console_handler: dict[str, Any] = {
+            "()": RichHandler,
+            "level": log_level,
+            "show_time": False,
+            "show_path": False,
+            "rich_tracebacks": True,
+            "markup": True,
+            "console": _console,
+            "filters": ["request_id_filter", "security_filter"],
+        }
+    else:
+        console_handler = {
+            "class": "logging.StreamHandler",
+            "level": log_level,
+            "formatter": "plain",
+            "stream": "ext://sys.stdout",
+            "filters": ["request_id_filter", "security_filter"],
+        }
+
     LOGGING_CONFIG = {
         "version": 1,
         "disable_existing_loggers": False,
@@ -270,6 +299,10 @@ def setup_logging() -> None:
                 "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s %(request_id)s",
                 "datefmt": "%Y-%m-%d %H:%M:%S",
             },
+            "plain": {
+                "format": "%(asctime)s %(levelname)-7s %(name)s %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
         },
         "filters": {
             "version_filter": {"()": VersionFilter},
@@ -277,15 +310,7 @@ def setup_logging() -> None:
             "security_filter": {"()": SecurityFilter},
         },
         "handlers": {
-            "console": {
-                "()": RichHandler,
-                "level": log_level,
-                "show_time": False,
-                "show_path": False,
-                "rich_tracebacks": True,
-                "markup": True,
-                "filters": ["request_id_filter", "security_filter"],
-            },
+            "console": console_handler,
             "file": {
                 "()": DailyRotatingFileHandler,
                 "level": log_level,

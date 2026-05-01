@@ -197,13 +197,14 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         existing_providers = result.all()
 
         if not existing_providers:
-            logger.info(
-                "No upstream providers found in database, seeding from settings"
-            )
             await _seed_providers_from_settings(session, settings)
             await session.commit()
             result = await session.exec(select(UpstreamProviderRow))
             existing_providers = result.all()
+            if existing_providers:
+                logger.info(
+                    f"Seeded {len(existing_providers)} upstream providers from settings"
+                )
 
         async def _init_single_provider(
             provider_row: UpstreamProviderRow,
