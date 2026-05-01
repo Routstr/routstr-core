@@ -26,7 +26,7 @@ logger = get_logger(__name__)
 
 def get_app_version() -> str | None:
     try:
-        from ..core.main import __version__ as imported_version
+        from ..core.version import __version__ as imported_version
 
         return imported_version
     except Exception:
