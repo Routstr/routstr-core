@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
+from starlette.responses import Response as StarletteResponse
+from starlette.types import Scope
 
 from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
@@ -197,6 +199,23 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             )
 
 
+class _ImmutableStaticFiles(StaticFiles):
+    """Static files with long Cache-Control for content-hashed Next.js assets.
+
+    Files under `/_next/static/` are emitted with content hashes in their
+    filenames and never mutate, so we serve them with a one-year immutable
+    cache header so browsers and CDNs stop revalidating on every reload.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> StarletteResponse:
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable"
+            )
+        return response
+
+
 app = FastAPI(version=__version__, lifespan=lifespan)
 
 
@@ -243,7 +262,7 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
 
     app.mount(
         "/_next",
-        StaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True),
+        _ImmutableStaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True),
         name="next-static",
     )
 
@@ -251,10 +270,12 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def serve_root_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
 
-    # Add explicit route for /index.txt to redirect to /
+    # Serve the App Router RSC payload for the home page.
     @app.get("/index.txt", include_in_schema=False)
-    async def redirect_index_txt() -> RedirectResponse:
-        return RedirectResponse("/")
+    async def serve_root_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "index.txt", media_type="text/x-component"
+        )
 
     @app.get("/admin")
     async def admin_redirect() -> FileResponse:
@@ -268,82 +289,96 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def serve_login_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "login" / "index.html")
 
-    # Add explicit route for /login/index.txt to redirect to /login
     @app.get("/login/index.txt", include_in_schema=False)
-    async def redirect_login_index_txt() -> RedirectResponse:
-        return RedirectResponse("/login")
+    async def serve_login_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "login" / "index.txt", media_type="text/x-component"
+        )
 
     @app.get("/model", include_in_schema=False)
     async def serve_models_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "model" / "index.html")
 
-    # Add explicit route for /model/index.txt to redirect to /model
     @app.get("/model/index.txt", include_in_schema=False)
-    async def redirect_model_index_txt() -> RedirectResponse:
-        return RedirectResponse("/model")
+    async def serve_model_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "model" / "index.txt", media_type="text/x-component"
+        )
 
     @app.get("/providers", include_in_schema=False)
     async def serve_providers_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "providers" / "index.html")
 
-    # Add explicit route for /providers/index.txt to redirect to /providers
     @app.get("/providers/index.txt", include_in_schema=False)
-    async def redirect_providers_index_txt() -> RedirectResponse:
-        return RedirectResponse("/providers")
+    async def serve_providers_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "providers" / "index.txt",
+            media_type="text/x-component",
+        )
 
     @app.get("/settings", include_in_schema=False)
     async def serve_settings_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "settings" / "index.html")
 
-    # Add explicit route for /settings/index.txt to redirect to /settings
     @app.get("/settings/index.txt", include_in_schema=False)
-    async def redirect_settings_index_txt() -> RedirectResponse:
-        return RedirectResponse("/settings")
+    async def serve_settings_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "settings" / "index.txt",
+            media_type="text/x-component",
+        )
 
     @app.get("/transactions", include_in_schema=False)
     async def serve_transactions_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
 
-    # Add explicit route for /transactions/index.txt to redirect to /transactions
     @app.get("/transactions/index.txt", include_in_schema=False)
-    async def redirect_transactions_index_txt() -> RedirectResponse:
-        return RedirectResponse("/transactions")
+    async def serve_transactions_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "transactions" / "index.txt",
+            media_type="text/x-component",
+        )
 
     @app.get("/balances", include_in_schema=False)
     async def serve_balances_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "balances" / "index.html")
 
-    # Add explicit route for /balances/index.txt to redirect to /balances
     @app.get("/balances/index.txt", include_in_schema=False)
-    async def redirect_balances_index_txt() -> RedirectResponse:
-        return RedirectResponse("/balances")
+    async def serve_balances_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "balances" / "index.txt",
+            media_type="text/x-component",
+        )
 
     @app.get("/logs", include_in_schema=False)
     async def serve_logs_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "logs" / "index.html")
 
-    # Add explicit route for /logs/index.txt to redirect to /logs
     @app.get("/logs/index.txt", include_in_schema=False)
-    async def redirect_logs_index_txt() -> RedirectResponse:
-        return RedirectResponse("/logs")
+    async def serve_logs_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "logs" / "index.txt", media_type="text/x-component"
+        )
 
     @app.get("/usage", include_in_schema=False)
     async def serve_usage_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "usage" / "index.html")
 
-    # Add explicit route for /usage/index.txt to redirect to /usage
     @app.get("/usage/index.txt", include_in_schema=False)
-    async def redirect_usage_index_txt() -> RedirectResponse:
-        return RedirectResponse("/usage")
+    async def serve_usage_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "usage" / "index.txt", media_type="text/x-component"
+        )
 
     @app.get("/unauthorized", include_in_schema=False)
     async def serve_unauthorized_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
 
-    # Add explicit route for /unauthorized/index.txt to redirect to /unauthorized
     @app.get("/unauthorized/index.txt", include_in_schema=False)
-    async def redirect_unauthorized_index_txt() -> RedirectResponse:
-        return RedirectResponse("/unauthorized")
+    async def serve_unauthorized_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "unauthorized" / "index.txt",
+            media_type="text/x-component",
+        )
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon() -> FileResponse:
@@ -356,9 +391,6 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def serve_icon() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "icon.ico")
 
-    app.mount(
-        "/static", StaticFiles(directory=UI_DIST_PATH, check_dir=True), name="ui-static"
-    )
 else:
     logger.warning(
         f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
