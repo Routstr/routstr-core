@@ -350,6 +350,9 @@ async def _update_sats_pricing_once() -> None:
     from ..proxy import get_upstreams, refresh_model_maps
 
     upstreams = get_upstreams()
+    if not upstreams:
+        return
+
     sats_to_usd = sats_usd_price()
 
     updated_count = 0
@@ -363,7 +366,10 @@ async def _update_sats_pricing_once() -> None:
         updated_count += len(updated_models)
 
     if updated_count > 0:
-        logger.info("Updated sats pricing", extra={"models_updated": updated_count})
+        logger.info(
+            f"Updated sats pricing for {updated_count} models",
+            extra={"models_updated": updated_count},
+        )
         await refresh_model_maps()
 
 
