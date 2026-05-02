@@ -38,11 +38,14 @@ def _make_key() -> ApiKey:
     return ApiKey(hashed_key="abcdef0123" * 4, balance=1_000_000)
 
 
-def _make_model(model_id: str = "openai/gpt-4o-mini") -> Model:
+def _make_model(
+    model_id: str = "openai/gpt-4o-mini",
+    forwarded_model_id: str | None = None,
+) -> Model:
     return Model(
         id=model_id,
         name=model_id,
-        forwarded_model_id=model_id,
+        forwarded_model_id=forwarded_model_id if forwarded_model_id is not None else model_id,
         created=0,
         description="",
         context_length=8192,
@@ -231,6 +234,125 @@ def test_provider_prefix_overrides() -> None:
 # ---------------------------------------------------------------------------
 # Bearer-key non-streaming
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
+    """Regression: Anthropic-Messages-only fields like `output_config`,
+    `thinking`, `context_management`, and `cache_control` must be removed
+    from the request body before litellm dispatches to non-Anthropic
+    upstreams. Otherwise upstream returns 400 (unknown field).
+    """
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+
+    body = json.dumps(
+        {
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64,
+            "thinking": {"type": "adaptive"},
+            "context_management": {"edits": []},
+            "output_config": {"effort": "medium"},
+            "cache_control": {"type": "ephemeral"},
+            "mcp_servers": [],
+            "service_tier": "auto",
+            "anthropic_beta": "abc",
+            "anthropic_version": "2023-06-01",
+        }
+    ).encode()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    for stripped in (
+        "thinking",
+        "context_management",
+        "output_config",
+        "cache_control",
+        "mcp_servers",
+        "service_tier",
+        "anthropic_beta",
+        "anthropic_version",
+    ):
+        assert stripped not in forwarded, (
+            f"Anthropic-only field {stripped!r} leaked through to litellm"
+        )
+    # Core fields preserved
+    assert forwarded["max_tokens"] == 64
+    assert forwarded["messages"] == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_model_id_for_upstream_and_forwarded_for_client() -> None:
+    """Convention: `model.id` is the canonical upstream model name;
+    `forwarded_model_id` is the public alias echoed back to the client.
+    """
+    provider = _make_provider()
+    key = _make_key()
+    # Upstream knows "gpt-4o-mini"; clients see public alias "gpt-5.4-test".
+    model = _make_model(
+        model_id="gpt-4o-mini",
+        forwarded_model_id="gpt-5.4-test",
+    )
+    session = _make_session()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["model"] = kwargs["model"]
+        resp = _anthropic_non_stream_response()
+        resp["model"] = "gpt-4o-mini"  # upstream echoes its own id
+        return resp
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        result = await provider._forward_messages_via_litellm(
+            request_body=_anthropic_request_body(stream=False),
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    # Upstream call uses `model.id` with provider prefix
+    assert captured["model"] == "openai/gpt-4o-mini"
+    # Response to client echoes the public `forwarded_model_id`
+    assert isinstance(result, Response)
+    body = json.loads(result.body)
+    assert body["model"] == "gpt-5.4-test"
 
 
 @pytest.mark.asyncio

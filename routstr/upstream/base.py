@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import traceback
 import uuid
@@ -11,6 +12,34 @@ from typing import Any, Mapping, cast
 
 import httpx
 import litellm
+
+if os.getenv("LITELLM_DEBUG") == "1":
+    try:
+        litellm._turn_on_debug()  # type: ignore[no-untyped-call]
+    except Exception:
+        pass
+
+# Force litellm's Anthropic-messages adapter to use OpenAI Chat Completions
+# (POST /chat/completions) instead of OpenAI Responses API (POST /responses)
+# for openai-prefixed providers. OpenAI-compatible upstreams like Google's
+# generativelanguage compat endpoint expose /chat/completions but not
+# /responses, which produces a 404. Override with
+# `LITELLM_USE_RESPONSES_API_FOR_ANTHROPIC_MESSAGES=1` if a future upstream
+# requires the Responses API.
+if os.getenv("LITELLM_USE_RESPONSES_API_FOR_ANTHROPIC_MESSAGES") != "1":
+    try:
+        litellm.use_chat_completions_url_for_anthropic_messages = True
+    except Exception:
+        pass
+
+# Silently drop Anthropic-Messages-only parameters (e.g. `context_management`,
+# `cache_control`, `thinking`) when translating to providers that don't
+# accept them. Without this, litellm raises UnsupportedParamsError for any
+# unrecognized field and rejects the whole request. Override with
+# `LITELLM_STRICT_PARAMS=1` if an integration depends on the strict
+# behavior.
+if os.getenv("LITELLM_STRICT_PARAMS") != "1":
+    litellm.drop_params = True
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
@@ -1577,6 +1606,34 @@ class BaseUpstreamProvider:
         body.pop("model", None)
         stream = bool(body.pop("stream", False))
 
+        # Anthropic-Messages-only fields that don't translate to OpenAI
+        # Chat Completions. litellm.drop_params only filters *known*
+        # unsupported params; these newer/extension fields get passed
+        # through verbatim and the upstream rejects them with a 400.
+        # Pop them here so the request reaches the upstream cleanly.
+        anthropic_only_fields = (
+            "thinking",
+            "cache_control",
+            "context_management",
+            "output_config",
+            "mcp_servers",
+            "service_tier",
+            "anthropic_version",
+            "anthropic_beta",
+        )
+        dropped: dict[str, Any] = {}
+        for field in anthropic_only_fields:
+            if field in body:
+                dropped[field] = body.pop(field)
+        if dropped:
+            logger.debug(
+                "Dropped anthropic-only fields before litellm dispatch",
+                extra={"dropped_keys": sorted(dropped.keys())},
+            )
+
+        # Convention: `model.id` is the canonical upstream model name;
+        # `forwarded_model_id` is the public alias the internal API
+        # exposes and echoes back to the client.
         requested_model = (
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
@@ -1603,16 +1660,31 @@ class BaseUpstreamProvider:
         try:
             result = await litellm.anthropic.messages.acreate(**kwargs)
         except Exception as exc:
+            exc_message = getattr(exc, "message", None) or str(exc) or repr(exc)
+            exc_status = getattr(exc, "status_code", None)
+            exc_response = getattr(exc, "response", None)
+            response_text = None
+            if exc_response is not None:
+                try:
+                    response_text = getattr(exc_response, "text", str(exc_response))
+                except Exception:
+                    response_text = "<unreadable>"
             logger.error(
                 "litellm dispatch failed",
                 extra={
-                    "error": str(exc),
+                    "error": exc_message,
                     "error_type": type(exc).__name__,
+                    "status_code": exc_status,
+                    "llm_provider": getattr(exc, "llm_provider", None),
+                    "body": getattr(exc, "body", None),
+                    "response_text": response_text,
                     "model": litellm_model,
+                    "api_base": self.base_url,
                 },
             )
             raise UpstreamError(
-                f"Upstream error via litellm: {exc}", status_code=502
+                f"Upstream error via litellm: {exc_message}",
+                status_code=exc_status if isinstance(exc_status, int) else 502,
             ) from exc
 
         return stream, result, requested_model
