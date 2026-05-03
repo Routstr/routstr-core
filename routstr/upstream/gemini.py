@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
+from . import gemini_messages
 from .base import BaseUpstreamProvider
 from .clients.gemini import GeminiClient
 
@@ -67,6 +68,51 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("gemini/")
+
+    async def _dispatch_anthropic_messages(
+        self,
+        request_body: bytes | None,
+        model_obj: "Model",
+        *,
+        log_extra: dict[str, Any] | None = None,
+    ) -> tuple[bool, Any, str | None]:
+        """Dispatch /v1/messages through Gemini's OpenAI-compat endpoint
+        with thought-signature injection.
+
+        Two Gemini-specific problems make the default litellm path fail:
+
+        1. litellm's ``gemini/`` native route mishandles tool-use input
+           reassembly for some MCP tool schemas (Claude Code reports
+           ``Invalid tool parameters``).
+        2. Gemini 2.5/3 thinking models reject inbound ``functionCall``
+           parts that lack a ``thought_signature``, which Anthropic-Messages
+           clients (Claude Code) never produce. Setting
+           ``reasoning_effort="none"`` only suppresses *new* thinking; it
+           does not lift validation on prior tool calls. Litellm + the
+           openai SDK both drop unknown tool-call fields before the wire,
+           so we cannot inject the dummy signature
+           (``"skip_thought_signature_validator"``, see Google's
+           thought-signatures docs FAQ #1) via the litellm path.
+
+        ``gemini_messages.dispatch_gemini_messages`` solves both by
+        translating the Anthropic body to OpenAI form via litellm's
+        translator, injecting
+        ``extra_content.google.thought_signature`` on every tool_call,
+        POSTing directly to ``{base}/openai/chat/completions`` via
+        ``httpx`` (preserves arbitrary fields), and translating the
+        OpenAI streaming response back to Anthropic SSE events.
+        """
+        compat_base_url = (
+            self.base_url.rstrip("/").removesuffix("/openai") + "/openai"
+        )
+        return await gemini_messages.dispatch_gemini_messages(
+            request_body=request_body,
+            model_obj=model_obj,
+            base_url=compat_base_url,
+            api_key=self.api_key,
+            transform_model_name=self.transform_model_name,
+            log_extra=log_extra,
+        )
 
     async def forward_request(
         self,
