@@ -16,7 +16,10 @@ Order matters: more specific needles must appear before more generic ones
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlsplit
+
+import litellm
 
 DEFAULT_PREFIX = "openai/"
 
@@ -111,3 +114,49 @@ def detect_litellm_prefix(
         return "ollama_chat/"
 
     return default
+
+
+_configured = False
+
+
+def configure_litellm() -> None:
+    """Apply litellm global settings used by the messages-dispatch path.
+
+    Idempotent: safe to call from both app startup and module-level
+    initializers without side effects on the second invocation.
+
+    Settings applied:
+
+    * ``LITELLM_DEBUG=1`` enables litellm's verbose debug logger.
+    * Forces the Anthropic-messages adapter to call OpenAI Chat Completions
+      (POST ``/chat/completions``) instead of the Responses API (POST
+      ``/responses``) for ``openai/``-prefixed providers. OpenAI-compatible
+      upstreams like Google's generativelanguage compat endpoint expose
+      ``/chat/completions`` but not ``/responses``, which would 404. Set
+      ``LITELLM_USE_RESPONSES_API_FOR_ANTHROPIC_MESSAGES=1`` to opt out.
+    * Silently drops Anthropic-Messages-only parameters (``thinking``,
+      ``cache_control``, ``context_management``, ...) when translating to
+      providers that don't accept them, instead of raising
+      ``UnsupportedParamsError``. Set ``LITELLM_STRICT_PARAMS=1`` to opt
+      out.
+    """
+    global _configured
+    if _configured:
+        return
+
+    if os.getenv("LITELLM_DEBUG") == "1":
+        try:
+            litellm._turn_on_debug()  # type: ignore[no-untyped-call]
+        except Exception:
+            pass
+
+    if os.getenv("LITELLM_USE_RESPONSES_API_FOR_ANTHROPIC_MESSAGES") != "1":
+        try:
+            litellm.use_chat_completions_url_for_anthropic_messages = True
+        except Exception:
+            pass
+
+    if os.getenv("LITELLM_STRICT_PARAMS") != "1":
+        litellm.drop_params = True
+
+    _configured = True
