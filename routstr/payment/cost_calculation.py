@@ -53,10 +53,17 @@ async def calculate_cost(  # todo: can be sync
 
     if "usage" not in response_data or response_data["usage"] is None:
         logger.warning(
-            "No usage data in response, using base cost only",
+            "No usage data in response — billing at MaxCostData with zero "
+            "tokens. Dashboard will show this request as `(0+0)`. Most "
+            "common cause: upstream stream did not include a final usage "
+            "chunk (OpenAI-compat backends require "
+            "`stream_options.include_usage=true`).",
             extra={
                 "max_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
+                "response_keys": sorted(response_data.keys())
+                if isinstance(response_data, dict)
+                else None,
             },
         )
         return MaxCostData(
@@ -139,6 +146,22 @@ async def calculate_cost(  # todo: can be sync
     )
 
     if usd_cost > 0:
+        if input_tokens == 0 and output_tokens == 0:
+            logger.warning(
+                "Upstream reported a USD cost but no token counts — "
+                "billing the USD-derived cost while the dashboard will "
+                "show this request as `(0+0)` tokens. Check that the "
+                "upstream actually emits `usage.input_tokens` and "
+                "`usage.output_tokens` (OpenAI-compat streams require "
+                "`stream_options.include_usage=true`).",
+                extra={
+                    "model": response_data.get("model", "unknown"),
+                    "usd_cost": usd_cost,
+                    "usage_keys": sorted(usage_data.keys())
+                    if isinstance(usage_data, dict)
+                    else None,
+                },
+            )
         try:
             sats_per_usd = 1.0 / sats_usd_price()
             cost_in_sats = usd_cost * sats_per_usd
@@ -239,10 +262,18 @@ async def calculate_cost(  # todo: can be sync
 
     if not (MSATS_PER_1K_OUTPUT_TOKENS and MSATS_PER_1K_INPUT_TOKENS):
         logger.warning(
-            "No token pricing configured, using base cost",
+            "No token pricing configured — billing at flat MaxCostData. "
+            "Token counts %s in the upstream response but cannot be "
+            "priced; the request will appear in dashboards with the "
+            "raw counts and a fixed max-cost charge.",
+            "are present"
+            if (input_tokens > 0 or output_tokens > 0)
+            else "are zero",
             extra={
                 "base_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
             },
         )
         return MaxCostData(

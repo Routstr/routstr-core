@@ -351,7 +351,10 @@ class BaseUpstreamProvider:
     ) -> bytes | None:
         """Transform request body for provider-specific requirements.
 
-        Automatically transforms model names in the request body.
+        Automatically transforms model names and, for streaming chat
+        completions, opts the upstream into emitting per-chunk ``usage``
+        so cost tracking can read real token counts instead of falling
+        back to ``MaxCostData``.
 
         Args:
             body: Original request body bytes
@@ -364,9 +367,25 @@ class BaseUpstreamProvider:
 
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and "model" in data:
-                original_model = model_obj.id
-                transformed_model = self.transform_model_name(original_model)
+        except Exception as e:
+            logger.debug(
+                "Could not parse request body for transformation",
+                extra={
+                    "error": str(e),
+                    "provider": self.provider_type or self.base_url,
+                },
+            )
+            return body
+
+        if not isinstance(data, dict):
+            return body
+
+        changed = False
+
+        if "model" in data:
+            original_model = model_obj.id
+            transformed_model = self.transform_model_name(original_model)
+            if data["model"] != transformed_model:
                 data["model"] = transformed_model
                 logger.debug(
                     "Transformed model name in request",
@@ -376,16 +395,28 @@ class BaseUpstreamProvider:
                         "provider": self.provider_type or self.base_url,
                     },
                 )
-                return json.dumps(data).encode()
-        except Exception as e:
-            logger.debug(
-                "Could not transform request body",
-                extra={
-                    "error": str(e),
-                    "provider": self.provider_type or self.base_url,
-                },
-            )
+                changed = True
 
+        # OpenAI-compatible streaming responses omit ``usage`` unless the
+        # request sets ``stream_options.include_usage = true``. Without it
+        # we can't reconcile token counts at end of stream and the
+        # request gets billed at max-cost with zero tokens. Discriminate
+        # chat-completions-shaped requests by the ``messages`` field so we
+        # don't poke unrelated endpoints.
+        if (
+            data.get("stream") is True
+            and "messages" in data
+            and isinstance(data.get("messages"), list)
+        ):
+            existing = data.get("stream_options")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            if merged.get("include_usage") is not True:
+                merged["include_usage"] = True
+                data["stream_options"] = merged
+                changed = True
+
+        if changed:
+            return json.dumps(data).encode()
         return body
 
     def _extract_upstream_error_message(
@@ -1667,6 +1698,20 @@ class BaseUpstreamProvider:
                 nonlocal usage_finalized
                 if usage_finalized:
                     return None
+                logger.warning(
+                    "Finalizing /v1/messages stream with no usage data — "
+                    "client will be billed at max-cost with zero tokens. "
+                    "Likely cause: upstream omitted `usage` from the SSE "
+                    "stream (check that the request includes "
+                    "`stream_options.include_usage=true` and that the "
+                    "upstream actually emits a final usage chunk).",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "model": last_model_seen or "unknown",
+                        "provider": self.provider_type or self.base_url,
+                        "max_cost_msats": max_cost_for_model,
+                    },
+                )
                 async with create_session() as new_session:
                     fresh_key = await new_session.get(
                         key.__class__, key.hashed_key
@@ -1700,8 +1745,12 @@ class BaseUpstreamProvider:
                 ):
                     if annotated.model:
                         last_model_seen = annotated.model
-                    input_tokens += annotated.input_tokens
-                    output_tokens += annotated.output_tokens
+                    # Anthropic SSE reports usage cumulatively across
+                    # message_start + message_delta — take the max snapshot
+                    # rather than summing, otherwise input tokens
+                    # double-count.
+                    input_tokens = max(input_tokens, annotated.input_tokens)
+                    output_tokens = max(output_tokens, annotated.output_tokens)
                     yield annotated.sse_bytes
 
                 if input_tokens > 0 or output_tokens > 0:
@@ -1785,14 +1834,29 @@ class BaseUpstreamProvider:
         ):
             if annotated.model:
                 last_model_seen = annotated.model
-            input_tokens += annotated.input_tokens
-            output_tokens += annotated.output_tokens
+            # See _stream_litellm_messages for why this is max() not +=.
+            input_tokens = max(input_tokens, annotated.input_tokens)
+            output_tokens = max(output_tokens, annotated.output_tokens)
             buffered.append(annotated.sse_bytes)
 
         response_headers: dict[str, str] = {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
         }
+
+        if input_tokens == 0 and output_tokens == 0:
+            logger.warning(
+                "x-cashu /v1/messages stream finished with no usage data "
+                "— refund cannot be computed and the client effectively "
+                "pays the full cashu amount. Likely cause: upstream "
+                "omitted `usage` from the SSE stream.",
+                extra={
+                    "model": last_model_seen or "unknown",
+                    "provider": self.provider_type or self.base_url,
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
 
         if input_tokens > 0 or output_tokens > 0:
             response_data: dict = {
