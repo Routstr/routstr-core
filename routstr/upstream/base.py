@@ -71,6 +71,7 @@ from ..payment.models import (
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
+from .litellm_routing import detect_litellm_prefix
 
 logger = get_logger(__name__)
 
@@ -94,7 +95,10 @@ class BaseUpstreamProvider:
     platform_url: str | None = None
 
     supports_anthropic_messages: bool = False
-    litellm_provider_prefix: str = "openai/"
+    # When None, the prefix is detected from `base_url` at dispatch time
+    # (see `get_litellm_provider_prefix`). Subclasses set this to lock the
+    # provider regardless of URL.
+    litellm_provider_prefix: str | None = None
 
     base_url: str
     api_key: str
@@ -115,6 +119,19 @@ class BaseUpstreamProvider:
         self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
+
+    def get_litellm_provider_prefix(self) -> str:
+        """Resolve the litellm provider prefix for this provider instance.
+
+        1. If the subclass pinned `litellm_provider_prefix`, use it.
+        2. Otherwise infer from `base_url` (e.g. ``api.fireworks.ai`` →
+           ``fireworks_ai/``) so custom/generic rows reach the correct
+           litellm backend instead of falling back to ``openai/``.
+        3. Default ``openai/`` for unknown OpenAI-compatible servers.
+        """
+        if self.__class__.litellm_provider_prefix:
+            return self.__class__.litellm_provider_prefix
+        return detect_litellm_prefix(self.base_url)
 
     @classmethod
     def from_db_row(
@@ -1559,6 +1576,121 @@ class BaseUpstreamProvider:
                 events.append(obj)
         return events, buffer
 
+    async def _aggregate_anthropic_events_to_message(
+        self, iterator: AsyncIterator[Any]
+    ) -> dict:
+        """Drain an Anthropic-Messages event iterator into a single Message
+        dict (the shape `litellm.anthropic.messages.acreate(stream=False)`
+        would have produced).
+
+        Used to transparently stream from upstream while still returning a
+        non-streaming response to the client. Lets us sidestep upstream
+        quirks (e.g. Fireworks rejects ``max_tokens > 4096`` unless
+        ``stream=true``) without leaking any of that into client-visible
+        behavior.
+        """
+        sse_buffer = b""
+        message: dict = {}
+        blocks: list[dict] = []
+        partial_json: dict[int, str] = {}
+        final_stop_reason: str | None = None
+        final_stop_sequence: str | None = None
+        final_usage: dict[str, Any] = {}
+        final_model: str | None = None
+
+        async for chunk in iterator:
+            events, sse_buffer = self._events_from_chunk(chunk, sse_buffer)
+            for event in events:
+                etype = event.get("type")
+                if etype == "message_start":
+                    raw = event.get("message") or {}
+                    if isinstance(raw, dict):
+                        message = dict(raw)
+                        existing = message.get("content")
+                        blocks = list(existing) if isinstance(existing, list) else []
+                        usage = message.get("usage")
+                        if isinstance(usage, dict):
+                            final_usage = dict(usage)
+                        if isinstance(message.get("model"), str):
+                            final_model = message["model"]
+                elif etype == "content_block_start":
+                    idx = int(event.get("index") or 0)
+                    cb = event.get("content_block") or {}
+                    cb_dict = dict(cb) if isinstance(cb, dict) else {}
+                    while len(blocks) <= idx:
+                        blocks.append({})
+                    blocks[idx] = cb_dict
+                elif etype == "content_block_delta":
+                    idx = int(event.get("index") or 0)
+                    if idx >= len(blocks):
+                        continue
+                    delta = event.get("delta") or {}
+                    if not isinstance(delta, dict):
+                        continue
+                    dtype = delta.get("type")
+                    block = blocks[idx]
+                    if dtype == "text_delta":
+                        block["text"] = (block.get("text") or "") + (
+                            delta.get("text") or ""
+                        )
+                    elif dtype == "input_json_delta":
+                        partial_json[idx] = partial_json.get(idx, "") + (
+                            delta.get("partial_json") or ""
+                        )
+                    elif dtype == "thinking_delta":
+                        block["thinking"] = (block.get("thinking") or "") + (
+                            delta.get("thinking") or ""
+                        )
+                    elif dtype == "signature_delta":
+                        block["signature"] = (block.get("signature") or "") + (
+                            delta.get("signature") or ""
+                        )
+                elif etype == "content_block_stop":
+                    idx = int(event.get("index") or 0)
+                    raw_json = partial_json.pop(idx, None)
+                    if raw_json is not None and idx < len(blocks):
+                        try:
+                            blocks[idx]["input"] = (
+                                json.loads(raw_json) if raw_json else {}
+                            )
+                        except json.JSONDecodeError:
+                            blocks[idx]["input"] = raw_json
+                elif etype == "message_delta":
+                    delta = event.get("delta") or {}
+                    if isinstance(delta, dict):
+                        if "stop_reason" in delta:
+                            final_stop_reason = delta.get("stop_reason")
+                        if "stop_sequence" in delta:
+                            final_stop_sequence = delta.get("stop_sequence")
+                    usage = event.get("usage")
+                    if isinstance(usage, dict):
+                        final_usage.update(usage)
+                # message_stop: nothing to merge
+
+        if not message:
+            # Upstream returned no message_start; expose what we can so the
+            # client at least sees the assembled content.
+            message = {
+                "id": "",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+            }
+
+        message["content"] = blocks
+        if final_model and not message.get("model"):
+            message["model"] = final_model
+        if final_stop_reason is not None:
+            message["stop_reason"] = final_stop_reason
+        if final_stop_sequence is not None:
+            message["stop_sequence"] = final_stop_sequence
+        if final_usage:
+            existing_usage = message.get("usage")
+            merged = dict(existing_usage) if isinstance(existing_usage, dict) else {}
+            merged.update(final_usage)
+            message["usage"] = merged
+        return message
+
     def _events_from_chunk(
         self, chunk: object, sse_buffer: bytes
     ) -> tuple[list[dict], bytes]:
@@ -1604,7 +1736,14 @@ class BaseUpstreamProvider:
             ) from exc
 
         body.pop("model", None)
-        stream = bool(body.pop("stream", False))
+        # `stream` here is what the **client** asked for. Upstream is
+        # always streamed (see `upstream_stream` below); when the client
+        # asked for a non-streaming response we drain and aggregate the
+        # events into a single Anthropic Message dict before returning.
+        # This sidesteps provider-specific non-streaming caps (e.g.
+        # Fireworks rejects `max_tokens > 4096` unless `stream=true`).
+        client_stream = bool(body.pop("stream", False))
+        upstream_stream = True
 
         # Anthropic-Messages-only fields that don't translate to OpenAI
         # Chat Completions. litellm.drop_params only filters *known*
@@ -1638,13 +1777,14 @@ class BaseUpstreamProvider:
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
         upstream_model = self.transform_model_name(model_obj.id)
-        litellm_model = f"{self.litellm_provider_prefix}{upstream_model}"
+        prefix = self.get_litellm_provider_prefix()
+        litellm_model = f"{prefix}{upstream_model}"
 
         kwargs: dict = {
             "model": litellm_model,
             "api_base": self.base_url,
             "api_key": self.api_key,
-            "stream": stream,
+            "stream": upstream_stream,
             **body,
         }
 
@@ -1652,7 +1792,9 @@ class BaseUpstreamProvider:
             "Dispatching /v1/messages via litellm",
             extra={
                 "model": litellm_model,
-                "stream": stream,
+                "resolved_provider": prefix.rstrip("/"),
+                "client_stream": client_stream,
+                "upstream_stream": upstream_stream,
                 **(log_extra or {}),
             },
         )
@@ -1687,7 +1829,33 @@ class BaseUpstreamProvider:
                 status_code=exc_status if isinstance(exc_status, int) else 502,
             ) from exc
 
-        return stream, result, requested_model
+        if not client_stream and hasattr(result, "__aiter__"):
+            # Client asked for a non-streaming response but we always
+            # stream from upstream — drain the events into a single
+            # Anthropic Message dict so the rest of the pipeline can
+            # treat it as if the upstream had returned non-streaming.
+            # Some litellm adapters return a non-streaming dict even
+            # when ``stream=True``; in that case, leave the result as-is.
+            try:
+                aggregated: Any = await self._aggregate_anthropic_events_to_message(
+                    cast(AsyncIterator[Any], result)
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to aggregate streamed events into message",
+                    extra={
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "model": litellm_model,
+                    },
+                )
+                raise UpstreamError(
+                    f"Failed to aggregate upstream stream: {exc}",
+                    status_code=502,
+                ) from exc
+            return client_stream, aggregated, requested_model
+
+        return client_stream, result, requested_model
 
     async def _forward_messages_via_litellm(
         self,

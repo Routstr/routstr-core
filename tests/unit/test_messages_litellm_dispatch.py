@@ -198,7 +198,48 @@ def test_compute_refund_invalid_unit() -> None:
 
 def test_default_provider_does_not_support_anthropic_messages() -> None:
     assert BaseUpstreamProvider.supports_anthropic_messages is False
-    assert BaseUpstreamProvider.litellm_provider_prefix == "openai/"
+    # Class default is None so URL detection runs at dispatch time.
+    assert BaseUpstreamProvider.litellm_provider_prefix is None
+
+
+def test_base_provider_resolves_prefix_from_base_url() -> None:
+    """The bug case: a custom row pointing at Fireworks must resolve to
+    `fireworks_ai/` instead of falling back to `openai/`."""
+    fireworks = BaseUpstreamProvider(
+        base_url="https://api.fireworks.ai/inference/v1", api_key="sk-test"
+    )
+    assert fireworks.get_litellm_provider_prefix() == "fireworks_ai/"
+
+    groq = BaseUpstreamProvider(
+        base_url="https://api.groq.com/openai/v1", api_key="sk-test"
+    )
+    assert groq.get_litellm_provider_prefix() == "groq/"
+
+    xai = BaseUpstreamProvider(
+        base_url="https://api.x.ai/v1", api_key="sk-test"
+    )
+    assert xai.get_litellm_provider_prefix() == "xai/"
+
+    deepseek = BaseUpstreamProvider(
+        base_url="https://api.deepseek.com/v1", api_key="sk-test"
+    )
+    assert deepseek.get_litellm_provider_prefix() == "deepseek/"
+
+    unknown = BaseUpstreamProvider(
+        base_url="https://example.com/v1", api_key="sk-test"
+    )
+    assert unknown.get_litellm_provider_prefix() == "openai/"
+
+
+def test_subclass_prefix_wins_over_url_detection() -> None:
+    """A subclass override must beat URL detection. e.g. configuring an
+    AnthropicUpstreamProvider with a fireworks URL still produces
+    ``anthropic/`` (defensive: subclasses pin their backend on purpose)."""
+    from routstr.upstream.anthropic import AnthropicUpstreamProvider
+
+    p = AnthropicUpstreamProvider(api_key="sk-test")
+    p.base_url = "https://api.fireworks.ai/inference/v1"
+    assert p.get_litellm_provider_prefix() == "anthropic/"
 
 
 def test_anthropic_provider_supports_native_messages() -> None:
@@ -371,7 +412,13 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
         assert kwargs["model"] == "openai/openai/gpt-4o-mini"
         assert kwargs["api_base"] == "http://test"
         assert kwargs["api_key"] == "upstream-key"
-        assert kwargs["stream"] is False
+        # The dispatcher always streams from upstream and aggregates back
+        # when the client wants a non-streaming response (sidesteps
+        # provider-specific non-streaming caps like Fireworks's max_tokens
+        # > 4096). When the mock returns a plain dict, the dispatcher
+        # detects the lack of __aiter__ and skips aggregation, so the
+        # client still gets the same Response shape.
+        assert kwargs["stream"] is True
         assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
         assert kwargs["max_tokens"] == 64
         return upstream_response
@@ -989,3 +1036,266 @@ async def test_forward_x_cashu_request_skips_litellm_for_count_tokens() -> None:
                     max_cost_for_model=10_000,
                     model_obj=model,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Upstream-always-streams + aggregate-on-non-streaming
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aggregator_assembles_text_message_from_events() -> None:
+    """When the client wants a non-streaming response, the dispatcher
+    drains the upstream stream and assembles a single Anthropic Message
+    dict. This is what makes Fireworks (which rejects max_tokens > 4096
+    unless stream=true) work transparently for non-streaming clients."""
+    provider = _make_provider()
+
+    events: list[dict] = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_aggregated",
+                "type": "message",
+                "role": "assistant",
+                "model": "accounts/fireworks/models/glm-5",
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 10, "output_tokens": 0},
+            },
+        },
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": ", world!"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 42},
+        },
+        {"type": "message_stop"},
+    ]
+
+    async def event_iter() -> AsyncIterator[dict]:
+        for event in events:
+            yield event
+
+    message = await provider._aggregate_anthropic_events_to_message(event_iter())
+
+    assert message["id"] == "msg_aggregated"
+    assert message["role"] == "assistant"
+    assert message["stop_reason"] == "end_turn"
+    assert message["stop_sequence"] is None
+    assert message["content"] == [{"type": "text", "text": "Hello, world!"}]
+    assert message["usage"]["input_tokens"] == 10
+    assert message["usage"]["output_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_aggregator_parses_tool_use_input_json_delta() -> None:
+    """tool_use blocks split their `input` across multiple
+    `input_json_delta` chunks. The aggregator must concatenate and parse
+    them into a single JSON object."""
+    provider = _make_provider()
+
+    events: list[dict] = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_tool",
+                "type": "message",
+                "role": "assistant",
+                "model": "test-model",
+                "content": [],
+                "usage": {"input_tokens": 5, "output_tokens": 0},
+            },
+        },
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "calc",
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"x":'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": ' 7}'},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use"},
+            "usage": {"output_tokens": 3},
+        },
+        {"type": "message_stop"},
+    ]
+
+    async def event_iter() -> AsyncIterator[dict]:
+        for event in events:
+            yield event
+
+    message = await provider._aggregate_anthropic_events_to_message(event_iter())
+    assert message["stop_reason"] == "tool_use"
+    assert message["content"][0]["type"] == "tool_use"
+    assert message["content"][0]["input"] == {"x": 7}
+
+
+@pytest.mark.asyncio
+async def test_aggregator_parses_sse_byte_chunks() -> None:
+    """litellm's anthropic adapter often yields raw SSE byte chunks. The
+    aggregator must parse the SSE wire format, not just typed dicts."""
+    provider = _make_provider()
+
+    sse = (
+        b'event: message_start\n'
+        b'data: {"type":"message_start","message":{"id":"m1","type":"message",'
+        b'"role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+        b'event: content_block_start\n'
+        b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        b'event: content_block_delta\n'
+        b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
+        b'event: content_block_stop\n'
+        b'data: {"type":"content_block_stop","index":0}\n\n'
+        b'event: message_delta\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
+        b'event: message_stop\n'
+        b'data: {"type":"message_stop"}\n\n'
+    )
+
+    async def chunk_iter() -> AsyncIterator[bytes]:
+        # Split mid-event to exercise the partial-buffer path.
+        yield sse[:100]
+        yield sse[100:]
+
+    message = await provider._aggregate_anthropic_events_to_message(chunk_iter())
+    assert message["content"] == [{"type": "text", "text": "hi"}]
+    assert message["stop_reason"] == "end_turn"
+    assert message["usage"]["output_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_always_streams_upstream_and_aggregates_for_non_streaming_client(  # noqa: E501
+) -> None:
+    """End-to-end: client says stream=false; dispatcher upstream-streams
+    and returns an aggregated Anthropic Message dict."""
+    provider = _make_provider()
+    model = _make_model()
+    body = _anthropic_request_body(stream=False)
+
+    events: list[dict] = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_e2e",
+                "type": "message",
+                "role": "assistant",
+                "model": "openai/gpt-4o-mini",
+                "content": [],
+                "usage": {"input_tokens": 4, "output_tokens": 0},
+            },
+        },
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "ok"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 1},
+        },
+        {"type": "message_stop"},
+    ]
+
+    async def event_iter() -> AsyncIterator[dict]:
+        for event in events:
+            yield event
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
+        captured_kwargs.update(kwargs)
+        return event_iter()
+
+    with patch(
+        "litellm.anthropic.messages.acreate",
+        new=AsyncMock(side_effect=fake_acreate),
+    ):
+        client_stream, result, requested_model = (
+            await provider._dispatch_anthropic_messages(
+                request_body=body,
+                model_obj=model,
+            )
+        )
+
+    # Upstream was streamed regardless of client preference.
+    assert captured_kwargs["stream"] is True
+    # Client wanted non-streaming → aggregator ran.
+    assert client_stream is False
+    assert isinstance(result, dict)
+    assert result["content"] == [{"type": "text", "text": "ok"}]
+    assert result["stop_reason"] == "end_turn"
+    assert requested_model == "openai/gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> None:
+    """The original bug: a custom-typed row pointing at Fireworks must
+    dispatch with `fireworks_ai/`, not `openai/`."""
+    provider = BaseUpstreamProvider(
+        base_url="https://api.fireworks.ai/inference/v1",
+        api_key="fw-key",
+    )
+    model = _make_model(model_id="accounts/fireworks/models/glm-5")
+    body = _anthropic_request_body(stream=True)
+
+    captured_kwargs: dict[str, Any] = {}
+
+    async def empty_iter() -> AsyncIterator[dict]:
+        if False:
+            yield {}
+
+    async def fake_acreate(**kwargs: Any) -> AsyncIterator[dict]:
+        captured_kwargs.update(kwargs)
+        return empty_iter()
+
+    with patch(
+        "litellm.anthropic.messages.acreate",
+        new=AsyncMock(side_effect=fake_acreate),
+    ):
+        await provider._dispatch_anthropic_messages(
+            request_body=body, model_obj=model
+        )
+
+    assert captured_kwargs["model"] == (
+        "fireworks_ai/accounts/fireworks/models/glm-5"
+    )
+    assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"
