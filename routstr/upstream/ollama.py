@@ -21,6 +21,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
     provider_type = "ollama"
     default_base_url = "http://localhost:11434"
     platform_url = None
+    litellm_provider_prefix = "ollama_chat/"
 
     def __init__(
         self,

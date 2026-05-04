@@ -13,6 +13,7 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
     provider_type = "azure"
     default_base_url = None
     platform_url = "https://portal.azure.com/"
+    litellm_provider_prefix = "azure/"
 
     def __init__(
         self,

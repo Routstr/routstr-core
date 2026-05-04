@@ -6,13 +6,13 @@ import json
 import re
 import traceback
 import uuid
-from collections.abc import AsyncGenerator
-from typing import Mapping
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import Any, Mapping, cast
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic.v1 import BaseModel
 from sqlmodel import select
 
 from ..auth import adjust_payment_for_tokens
@@ -41,6 +41,8 @@ from ..payment.models import (
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
+from . import messages_dispatch
+from .litellm_routing import detect_litellm_prefix
 
 logger = get_logger(__name__)
 
@@ -63,6 +65,12 @@ class BaseUpstreamProvider:
     default_base_url: str | None = None
     platform_url: str | None = None
 
+    supports_anthropic_messages: bool = False
+    # When None, the prefix is detected from `base_url` at dispatch time
+    # (see `get_litellm_provider_prefix`). Subclasses set this to lock the
+    # provider regardless of URL.
+    litellm_provider_prefix: str | None = None
+
     base_url: str
     api_key: str
     provider_fee: float = 1.05
@@ -82,6 +90,19 @@ class BaseUpstreamProvider:
         self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
+
+    def get_litellm_provider_prefix(self) -> str:
+        """Resolve the litellm provider prefix for this provider instance.
+
+        1. If the subclass pinned `litellm_provider_prefix`, use it.
+        2. Otherwise infer from `base_url` (e.g. ``api.fireworks.ai`` →
+           ``fireworks_ai/``) so custom/generic rows reach the correct
+           litellm backend instead of falling back to ``openai/``.
+        3. Default ``openai/`` for unknown OpenAI-compatible servers.
+        """
+        if self.__class__.litellm_provider_prefix:
+            return self.__class__.litellm_provider_prefix
+        return detect_litellm_prefix(self.base_url)
 
     @classmethod
     def from_db_row(
@@ -330,7 +351,10 @@ class BaseUpstreamProvider:
     ) -> bytes | None:
         """Transform request body for provider-specific requirements.
 
-        Automatically transforms model names in the request body.
+        Automatically transforms model names and, for streaming chat
+        completions, opts the upstream into emitting per-chunk ``usage``
+        so cost tracking can read real token counts instead of falling
+        back to ``MaxCostData``.
 
         Args:
             body: Original request body bytes
@@ -343,9 +367,25 @@ class BaseUpstreamProvider:
 
         try:
             data = json.loads(body)
-            if isinstance(data, dict) and "model" in data:
-                original_model = model_obj.id
-                transformed_model = self.transform_model_name(original_model)
+        except Exception as e:
+            logger.debug(
+                "Could not parse request body for transformation",
+                extra={
+                    "error": str(e),
+                    "provider": self.provider_type or self.base_url,
+                },
+            )
+            return body
+
+        if not isinstance(data, dict):
+            return body
+
+        changed = False
+
+        if "model" in data:
+            original_model = model_obj.id
+            transformed_model = self.transform_model_name(original_model)
+            if data["model"] != transformed_model:
                 data["model"] = transformed_model
                 logger.debug(
                     "Transformed model name in request",
@@ -355,16 +395,28 @@ class BaseUpstreamProvider:
                         "provider": self.provider_type or self.base_url,
                     },
                 )
-                return json.dumps(data).encode()
-        except Exception as e:
-            logger.debug(
-                "Could not transform request body",
-                extra={
-                    "error": str(e),
-                    "provider": self.provider_type or self.base_url,
-                },
-            )
+                changed = True
 
+        # OpenAI-compatible streaming responses omit ``usage`` unless the
+        # request sets ``stream_options.include_usage = true``. Without it
+        # we can't reconcile token counts at end of stream and the
+        # request gets billed at max-cost with zero tokens. Discriminate
+        # chat-completions-shaped requests by the ``messages`` field so we
+        # don't poke unrelated endpoints.
+        if (
+            data.get("stream") is True
+            and "messages" in data
+            and isinstance(data.get("messages"), list)
+        ):
+            existing = data.get("stream_options")
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            if merged.get("include_usage") is not True:
+                merged["include_usage"] = True
+                data["stream_options"] = merged
+                changed = True
+
+        if changed:
+            return json.dumps(data).encode()
         return body
 
     def _extract_upstream_error_message(
@@ -1470,6 +1522,397 @@ class BaseUpstreamProvider:
         except Exception:
             raise
 
+    # ------------------------------------------------------------------
+    # Litellm /v1/messages dispatch (thin wrappers)
+    #
+    # The actual translation logic lives in ``messages_dispatch``. These
+    # method shims exist so subclasses and tests can keep the original
+    # provider-bound API.
+    # ------------------------------------------------------------------
+
+    _coerce_litellm_payload = staticmethod(messages_dispatch.coerce_litellm_payload)
+    _parse_sse_blocks = staticmethod(messages_dispatch.parse_sse_blocks)
+    _events_from_chunk = staticmethod(messages_dispatch.events_from_chunk)
+
+    async def _aggregate_anthropic_events_to_message(
+        self, iterator: AsyncIterator[Any]
+    ) -> dict:
+        return await messages_dispatch.aggregate_anthropic_events_to_message(
+            iterator
+        )
+
+    async def _dispatch_anthropic_messages(
+        self,
+        request_body: bytes | None,
+        model_obj: Model,
+        *,
+        log_extra: dict[str, Any] | None = None,
+    ) -> tuple[bool, Any, str | None]:
+        return await messages_dispatch.dispatch_anthropic_messages(
+            request_body=request_body,
+            model_obj=model_obj,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            provider_prefix=self.get_litellm_provider_prefix(),
+            transform_model_name=self.transform_model_name,
+            log_extra=log_extra,
+        )
+
+    async def _forward_messages_via_litellm(
+        self,
+        request_body: bytes | None,
+        key: ApiKey,
+        session: AsyncSession,
+        max_cost_for_model: int,
+        model_obj: Model,
+    ) -> Response | StreamingResponse:
+        """Translate /v1/messages to upstream chat/completions via litellm.
+
+        Used when the upstream provider does not natively serve Anthropic
+        Messages (i.e. supports_anthropic_messages is False). Cost
+        tracking and metadata injection mirror the native messages path.
+        """
+        stream, result, requested_model = await self._dispatch_anthropic_messages(
+            request_body,
+            model_obj,
+            log_extra={"key_hash": key.hashed_key[:8] + "..."},
+        )
+
+        if stream:
+            return self._stream_litellm_messages(
+                cast(AsyncIterator[Any], result),
+                key,
+                max_cost_for_model,
+                requested_model,
+            )
+
+        response_json = messages_dispatch.coerce_litellm_payload(result)
+        if requested_model and "model" in response_json:
+            response_json["model"] = requested_model
+
+        cost_data = await adjust_payment_for_tokens(
+            key, response_json, session, max_cost_for_model
+        )
+        self.inject_cost_metadata(response_json, cost_data, key)
+
+        return Response(
+            content=json.dumps(response_json).encode(),
+            status_code=200,
+            media_type="application/json",
+        )
+
+    async def _forward_x_cashu_messages_via_litellm(
+        self,
+        request_body: bytes,
+        amount: int,
+        unit: str,
+        max_cost_for_model: int,
+        model_obj: Model,
+        mint: str | None = None,
+        payment_token_hash: str | None = None,
+        request_id: str | None = None,
+    ) -> Response | StreamingResponse:
+        """Dispatch /v1/messages via litellm for x-cashu payments.
+
+        Computes cost from upstream usage, refunds the unspent balance via
+        an X-Cashu response header, and returns the Anthropic-shaped body.
+        """
+        stream, result, requested_model = await self._dispatch_anthropic_messages(
+            request_body,
+            model_obj,
+            log_extra={"payment_unit": unit, "payment_amount": amount},
+        )
+
+        if stream:
+            return await self._stream_x_cashu_litellm_messages(
+                cast(AsyncIterator[Any], result),
+                amount,
+                unit,
+                max_cost_for_model,
+                requested_model,
+                mint,
+                payment_token_hash,
+                request_id,
+            )
+
+        response_json = messages_dispatch.coerce_litellm_payload(result)
+        if requested_model and "model" in response_json:
+            response_json["model"] = requested_model
+
+        cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+
+        if cost_data and "usage" in response_json and isinstance(
+            response_json["usage"], dict
+        ):
+            response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+
+        response_headers: dict[str, str] = {}
+        if cost_data:
+            refund_amount = messages_dispatch.compute_refund(
+                amount, unit, cost_data.total_msats
+            )
+            if refund_amount > 0:
+                refund_token = await self.send_refund(
+                    refund_amount,
+                    unit,
+                    mint,
+                    payment_token_hash,
+                    request_id=request_id,
+                )
+                response_headers["X-Cashu"] = refund_token
+                logger.info(
+                    "Refund processed for non-streaming /v1/messages via litellm",
+                    extra={
+                        "refund_amount": refund_amount,
+                        "unit": unit,
+                        "model": response_json.get("model", "unknown"),
+                    },
+                )
+
+        return Response(
+            content=json.dumps(response_json).encode(),
+            status_code=200,
+            headers=response_headers,
+            media_type="application/json",
+        )
+
+    _compute_refund = staticmethod(messages_dispatch.compute_refund)
+
+    def _stream_litellm_messages(
+        self,
+        iterator: AsyncIterator[Any],
+        key: ApiKey,
+        max_cost_for_model: int,
+        requested_model: str | None,
+    ) -> StreamingResponse:
+        """Re-emit a litellm Anthropic-event iterator as live SSE bytes
+        with cost reconciliation appended at end of stream."""
+
+        async def stream_with_cost() -> AsyncGenerator[bytes, None]:
+            usage_finalized = False
+            last_model_seen: str | None = None
+            input_tokens = 0
+            output_tokens = 0
+
+            async def finalize_without_usage() -> bytes | None:
+                nonlocal usage_finalized
+                if usage_finalized:
+                    return None
+                logger.warning(
+                    "Finalizing /v1/messages stream with no usage data — "
+                    "client will be billed at max-cost with zero tokens. "
+                    "Likely cause: upstream omitted `usage` from the SSE "
+                    "stream (check that the request includes "
+                    "`stream_options.include_usage=true` and that the "
+                    "upstream actually emits a final usage chunk).",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "model": last_model_seen or "unknown",
+                        "provider": self.provider_type or self.base_url,
+                        "max_cost_msats": max_cost_for_model,
+                    },
+                )
+                async with create_session() as new_session:
+                    fresh_key = await new_session.get(
+                        key.__class__, key.hashed_key
+                    )
+                    if not fresh_key:
+                        usage_finalized = True
+                        return None
+                    try:
+                        fallback: dict = {
+                            "model": last_model_seen or "unknown",
+                            "usage": None,
+                        }
+                        cost_data = await adjust_payment_for_tokens(
+                            fresh_key,
+                            fallback,
+                            new_session,
+                            max_cost_for_model,
+                        )
+                        usage_finalized = True
+                        return (
+                            f"event: cost\ndata: "
+                            f"{json.dumps({'cost': cost_data})}\n\n"
+                        ).encode()
+                    except Exception:
+                        usage_finalized = True
+                        return None
+
+            try:
+                async for annotated in messages_dispatch.stream_annotated_events(
+                    iterator, requested_model
+                ):
+                    if annotated.model:
+                        last_model_seen = annotated.model
+                    # Anthropic SSE reports usage cumulatively across
+                    # message_start + message_delta — take the max snapshot
+                    # rather than summing, otherwise input tokens
+                    # double-count.
+                    input_tokens = max(input_tokens, annotated.input_tokens)
+                    output_tokens = max(output_tokens, annotated.output_tokens)
+                    yield annotated.sse_bytes
+
+                if input_tokens > 0 or output_tokens > 0:
+                    async with create_session() as new_session:
+                        fresh_key = await new_session.get(
+                            key.__class__, key.hashed_key
+                        )
+                        if fresh_key:
+                            try:
+                                combined_data: dict = {
+                                    "model": last_model_seen or "unknown",
+                                    "usage": {
+                                        "input_tokens": input_tokens,
+                                        "output_tokens": output_tokens,
+                                    },
+                                }
+                                cost_data = await adjust_payment_for_tokens(
+                                    fresh_key,
+                                    combined_data,
+                                    new_session,
+                                    max_cost_for_model,
+                                )
+                                self.inject_cost_metadata(
+                                    combined_data, cost_data, fresh_key
+                                )
+                                usage_finalized = True
+                                yield (
+                                    f"event: cost\ndata: "
+                                    f"{json.dumps({'cost': cost_data})}\n\n"
+                                ).encode()
+                            except Exception:
+                                pass
+
+                if not usage_finalized:
+                    cost_event = await finalize_without_usage()
+                    if cost_event is not None:
+                        yield cost_event
+
+            except Exception:
+                if not usage_finalized:
+                    await finalize_without_usage()
+                raise
+
+        return StreamingResponse(
+            stream_with_cost(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    async def _stream_x_cashu_litellm_messages(
+        self,
+        iterator: AsyncIterator[Any],
+        amount: int,
+        unit: str,
+        max_cost_for_model: int,
+        requested_model: str | None,
+        mint: str | None,
+        payment_token_hash: str | None,
+        request_id: str | None,
+    ) -> StreamingResponse:
+        """Buffer a litellm stream end-to-end, compute cost, then replay.
+
+        Note this is **not** true streaming — the full event sequence is
+        accumulated into memory before a single byte is sent to the
+        client. The constraint is the ``X-Cashu`` refund token, which must
+        be set as a response *header* and therefore has to be known before
+        the response begins. The bearer-key path
+        (:meth:`_stream_litellm_messages`) avoids this by emitting cost as
+        a trailing ``event: cost`` SSE message; switching x-cashu to the
+        same trailing-event contract would let this path stream live, at
+        the cost of a wire-format change for clients that read ``X-Cashu``
+        from headers today.
+        """
+        buffered: list[bytes] = []
+        last_model_seen: str | None = None
+        input_tokens = 0
+        output_tokens = 0
+
+        async for annotated in messages_dispatch.stream_annotated_events(
+            iterator, requested_model
+        ):
+            if annotated.model:
+                last_model_seen = annotated.model
+            # See _stream_litellm_messages for why this is max() not +=.
+            input_tokens = max(input_tokens, annotated.input_tokens)
+            output_tokens = max(output_tokens, annotated.output_tokens)
+            buffered.append(annotated.sse_bytes)
+
+        response_headers: dict[str, str] = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+
+        if input_tokens == 0 and output_tokens == 0:
+            logger.warning(
+                "x-cashu /v1/messages stream finished with no usage data "
+                "— refund cannot be computed and the client effectively "
+                "pays the full cashu amount. Likely cause: upstream "
+                "omitted `usage` from the SSE stream.",
+                extra={
+                    "model": last_model_seen or "unknown",
+                    "provider": self.provider_type or self.base_url,
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
+
+        if input_tokens > 0 or output_tokens > 0:
+            response_data: dict = {
+                "model": last_model_seen or "unknown",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+            }
+            try:
+                cost_data = await self.get_x_cashu_cost(
+                    response_data, max_cost_for_model
+                )
+                if cost_data:
+                    refund_amount = messages_dispatch.compute_refund(
+                        amount, unit, cost_data.total_msats
+                    )
+                    if refund_amount > 0:
+                        refund_token = await self.send_refund(
+                            refund_amount,
+                            unit,
+                            mint,
+                            payment_token_hash,
+                            request_id=request_id,
+                        )
+                        response_headers["X-Cashu"] = refund_token
+                        logger.info(
+                            "Refund processed for streaming /v1/messages "
+                            "via litellm",
+                            extra={
+                                "refund_amount": refund_amount,
+                                "unit": unit,
+                                "model": last_model_seen,
+                            },
+                        )
+            except Exception as exc:
+                logger.error(
+                    "Error calculating cost for streaming /v1/messages",
+                    extra={
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                        "amount": amount,
+                        "unit": unit,
+                    },
+                )
+
+        async def replay() -> AsyncGenerator[bytes, None]:
+            for chunk in buffered:
+                yield chunk
+
+        return StreamingResponse(
+            replay(),
+            media_type="text/event-stream",
+            headers=response_headers,
+        )
+
     async def forward_request(
         self,
         request: Request,
@@ -1496,6 +1939,20 @@ class BaseUpstreamProvider:
             Response or StreamingResponse from upstream with cost tracking
         """
         path = self.normalize_request_path(path, model_obj)
+
+        if (
+            path.endswith("messages")
+            and not path.endswith("count_tokens")
+            and not self.supports_anthropic_messages
+        ):
+            return await self._forward_messages_via_litellm(
+                request_body=request_body,
+                key=key,
+                session=session,
+                max_cost_for_model=max_cost_for_model,
+                model_obj=model_obj,
+            )
+
         url = self.build_request_url(path, model_obj)
 
         original_model_id = (
@@ -2679,9 +3136,26 @@ class BaseUpstreamProvider:
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
+        request_body = await request.body()
+
+        if (
+            path.endswith("messages")
+            and not path.endswith("count_tokens")
+            and not self.supports_anthropic_messages
+        ):
+            return await self._forward_x_cashu_messages_via_litellm(
+                request_body=request_body,
+                amount=amount,
+                unit=unit,
+                max_cost_for_model=max_cost_for_model,
+                model_obj=model_obj,
+                mint=mint,
+                payment_token_hash=payment_token_hash,
+                request_id=getattr(request.state, "request_id", None),
+            )
+
         url = f"{self.base_url}/{path}"
 
-        request_body = await request.body()
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
         logger.debug(
