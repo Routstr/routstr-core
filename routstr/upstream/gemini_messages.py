@@ -86,14 +86,12 @@ def inject_thought_signatures(messages: list[dict]) -> None:
         for tc in tool_calls:
             if not isinstance(tc, dict):
                 continue
-            extra = tc.setdefault("extra_content", {})
+            extra = tc.get("extra_content")
             if not isinstance(extra, dict):
-                extra = {}
-                tc["extra_content"] = extra
-            google_cfg = extra.setdefault("google", {})
+                extra = tc["extra_content"] = {}
+            google_cfg = extra.get("google")
             if not isinstance(google_cfg, dict):
-                google_cfg = {}
-                extra["google"] = google_cfg
+                google_cfg = extra["google"] = {}
             google_cfg.setdefault("thought_signature", DUMMY_THOUGHT_SIGNATURE)
 
 
@@ -142,6 +140,9 @@ async def _openai_chunks_to_anthropic_events(
     next_block_idx = 0
     final_finish_reason: str | None = None
     final_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+    chunks_seen = 0
+    chunks_with_usage = 0
+    last_chunk_preview: str | None = None
 
     def open_text_block() -> bytes:
         nonlocal text_block_idx, next_block_idx
@@ -198,6 +199,9 @@ async def _openai_chunks_to_anthropic_events(
         if not isinstance(chunk, dict):
             continue
 
+        chunks_seen += 1
+        last_chunk_preview = payload[:500]
+
         if not started:
             started = True
             yield _sse_event(
@@ -220,14 +224,18 @@ async def _openai_chunks_to_anthropic_events(
                 },
             )
 
+        print(f"[gemini-compat upstream chunk] {payload[:1000]}", flush=True)
+
         usage = chunk.get("usage")
         if isinstance(usage, dict):
+            chunks_with_usage += 1
             in_tok = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
             out_tok = usage.get("completion_tokens") or usage.get("output_tokens") or 0
             if in_tok:
                 final_usage["input_tokens"] = int(in_tok)
             if out_tok:
                 final_usage["output_tokens"] = int(out_tok)
+            print(f"[gemini-compat usage chunk] {usage}", flush=True)
 
         choices = chunk.get("choices") or []
         if not choices:
@@ -285,6 +293,16 @@ async def _openai_chunks_to_anthropic_events(
         yield close_block(text_block_idx)
     for block_idx in tool_block_indices.values():
         yield close_block(block_idx)
+
+    print(
+        f"[gemini-compat stream done] chunks_seen={chunks_seen} "
+        f"chunks_with_usage={chunks_with_usage} "
+        f"input_tokens={final_usage['input_tokens']} "
+        f"output_tokens={final_usage['output_tokens']} "
+        f"finish_reason={final_finish_reason} "
+        f"last_chunk={last_chunk_preview}",
+        flush=True,
+    )
 
     # message_delta with stop_reason and usage
     stop_reason = _FINISH_TO_STOP.get(final_finish_reason or "", "end_turn")
@@ -418,6 +436,18 @@ async def dispatch_gemini_messages(
     openai_kwargs.setdefault("reasoning_effort", "none")
     openai_kwargs["stream"] = True
     openai_kwargs["model"] = upstream_model
+    # OpenAI-compat backends (including Gemini's) only emit a final
+    # ``usage`` chunk when the request opts in via this flag. Without it
+    # the cost-calculation pipeline can't read real token counts and
+    # falls back to MaxCostData billing.
+    existing_stream_options = openai_kwargs.get("stream_options")
+    merged_stream_options = (
+        dict(existing_stream_options)
+        if isinstance(existing_stream_options, dict)
+        else {}
+    )
+    merged_stream_options.setdefault("include_usage", True)
+    openai_kwargs["stream_options"] = merged_stream_options
 
     logger.info(
         "Dispatching /v1/messages via gemini compat (httpx)",
@@ -429,6 +459,12 @@ async def dispatch_gemini_messages(
             ),
             **(log_extra or {}),
         },
+    )
+    print(
+        f"[gemini-compat outgoing] model={upstream_model} "
+        f"stream_options={openai_kwargs.get('stream_options')} "
+        f"reasoning_effort={openai_kwargs.get('reasoning_effort')}",
+        flush=True,
     )
 
     http_client, response = await _post_and_stream(
