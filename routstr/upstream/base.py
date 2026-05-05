@@ -4305,7 +4305,7 @@ class BaseUpstreamProvider:
                 except Exception:
                     self._models_cache = models_with_fees
 
-                self._models_by_id = {m.id: m for m in self._models_cache}
+                self._models_by_id = {m.forwarded_model_id or m.id: m for m in self._models_cache}
 
         except Exception as e:
             logger.error(
