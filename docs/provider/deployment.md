@@ -2,6 +2,57 @@
 
 Production deployment guide for Routstr Provider nodes.
 
+## All-in-One Docker Image (Preferred)
+
+The easiest way to deploy Routstr is using the all-in-one Docker image from Docker Hub, which includes both the FastAPI backend and the Next.js admin dashboard in a single container.
+
+### Quick Start
+
+```bash
+docker run -d \
+  --name routstr \
+  -p 8000:8000 \
+  -v routstr-data:/app/data \
+  -e DATABASE_URL="sqlite:////app/data/routstr.db" \
+  9qeklajc/routstr:latest
+```
+
+Access your node:
+- **API & Admin Dashboard**: http://localhost:8000
+
+### Docker Compose Setup
+
+Create `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  routstr:
+    image: 9qeklajc/routstr:latest
+    container_name: routstr
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - routstr-data:/app/data
+    environment:
+      DATABASE_URL: "sqlite:////app/data/routstr.db"
+      ADMIN_KEY: "your-secure-admin-key"
+      LOG_LEVEL: "info"
+
+volumes:
+  routstr-data:
+```
+
+Start it:
+
+```bash
+docker compose up -d
+```
+
+---
+
 ## Docker Compose (Recommended)
 
 For production, use Docker Compose with persistent storage and optional Tor support.
