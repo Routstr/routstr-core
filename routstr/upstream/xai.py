@@ -13,6 +13,7 @@ class XAIUpstreamProvider(BaseUpstreamProvider):
     provider_type = "x-ai"
     default_base_url = "https://api.x.ai/v1"
     platform_url = "https://console.x.ai/"
+    litellm_provider_prefix = "xai/"
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(

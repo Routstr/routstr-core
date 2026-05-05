@@ -13,7 +13,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import ApiKey, CashuTransaction
 
 
 @pytest.mark.integration
@@ -358,6 +358,70 @@ async def test_concurrent_refund_requests(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_refund_rejects_concurrent_topup_on_same_key(
+    authenticated_client: AsyncClient,
+    testmint_wallet: Any,
+) -> None:
+    """Test refund returns 409 when a concurrent topup changes the balance first."""
+    from routstr import balance as balance_module
+
+    wallet_response = await authenticated_client.get("/v1/wallet/")
+    assert wallet_response.status_code == 200
+    initial_balance = wallet_response.json()["balance"]
+
+    topup_amount_sat = 500
+    topup_token = await testmint_wallet.mint_tokens(topup_amount_sat)
+
+    validate_called = asyncio.Event()
+    allow_refund_to_continue = asyncio.Event()
+    original_validate_bearer_key = balance_module.validate_bearer_key
+    delayed_once = False
+
+    async def delayed_validate_bearer_key(*args: Any, **kwargs: Any) -> ApiKey:
+        nonlocal delayed_once
+        key = await original_validate_bearer_key(*args, **kwargs)
+        if not delayed_once:
+            delayed_once = True
+            validate_called.set()
+            await allow_refund_to_continue.wait()
+        return key
+
+    async def issue_refund() -> Any:
+        return await authenticated_client.post("/v1/wallet/refund")
+
+    async def issue_topup() -> Any:
+        await validate_called.wait()
+        try:
+            return await authenticated_client.post(
+                "/v1/wallet/topup", params={"cashu_token": topup_token}
+            )
+        finally:
+            allow_refund_to_continue.set()
+
+    with patch(
+        "routstr.balance.validate_bearer_key", new=delayed_validate_bearer_key
+    ):
+        refund_response, topup_response = await asyncio.gather(
+            issue_refund(), issue_topup()
+        )
+
+    assert topup_response.status_code == 200
+    assert topup_response.json()["msats"] == topup_amount_sat * 1000
+    assert refund_response.status_code == 409
+    assert (
+        refund_response.json()["detail"]
+        == "Balance changed concurrently. Please retry the refund."
+    )
+
+    final_balance_response = await authenticated_client.get("/v1/wallet/")
+    assert final_balance_response.status_code == 200
+    assert final_balance_response.json()["balance"] == (
+        initial_balance + topup_amount_sat * 1000
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_refund_during_active_usage(
     integration_client: AsyncClient, authenticated_client: AsyncClient
 ) -> None:
@@ -392,6 +456,42 @@ async def test_refund_during_active_usage(
     response = await authenticated_client.get("/v1/wallet/")
     assert response.status_code == 200
     assert response.json()["balance"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_wallet_history_returns_apikey_transactions(
+    authenticated_client: AsyncClient,
+    testmint_wallet: Any,
+    integration_session: Any,
+) -> None:
+    wallet_response = await authenticated_client.get("/v1/wallet/")
+    api_key = wallet_response.json()["api_key"]
+    hashed_key = api_key[3:] if api_key.startswith("sk-") else api_key
+
+    topup_token = await testmint_wallet.mint_tokens(250)
+    topup_response = await authenticated_client.post(
+        "/v1/wallet/topup", params={"cashu_token": topup_token}
+    )
+    assert topup_response.status_code == 200
+
+    refund_response = await authenticated_client.post("/v1/wallet/refund")
+    assert refund_response.status_code == 200
+
+    history_response = await authenticated_client.get("/v1/wallet/history")
+    assert history_response.status_code == 200
+    transactions = history_response.json()["transactions"]
+    assert len(transactions) >= 2
+    assert all("api_key_hashed_key" not in tx for tx in transactions)
+    assert {tx["type"] for tx in transactions} >= {"in", "out"}
+
+    db_result = await integration_session.execute(
+        select(CashuTransaction).where(
+            CashuTransaction.api_key_hashed_key == hashed_key
+        )
+    )
+    db_transactions = db_result.scalars().all()
+    assert len(db_transactions) >= 2
 
 
 @pytest.mark.integration

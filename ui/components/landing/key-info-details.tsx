@@ -1,8 +1,10 @@
 'use client';
 
-import { type JSX, useState, useCallback, useEffect } from 'react';
-import { Copy, RefreshCcw, RotateCcw } from 'lucide-react';
+import { useWalletInfo } from '@/hooks/use-wallet-info';
+import type { RefundReceipt } from './cashu-payment-workflow';
 import { toast } from 'sonner';
+import { ApiKeyInput } from '../api-key-input';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
   Card,
   CardContent,
@@ -12,8 +14,9 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
 import { WalletService } from '@/lib/api/services/wallet';
+import React, { useState, useCallback, useEffect } from 'react';
+import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
 
 export type ChildKeyInfo = {
   api_key: string;
@@ -44,68 +47,44 @@ interface KeyInfoDetailsProps {
   walletInfo?: WalletSnapshot | null;
   onApiKeyChanged?: (apiKey: string) => void;
   onWalletInfoUpdated?: (walletInfo: WalletSnapshot | null) => void;
+  onRefundComplete?: (receipt: RefundReceipt) => void;
 }
 
 export function KeyInfoDetails({
   baseUrl,
   apiKey = '',
-  walletInfo = null,
+  walletInfo: propWalletInfo = null,
   onApiKeyChanged,
   onWalletInfoUpdated,
-}: KeyInfoDetailsProps): JSX.Element {
+  onRefundComplete,
+}: KeyInfoDetailsProps): React.ReactNode {
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
-  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isResetting, setIsResetting] = useState<string | null>(null);
+  const [isRefunding, setIsRefunding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const {
+    data: queryWalletInfo,
+    refetch,
+    isFetching,
+  } = useWalletInfo(baseUrl, apiKeyInput);
+  const walletInfo = propWalletInfo ?? queryWalletInfo ?? null;
 
   // Sync internal state with props if they change
   useEffect(() => {
     setApiKeyInput(apiKey);
   }, [apiKey]);
 
-  const fetchDetails = useCallback(
-    async (keyToFetch: string) => {
-      setIsRefreshing(true);
-      try {
-        const response = await fetch(`${baseUrl}/v1/balance/info`, {
-          headers: { Authorization: `Bearer ${keyToFetch}` },
-        });
-        if (!response.ok) {
-          throw new Error('Failed to fetch key info');
-        }
-        const payload = await response.json();
-        const snapshot: WalletSnapshot = {
-          apiKey: payload.api_key || keyToFetch,
-          balanceMsats: payload.balance ?? 0,
-          reservedMsats: payload.reserved ?? 0,
-          isChild: payload.is_child,
-          parentKey: payload.parent_key,
-          totalRequests: payload.total_requests,
-          totalSpent: payload.total_spent,
-          balanceLimit: payload.balance_limit,
-          balanceLimitReset: payload.balance_limit_reset,
-          validityDate: payload.validity_date,
-          childKeys: payload.child_keys,
-        };
-        onWalletInfoUpdated?.(snapshot);
-        toast.success('Key details synced');
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : 'Failed to fetch details'
-        );
-      } finally {
-        setIsRefreshing(false);
-      }
-    },
-    [baseUrl, onWalletInfoUpdated]
-  );
-
-  const handleRefresh = async () => {
+  const handleRefresh = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
     if (!apiKeyInput) return;
-    await fetchDetails(apiKeyInput);
+    await refetch();
   };
 
   const handleKeyChange = (newKey: string) => {
     setApiKeyInput(newKey);
+    setError(null);
     onApiKeyChanged?.(newKey);
     // Optionally clear info when key changes
     if (newKey !== apiKey) {
@@ -125,7 +104,7 @@ export function KeyInfoDetails({
     try {
       await WalletService.resetChildKeySpent(baseUrl, apiKeyInput, childKey);
       toast.success('Child key spent reset');
-      await fetchDetails(apiKeyInput);
+      await refetch();
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : 'Failed to reset child key'
@@ -134,6 +113,36 @@ export function KeyInfoDetails({
       setIsResetting(null);
     }
   };
+
+  const handleRefund = useCallback(async (): Promise<void> => {
+    if (!apiKeyInput) {
+      toast.error('Paste an API key first');
+      return;
+    }
+
+    setIsRefunding(true);
+    try {
+      const response = await fetch(`${baseUrl}/v1/balance/refund`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKeyInput}`,
+        },
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Refund failed');
+      }
+      const receipt = (await response.json()) as RefundReceipt;
+      onRefundComplete?.(receipt);
+      toast.success('Refund completed');
+      await refetch();
+    } catch (error) {
+      console.error(error);
+      toast.error(error instanceof Error ? error.message : 'Refund failed');
+    } finally {
+      setIsRefunding(false);
+    }
+  }, [apiKeyInput, baseUrl, onRefundComplete, refetch]);
 
   const formatSats = (msats: number) =>
     new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
@@ -153,17 +162,11 @@ export function KeyInfoDetails({
         </CardHeader>
         <CardContent>
           <div className='flex flex-col gap-2 sm:flex-row'>
-            <Input
-              value={apiKeyInput}
-              onChange={(e) => handleKeyChange(e.target.value)}
-              placeholder='sk-...'
-              className='font-mono text-sm'
-            />
+            <ApiKeyInput value={apiKeyInput} onApiKeyChange={handleKeyChange} />
             <div className='flex gap-2'>
               <Button
                 variant='outline'
                 size='icon'
-                className='h-10 w-10 shrink-0'
                 onClick={() => handleCopy(apiKeyInput)}
                 disabled={!apiKeyInput}
               >
@@ -174,15 +177,22 @@ export function KeyInfoDetails({
                 size='sm'
                 className='min-w-[80px] gap-1'
                 onClick={handleRefresh}
-                disabled={isRefreshing || !apiKeyInput}
+                disabled={isFetching || !apiKeyInput}
+                type='button'
               >
                 <RefreshCcw
-                  className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`}
+                  className={`h-8 w-4 ${isFetching ? 'animate-spin' : ''}`}
                 />
-                {isRefreshing ? 'Syncing...' : 'Sync'}
+                {isFetching ? 'Syncing...' : 'Sync'}
               </Button>
             </div>
           </div>
+          {error && (
+            <Alert variant='destructive' className='mt-2'>
+              <AlertTitle>Error</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
         </CardContent>
       </Card>
 
@@ -228,6 +238,14 @@ export function KeyInfoDetails({
                     {formatDate(walletInfo.validityDate)}
                   </span>
                 </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardTitle className='text-lg'>Infos</CardTitle>
+              </CardHeader>
+              <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
                   <span className='text-muted-foreground text-sm'>
                     Spendable Balance
@@ -236,14 +254,6 @@ export function KeyInfoDetails({
                     {formatSats(walletInfo.balanceMsats)} sats
                   </span>
                 </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className='pb-2'>
-                <CardTitle className='text-lg'>Consumption</CardTitle>
-              </CardHeader>
-              <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
                   <span className='text-muted-foreground text-sm'>
                     Total Requests
@@ -390,18 +400,16 @@ export function KeyInfoDetails({
               </Card>
             )}
 
-          <div className='flex justify-center'>
+          <div className='flex justify-center gap-4'>
             <Button
-              variant='ghost'
+              onClick={handleRefund}
+              disabled={isRefunding || !apiKeyInput}
+              variant='destructive'
               size='sm'
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className='text-muted-foreground'
+              className='gap-2'
             >
-              <RefreshCcw
-                className={`mr-2 h-3 w-3 ${isRefreshing ? 'animate-spin' : ''}`}
-              />
-              Last synced: {new Date().toLocaleTimeString()}
+              <Trash2 className='h-4 w-4' />
+              {isRefunding ? 'Processing...' : 'Refund Key'}
             </Button>
           </div>
         </>

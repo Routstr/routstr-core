@@ -11,7 +11,7 @@ import pytest
 from httpx import AsyncClient
 from sqlmodel import select
 
-from routstr.core.db import ApiKey
+from routstr.core.db import ApiKey, CashuTransaction
 
 from .utils import (
     CashuTokenGenerator,
@@ -70,6 +70,16 @@ async def test_topup_with_valid_token(  # type: ignore[no-untyped-def]
     # Verify balance increased in database
     assert db_key.balance == new_balance
     assert db_key.balance == initial_balance + (topup_amount * 1000)
+
+    tx_result = await integration_session.execute(
+        select(CashuTransaction).where(
+            CashuTransaction.token == token,
+            CashuTransaction.type == "in",
+        )
+    )
+    tx = tx_result.scalar_one()
+    assert tx.api_key_hashed_key == hashed_key
+    assert tx.source == "apikey"
 
 
 @pytest.mark.integration

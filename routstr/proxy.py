@@ -69,7 +69,25 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
 
 def get_model_instance(model_id: str) -> Model | None:
     """Get Model instance by ID from global cache."""
-    return _model_instances.get(model_id.lower())
+    if not model_id:
+        return None
+
+    model_id_lower = model_id.lower()
+    # Try exact match first
+    if model := _model_instances.get(model_id_lower):
+        return model
+
+    # Try stripping common version suffixes (e.g., -20251222)
+    # This handles cases where upstream returns a specific version
+    # but we only track the base model name.
+    import re
+
+    base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
+    if base_model_id != model_id_lower:
+        if model := _model_instances.get(base_model_id):
+            return model
+
+    return None
 
 
 def get_provider_for_model(model_id: str) -> list[BaseUpstreamProvider] | None:
@@ -207,7 +225,7 @@ async def proxy(
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(
-            headers, path, session, auth, max_cost_for_model
+            headers, path, session, auth, max_cost_for_model, model_id
         )
 
     else:
@@ -387,7 +405,12 @@ async def proxy(
 
 
 async def get_bearer_token_key(
-    headers: dict, path: str, session: AsyncSession, auth: str, min_cost: int = 0
+    headers: dict,
+    path: str,
+    session: AsyncSession,
+    auth: str,
+    min_cost: int = 0,
+    model_id: str = "unknown",
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
     parts = auth.split()
@@ -457,11 +480,13 @@ async def get_bearer_token_key(
     except Exception as e:
         key_preview = bearer_key[:20] + "..." if len(bearer_key) > 20 else bearer_key
         logger.error(
-            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} key={key_preview!r}",
+            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} model={model_id!r} min_cost={min_cost} key={key_preview!r}",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "path": path,
+                "model_id": model_id,
+                "min_cost_msat": min_cost,
                 "bearer_key_preview": key_preview,
             },
         )

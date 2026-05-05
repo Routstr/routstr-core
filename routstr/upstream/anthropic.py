@@ -13,6 +13,8 @@ class AnthropicUpstreamProvider(BaseUpstreamProvider):
     provider_type = "anthropic"
     default_base_url = "https://api.anthropic.com/v1"
     platform_url = "https://console.anthropic.com/settings/keys"
+    supports_anthropic_messages = True
+    litellm_provider_prefix = "anthropic/"
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(

@@ -15,6 +15,8 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     provider_type = "openrouter"
     default_base_url = "https://openrouter.ai/api/v1"
     platform_url = "https://openrouter.ai/settings/keys"
+    supports_anthropic_messages = True
+    litellm_provider_prefix = "openrouter/"
 
     def __init__(self, api_key: str, provider_fee: float = 1.06):
         """Initialize OpenRouter provider with API key.

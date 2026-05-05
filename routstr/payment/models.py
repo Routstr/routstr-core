@@ -4,10 +4,11 @@ import random
 
 import httpx
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel as V2BaseModel
 from pydantic.v1 import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..core.db import ModelRow, get_session
+from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
@@ -60,6 +61,7 @@ class Model(BaseModel):
     upstream_provider_id: int | str | None = None
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
+    forwarded_model_id: str | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -177,6 +179,7 @@ def _row_to_model(
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
+        forwarded_model_id=getattr(row, "forwarded_model_id", None) or row.id,
     )
 
     if apply_provider_fee:
@@ -329,6 +332,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
+            forwarded_model_id=model.forwarded_model_id,
         )
     except Exception as e:
         logger.error(
@@ -347,6 +351,9 @@ async def _update_sats_pricing_once() -> None:
     from ..proxy import get_upstreams, refresh_model_maps
 
     upstreams = get_upstreams()
+    if not upstreams:
+        return
+
     sats_to_usd = sats_usd_price()
 
     updated_count = 0
@@ -360,7 +367,10 @@ async def _update_sats_pricing_once() -> None:
         updated_count += len(updated_models)
 
     if updated_count > 0:
-        logger.info("Updated sats pricing", extra={"models_updated": updated_count})
+        logger.info(
+            f"Updated sats pricing for {updated_count} models",
+            extra={"models_updated": updated_count},
+        )
         await refresh_model_maps()
 
 
@@ -402,6 +412,76 @@ async def update_sats_pricing() -> None:
             logger.error(f"Error updating sats pricing: {e}")
 
 
+class ModelTestRequest(V2BaseModel):
+    model_id: str
+    endpoint_type: str
+    request_data: dict
+
+
+@models_router.post("/api/models/test")
+async def test_model(
+    payload: ModelTestRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Test a model by sending a request through its configured upstream provider."""
+    from sqlmodel import select
+
+    result = await session.execute(
+        select(ModelRow).where(ModelRow.id == payload.model_id)
+    )
+    model_row = result.scalars().first()
+
+    if not model_row:
+        return {
+            "success": False,
+            "error": f"Model '{payload.model_id}' not found in database",
+            "status_code": 404,
+        }
+
+    provider = await session.get(UpstreamProviderRow, model_row.upstream_provider_id)
+    if not provider:
+        return {
+            "success": False,
+            "error": "Upstream provider not found",
+            "status_code": 404,
+        }
+
+    base_url = provider.base_url.rstrip("/")
+    if payload.endpoint_type == "chat-completions":
+        url = f"{base_url}/chat/completions"
+    else:
+        url = f"{base_url}/{payload.endpoint_type}"
+
+    actual_model_id = model_row.forwarded_model_id or model_row.id
+    request_data = dict(payload.request_data)
+    request_data["model"] = actual_model_id
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {provider.api_key}",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=request_data, headers=headers)
+            try:
+                response_data = response.json()
+            except Exception:
+                response_data = {"raw": response.text}
+
+            return {
+                "success": response.status_code < 400,
+                "data": response_data,
+                "status_code": response.status_code,
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "status_code": 500,
+        }
+
+
 @models_router.get("/v1/models")
 @models_router.get("/v1/models/", include_in_schema=False)
 @models_router.get("/models")
@@ -411,4 +491,10 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     from ..proxy import get_unique_models
 
     items = get_unique_models()
-    return {"data": items}
+    data = []
+    for model in items:
+        m = model.dict()
+        if model.forwarded_model_id:
+            m["id"] = model.forwarded_model_id
+        data.append(m)
+    return {"data": data}

@@ -1,7 +1,9 @@
 'use client';
 
 import { useState } from 'react';
+import { useWalletInfo } from '@/hooks/use-wallet-info';
 import { WalletService } from '@/lib/api/services/wallet';
+import { ApiKeyInput } from './api-key-input';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -14,17 +16,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
-import {
-  Key,
-  Copy,
-  Check,
-  Loader2,
-  RotateCcw,
-  Plus,
-  Trash2,
-} from 'lucide-react';
+import { Key, Copy, Check, Loader2, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { Badge } from '@/components/ui/badge';
 import { KeyOptions } from './key-options';
 
 interface KeyConfig {
@@ -42,6 +35,14 @@ interface ChildKeyCreatorProps {
   costPerKeyMsats?: number;
 }
 
+function formatSats(msats: number): string {
+  return new Intl.NumberFormat('en-US').format(Math.floor(msats / 1000));
+}
+
+function formatMsats(msats: number): string {
+  return new Intl.NumberFormat('en-US').format(msats);
+}
+
 export function ChildKeyCreator({
   baseUrl,
   apiKey: propApiKey,
@@ -50,6 +51,7 @@ export function ChildKeyCreator({
 }: ChildKeyCreatorProps) {
   const [internalApiKey, setInternalApiKey] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [configs, setConfigs] = useState<KeyConfig[]>([
     {
       id: crypto.randomUUID(),
@@ -59,28 +61,21 @@ export function ChildKeyCreator({
       validityDate: '',
     },
   ]);
-  const [childKeyToCheck, setChildKeyToCheck] = useState('');
-  const [checking, setChecking] = useState(false);
-  const [keyStatus, setKeyStatus] = useState<{
-    total_spent: number;
-    balance_limit: number | null;
-    validity_date: number | null;
-    is_expired: boolean;
-    is_drained: boolean;
-  } | null>(null);
+
+  const activeApiKey = propApiKey ?? internalApiKey;
+  const { data: walletInfo } = useWalletInfo(baseUrl ?? '', activeApiKey);
+
+  const handleApiKeyChange = (val: string) => {
+    setInternalApiKey(val);
+    onApiKeyChange?.(val);
+  };
+
   const [newKeys, setNewKeys] = useState<string[]>([]);
   const [resultInfo, setResultInfo] = useState<{
     cost_msats: number;
     parent_balance: number;
   } | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  const activeApiKey = propApiKey ?? internalApiKey;
-
-  const handleApiKeyChange = (val: string) => {
-    setInternalApiKey(val);
-    onApiKeyChange?.(val);
-  };
 
   const addConfig = () => {
     setConfigs([
@@ -112,6 +107,7 @@ export function ChildKeyCreator({
     }
 
     setLoading(true);
+    setError(null);
     try {
       let allNewKeys: string[] = [];
       let totalCost = 0;
@@ -152,52 +148,18 @@ export function ChildKeyCreator({
       );
     } catch (error) {
       console.error('Failed to create child key:', error);
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to create child key'
-      );
+      let errorMessage =
+        error instanceof Error ? error.message : 'Failed to create child key';
+      try {
+        const parsed = JSON.parse(errorMessage);
+        errorMessage =
+          parsed.detail?.error?.message ||
+          (typeof parsed.detail === 'string' ? parsed.detail : errorMessage);
+      } catch {}
+      setError(errorMessage);
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleCheckKey = async () => {
-    if (!childKeyToCheck) {
-      toast.error('Please provide a Child API key to check');
-      return;
-    }
-
-    setChecking(true);
-    setKeyStatus(null);
-    try {
-      const baseUrlToUse = baseUrl || '';
-      const response = await fetch(`${baseUrlToUse}/v1/balance/info`, {
-        headers: {
-          Authorization: `Bearer ${childKeyToCheck}`,
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch key info');
-      }
-
-      const info = await response.json();
-      const now = Math.floor(Date.now() / 1000);
-
-      setKeyStatus({
-        total_spent: info.total_spent,
-        balance_limit: info.balance_limit,
-        validity_date: info.validity_date,
-        is_expired: info.validity_date ? now > info.validity_date : false,
-        is_drained: info.balance_limit
-          ? info.total_spent >= info.balance_limit
-          : false,
-      });
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to check child key'
-      );
-    } finally {
-      setChecking(false);
     }
   };
 
@@ -243,12 +205,55 @@ export function ChildKeyCreator({
                 <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
                   Parent API Key
                 </Label>
-                <Input
-                  value={activeApiKey}
-                  onChange={(e) => handleApiKeyChange(e.target.value)}
-                  placeholder='sk-...'
-                  className='font-mono text-sm'
-                />
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <ApiKeyInput
+                      value={activeApiKey}
+                      onApiKeyChange={handleApiKeyChange}
+                    />
+                  </div>
+                  <Button
+                    variant='outline'
+                    size='icon'
+                    onClick={() => navigator.clipboard.writeText(activeApiKey)}
+                    disabled={!activeApiKey}
+                  >
+                    <Copy className='h-4 w-4' />
+                  </Button>
+                </div>
+                {walletInfo && (
+                  <div className='bg-muted/30 mt-2 space-y-2 rounded-lg p-3'>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-muted-foreground text-sm'>
+                        Spendable Balance
+                      </span>
+                      <span className='text-primary font-mono text-sm font-medium'>
+                        {formatSats(walletInfo.balanceMsats)} sats
+                      </span>
+                    </div>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-muted-foreground text-sm'>
+                        Total Requests
+                      </span>
+                      <span className='font-mono text-sm font-medium'>
+                        {walletInfo.totalRequests}
+                      </span>
+                    </div>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-muted-foreground text-sm'>
+                        Total Spent
+                      </span>
+                      <div className='text-right'>
+                        <p className='font-mono text-sm font-medium'>
+                          {formatSats(walletInfo.totalSpent)} sats
+                        </p>
+                        <p className='text-muted-foreground font-mono text-[0.6rem]'>
+                          {formatMsats(walletInfo.totalSpent)} msats
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -362,11 +367,18 @@ export function ChildKeyCreator({
                   )}
                 </Button>
               </div>
-            </div>
 
-            <p className='text-muted-foreground text-xs'>
-              Each key creation has a small one-time fee.
-            </p>
+              {error && (
+                <Alert variant='destructive'>
+                  <AlertTitle>Error</AlertTitle>
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+
+              <p className='text-muted-foreground text-xs'>
+                Each key creation has a small one-time fee.
+              </p>
+            </div>
 
             {newKeys.length > 0 && (
               <div className='mt-6 space-y-4'>
@@ -453,89 +465,6 @@ export function ChildKeyCreator({
                     </div>
                   </div>
                 )}
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className='text-lg'>Check Child Key Status</CardTitle>
-          <CardDescription>
-            View the current spending, limit, and expiration status of any child
-            key.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className='space-y-4'>
-            <div className='space-y-2'>
-              <Label className='text-muted-foreground text-[0.7rem] tracking-wider'>
-                Child API Key
-              </Label>
-              <Input
-                value={childKeyToCheck}
-                onChange={(e) => setChildKeyToCheck(e.target.value)}
-                placeholder='sk-...'
-                className='font-mono text-sm'
-              />
-            </div>
-            <Button
-              onClick={handleCheckKey}
-              disabled={checking || !childKeyToCheck}
-              variant='outline'
-              className='w-full'
-            >
-              {checking ? (
-                <>
-                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                  Checking...
-                </>
-              ) : (
-                <>
-                  <RotateCcw className='mr-2 h-4 w-4' />
-                  Check Status
-                </>
-              )}
-            </Button>
-
-            {keyStatus && (
-              <div className='bg-muted/30 mt-4 space-y-3 rounded-lg border p-4 text-sm'>
-                <div className='flex justify-between'>
-                  <span className='text-muted-foreground'>Total Spent:</span>
-                  <span className='font-mono font-medium'>
-                    {keyStatus.total_spent} mSats
-                  </span>
-                </div>
-                {keyStatus.balance_limit !== null && (
-                  <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>Limit:</span>
-                    <span className='font-mono font-medium'>
-                      {keyStatus.balance_limit} mSats
-                    </span>
-                  </div>
-                )}
-                {keyStatus.validity_date !== null && (
-                  <div className='flex justify-between'>
-                    <span className='text-muted-foreground'>Expires:</span>
-                    <span className='font-mono font-medium'>
-                      {new Date(
-                        keyStatus.validity_date * 1000
-                      ).toLocaleDateString()}
-                    </span>
-                  </div>
-                )}
-                <div className='flex gap-2 pt-2'>
-                  {keyStatus.is_drained && (
-                    <Badge variant='destructive'>Drained</Badge>
-                  )}
-                  {keyStatus.is_expired && (
-                    <Badge variant='destructive'>Expired</Badge>
-                  )}
-                  {!keyStatus.is_drained && !keyStatus.is_expired && (
-                    <Badge>Active</Badge>
-                  )}
-                </div>
               </div>
             )}
           </div>

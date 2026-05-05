@@ -1,16 +1,31 @@
 import asyncio
-import math
 import time
+import typing
 from typing import TypedDict
 
 from cashu.core.base import Proof, Token
+from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
+from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
+from .core.db import store_cashu_transaction
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
+
+# cashu still declares Optional[X] without explicit defaults on MintInfo.
+# Under pydantic v2 those are required, but real mints omit many of them.
+# Default Optional fields to None at import time so balance fetches don't 422.
+for _name, _field in _CashuMintInfo.model_fields.items():
+    _annot = _field.annotation
+    _is_optional = typing.get_origin(_annot) is typing.Union and type(
+        None
+    ) in typing.get_args(_annot)
+    if _is_optional and _field.default is PydanticUndefined:
+        _field.default = None
+_CashuMintInfo.model_rebuild(force=True)
 
 logger = get_logger(__name__)
 
@@ -60,6 +75,76 @@ async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str
     return token
 
 
+async def _calculate_swap_amount(
+    amount_msat: int,
+    token_unit: str,
+    token_mint_url: str,
+    token_wallet: Wallet,
+    primary_wallet: Wallet,
+) -> int:
+    """
+    Calculate the amount to mint on the primary mint after accounting for
+    potential swap fees (melt fees) on the foreign mint.
+    """
+    if settings.primary_mint_unit == "sat":
+        receive_amount = amount_msat // 1000
+    else:
+        receive_amount = amount_msat
+
+    if token_mint_url == settings.primary_mint:
+        logger.info(
+            "swap_to_primary_mint: skipping fee estimation (same mint)",
+            extra={"minted_amount": receive_amount},
+        )
+        return int(receive_amount)
+
+    logger.info(
+        "swap_to_primary_mint: estimating fees",
+        extra={
+            "dummy_amount": receive_amount,
+            "unit": settings.primary_mint_unit,
+        },
+    )
+
+    try:
+        dummy_mint_quote = await primary_wallet.request_mint(receive_amount)
+        dummy_melt_quote = await token_wallet.melt_quote(dummy_mint_quote.request)
+
+        fee_reserve = dummy_melt_quote.fee_reserve
+        if token_unit == "sat":
+            fee_msat = fee_reserve * 1000
+        else:
+            fee_msat = fee_reserve
+
+        amount_msat_after_fee = amount_msat - fee_msat
+
+        if settings.primary_mint_unit == "sat":
+            minted_amount = int(amount_msat_after_fee // 1000)
+        else:
+            minted_amount = int(amount_msat_after_fee)
+
+        if minted_amount <= 0:
+            raise ValueError(f"Fees ({fee_reserve} {token_unit}) exceed token amount")
+
+        logger.info(
+            "swap_to_primary_mint: fee estimation result",
+            extra={
+                "token_amount_sat": amount_msat // 1000,
+                "estimated_fee_sat": fee_msat // 1000,
+                "minted_amount": minted_amount,
+                "minted_unit": settings.primary_mint_unit,
+            },
+        )
+        return minted_amount
+
+    except Exception as e:
+        logger.error(
+            "swap_to_primary_mint: fee estimation failed",
+            extra={"error": str(e)},
+        )
+        raise ValueError(f"Failed to estimate fees: {e}") from e
+
+
 async def swap_to_primary_mint(
     token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, str, str]:
@@ -84,23 +169,28 @@ async def swap_to_primary_mint(
         amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
-    estimated_fee_sat = math.ceil(max(amount_msat // 1000 * 0.01, 2)) + 1
-    amount_msat_after_fee = amount_msat - estimated_fee_sat * 1000
     primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
 
-    if settings.primary_mint_unit == "sat":
-        minted_amount = int(amount_msat_after_fee // 1000)
-    else:
-        minted_amount = int(amount_msat_after_fee)
+    # If the token is already from the primary mint, we don't need to swap
+    # and we definitely don't want to calculate or pay fees.
+    if token_obj.mint == settings.primary_mint:
+        logger.info(
+            "swap_to_primary_mint: token already on primary mint, skipping swap",
+            extra={
+                "mint": token_obj.mint,
+                "amount": token_amount,
+                "unit": token_obj.unit,
+            },
+        )
+        await token_wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
+        return token_amount, token_obj.unit, token_obj.mint
 
-    logger.info(
-        "swap_to_primary_mint: fee estimation",
-        extra={
-            "token_amount_sat": amount_msat // 1000,
-            "estimated_fee_sat": estimated_fee_sat,
-            "minted_amount": minted_amount,
-            "minted_unit": settings.primary_mint_unit,
-        },
+    minted_amount = await _calculate_swap_amount(
+        amount_msat,
+        token_obj.unit,
+        token_obj.mint,
+        token_wallet,
+        primary_wallet,
     )
 
     mint_quote = await primary_wallet.request_mint(minted_amount)
@@ -205,6 +295,8 @@ async def credit_balance(
 
     try:
         amount, unit, mint_url = await recieve_token(cashu_token)
+        original_amount = amount
+        original_unit = unit
         logger.info(
             "credit_balance: Token redeemed successfully",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
@@ -236,7 +328,20 @@ async def credit_balance(
             extra={"new_balance": key.balance},
         )
 
-        logger.info(
+        try:
+            await store_cashu_transaction(
+                token=cashu_token,
+                amount=original_amount,
+                unit=original_unit,
+                mint_url=mint_url,
+                typ="in",
+                source="apikey",
+                api_key_hashed_key=key.hashed_key,
+            )
+        except Exception:
+            pass
+
+        logger.debug(
             "Cashu token successfully redeemed and stored",
             extra={"amount": amount, "unit": unit, "mint_url": mint_url},
         )
@@ -398,7 +503,7 @@ async def fetch_all_balances(
 
 async def periodic_payout() -> None:
     if not settings.receive_ln_address:
-        logger.error("RECEIVE_LN_ADDRESS is not set, skipping payout")
+        logger.warning("RECEIVE_LN_ADDRESS is not set, periodic payout disabled")
         return
     while True:
         await asyncio.sleep(60 * 15)
@@ -475,7 +580,7 @@ async def periodic_refund_sweep() -> None:
                     except Exception as e:
                         error_msg = str(e).lower()
                         if "already spent" in error_msg:
-                            refund.swept = True
+                            refund.collected = True
                             session.add(refund)
                             logger.info(
                                 "Refund already spent (client collected), marking swept",
@@ -496,6 +601,46 @@ async def periodic_refund_sweep() -> None:
             logger.error(
                 "Error in periodic refund sweep",
                 extra={"error": str(e), "error_type": type(e).__name__},
+            )
+
+
+async def periodic_routstr_fee_payout() -> None:
+    from .auth import (
+        ROUTSTR_FEE_DEFAULT_PAYOUT,
+        ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS,
+        ROUTSTR_LN_ADDRESS,
+    )
+
+    if not ROUTSTR_LN_ADDRESS:
+        logger.info("ROUTSTR_LN_ADDRESS not set, skipping fee payout")
+        return
+    while True:
+        await asyncio.sleep(ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS)
+        try:
+            async with db.create_session() as session:
+                fee = await db.get_routstr_fee(session)
+                accumulated_sats = fee.accumulated_msats // 1000
+                if accumulated_sats >= ROUTSTR_FEE_DEFAULT_PAYOUT:
+                    wallet = await get_wallet(settings.primary_mint, "sat")
+                    proofs = get_proofs_per_mint_and_unit(
+                        wallet, settings.primary_mint, "sat", not_reserved=True
+                    )
+                    amount_received = await raw_send_to_lnurl(
+                        wallet, proofs, ROUTSTR_LN_ADDRESS, "sat", amount=accumulated_sats
+                    )
+                    paid_msats = accumulated_sats * 1000
+                    await db.reset_routstr_fee(session, paid_msats)
+                    logger.info(
+                        "Routstr fee payout sent",
+                        extra={
+                            "accumulated_sats": accumulated_sats,
+                            "amount_received": amount_received,
+                        },
+                    )
+        except Exception as e:
+            logger.error(
+                f"Error in Routstr fee payout: {type(e).__name__}",
+                extra={"error": str(e)},
             )
 
 

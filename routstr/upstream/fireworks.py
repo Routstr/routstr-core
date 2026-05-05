@@ -12,6 +12,7 @@ class FireworksUpstreamProvider(BaseUpstreamProvider):
     provider_type = "fireworks"
     default_base_url = "https://api.fireworks.ai/inference/v1"
     platform_url = "https://app.fireworks.ai/settings/users/api-keys"
+    litellm_provider_prefix = "fireworks_ai/"
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(

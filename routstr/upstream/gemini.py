@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse
-
+from . import gemini_messages
 from .base import BaseUpstreamProvider
 from .clients.gemini import GeminiClient
 
 if TYPE_CHECKING:
-    from ..core.db import ApiKey, AsyncSession, UpstreamProviderRow
+    from ..core.db import UpstreamProviderRow
     from ..payment.models import Model
 
 from ..core.logging import get_logger
@@ -20,9 +16,19 @@ logger = get_logger(__name__)
 
 
 class GeminiUpstreamProvider(BaseUpstreamProvider):
+    """Gemini provider — proxies through Gemini's OpenAI-compat surface.
+
+    The chat-completions, embeddings, and models paths all flow through
+    :meth:`BaseUpstreamProvider.forward_request`; we only override
+    ``get_request_base_url`` to redirect to ``{base}/openai/...`` and
+    ``_dispatch_anthropic_messages`` to inject thought-signatures on the
+    /v1/messages path (see :mod:`gemini_messages` for that rationale).
+    """
+
     provider_type = "gemini"
     default_base_url = "https://generativelanguage.googleapis.com/v1beta"
     platform_url = "https://aistudio.google.com/app/apikey"
+    litellm_provider_prefix = "gemini/"
 
     def __init__(
         self,
@@ -39,7 +45,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
 
     @property
     def client(self) -> GeminiClient:
-        """Get or create the Gemini API client."""
+        """Get or create the Gemini API client (used for the models listing)."""
         if self._client is None:
             self._client = GeminiClient(api_key=self.api_key)
         return self._client
@@ -65,248 +71,66 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
         }
 
     def transform_model_name(self, model_id: str) -> str:
-        return model_id.removeprefix("gemini/")
+        """Reduce a routstr model id to the bare upstream Gemini name.
 
-    async def forward_request(
+        Gemini's OpenAI-compat surface expects the literal model id
+        (e.g. ``gemini-3.1-flash-lite-preview``) — no ``gemini/`` provider
+        prefix and no ``google/`` vendor sub-prefix. Take the last path
+        segment so we tolerate any of:
+
+            ``gemini-2.0-flash``
+            ``gemini/gemini-2.0-flash``
+            ``gemini/google/gemini-3.1-flash-lite-preview``
+        """
+        return model_id.rsplit("/", 1)[-1]
+
+    @property
+    def compat_base_url(self) -> str:
+        """Gemini's OpenAI-compat surface, regardless of what's stored.
+
+        Stored ``base_url`` may be ``.../v1beta`` (the native Gemini API
+        root) or ``.../v1beta/openai`` (already pointed at the compat
+        surface). Normalize to the latter.
+        """
+        return self.base_url.rstrip("/").removesuffix("/openai") + "/openai"
+
+    def get_request_base_url(
+        self, path: str, model_obj: "Model | None" = None
+    ) -> str:
+        """Route every proxied request to the OpenAI-compat surface.
+
+        Required because the stored ``base_url`` typically points at the
+        native Gemini API (``/v1beta``), but :meth:`forward_request`
+        forwards OpenAI-shaped paths (``/chat/completions``,
+        ``/embeddings``, ``/models``) which only exist under the
+        ``/openai`` subtree.
+        """
+        return self.compat_base_url
+
+    async def _dispatch_anthropic_messages(
         self,
-        request: Request,
-        path: str,
-        headers: dict,
         request_body: bytes | None,
-        key: ApiKey,
-        max_cost_for_model: int,
-        session: AsyncSession,
-        model_obj: Model,
-    ) -> Response | StreamingResponse:
-        # Remove provider prefix from model ID for Gemini API
-        if "/" in model_obj.id:
-            model_obj.id = model_obj.id.split("/", 1)[1]
+        model_obj: "Model",
+        *,
+        log_extra: dict[str, Any] | None = None,
+    ) -> tuple[bool, Any, str | None]:
+        """Dispatch /v1/messages via the gemini-specific httpx path.
 
-        if not path.startswith("chat/completions"):
-            return await super().forward_request(
-                request,
-                path,
-                headers,
-                request_body,
-                key,
-                max_cost_for_model,
-                session,
-                model_obj,
-            )
-
-        if not request_body:
-            return await super().forward_request(
-                request,
-                path,
-                headers,
-                request_body,
-                key,
-                max_cost_for_model,
-                session,
-                model_obj,
-            )
-
-        try:
-            openai_data = json.loads(request_body)
-            messages = openai_data.get("messages", [])
-            temperature = openai_data.get("temperature")
-            max_tokens = openai_data.get("max_tokens")
-            top_p = openai_data.get("top_p")
-            is_streaming = openai_data.get("stream", False)
-
-            logger.info(
-                "Processing Gemini request with client abstraction",
-                extra={
-                    "model": model_obj.id,
-                    "is_streaming": is_streaming,
-                    "message_count": len(messages),
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-
-            if is_streaming:
-                final_usage_data: dict | None = None
-
-                def usage_callback(usage_data: dict[str, Any]) -> None:
-                    """Callback to capture usage data during streaming"""
-                    nonlocal final_usage_data
-                    final_usage_data = usage_data
-
-                async def completion_callback(
-                    model: str, usage_data: dict[str, Any] | None
-                ) -> None:
-                    """Callback to handle payment when streaming completes"""
-                    nonlocal final_usage_data
-                    if usage_data:
-                        final_usage_data = usage_data
-
-                    payment_data = {
-                        "model": model,
-                        "usage": final_usage_data,
-                    }
-
-                    from ..auth import adjust_payment_for_tokens
-                    from ..core.db import create_session
-
-                    async with create_session() as new_session:
-                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                        if fresh_key:
-                            try:
-                                cost_data = await adjust_payment_for_tokens(
-                                    fresh_key,
-                                    payment_data,
-                                    new_session,
-                                    max_cost_for_model,
-                                )
-
-                                logger.info(
-                                    "Gemini streaming payment finalized",
-                                    extra={
-                                        "cost_data": cost_data,
-                                        "usage_data": final_usage_data,
-                                        "key_hash": key.hashed_key[:8] + "...",
-                                    },
-                                )
-                            except Exception as cost_error:
-                                logger.error(
-                                    "Error finalizing Gemini streaming payment",
-                                    extra={
-                                        "error": str(cost_error),
-                                        "key_hash": key.hashed_key[:8] + "...",
-                                    },
-                                )
-
-                response_generator = self.client.generate_content_stream(
-                    model=model_obj.id,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    top_p=top_p,
-                    usage_callback=usage_callback,
-                    completion_callback=completion_callback,
-                )
-
-                async def stream_with_cost() -> AsyncGenerator[bytes, None]:
-                    payment_finalized = False
-
-                    async def finalize_payment() -> None:
-                        nonlocal payment_finalized
-                        if payment_finalized:
-                            return
-                        from ..auth import adjust_payment_for_tokens
-                        from ..core.db import create_session
-
-                        async with create_session() as new_session:
-                            fresh_key = await new_session.get(
-                                key.__class__, key.hashed_key
-                            )
-                            if fresh_key:
-                                try:
-                                    await adjust_payment_for_tokens(
-                                        fresh_key,
-                                        {
-                                            "model": model_obj.id,
-                                            "usage": final_usage_data,
-                                        },
-                                        new_session,
-                                        max_cost_for_model,
-                                    )
-                                    payment_finalized = True
-                                except Exception as cost_error:
-                                    logger.error(
-                                        "Error finalizing Gemini streaming payment in fallback",
-                                        extra={
-                                            "error": str(cost_error),
-                                            "key_hash": key.hashed_key[:8] + "...",
-                                        },
-                                    )
-
-                    try:
-                        async for chunk in response_generator:
-                            sse_data = f"data: {json.dumps(chunk)}\n\n"
-                            yield sse_data.encode()
-                    except Exception as e:
-                        logger.error(
-                            "Error in Gemini streaming response",
-                            extra={
-                                "error": str(e),
-                                "error_type": type(e).__name__,
-                                "key_hash": key.hashed_key[:8] + "...",
-                            },
-                        )
-                        raise
-                    finally:
-                        if not payment_finalized:
-                            await finalize_payment()
-
-                return StreamingResponse(
-                    stream_with_cost(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
-
-            else:
-                openai_format_response = await self.client.generate_content(
-                    model=model_obj.id,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    top_p=top_p,
-                )
-
-                from ..auth import adjust_payment_for_tokens
-
-                cost_data = await adjust_payment_for_tokens(
-                    key, openai_format_response, session, max_cost_for_model
-                )
-                await session.refresh(key)
-                remaining_balance_msats = key.balance
-                openai_format_response["cost"] = cost_data
-                openai_format_response["cost"]["sats_cost"] = (
-                    cost_data.get("total_msats", 0) // 1000
-                )
-                openai_format_response["cost"]["remaining_balance_msats"] = (
-                    remaining_balance_msats
-                )
-
-                logger.info(
-                    "Gemini non-streaming payment completed",
-                    extra={
-                        "cost_data": cost_data,
-                        "model": model_obj.id,
-                        "key_hash": key.hashed_key[:8] + "...",
-                    },
-                )
-
-                return Response(
-                    content=json.dumps(openai_format_response),
-                    media_type="application/json",
-                    headers={"Cache-Control": "no-cache"},
-                )
-
-        except Exception as e:
-            logger.error(
-                "Error in Gemini forward_request",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                },
-            )
-            return await super().forward_request(
-                request,
-                path,
-                headers,
-                request_body,
-                key,
-                max_cost_for_model,
-                session,
-                model_obj,
-            )
+        See :mod:`routstr.upstream.gemini_messages` for the full rationale
+        (thought-signature injection, why litellm + the openai SDK can't
+        carry the required ``extra_content`` field).
+        """
+        return await gemini_messages.dispatch_gemini_messages(
+            request_body=request_body,
+            model_obj=model_obj,
+            base_url=self.compat_base_url,
+            api_key=self.api_key,
+            transform_model_name=self.transform_model_name,
+            log_extra=log_extra,
+        )
 
     async def _fetch_provider_models(self) -> dict:
-        """Fetch models from Gemini API."""
+        """Fetch models from Gemini API via the OpenAI-compat client."""
         try:
             models_data = await self.client.list_models()
 

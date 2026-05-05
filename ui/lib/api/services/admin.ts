@@ -76,6 +76,7 @@ export const AdminModelSchema = z.object({
   canonical_slug: z.string().nullable().optional(),
   alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
+  forwarded_model_id: z.string().nullable().optional(),
 });
 
 export const ProviderModelsSchema = z.object({
@@ -890,13 +891,17 @@ export class AdminService {
     type?: string,
     status?: string,
     search?: string,
-    limit: number = 100
+    source?: string,
+    limit: number = 50,
+    offset: number = 0
   ): Promise<TransactionsResponse> {
     const params = new URLSearchParams();
     if (type) params.append('type', type);
     if (status) params.append('status', status);
     if (search) params.append('search', search);
+    if (source) params.append('source', source);
     params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
 
     return await apiClient.get<TransactionsResponse>(
       `/admin/api/transactions?${params.toString()}`
@@ -961,6 +966,45 @@ export class AdminService {
       balance_data: number | null | Record<string, unknown>;
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
+
+  // ── CLI Tokens ──
+
+  static async listCliTokens(): Promise<CliTokenListItem[]> {
+    return await apiClient.get<CliTokenListItem[]>('/admin/api/cli-tokens');
+  }
+
+  static async createCliToken(
+    name: string,
+    expiresInDays?: number
+  ): Promise<CliTokenCreated> {
+    return await apiClient.post<CliTokenCreated>('/admin/api/cli-tokens', {
+      name,
+      expires_in_days: expiresInDays ?? null,
+    });
+  }
+
+  static async revokeCliToken(tokenId: string): Promise<{ ok: boolean }> {
+    return await apiClient.delete<{ ok: boolean }>(
+      `/admin/api/cli-tokens/${encodeURIComponent(tokenId)}`
+    );
+  }
+}
+
+export interface CliTokenListItem {
+  id: string;
+  name: string;
+  token_preview: string;
+  created_at: number;
+  last_used_at: number | null;
+  expires_at: number | null;
+}
+
+export interface CliTokenCreated {
+  id: string;
+  name: string;
+  token: string;
+  created_at: number;
+  expires_at: number | null;
 }
 
 export const TemporaryBalanceSchema = z.object({
@@ -1134,6 +1178,8 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
+  source: 'x-cashu' | 'apikey';
+  api_key_hashed_key?: string;
 }
 
 export interface TransactionsResponse {

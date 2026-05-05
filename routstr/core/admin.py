@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
@@ -20,6 +20,7 @@ from ..wallet import (
 from .db import (
     ApiKey,
     CashuTransaction,
+    CliToken,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -38,12 +39,27 @@ ADMIN_SESSION_DURATION = 3600
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
-def require_admin_api(request: Request) -> None:
+async def require_admin_api(request: Request) -> None:
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1]
-        expiry = admin_sessions.get(token)
-        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    token = auth_header.split(" ", 1)[1]
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    # 1) Short-lived session token (in-memory)
+    expiry = admin_sessions.get(token)
+    if expiry and expiry > now_ts:
+        return
+
+    # 2) Long-lived CLI token (DB-backed)
+    async with create_session() as session:
+        result = await session.exec(select(CliToken).where(CliToken.token == token))
+        cli_token = result.first()
+        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+            cli_token.last_used_at = now_ts
+            session.add(cli_token)
+            await session.commit()
             return
 
     raise HTTPException(status_code=403, detail="Unauthorized")
@@ -126,8 +142,8 @@ async def get_settings(request: Request) -> dict:
     return data
 
 
-class SettingsUpdate(BaseModel):
-    __root__: dict[str, object]
+class SettingsUpdate(RootModel[dict[str, object]]):
+    pass
 
 
 class PasswordUpdate(BaseModel):
@@ -138,7 +154,7 @@ class PasswordUpdate(BaseModel):
 @admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
 async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     # Remove sensitive fields from general settings update
-    settings_data = update.__root__.copy()
+    settings_data = update.root.copy()
     sensitive_fields = ["admin_password", "upstream_api_key", "nsec"]
     for field in sensitive_fields:
         if field in settings_data:
@@ -242,6 +258,73 @@ async def admin_logout(request: Request) -> dict[str, object]:
     return {"ok": True}
 
 
+# ─── CLI Tokens (long-lived bearer tokens for CLI/agent use) ───
+
+
+class CliTokenCreate(BaseModel):
+    name: str
+    expires_in_days: int | None = None
+
+
+@admin_router.get("/api/cli-tokens", dependencies=[Depends(require_admin_api)])
+async def list_cli_tokens() -> list[dict[str, object]]:
+    async with create_session() as session:
+        result = await session.exec(select(CliToken))
+        tokens = result.all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "token_preview": f"{t.token[:8]}...{t.token[-4:]}",
+            "created_at": t.created_at,
+            "last_used_at": t.last_used_at,
+            "expires_at": t.expires_at,
+        }
+        for t in tokens
+    ]
+
+
+@admin_router.post("/api/cli-tokens", dependencies=[Depends(require_admin_api)])
+async def create_cli_token(payload: CliTokenCreate) -> dict[str, object]:
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    raw_token = secrets.token_urlsafe(32)
+    expires_at: int | None = None
+    if payload.expires_in_days is not None and payload.expires_in_days > 0:
+        expires_at = int(datetime.now(timezone.utc).timestamp()) + (
+            payload.expires_in_days * 86400
+        )
+
+    async with create_session() as session:
+        cli_token = CliToken(token=raw_token, name=name, expires_at=expires_at)
+        session.add(cli_token)
+        await session.commit()
+        await session.refresh(cli_token)
+
+    return {
+        "id": cli_token.id,
+        "name": cli_token.name,
+        "token": raw_token,  # full token returned only on creation
+        "created_at": cli_token.created_at,
+        "expires_at": cli_token.expires_at,
+    }
+
+
+@admin_router.delete(
+    "/api/cli-tokens/{token_id}", dependencies=[Depends(require_admin_api)]
+)
+async def revoke_cli_token(token_id: str) -> dict[str, object]:
+    async with create_session() as session:
+        cli_token = await session.get(CliToken, token_id)
+        if not cli_token:
+            raise HTTPException(status_code=404, detail="Token not found")
+        await session.delete(cli_token)
+        await session.commit()
+    return {"ok": True, "deleted_id": token_id}
+
+
 class WithdrawRequest(BaseModel):
     amount: int
     mint_url: str | None = None
@@ -295,6 +378,7 @@ class ModelCreate(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     enabled: bool = True
+    forwarded_model_id: str | None = None
 
 
 @admin_router.post(
@@ -339,6 +423,7 @@ async def upsert_provider_model(
                 json.dumps(payload.alias_ids) if payload.alias_ids else None
             )
             existing_row.enabled = payload.enabled
+            existing_row.forwarded_model_id = payload.forwarded_model_id or payload.id
 
             session.add(existing_row)
             await session.commit()
@@ -371,6 +456,7 @@ async def upsert_provider_model(
                 ),
                 upstream_provider_id=provider_id,
                 enabled=payload.enabled,
+                forwarded_model_id=payload.forwarded_model_id or payload.id,
             )
             session.add(row)
             await session.commit()
@@ -1332,41 +1418,56 @@ async def get_transactions_api(
     type: str | None = None,
     status: str | None = None,
     search: str | None = None,
-    limit: int = 100,
+    source: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     async with create_session() as session:
-        from sqlmodel import col
+        from sqlmodel import col, func
 
-        stmt = select(CashuTransaction)
+        base = select(CashuTransaction)
         if type:
-            stmt = stmt.where(CashuTransaction.type == type)
+            base = base.where(CashuTransaction.type == type)
+        if source:
+            if source == "x-cashu":
+                base = base.where(
+                    (CashuTransaction.source == "x-cashu")
+                    | (CashuTransaction.source == None)  # noqa: E711
+                )
+            else:
+                base = base.where(CashuTransaction.source == source)
         if status:
             if status == "collected":
-                stmt = stmt.where(CashuTransaction.collected == True)  # noqa: E712
+                base = base.where(CashuTransaction.collected == True)  # noqa: E712
             elif status == "swept":
-                stmt = stmt.where(CashuTransaction.swept == True)  # noqa: E712
+                base = base.where(CashuTransaction.swept == True)  # noqa: E712
             elif status == "pending":
-                stmt = stmt.where(
+                base = base.where(
                     CashuTransaction.collected == False,  # noqa: E712
                     CashuTransaction.swept == False,  # noqa: E712
                 )
 
         if search:
             search_pattern = f"%{search}%"
-            stmt = stmt.where(
+            base = base.where(
                 (col(CashuTransaction.id).like(search_pattern))
                 | (col(CashuTransaction.token).like(search_pattern))
                 | (col(CashuTransaction.request_id).like(search_pattern))
+                | (col(CashuTransaction.api_key_hashed_key).like(search_pattern))
             )
 
-        stmt = stmt.order_by(col(CashuTransaction.created_at).desc()).limit(limit)
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
 
+        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
         results = await session.exec(stmt)
         transactions = results.all()
 
         return {
             "transactions": [tx.dict() for tx in transactions],
-            "total": len(transactions),
+            "total": total,
         }
 
 

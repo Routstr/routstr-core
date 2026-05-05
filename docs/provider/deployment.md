@@ -6,16 +6,7 @@ Production deployment guide for Routstr Provider nodes.
 
 For production, use Docker Compose with persistent storage and optional Tor support.
 
-### Unified Setup (All-in-one)
-To build and run the node with the UI integrated in a single container using the multi-stage build:
-
-```bash
-docker build -f Dockerfile.full -t routstr-full .
-docker run -d -p 8000:8000 --env-file .env routstr-full
-```
-
-### Advanced Setup (Separated UI & Node)
-Use the included `compose.yml` for a more flexible setup that separates the UI build process from the node execution. This is useful for development or when you want to manage Tor as a separate service.
+Use the included `compose.yml` for a flexible setup that handles both the UI and the node execution. This is useful for development or when you want to manage Tor as a separate service.
 
 ```bash
 docker compose up -d
@@ -184,20 +175,16 @@ docker compose up -d
 
 ## Building from Source
 
-### Unified Image (UI + Node)
-The easiest way to build everything from source into a single production-ready image:
+### Using Docker Compose
+The easiest way to build everything from source:
 
 ```bash
-docker build -f Dockerfile.full -t routstr-full .
+docker compose build
 ```
 
 ### Individual Components
-If you prefer building them separately or using Docker Compose:
+If you prefer building the node only (requires manual UI build first):
 
 ```bash
-# Build using compose
-docker compose build
-
-# Or build the node only (requires manual UI build first)
 docker build -t routstr-node .
 ```

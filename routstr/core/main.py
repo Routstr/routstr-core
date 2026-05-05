@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -9,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
+from starlette.responses import Response as StarletteResponse
+from starlette.types import Scope
 
 from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
@@ -22,7 +23,8 @@ from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..upstream.auto_topup import periodic_auto_topup
-from ..wallet import periodic_payout, periodic_refund_sweep
+from ..upstream.litellm_routing import configure_litellm
+from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
@@ -30,15 +32,11 @@ from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .settings import SettingsService
 from .settings import settings as global_settings
+from .version import __version__
 
 # Initialize logging first
 setup_logging()
 logger = get_logger(__name__)
-
-if os.getenv("VERSION_SUFFIX") is not None:
-    __version__ = f"0.4.0-{os.getenv('VERSION_SUFFIX')}"
-else:
-    __version__ = "0.4.0"
 
 
 @asynccontextmanager
@@ -56,8 +54,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     key_reset_task = None
     auto_topup_task = None
     refund_sweep_task = None
+    routstr_fee_task = None
 
     try:
+        # Apply litellm-wide settings (drop_params, chat-completions URL,
+        # debug logging) before any upstream provider dispatches a request.
+        configure_litellm()
+
         # Run database migrations on startup
         run_migrations()
 
@@ -102,8 +105,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         btc_price_task = asyncio.create_task(update_prices_periodically())
         pricing_task = asyncio.create_task(update_sats_pricing())
         if global_settings.models_refresh_interval_seconds > 0:
+            # Pass the accessor (not its current value) so the loop sees providers
+            # added/changed via reinitialize_upstreams() instead of staying pinned
+            # to the startup snapshot.
             models_refresh_task = asyncio.create_task(
-                refresh_upstreams_models_periodically(get_upstreams())
+                refresh_upstreams_models_periodically(get_upstreams)
             )
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
         payout_task = asyncio.create_task(periodic_payout())
@@ -115,6 +121,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         key_reset_task = asyncio.create_task(periodic_key_reset())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
+        routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
 
         yield
 
@@ -152,6 +159,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             auto_topup_task.cancel()
         if refund_sweep_task is not None:
             refund_sweep_task.cancel()
+        if routstr_fee_task is not None:
+            routstr_fee_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -177,6 +186,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(auto_topup_task)
             if refund_sweep_task is not None:
                 tasks_to_wait.append(refund_sweep_task)
+            if routstr_fee_task is not None:
+                tasks_to_wait.append(routstr_fee_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
@@ -186,6 +197,23 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 "Error stopping background tasks",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
+
+
+class _ImmutableStaticFiles(StaticFiles):
+    """Static files with long Cache-Control for content-hashed Next.js assets.
+
+    Files under `/_next/static/` are emitted with content hashes in their
+    filenames and never mutate, so we serve them with a one-year immutable
+    cache header so browsers and CDNs stop revalidating on every reload.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> StarletteResponse:
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable"
+            )
+        return response
 
 
 app = FastAPI(version=__version__, lifespan=lifespan)
@@ -234,7 +262,7 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
 
     app.mount(
         "/_next",
-        StaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True),
+        _ImmutableStaticFiles(directory=UI_DIST_PATH / "_next", check_dir=True),
         name="next-static",
     )
 
@@ -242,99 +270,69 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def serve_root_ui() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
 
-    # Add explicit route for /index.txt to redirect to /
+    # Serve the App Router RSC payload for the home page.
     @app.get("/index.txt", include_in_schema=False)
-    async def redirect_index_txt() -> RedirectResponse:
-        return RedirectResponse("/")
+    async def serve_root_rsc() -> FileResponse:
+        return FileResponse(
+            UI_DIST_PATH / "index.txt", media_type="text/x-component"
+        )
+
+    # Next.js is built with `trailingSlash: true`, so all UI page URLs end
+    # with a slash (e.g. `/login/`). The proxy router catches `/{path:path}`
+    # before FastAPI's `redirect_slashes` logic can normalize the URL, so we
+    # must register both the with-slash and without-slash variants here.
+    UI_PAGES = (
+        "dashboard",
+        "login",
+        "model",
+        "providers",
+        "settings",
+        "transactions",
+        "balances",
+        "logs",
+        "usage",
+        "unauthorized",
+    )
+
+    def _register_ui_page(name: str) -> None:
+        page_dir = UI_DIST_PATH / name
+        index_html = page_dir / "index.html"
+        index_txt = page_dir / "index.txt"
+
+        async def serve_page() -> FileResponse:
+            return FileResponse(index_html)
+
+        async def serve_page_rsc() -> FileResponse:
+            return FileResponse(index_txt, media_type="text/x-component")
+
+        app.add_api_route(
+            f"/{name}",
+            serve_page,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"serve_{name}_ui",
+        )
+        app.add_api_route(
+            f"/{name}/",
+            serve_page,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"serve_{name}_ui_slash",
+        )
+        app.add_api_route(
+            f"/{name}/index.txt",
+            serve_page_rsc,
+            methods=["GET"],
+            include_in_schema=False,
+            name=f"serve_{name}_rsc",
+        )
+
+    for _page in UI_PAGES:
+        _register_ui_page(_page)
 
     @app.get("/admin")
     async def admin_redirect() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "index.html")
-
-    @app.get("/dashboard", include_in_schema=False)
-    async def serve_dashboard_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "index.html")
-
-    @app.get("/login", include_in_schema=False)
-    async def serve_login_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "login" / "index.html")
-
-    # Add explicit route for /login/index.txt to redirect to /login
-    @app.get("/login/index.txt", include_in_schema=False)
-    async def redirect_login_index_txt() -> RedirectResponse:
-        return RedirectResponse("/login")
-
-    @app.get("/model", include_in_schema=False)
-    async def serve_models_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "model" / "index.html")
-
-    # Add explicit route for /model/index.txt to redirect to /model
-    @app.get("/model/index.txt", include_in_schema=False)
-    async def redirect_model_index_txt() -> RedirectResponse:
-        return RedirectResponse("/model")
-
-    @app.get("/providers", include_in_schema=False)
-    async def serve_providers_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "providers" / "index.html")
-
-    # Add explicit route for /providers/index.txt to redirect to /providers
-    @app.get("/providers/index.txt", include_in_schema=False)
-    async def redirect_providers_index_txt() -> RedirectResponse:
-        return RedirectResponse("/providers")
-
-    @app.get("/settings", include_in_schema=False)
-    async def serve_settings_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "settings" / "index.html")
-
-    # Add explicit route for /settings/index.txt to redirect to /settings
-    @app.get("/settings/index.txt", include_in_schema=False)
-    async def redirect_settings_index_txt() -> RedirectResponse:
-        return RedirectResponse("/settings")
-
-    @app.get("/transactions", include_in_schema=False)
-    async def serve_transactions_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "transactions" / "index.html")
-
-    # Add explicit route for /transactions/index.txt to redirect to /transactions
-    @app.get("/transactions/index.txt", include_in_schema=False)
-    async def redirect_transactions_index_txt() -> RedirectResponse:
-        return RedirectResponse("/transactions")
-
-    @app.get("/balances", include_in_schema=False)
-    async def serve_balances_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "balances" / "index.html")
-
-    # Add explicit route for /balances/index.txt to redirect to /balances
-    @app.get("/balances/index.txt", include_in_schema=False)
-    async def redirect_balances_index_txt() -> RedirectResponse:
-        return RedirectResponse("/balances")
-
-    @app.get("/logs", include_in_schema=False)
-    async def serve_logs_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "logs" / "index.html")
-
-    # Add explicit route for /logs/index.txt to redirect to /logs
-    @app.get("/logs/index.txt", include_in_schema=False)
-    async def redirect_logs_index_txt() -> RedirectResponse:
-        return RedirectResponse("/logs")
-
-    @app.get("/usage", include_in_schema=False)
-    async def serve_usage_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "usage" / "index.html")
-
-    # Add explicit route for /usage/index.txt to redirect to /usage
-    @app.get("/usage/index.txt", include_in_schema=False)
-    async def redirect_usage_index_txt() -> RedirectResponse:
-        return RedirectResponse("/usage")
-
-    @app.get("/unauthorized", include_in_schema=False)
-    async def serve_unauthorized_ui() -> FileResponse:
-        return FileResponse(UI_DIST_PATH / "unauthorized" / "index.html")
-
-    # Add explicit route for /unauthorized/index.txt to redirect to /unauthorized
-    @app.get("/unauthorized/index.txt", include_in_schema=False)
-    async def redirect_unauthorized_index_txt() -> RedirectResponse:
-        return RedirectResponse("/unauthorized")
 
     @app.get("/favicon.ico", include_in_schema=False)
     async def serve_favicon() -> FileResponse:
@@ -347,9 +345,6 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     async def serve_icon() -> FileResponse:
         return FileResponse(UI_DIST_PATH / "icon.ico")
 
-    app.mount(
-        "/static", StaticFiles(directory=UI_DIST_PATH, check_dir=True), name="ui-static"
-    )
 else:
     logger.warning(
         f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
