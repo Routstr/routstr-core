@@ -336,7 +336,14 @@ def create_model_mappings(
             model.forwarded_model_id
             and model.forwarded_model_id.lower() == alias
         ):
+            return 5
+
+        if (
+            model.id
+            and model.id.lower() == alias
+        ):
             return 4
+
         model_base = get_base_model_id(model.id)
         if model_base == alias:
             return 3
