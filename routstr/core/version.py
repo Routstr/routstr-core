@@ -55,9 +55,14 @@ def _on_tagged_release() -> bool:
     if tag:
         return tag.lstrip("v") == BASE_VERSION
     described = _run_git("describe", "--tags", "--exact-match", "HEAD")
-    if not described:
-        return False
-    return described.lstrip("v") == BASE_VERSION
+    if described and described.lstrip("v") == BASE_VERSION:
+        return True
+    current_branch = _run_git("rev-parse", "--abbrev-ref", "HEAD")
+    if current_branch == "main":
+        branch_tag = _run_git("describe", "--tags", "--abbrev=0", "HEAD")
+        if branch_tag and branch_tag.lstrip("v") == BASE_VERSION:
+            return True
+    return False
 
 
 @lru_cache(maxsize=1)
