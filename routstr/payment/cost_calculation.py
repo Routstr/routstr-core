@@ -180,7 +180,17 @@ async def calculate_cost(  # todo: can be sync
                     input_msats = int(cost_in_msats * input_ratio)
                     output_msats = cost_in_msats - input_msats
                 else:
-                    output_msats = cost_in_msats
+                    # No tokens reported — model produced empty output, issue full refund
+                    logger.warning(
+                        "Zero tokens with non-zero USD cost — issuing full refund",
+                        extra={
+                            "usd_cost": usd_cost,
+                            "model": response_data.get("model", "unknown"),
+                        },
+                    )
+                    input_msats = 0
+                    output_msats = 0
+                    cost_in_msats = 0
 
             logger.info(
                 "Using cost from usage data/details",
