@@ -248,12 +248,28 @@ class AnnotatedEvent(NamedTuple):
     streaming paths in ``BaseUpstreamProvider`` consume ``sse_bytes`` plus
     the tallies and only differ in whether they stream live or buffer
     first.
+
+    ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` are
+    surfaced separately so the cost path can price them against the cache
+    rate rather than fold them silently into the regular input bucket.
+
+    ``total_cost`` / ``input_cost`` / ``output_cost`` carry any
+    USD cost figures the upstream attached to this event (from
+    ``usage.cost``, ``usage.total_cost``, or ``usage.cost_details``) so the
+    streaming paths can re-embed them in the rebuilt ``usage`` dict and let
+    ``calculate_cost`` convert directly USD→sats instead of falling back to
+    token-based math.
     """
 
     event: dict
     sse_bytes: bytes
     input_tokens: int
     output_tokens: int
+    cache_read_input_tokens: int
+    cache_creation_input_tokens: int
+    total_cost: float
+    input_cost: float
+    output_cost: float
     model: str | None
 
 
@@ -272,7 +288,33 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
 
     in_tokens = 0
     out_tokens = 0
+    cache_read_tokens = 0
+    cache_create_tokens = 0
+    total_cost = 0.0
+    input_cost = 0.0
+    output_cost = 0.0
     model: str | None = None
+
+    def _coerce_float(value: object) -> float:
+        if value is None or isinstance(value, bool):
+            return 0.0
+        if not isinstance(value, (int, float, str)):
+            return 0.0
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _accumulate(usage: dict) -> None:
+        nonlocal in_tokens, out_tokens, cache_read_tokens, cache_create_tokens
+        nonlocal total_cost, input_cost, output_cost
+        in_tokens += int(usage.get("input_tokens") or 0)
+        out_tokens += int(usage.get("output_tokens") or 0)
+        cache_read_tokens += int(usage.get("cache_read_input_tokens") or 0)
+        cache_create_tokens += int(usage.get("cache_creation_input_tokens") or 0)
+        total_cost += _coerce_float(usage.get("total_cost"))
+        input_cost += _coerce_float(usage.get("input_cost"))
+        output_cost += _coerce_float(usage.get("output_cost"))
 
     msg_for_meta = event.get("message")
     if isinstance(msg_for_meta, dict):
@@ -280,13 +322,31 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
             model = str(msg_for_meta["model"])
         usage = msg_for_meta.get("usage")
         if isinstance(usage, dict):
-            in_tokens += int(usage.get("input_tokens") or 0)
-            out_tokens += int(usage.get("output_tokens") or 0)
+            _accumulate(usage)
 
     if isinstance(event.get("usage"), dict):
-        usage = event["usage"]
-        in_tokens += int(usage.get("input_tokens") or 0)
-        out_tokens += int(usage.get("output_tokens") or 0)
+        _accumulate(event["usage"])
+
+    # Some upstreams (notably OpenRouter-style proxies) attach cost fields
+    # directly at the event root rather than inside ``usage``.
+    for field in ("total_cost", "cost"):
+        total_cost = max(total_cost, _coerce_float(event.get(field)))
+    input_cost = max(input_cost, _coerce_float(event.get("input_cost")))
+    output_cost = max(output_cost, _coerce_float(event.get("output_cost")))
+    root_cost_details = event.get("cost_details")
+    if isinstance(root_cost_details, dict):
+        total_cost = max(
+            total_cost,
+            _coerce_float(root_cost_details.get("total_cost")),
+        )
+        input_cost = max(
+            input_cost,
+            _coerce_float(root_cost_details.get("input_cost")),
+        )
+        output_cost = max(
+            output_cost,
+            _coerce_float(root_cost_details.get("output_cost")),
+        )
 
     event_type = str(event.get("type") or "")
     payload = json.dumps(event)
@@ -295,7 +355,18 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
     else:
         sse_bytes = f"data: {payload}\n\n".encode()
 
-    return AnnotatedEvent(event, sse_bytes, in_tokens, out_tokens, model)
+    return AnnotatedEvent(
+        event,
+        sse_bytes,
+        in_tokens,
+        out_tokens,
+        cache_read_tokens,
+        cache_create_tokens,
+        total_cost,
+        input_cost,
+        output_cost,
+        model,
+    )
 
 
 async def stream_annotated_events(
@@ -313,6 +384,38 @@ async def stream_annotated_events(
         events, sse_buffer = events_from_chunk(chunk, sse_buffer)
         for event in events:
             yield annotate_event(event, requested_model)
+
+
+def embed_usd_costs(
+    usage: dict,
+    total_cost: float,
+    input_cost: float,
+    output_cost: float,
+) -> None:
+    """Mutate ``usage`` so ``calculate_cost`` will pick up the USD totals.
+
+    Mirrors the upstream shape: when any USD figure is present, attach
+    ``cost`` (used by the simple-fallback branch in ``calculate_cost``) and
+    a ``cost_details`` block (used by the preferred branch — also gives the
+    input/output USD split when we have one).
+    """
+    if total_cost <= 0 and input_cost <= 0 and output_cost <= 0:
+        return
+
+    cost_details: dict[str, float] = {}
+    effective_total = total_cost
+    if effective_total <= 0 and (input_cost > 0 or output_cost > 0):
+        effective_total = input_cost + output_cost
+
+    if effective_total > 0:
+        cost_details["total_cost"] = effective_total
+        usage["cost"] = effective_total
+    if input_cost > 0:
+        cost_details["input_cost"] = input_cost
+    if output_cost > 0:
+        cost_details["output_cost"] = output_cost
+    if cost_details:
+        usage["cost_details"] = cost_details
 
 
 def compute_refund(amount: int, unit: str, cost_msats: int) -> int:
