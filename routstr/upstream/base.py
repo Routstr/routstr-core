@@ -140,6 +140,51 @@ class BaseUpstreamProvider:
             "can_show_balance": False,
         }
 
+    @staticmethod
+    def _fold_cache_into_input_tokens(usage: object) -> None:
+        """Fold cache token counts into ``input_tokens`` / ``prompt_tokens``.
+
+        Cost calculation has already used the per-bucket counts to bill the
+        request correctly; what the client sees in the visible token total
+        should be a single rolled-up prompt count *including* the cache
+        portion. The standalone ``cache_read_input_tokens`` /
+        ``cache_creation_input_tokens`` fields are left in place for clients
+        that want the breakdown.
+
+        For Anthropic-shaped responses (``input_tokens`` present), the cache
+        fields are forced to ``0`` when the upstream omitted them, so the
+        client always sees a consistent shape.
+        """
+        if not isinstance(usage, dict):
+            return
+
+        # Normalise missing cache fields to 0 on Anthropic-shaped usage so
+        # downstream consumers can rely on them being present.
+        if "input_tokens" in usage:
+            usage.setdefault("cache_read_input_tokens", 0)
+            usage.setdefault("cache_creation_input_tokens", 0)
+
+        try:
+            cache_read = int(usage.get("cache_read_input_tokens") or 0)
+            cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+        except (TypeError, ValueError):
+            return
+        extra = cache_read + cache_creation
+        if extra <= 0:
+            return
+        if "input_tokens" in usage:
+            try:
+                usage["input_tokens"] = int(usage.get("input_tokens") or 0) + extra
+            except (TypeError, ValueError):
+                pass
+        if "prompt_tokens" in usage:
+            try:
+                usage["prompt_tokens"] = (
+                    int(usage.get("prompt_tokens") or 0) + extra
+                )
+            except (TypeError, ValueError):
+                pass
+
     def inject_cost_metadata(
         self,
         response_json: dict,
@@ -163,6 +208,7 @@ class BaseUpstreamProvider:
             response_json["usage"]["cost"] = total_usd
             response_json["usage"]["cost_sats"] = sats_cost
             response_json["usage"]["remaining_balance_msats"] = key.balance
+            self._fold_cache_into_input_tokens(response_json["usage"])
 
         # Inject into Anthropic nested usage block if present
         if (
@@ -171,6 +217,7 @@ class BaseUpstreamProvider:
             and "usage" in response_json["message"]
         ):
             response_json["message"]["usage"]["sats_cost"] = sats_cost
+            self._fold_cache_into_input_tokens(response_json["message"]["usage"])
 
         # Unified Routstr metadata
         response_json["metadata"] = response_json.get("metadata", {})
@@ -826,6 +873,7 @@ class BaseUpstreamProvider:
                 response_json["usage"]["remaining_balance_msats"] = (
                     remaining_balance_msats
                 )
+                self._fold_cache_into_input_tokens(response_json["usage"])
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -1200,6 +1248,7 @@ class BaseUpstreamProvider:
                 response_json["usage"]["remaining_balance_msats"] = (
                     remaining_balance_msats
                 )
+                self._fold_cache_into_input_tokens(response_json["usage"])
 
             # Keep detailed cost
             response_json["metadata"] = response_json.get("metadata", {})
@@ -1327,6 +1376,42 @@ class BaseUpstreamProvider:
             last_model_seen: str | None = None
             input_tokens: int = 0
             output_tokens: int = 0
+            cache_read_input_tokens: int = 0
+            cache_creation_input_tokens: int = 0
+            total_cost: float = 0.0
+            input_cost: float = 0.0
+            output_cost: float = 0.0
+
+            def _coerce_usd(value: object) -> float:
+                if value is None or isinstance(value, bool):
+                    return 0.0
+                if not isinstance(value, (int, float, str)):
+                    return 0.0
+                try:
+                    return max(0.0, float(value))
+                except (TypeError, ValueError):
+                    return 0.0
+
+            def _absorb_usd(usage_or_root: dict) -> None:
+                nonlocal total_cost, input_cost, output_cost
+                cd = usage_or_root.get("cost_details")
+                if isinstance(cd, dict):
+                    total_cost = max(
+                        total_cost,
+                        _coerce_usd(cd.get("total_cost")),
+                    )
+                    input_cost = max(
+                        input_cost,
+                        _coerce_usd(cd.get("input_cost")),
+                    )
+                    output_cost = max(
+                        output_cost,
+                        _coerce_usd(cd.get("output_cost")),
+                    )
+                for field in ("total_cost", "cost"):
+                    total_cost = max(
+                        total_cost, _coerce_usd(usage_or_root.get(field))
+                    )
 
             async def finalize_without_usage() -> bytes | None:
                 nonlocal usage_finalized
@@ -1386,12 +1471,63 @@ class BaseUpstreamProvider:
                                             output_tokens += usage.get(
                                                 "output_tokens", 0
                                             )
+                                            # Anthropic's `message_start.usage`
+                                            # carries the cumulative cache
+                                            # snapshot for the prompt — pick
+                                            # the max() so subsequent
+                                            # `message_delta.usage` events
+                                            # (which only restate the same
+                                            # numbers) don't double-count.
+                                            cache_read_input_tokens = max(
+                                                cache_read_input_tokens,
+                                                int(
+                                                    usage.get(
+                                                        "cache_read_input_tokens", 0
+                                                    )
+                                                    or 0
+                                                ),
+                                            )
+                                            cache_creation_input_tokens = max(
+                                                cache_creation_input_tokens,
+                                                int(
+                                                    usage.get(
+                                                        "cache_creation_input_tokens",
+                                                        0,
+                                                    )
+                                                    or 0
+                                                ),
+                                            )
+                                            _absorb_usd(usage)
 
                                         if usage := data.get("usage"):
                                             input_tokens += usage.get("input_tokens", 0)
                                             output_tokens += usage.get(
                                                 "output_tokens", 0
                                             )
+                                            cache_read_input_tokens = max(
+                                                cache_read_input_tokens,
+                                                int(
+                                                    usage.get(
+                                                        "cache_read_input_tokens", 0
+                                                    )
+                                                    or 0
+                                                ),
+                                            )
+                                            cache_creation_input_tokens = max(
+                                                cache_creation_input_tokens,
+                                                int(
+                                                    usage.get(
+                                                        "cache_creation_input_tokens",
+                                                        0,
+                                                    )
+                                                    or 0
+                                                ),
+                                            )
+                                            _absorb_usd(usage)
+                                        # Some upstreams attach cost fields at
+                                        # the event root rather than nested
+                                        # under `usage`.
+                                        _absorb_usd(data)
                                 except json.JSONDecodeError:
                                     pass
                             modified_lines.append(line)
@@ -1406,9 +1542,23 @@ class BaseUpstreamProvider:
                 usage_data = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
                 }
+                messages_dispatch.embed_usd_costs(
+                    usage_data,
+                    total_cost,
+                    input_cost,
+                    output_cost,
+                )
 
-                if input_tokens > 0 or output_tokens > 0:
+                if (
+                    input_tokens > 0
+                    or output_tokens > 0
+                    or cache_read_input_tokens > 0
+                    or cache_creation_input_tokens > 0
+                    or total_cost > 0
+                ):
                     async with create_session() as new_session:
                         fresh_key = await new_session.get(key.__class__, key.hashed_key)
                         if fresh_key:
@@ -1645,6 +1795,7 @@ class BaseUpstreamProvider:
             response_json["usage"], dict
         ):
             response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+            self._fold_cache_into_input_tokens(response_json["usage"])
 
         response_headers: dict[str, str] = {}
         if cost_data:
@@ -1693,6 +1844,11 @@ class BaseUpstreamProvider:
             last_model_seen: str | None = None
             input_tokens = 0
             output_tokens = 0
+            cache_read_input_tokens = 0
+            cache_creation_input_tokens = 0
+            total_cost = 0.0
+            input_cost = 0.0
+            output_cost = 0.0
 
             async def finalize_without_usage() -> bytes | None:
                 nonlocal usage_finalized
@@ -1751,21 +1907,51 @@ class BaseUpstreamProvider:
                     # double-count.
                     input_tokens = max(input_tokens, annotated.input_tokens)
                     output_tokens = max(output_tokens, annotated.output_tokens)
+                    cache_read_input_tokens = max(
+                        cache_read_input_tokens,
+                        annotated.cache_read_input_tokens,
+                    )
+                    cache_creation_input_tokens = max(
+                        cache_creation_input_tokens,
+                        annotated.cache_creation_input_tokens,
+                    )
+                    total_cost = max(total_cost, annotated.total_cost)
+                    input_cost = max(input_cost, annotated.input_cost)
+                    output_cost = max(output_cost, annotated.output_cost)
                     yield annotated.sse_bytes
 
-                if input_tokens > 0 or output_tokens > 0:
+                if (
+                    input_tokens > 0
+                    or output_tokens > 0
+                    or cache_read_input_tokens > 0
+                    or cache_creation_input_tokens > 0
+                    or total_cost > 0
+                ):
                     async with create_session() as new_session:
                         fresh_key = await new_session.get(
                             key.__class__, key.hashed_key
                         )
                         if fresh_key:
                             try:
+                                rebuilt_usage: dict = {
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "cache_read_input_tokens": (
+                                        cache_read_input_tokens
+                                    ),
+                                    "cache_creation_input_tokens": (
+                                        cache_creation_input_tokens
+                                    ),
+                                }
+                                messages_dispatch.embed_usd_costs(
+                                    rebuilt_usage,
+                                    total_cost,
+                                    input_cost,
+                                    output_cost,
+                                )
                                 combined_data: dict = {
                                     "model": last_model_seen or "unknown",
-                                    "usage": {
-                                        "input_tokens": input_tokens,
-                                        "output_tokens": output_tokens,
-                                    },
+                                    "usage": rebuilt_usage,
                                 }
                                 cost_data = await adjust_payment_for_tokens(
                                     fresh_key,
@@ -1828,6 +2014,11 @@ class BaseUpstreamProvider:
         last_model_seen: str | None = None
         input_tokens = 0
         output_tokens = 0
+        cache_read_input_tokens = 0
+        cache_creation_input_tokens = 0
+        total_cost = 0.0
+        input_cost = 0.0
+        output_cost = 0.0
 
         async for annotated in messages_dispatch.stream_annotated_events(
             iterator, requested_model
@@ -1837,6 +2028,16 @@ class BaseUpstreamProvider:
             # See _stream_litellm_messages for why this is max() not +=.
             input_tokens = max(input_tokens, annotated.input_tokens)
             output_tokens = max(output_tokens, annotated.output_tokens)
+            cache_read_input_tokens = max(
+                cache_read_input_tokens, annotated.cache_read_input_tokens
+            )
+            cache_creation_input_tokens = max(
+                cache_creation_input_tokens,
+                annotated.cache_creation_input_tokens,
+            )
+            total_cost = max(total_cost, annotated.total_cost)
+            input_cost = max(input_cost, annotated.input_cost)
+            output_cost = max(output_cost, annotated.output_cost)
             buffered.append(annotated.sse_bytes)
 
         response_headers: dict[str, str] = {
@@ -1844,7 +2045,13 @@ class BaseUpstreamProvider:
             "Connection": "keep-alive",
         }
 
-        if input_tokens == 0 and output_tokens == 0:
+        if (
+            input_tokens == 0
+            and output_tokens == 0
+            and cache_read_input_tokens == 0
+            and cache_creation_input_tokens == 0
+            and total_cost == 0
+        ):
             logger.warning(
                 "x-cashu /v1/messages stream finished with no usage data "
                 "— refund cannot be computed and the client effectively "
@@ -1858,13 +2065,25 @@ class BaseUpstreamProvider:
                 },
             )
 
-        if input_tokens > 0 or output_tokens > 0:
+        if (
+            input_tokens > 0
+            or output_tokens > 0
+            or cache_read_input_tokens > 0
+            or cache_creation_input_tokens > 0
+            or total_cost > 0
+        ):
+            rebuilt_usage: dict = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+                "cache_creation_input_tokens": cache_creation_input_tokens,
+            }
+            messages_dispatch.embed_usd_costs(
+                rebuilt_usage, total_cost, input_cost, output_cost
+            )
             response_data: dict = {
                 "model": last_model_seen or "unknown",
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                },
+                "usage": rebuilt_usage,
             }
             try:
                 cost_data = await self.get_x_cashu_cost(
