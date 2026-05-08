@@ -78,9 +78,15 @@ Which mints to accept payments from:
 
 Automatic profit withdrawal:
 
-| Setting               | Description                     |
-| --------------------- | ------------------------------- |
-| **Lightning Address** | Your LN address for withdrawals |
+| Setting                              | Description                                                                                                | Default |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------- |
+| **Lightning Address**                | Your LN address for withdrawals                                                                            | —       |
+| **Minimum Payout (sat)**             | Min available balance (in sats) before profit is paid out. Applies to both `sat` and `msat` mints (auto-converted). | `210`   |
+| **Payout Interval (seconds)**        | How often the payout loop wakes up and checks balances                                                     | `900`   |
+
+All payout amounts must be positive. Set the minimums above your wallet's
+minimum-invoice constraint (typically 1 sat) and high enough to amortise
+routing fees.
 
 ### Security
 
@@ -126,6 +132,8 @@ Use environment variables for:
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
+| `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
+| `PAYOUT_INTERVAL_SECONDS` | Payout loop interval (seconds) | `900`                            |
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |
 | `CORS_ORIGINS`       | Allowed CORS origins              | `*`                                  |
 | `RELAYS`             | Nostr relays (comma-separated)    | (default set)                        |

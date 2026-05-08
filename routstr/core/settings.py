@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
 
+    # Lightning payout configuration
+    # Minimum available balance (in satoshis) before profit is paid out over
+    # Lightning
+    min_payout_sat: int = Field(default=210, gt=0, env="MIN_PAYOUT_SAT")
+    # Interval (seconds) between periodic payout attempts. Must be positive.
+    payout_interval_seconds: int = Field(
+        default=900, gt=0, env="PAYOUT_INTERVAL_SECONDS"
+    )
+
     # Pricing
     # Default behavior: derive pricing from MODELS
     # If fixed_pricing is True -> use fixed_cost_per_request and ignore tokens
