@@ -32,8 +32,17 @@ interface SettingsData {
   onion_url?: string;
   cashu_mints?: string[];
   relays?: string[];
+  receive_ln_address?: string;
+  min_payout_sat?: number;
+  payout_interval_seconds?: number;
   [key: string]: unknown;
 }
+
+const PAYOUT_KEYS = [
+  'receive_ln_address',
+  'min_payout_sat',
+  'payout_interval_seconds',
+] as const;
 
 const HANDLED_KEYS = [
   'name',
@@ -48,6 +57,7 @@ const HANDLED_KEYS = [
   'admin_password',
   'id',
   'updated_at',
+  ...PAYOUT_KEYS,
 ];
 
 const IGNORED_KEYS = [
@@ -369,6 +379,7 @@ export function AdminSettings() {
   const cashuMintsChanged = hasFieldChanged('cashu_mints');
   const relaysChanged = hasFieldChanged('relays');
   const analyticsSharingChanged = hasFieldChanged('enable_analytics_sharing');
+  const payoutChanged = PAYOUT_KEYS.some(hasFieldChanged);
   const advancedKeys = Object.keys(settings).filter(
     (key) => !HANDLED_KEYS.includes(key) && !IGNORED_KEYS.includes(key)
   );
@@ -401,7 +412,43 @@ export function AdminSettings() {
     setNewRelay('');
   };
   const resetAnalyticsSharing = () => resetFields(['enable_analytics_sharing']);
+  const resetPayout = () => resetFields([...PAYOUT_KEYS]);
   const resetAdvanced = () => resetFields(advancedKeys);
+
+  const payoutFields: ReadonlyArray<{
+    key: (typeof PAYOUT_KEYS)[number];
+    label: string;
+    placeholder: string;
+    type: 'text' | 'number';
+    helpText: string;
+    min?: number;
+  }> = [
+    {
+      key: 'receive_ln_address',
+      label: 'Lightning Receive Address',
+      placeholder: 'you@walletofsatoshi.com or LNURL',
+      type: 'text',
+      helpText:
+        'Lightning address (or LNURL) profits are paid out to. Leave empty to disable periodic payouts.',
+    },
+    {
+      key: 'min_payout_sat',
+      label: 'Minimum Payout (sat)',
+      placeholder: '210',
+      type: 'number',
+      min: 1,
+      helpText:
+        'Wallet payouts only fire when at least this many satoshis are available. Must be > 0.',
+    },
+    {
+      key: 'payout_interval_seconds',
+      label: 'Payout Interval (seconds)',
+      placeholder: '900',
+      type: 'number',
+      min: 1,
+      helpText: 'How often the payout loop wakes up to check balances.',
+    },
+  ];
 
   if (loading) {
     return (
@@ -608,6 +655,89 @@ export function AdminSettings() {
                 <Button
                   variant='outline'
                   onClick={resetCashuMints}
+                  disabled={loading || saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={loading || saving}>
+                  {saving ? 'Saving...' : 'Save'}
+                </Button>
+              </div>
+            </CardFooter>
+          ) : null}
+        </Card>
+
+        {/* Lightning Payout Settings */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Lightning Payout Settings</CardTitle>
+            <CardDescription>
+              Tune how node profit is paid out over Lightning. Amounts must be
+              positive and above your wallet&apos;s minimum-invoice constraints.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='space-y-4'>
+            {payoutFields.map((field) => {
+              const value = settings[field.key];
+              if (field.type === 'number') {
+                return (
+                  <div key={field.key} className='space-y-2'>
+                    <Label htmlFor={field.key}>{field.label}</Label>
+                    <Input
+                      id={field.key}
+                      type='number'
+                      min={field.min}
+                      value={
+                        typeof value === 'number'
+                          ? value
+                          : value === undefined || value === null
+                            ? ''
+                            : Number(value)
+                      }
+                      placeholder={field.placeholder}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === '') {
+                          handleInputChange(field.key, undefined);
+                        } else {
+                          const parsed = Number(raw);
+                          handleInputChange(
+                            field.key,
+                            Number.isFinite(parsed) ? parsed : undefined
+                          );
+                        }
+                      }}
+                    />
+                    <p className='text-muted-foreground text-xs'>
+                      {field.helpText}
+                    </p>
+                  </div>
+                );
+              }
+              return (
+                <div key={field.key} className='space-y-2'>
+                  <Label htmlFor={field.key}>{field.label}</Label>
+                  <Input
+                    id={field.key}
+                    value={(value as string) || ''}
+                    placeholder={field.placeholder}
+                    onChange={(e) =>
+                      handleInputChange(field.key, e.target.value)
+                    }
+                  />
+                  <p className='text-muted-foreground text-xs'>
+                    {field.helpText}
+                  </p>
+                </div>
+              );
+            })}
+          </CardContent>
+          {payoutChanged ? (
+            <CardFooter className='justify-start'>
+              <div className='flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center'>
+                <Button
+                  variant='outline'
+                  onClick={resetPayout}
                   disabled={loading || saving}
                 >
                   Cancel

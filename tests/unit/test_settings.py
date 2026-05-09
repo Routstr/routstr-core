@@ -1,11 +1,12 @@
 import os
 
 import pytest
+from pydantic.v1 import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.settings import SettingsService
+from routstr.core.settings import Settings, SettingsService
 
 
 @pytest.mark.asyncio
@@ -44,6 +45,54 @@ async def test_settings_db_precedence_over_env() -> None:
         again = await SettingsService.initialize(session)
         assert again.name == "DBName"
         assert again.enable_analytics_sharing is False
+
+
+def test_payout_settings_have_sensible_defaults() -> None:
+    s = Settings()
+    assert s.min_payout_sat == 210
+    assert s.payout_interval_seconds == 900
+
+
+@pytest.mark.parametrize(
+    "field,bad_value",
+    [
+        ("min_payout_sat", 0),
+        ("min_payout_sat", -1),
+        ("payout_interval_seconds", 0),
+        ("payout_interval_seconds", -10),
+    ],
+)
+def test_payout_settings_reject_invalid_values(field: str, bad_value: int) -> None:
+    kwargs: dict[str, object] = {field: bad_value}
+    with pytest.raises(ValidationError):
+        Settings(**kwargs)  # type: ignore[arg-type]
+
+
+def test_payout_settings_accept_custom_positive_values() -> None:
+    s = Settings(min_payout_sat=500, payout_interval_seconds=60)
+    assert s.min_payout_sat == 500
+    assert s.payout_interval_seconds == 60
+
+
+@pytest.mark.asyncio
+async def test_payout_settings_persist_via_settings_service() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await SettingsService.initialize(session)
+        updated = await SettingsService.update(
+            {"min_payout_sat": 1000, "payout_interval_seconds": 300}, session
+        )
+        assert updated.min_payout_sat == 1000
+        assert updated.payout_interval_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_payout_settings_update_rejects_invalid() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await SettingsService.initialize(session)
+        with pytest.raises(ValidationError):
+            await SettingsService.update({"min_payout_sat": 0}, session)
 
 
 @pytest.mark.asyncio

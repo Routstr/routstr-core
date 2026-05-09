@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, RootModel
+from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
@@ -160,8 +161,13 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
         if field in settings_data:
             del settings_data[field]
 
-    async with create_session() as session:
-        new_settings = await SettingsService.update(settings_data, session)
+    try:
+        async with create_session() as session:
+            new_settings = await SettingsService.update(settings_data, session)
+    except PydanticValidationError as e:
+        # Surface validation issues (e.g. non-positive payout amounts)
+        # as a clean 400 instead of a 500.
+        raise HTTPException(status_code=400, detail=e.errors()) from e
     data = new_settings.dict()
     if "upstream_api_key" in data:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""

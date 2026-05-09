@@ -502,11 +502,11 @@ async def fetch_all_balances(
 
 
 async def periodic_payout() -> None:
-    if not settings.receive_ln_address:
-        logger.warning("RECEIVE_LN_ADDRESS is not set, periodic payout disabled")
-        return
     while True:
-        await asyncio.sleep(60 * 15)
+        await asyncio.sleep(settings.payout_interval_seconds)
+        print(settings.payout_interval_seconds)
+        if not settings.receive_ln_address:
+            continue
         try:
             async with db.create_session() as session:
                 for mint_url in settings.cashu_mints:
@@ -524,7 +524,12 @@ async def periodic_payout() -> None:
                             user_balance = user_balance // 1000
                         proofs_balance = sum(proof.amount for proof in proofs)
                         available_balance = proofs_balance - user_balance
-                        min_amount = 210 if unit == "sat" else 210000
+                        # Threshold is configured in sats; convert for msat wallets.
+                        min_amount = (
+                            settings.min_payout_sat
+                            if unit == "sat"
+                            else settings.min_payout_sat * 1000
+                        )
                         if available_balance > min_amount:
                             amount_received = await raw_send_to_lnurl(
                                 wallet,
