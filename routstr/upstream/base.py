@@ -47,6 +47,17 @@ from .litellm_routing import detect_litellm_prefix
 logger = get_logger(__name__)
 
 
+def _is_json_content_type(content_type: str | None) -> bool:
+    """Return True when the upstream response should be parsed as JSON.
+    """
+    if not content_type:
+        return False
+    main = content_type.split(";", 1)[0].strip().lower()
+    if main in ("application/json", "text/json"):
+        return True
+    return main.startswith("application/") and main.endswith("+json")
+
+
 class TopupData(BaseModel):
     """Universal top-up data schema for Lightning Network invoices."""
 
@@ -523,7 +534,8 @@ class BaseUpstreamProvider:
     async def forward_upstream_error_response(
         self, request: Request, path: str, upstream_response: httpx.Response
     ) -> Response:
-        """Log upstream errors and forward the upstream response unchanged."""
+        """Log upstream errors and forward the response in a JSON envelope.
+        """
         status_code = upstream_response.status_code
         headers = dict(upstream_response.headers)
         content_type = headers.get("content-type") or headers.get("Content-Type", "")
@@ -545,9 +557,10 @@ class BaseUpstreamProvider:
 
         message, upstream_code = self._extract_upstream_error_message(body_bytes)
         body_preview = body_bytes.decode("utf-8", errors="ignore").strip()[:500]
+        is_json_body = _is_json_content_type(content_type)
 
         logger.warning(
-            "Forwarding upstream error response as-is",
+            "Forwarding upstream error response",
             extra={
                 "path": path,
                 "provider": self.provider_type,
@@ -559,6 +572,7 @@ class BaseUpstreamProvider:
                 "body_preview": body_preview,
                 "body_read_error": body_read_error,
                 "method": request.method,
+                "json_normalized": not is_json_body,
             },
         )
 
@@ -586,17 +600,40 @@ class BaseUpstreamProvider:
         ):
             headers.pop(header_name, None)
 
-        if not content_type:
-            headers.pop("content-type", None)
-            headers.pop("Content-Type", None)
+        if is_json_body:
+            if not content_type:
+                headers.pop("content-type", None)
+                headers.pop("Content-Type", None)
+            media_type = content_type or None
+            return Response(
+                content=body_bytes,
+                status_code=status_code,
+                headers=headers,
+                media_type=media_type,
+            )
 
-        media_type = content_type or None
+        # Non-JSON upstream error (HTML, plain text, empty, ...). Wrap it in
+        # the standard JSON envelope so callers don't need a second parser.
+        for header_name in ("content-type", "Content-Type"):
+            headers.pop(header_name, None)
+
+        envelope = {
+            "error": {
+                "message": message or "Upstream returned a non-JSON error response",
+                "type": "upstream_error",
+                "code": upstream_code or status_code,
+                "upstream_status": status_code,
+                "upstream_content_type": content_type or None,
+                "upstream_body_preview": body_preview or None,
+            },
+            "request_id": getattr(request.state, "request_id", None),
+        }
 
         return Response(
-            content=body_bytes,
+            content=json.dumps(envelope).encode(),
             status_code=status_code,
             headers=headers,
-            media_type=media_type,
+            media_type="application/json",
         )
 
     async def handle_streaming_chat_completion(

@@ -74,3 +74,39 @@ async def test_get_balance_returns_none_on_connect_timeout(
     balance = await provider.get_balance()
 
     assert balance is None
+
+
+def test_normalize_request_path_keeps_v1_prefix() -> None:
+    """Routstr upstream stores ``base_url`` without ``/v1``; the prefix
+    must stay on the path so ``build_request_url`` produces ``/v1/<endpoint>``
+    instead of ``/<endpoint>`` (which the upstream Routstr 404s with HTML)."""
+    provider = RoutstrUpstreamProvider(
+        base_url="https://privateprovider.xyz", api_key="key"
+    )
+
+    assert provider.normalize_request_path("v1/messages") == "v1/messages"
+    assert provider.normalize_request_path("/v1/messages") == "v1/messages"
+    assert (
+        provider.normalize_request_path("v1/chat/completions")
+        == "v1/chat/completions"
+    )
+
+
+def test_build_request_url_for_v1_messages() -> None:
+    """Forwarding ``/v1/messages`` must hit the upstream's ``/v1/messages``."""
+    provider = RoutstrUpstreamProvider(
+        base_url="https://privateprovider.xyz", api_key="key"
+    )
+
+    normalized = provider.normalize_request_path("v1/messages")
+
+    assert (
+        provider.build_request_url(normalized)
+        == "https://privateprovider.xyz/v1/messages"
+    )
+
+
+def test_supports_anthropic_messages_natively() -> None:
+    """Routstr nodes serve ``/v1/messages`` directly, so the proxy must
+    forward as-is instead of round-tripping through litellm."""
+    assert RoutstrUpstreamProvider.supports_anthropic_messages is True
