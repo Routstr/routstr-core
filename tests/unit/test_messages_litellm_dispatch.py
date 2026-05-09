@@ -908,7 +908,7 @@ async def test_forward_request_skips_litellm_when_provider_supports_messages() -
 
 
 @pytest.mark.asyncio
-async def test_forward_request_skips_litellm_for_count_tokens() -> None:
+async def test_forward_request_handles_count_tokens_locally() -> None:
     provider = _make_provider()
     key = _make_key()
     model = _make_model()
@@ -923,19 +923,25 @@ async def test_forward_request_skips_litellm_for_count_tokens() -> None:
         with patch.object(
             provider,
             "prepare_request_body",
-            side_effect=RuntimeError("stop here"),
+            side_effect=AssertionError("upstream should not be called"),
         ):
-            with pytest.raises(RuntimeError, match="stop here"):
-                await provider.forward_request(
-                    request=request,
-                    path="messages/count_tokens",
-                    headers={},
-                    request_body=_anthropic_request_body(),
-                    key=key,
-                    max_cost_for_model=10_000,
-                    session=session,
-                    model_obj=model,
-                )
+            response = await provider.forward_request(
+                request=request,
+                path="messages/count_tokens",
+                headers={},
+                request_body=_anthropic_request_body(),
+                key=key,
+                max_cost_for_model=10_000,
+                session=session,
+                model_obj=model,
+            )
+
+    assert response.status_code == 200
+    body = response.body if isinstance(response.body, bytes) else bytes(response.body)
+    payload = json.loads(body.decode())
+    assert "input_tokens" in payload
+    assert isinstance(payload["input_tokens"], int)
+    assert payload["input_tokens"] >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -1010,7 +1016,7 @@ async def test_forward_x_cashu_request_skips_litellm_when_native_messages() -> N
 
 
 @pytest.mark.asyncio
-async def test_forward_x_cashu_request_skips_litellm_for_count_tokens() -> None:
+async def test_forward_x_cashu_request_handles_count_tokens_locally() -> None:
     provider = _make_provider()
     model = _make_model()
     request = _make_request()
@@ -1024,18 +1030,24 @@ async def test_forward_x_cashu_request_skips_litellm_for_count_tokens() -> None:
         with patch.object(
             provider,
             "prepare_request_body",
-            side_effect=RuntimeError("stop here"),
+            side_effect=AssertionError("upstream should not be called"),
         ):
-            with pytest.raises(RuntimeError, match="stop here"):
-                await provider.forward_x_cashu_request(
-                    request=request,
-                    path="v1/messages/count_tokens",
-                    headers={},
-                    amount=5_000,
-                    unit="sat",
-                    max_cost_for_model=10_000,
-                    model_obj=model,
-                )
+            response = await provider.forward_x_cashu_request(
+                request=request,
+                path="v1/messages/count_tokens",
+                headers={},
+                amount=5_000,
+                unit="sat",
+                max_cost_for_model=10_000,
+                model_obj=model,
+                mint="https://mint",
+                payment_token_hash="h",
+            )
+
+    assert response.status_code == 200
+    body = response.body if isinstance(response.body, bytes) else bytes(response.body)
+    payload = json.loads(body.decode())
+    assert "input_tokens" in payload
 
 
 # ---------------------------------------------------------------------------
