@@ -48,6 +48,8 @@ async def recieve_token(
     if token_obj.mint not in settings.cashu_mints:
         return await swap_to_primary_mint(token_obj, wallet)
 
+    await wallet.load_mint(keyset_id=token_obj.keysets[0])
+
     wallet.verify_proofs_dleq(token_obj.proofs)
     await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
 
