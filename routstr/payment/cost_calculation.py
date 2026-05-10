@@ -36,7 +36,6 @@ class CostDataError(BaseModel):
 async def calculate_cost(
     response_data: dict, max_cost: int, session: AsyncSession
 ) -> CostData | MaxCostData | CostDataError:
-    print(response_data)
     """Calculate the cost of an API request based on token usage.
 
     Args:
