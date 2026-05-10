@@ -4,7 +4,7 @@ FROM node:23-alpine AS ui-builder
 WORKDIR /app/ui
 
 # Install pnpm
-RUN corepack enable pnpm && corepack prepare pnpm@latest --activate
+RUN corepack enable pnpm && corepack prepare pnpm@10.15.0 --activate
 
 # Copy UI source
 COPY ui/package.json ui/pnpm-lock.yaml* ./
