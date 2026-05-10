@@ -42,6 +42,7 @@ from ..payment.models import (
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
+from .count_tokens import count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
 
 logger = get_logger(__name__)
@@ -2197,6 +2198,12 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path, model_obj)
 
         if (
+            path.endswith("messages/count_tokens")
+            and not self.supports_anthropic_messages
+        ):
+            return count_tokens_locally(request_body, model_obj)
+
+        if (
             path.endswith("messages")
             and not path.endswith("count_tokens")
             and not self.supports_anthropic_messages
@@ -3393,6 +3400,12 @@ class BaseUpstreamProvider:
             path = path.replace("v1/", "")
 
         request_body = await request.body()
+
+        if (
+            path.endswith("messages/count_tokens")
+            and not self.supports_anthropic_messages
+        ):
+            return count_tokens_locally(request_body, model_obj)
 
         if (
             path.endswith("messages")
