@@ -168,12 +168,12 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
     refund_token = "cashuArefund_apikey_token"
 
     session = MagicMock()
+    session.get = AsyncMock(return_value=key)
     session.exec = AsyncMock(return_value=_update_result(1))
     session.add = MagicMock()
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()) as mock_store,
@@ -203,12 +203,12 @@ async def test_apikey_refund_logs_token() -> None:
     refund_token = "cashuAlogged_token"
 
     session = MagicMock()
+    session.get = AsyncMock(return_value=key)
     session.exec = AsyncMock(return_value=_update_result(1))
     session.add = MagicMock()
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
@@ -232,12 +232,12 @@ async def test_apikey_refund_log_includes_path() -> None:
     refund_token = "cashuApath_token"
 
     session = MagicMock()
+    session.get = AsyncMock(return_value=key)
     session.exec = AsyncMock(return_value=_update_result(1))
     session.add = MagicMock()
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
@@ -269,6 +269,7 @@ async def test_apikey_refund_rejects_on_concurrent_balance_change() -> None:
     key = _make_api_key(balance=5000, refund_currency="sat")
 
     session = MagicMock()
+    session.get = AsyncMock(return_value=key)
     # Debit returns rowcount=0 → balance changed concurrently
     session.exec = AsyncMock(return_value=_update_result(0))
     session.commit = AsyncMock()
@@ -276,7 +277,6 @@ async def test_apikey_refund_rejects_on_concurrent_balance_change() -> None:
     mock_send_token = AsyncMock(return_value="cashuAshould_not_be_minted")
 
     with (
-        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", mock_send_token),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
@@ -333,11 +333,11 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
 
     # First exec call = debit (succeeds), second = restore
     session = MagicMock()
+    session.get = AsyncMock(return_value=key)
     session.exec = AsyncMock(side_effect=[_update_result(1), _update_result(1)])
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(side_effect=Exception("mint down"))),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
@@ -355,3 +355,49 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
     assert exc_info.value.status_code == 503
     # Verify two exec calls: debit + restore
     assert session.exec.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# no-create guarantee: fresh Cashu/unknown sk- tokens must not create API keys
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refund_fresh_cashu_bearer_returns_401() -> None:
+    """Fresh Cashu token not in DB must get 401, never create a new ApiKey."""
+    from fastapi import HTTPException
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await refund_wallet_endpoint(
+            authorization="Bearer cashuAfresh_never_deposited_token",
+            x_cashu=None,
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 401
+    session.get.assert_awaited_once()
+    # No add/commit → no key was persisted
+    session.add.assert_not_called()
+    session.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_refund_unknown_sk_bearer_returns_401() -> None:
+    """Unknown sk- key not in DB must get 401."""
+    from fastapi import HTTPException
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await refund_wallet_endpoint(
+            authorization="Bearer sk-unknownhash",
+            x_cashu=None,
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 401
+    session.get.assert_awaited_once()
