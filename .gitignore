@@ -41,3 +41,11 @@ ui_out
 
 scraped_html/
 api_responses/
+
+*uv.lock
+
+
+*.sqlite3-shm
+*.sqlite3-wal
+
+uv.lock

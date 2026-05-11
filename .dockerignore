@@ -10,4 +10,4 @@ compose.testing.yml
 .vscode
 .DS_Store
 **/node_modules
-ui/.next
+ui/.nexts
