@@ -22,6 +22,7 @@ class CostData(BaseModel):
     cache_creation_input_tokens: int = 0
     cache_read_msats: int = 0
     cache_creation_msats: int = 0
+    web_search_msats: int | None = 0
 
 
 class MaxCostData(CostData):
@@ -84,6 +85,10 @@ async def calculate_cost(
             cache_creation_msats=0,
         )
 
+    # Calculate web search cost (model-specific or fixed)
+    web_search_cost_msats = _calculate_web_search_cost(response_data)
+
+
     usage_data = response_data["usage"]
 
     # Extract token counts
@@ -129,6 +134,7 @@ async def calculate_cost(
                 cache_read_tokens,
                 cache_creation_tokens,
                 output_tokens,
+                web_search_cost_msats,
                 response_data,
             )
         except Exception as e:
@@ -175,13 +181,14 @@ async def calculate_cost(
             base_msats=max_cost,
             input_msats=0,
             output_msats=0,
-            total_msats=max_cost,
+            total_msats=max_cost + web_search_cost_msats,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_input_tokens=cache_read_tokens,
             cache_creation_input_tokens=cache_creation_tokens,
             cache_read_msats=0,
             cache_creation_msats=0,
+            web_search_msats=web_search_cost_msats,
         )
 
     return _calculate_from_tokens(
@@ -193,6 +200,7 @@ async def calculate_cost(
         output_rate,
         cache_read_rate,
         cache_creation_rate,
+        web_search_cost_msats,
         response_data,
     )
 
@@ -200,6 +208,37 @@ async def calculate_cost(
 # ============================================================================
 # Helper Functions (ordered by call sequence in calculate_cost)
 # ============================================================================
+
+def _calculate_web_search_cost(response_data: dict) -> int:
+    """Calculate web search cost (model-specific or fixed). From your feature branch."""
+    if not response_data.get("web_search_executed"):
+        return 0
+
+    if settings.web_search_fixed_cost is not None:
+        cost = int(settings.web_search_fixed_cost)
+        logger.debug(f"Using fixed cost for Websearch: {cost} msats")
+        return cost
+
+    response_model = response_data.get("model")
+    if not response_model:
+        return 0
+
+    from ..proxy import get_model_instance
+    model_obj = get_model_instance(response_model)
+    if (
+        model_obj and model_obj.sats_pricing
+        and hasattr(model_obj.sats_pricing, "web_search")
+        and model_obj.sats_pricing.web_search is not None
+    ):
+        cost = int(model_obj.sats_pricing.web_search) * 1000
+        logger.debug(f"Using model-specific cost for Websearch: {cost} msats")
+        return cost
+
+    logger.warning(
+        "Websearch performed but no pricing defined. Cost will be 0",
+        extra={"model": response_model},
+    )
+    return 0
 
 
 def parse_token_count(value: object) -> int:
@@ -344,6 +383,7 @@ def _calculate_from_usd_cost(
     cache_read_tokens: int,
     cache_creation_tokens: int,
     output_tokens: int,
+    web_search_cost_msats: int,
     response_data: dict,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
@@ -380,7 +420,7 @@ def _calculate_from_usd_cost(
         base_msats=0,
         input_msats=input_msats,
         output_msats=output_msats,
-        total_msats=cost_in_msats,
+        total_msats=cost_in_msats + web_search_cost_msats,
         total_usd=usd_cost,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -388,6 +428,7 @@ def _calculate_from_usd_cost(
         cache_creation_input_tokens=cache_creation_tokens,
         cache_read_msats=0,
         cache_creation_msats=0,
+        web_search_msats=web_search_cost_msats,
     )
 
 
@@ -400,6 +441,7 @@ def _calculate_from_tokens(
     output_rate: float,
     cache_read_rate: float,
     cache_creation_rate: float,
+    web_search_cost_msats: int,
     response_data: dict,
 ) -> CostData:
     """Calculate cost from token counts using pricing rates."""
@@ -415,7 +457,9 @@ def _calculate_from_tokens(
         + calc_cache_read_msats
         + calc_cache_write_msats
     )
-    total_usd = (token_based_cost / 1000.0) * sats_usd_price()
+
+    total_msat = token_based_cost + web_search_cost_msats
+    total_usd = (total_msat / 1000.0) * sats_usd_price()
 
     logger.info(
         "Calculated token-based cost",
@@ -428,7 +472,8 @@ def _calculate_from_tokens(
             "output_cost_msats": calc_output_msats,
             "cache_read_cost_msats": calc_cache_read_msats,
             "cache_creation_cost_msats": calc_cache_write_msats,
-            "total_cost_msats": token_based_cost,
+            "web_search_cost_msats": web_search_cost_msats,
+            "total_cost_msats": total_msat,
             "total_usd": total_usd,
             "model": response_data.get("model", "unknown"),
         },
@@ -438,7 +483,7 @@ def _calculate_from_tokens(
         base_msats=0,
         input_msats=int(calc_input_msats),
         output_msats=int(calc_output_msats),
-        total_msats=token_based_cost,
+        total_msats=total_msat,
         total_usd=total_usd,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -446,4 +491,5 @@ def _calculate_from_tokens(
         cache_creation_input_tokens=cache_creation_tokens,
         cache_read_msats=int(calc_cache_read_msats),
         cache_creation_msats=int(calc_cache_write_msats),
+        web_search_msats=web_search_cost_msats,
     )
