@@ -554,8 +554,8 @@ class WebManager:
         instructions = [
             "Use the sources above to answer the user's request as accurately as possible.",
             "If the sources do not contain enough information to answer the query, inform the user that the provided context is insufficient instead of speculating.",
-            "Cite sources using their ID in brackets (e.g. [1]), formatted as markdown superscript (^[1]^).",
-            "Pay attention to the <published> property, if available, which shows the date on which the website was first published.",
+            "Cite sources using their ID in brackets (e.g. [1]).",
+            "Pay attention to the <published> property, if available, which shows the date on which the website was first published."
         ]
 
         parts.append("\n<instructions>")
@@ -566,6 +566,7 @@ class WebManager:
         parts.append("</search_results>")
 
         return "\n".join(parts)
+
 
 
 # Singleton instance
