@@ -21,6 +21,7 @@ from .payment.cost_calculation import (
     calculate_cost,
 )
 from .wallet import credit_balance, deserialize_token_from_string
+from .websearch.types import WebSearchContext
 
 logger = get_logger(__name__)
 payments_logger = get_logger("routstr.payments")
@@ -670,7 +671,11 @@ async def revert_pay_for_request(
 
 
 async def adjust_payment_for_tokens(
-    key: ApiKey, response_data: dict, session: AsyncSession, deducted_max_cost: int
+    key: ApiKey,
+    response_data: dict,
+    session: AsyncSession,
+    deducted_max_cost: int,
+    web_context: WebSearchContext = WebSearchContext(),
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -679,7 +684,6 @@ async def adjust_payment_for_tokens(
     """
     billing_key = await get_billing_key(key, session)
     model = response_data.get("model", "unknown")
-
     logger.debug(
         "Starting payment adjustment for tokens",
         extra={
@@ -757,6 +761,9 @@ async def adjust_payment_for_tokens(
                     "Failed to accumulate Routstr fee",
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
+    # Add web_search_executed flag for cost calculation if it was executed
+    if web_context.executed and "web_search_executed" not in response_data:
+        response_data["web_search_executed"] = True
 
     match await calculate_cost(response_data, deducted_max_cost, session):
         case MaxCostData() as cost:

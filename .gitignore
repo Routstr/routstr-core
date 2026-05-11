@@ -38,3 +38,6 @@ proof_backups
 
 *.todo
 ui_out
+
+scraped_html/
+api_responses/

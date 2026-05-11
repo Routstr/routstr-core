@@ -22,6 +22,8 @@ dependencies = [
     "pillow>=10",
     "openai>=1.98.0",
     "litellm>=1.55.0",
+    "trafilatura>=1.6.0",
+    "rank-bm25",
 ]
 
 [dependency-groups]

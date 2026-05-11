@@ -2400,8 +2400,10 @@ dependencies = [
     { name = "openai" },
     { name = "pillow" },
     { name = "python-json-logger" },
+    { name = "rank-bm25" },
     { name = "secp256k1" },
     { name = "sqlmodel" },
+    { name = "trafilatura" },
     { name = "websockets" },
 ]
 
@@ -2435,8 +2437,10 @@ requires-dist = [
     { name = "openai", specifier = ">=1.98.0" },
     { name = "pillow", specifier = ">=10" },
     { name = "python-json-logger", specifier = ">=2.0.0" },
+    { name = "rank-bm25" },
     { name = "secp256k1", git = "https://github.com/saschanaz/secp256k1-py?branch=upgrade060" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
+    { name = "trafilatura", specifier = ">=1.6.0" },
     { name = "websockets", specifier = ">=12.0" },
 ]
 
