@@ -379,15 +379,26 @@ async def refund_wallet_endpoint(
         # Minting failed — restore the debited balance
         await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
         error_msg = str(e)
+        logger.error(
+            "refund_wallet_endpoint: mint/send failed",
+            extra={
+                "error": error_msg,
+                "error_type": type(e).__name__,
+                "hashed_key": key.hashed_key,
+                "remaining_balance": remaining_balance,
+                "refund_currency": key.refund_currency,
+                "refund_mint_url": key.refund_mint_url,
+                "has_refund_address": bool(key.refund_address),
+            },
+        )
         if (
             "mint" in error_msg.lower()
             or "connection" in error_msg.lower()
-            or isinstance(e, Exception)
-            and "ConnectError" in str(type(e))
+            or "ConnectError" in str(type(e))
         ):
-            raise HTTPException(status_code=503, detail="Mint service unavailable")
+            raise HTTPException(status_code=503, detail=f"Mint service unavailable: {error_msg}")
         else:
-            raise HTTPException(status_code=500, detail="Refund failed")
+            raise HTTPException(status_code=500, detail=f"Refund failed: {error_msg}")
 
     await _refund_cache_set(bearer_value, result)
 
