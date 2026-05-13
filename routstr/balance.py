@@ -211,8 +211,20 @@ async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
         _refund_cache[key] = (expiry, value)
 
 
+async def _lookup_key_no_create(
+    bearer_value: str, session: AsyncSession
+) -> ApiKey | None:
+    """Look up an existing API key without creating one Used by the refund endpoint"""
+    if bearer_value.startswith("sk-"):
+        return await session.get(ApiKey, bearer_value[3:])
+    if bearer_value.startswith("cashu"):
+        hashed = hashlib.sha256(bearer_value.encode()).hexdigest()
+        return await session.get(ApiKey, hashed)
+    return None
+
+
 async def _restore_balance(
-    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int
+    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int, mint_url: str
 ) -> None:
     """Restore balance after a failed refund mint attempt."""
     restore_stmt = (
@@ -227,7 +239,7 @@ async def _restore_balance(
     await session.commit()
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
-        extra={"hashed_key": hashed_key, "restored_balance": balance},
+        extra={"hashed_key": hashed_key, "restored_balance": balance, "mint_url": mint_url},
     )
 
 
@@ -282,7 +294,12 @@ async def refund_wallet_endpoint(
         )
 
     bearer_value: str = authorization[7:]
-    key: ApiKey = await validate_bearer_key(bearer_value, session)
+    key: ApiKey | None = await _lookup_key_no_create(bearer_value, session)
+    if key is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Key not found. Deposit first via /v1/wallet/create before requesting a refund.",
+        )
 
     if key.total_balance <= 0:
         if cached := await _refund_cache_get(bearer_value):
@@ -373,11 +390,11 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
+        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
+        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
         error_msg = str(e)
         if (
             "mint" in error_msg.lower()
