@@ -123,6 +123,7 @@ async def test_swap_to_primary_mint_insufficient_for_fees() -> None:
     mock_token_wallet = Mock()
     mock_token_wallet.load_mint = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
+    mock_token_wallet.get_fees_for_proofs = Mock(return_value=0)
 
     mock_primary_wallet = Mock()
     mock_primary_wallet.load_mint = AsyncMock()
@@ -166,6 +167,7 @@ async def test_swap_to_primary_mint_melt_error_wrapped() -> None:
     mock_token_wallet = Mock()
     mock_token_wallet.load_mint = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
+    mock_token_wallet.get_fees_for_proofs = Mock(return_value=0)
 
     mock_primary_wallet = Mock()
     mock_primary_wallet.load_mint = AsyncMock()
@@ -261,6 +263,7 @@ async def test_swap_to_primary_mint_success() -> None:
     mock_token_wallet = Mock()
     mock_token_wallet.load_mint = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
+    mock_token_wallet.get_fees_for_proofs = Mock(return_value=0)
 
     mock_primary_wallet = Mock()
     mock_primary_wallet.load_mint = AsyncMock()
