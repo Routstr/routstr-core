@@ -56,9 +56,40 @@ async def recieve_token(
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Internal send function - returns amount and serialized token"""
-    wallet: Wallet = await get_wallet(mint_url or settings.primary_mint, unit)
-    proofs = get_proofs_per_mint_and_unit(
-        wallet, mint_url or settings.primary_mint, unit
+    effective_mint_url = mint_url or settings.primary_mint
+    wallet: Wallet = await get_wallet(effective_mint_url, unit)
+    proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+    proofs_for_mint = sum(p.amount for p in proofs)
+
+    # Fallback: proofs from untrusted source mints are swapped to primary_mint
+    # during receive, so the user's preferred refund_mint_url may have no proofs
+    # even though the global wallet has the balance.
+    if proofs_for_mint < amount and effective_mint_url != settings.primary_mint:
+        logger.info(
+            f"send: insufficient proofs at {effective_mint_url} "
+            f"(have {proofs_for_mint}, need {amount}), falling back to primary_mint={settings.primary_mint}"
+        )
+        effective_mint_url = settings.primary_mint
+        wallet = await get_wallet(effective_mint_url, unit)
+        proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+        proofs_for_mint = sum(p.amount for p in proofs)
+
+    all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
+    proof_summary = {
+        f"{k.mint_url}/{k.unit.name}": sum(p.amount for p in wallet.proofs if p.id == k.id)
+        for k in wallet.keysets.values()
+    }
+    # Show ALL proofs in DB by keyset_id, regardless of whether the loaded wallet
+    # knows about that keyset. This reveals proofs orphaned under stale keysets.
+    raw_proofs_by_keyset: dict[str, int] = {}
+    for p in wallet.proofs:
+        raw_proofs_by_keyset[p.id] = raw_proofs_by_keyset.get(p.id, 0) + p.amount
+    logger.info(
+        f"send: proof inventory | mint={effective_mint_url} unit={unit} amount={amount} "
+        f"primary_mint={settings.primary_mint} proofs_for_mint={proofs_for_mint} "
+        f"all_mints={all_mint_urls} by_keyset={proof_summary} "
+        f"raw_proofs_by_keyset_id={raw_proofs_by_keyset} "
+        f"total_wallet_proofs={sum(p.amount for p in wallet.proofs)}"
     )
 
     # Reserve proofs only after serialization succeeds — if serialize_proofs or
@@ -272,6 +303,8 @@ async def swap_to_primary_mint(
         extra={"minted_amount": minted_amount, "mint_quote_id": mint_quote.quote},
     )
 
+    await primary_wallet.load_proofs(reload=True)
+    pre_mint_balance = primary_wallet.available_balance.amount
     try:
         _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
     except Exception as e:
@@ -287,10 +320,30 @@ async def swap_to_primary_mint(
                 for keyset_id in primary_wallet.keysets:
                     await primary_wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
                 await primary_wallet.load_proofs(reload=True)
+                post_recovery_balance = primary_wallet.available_balance.amount
+                balance_gained = post_recovery_balance - pre_mint_balance
                 logger.info(
-                    "swap_to_primary_mint: recovery succeeded",
-                    extra={"balance": primary_wallet.available_balance.amount},
+                    "swap_to_primary_mint: recovery scan completed",
+                    extra={
+                        "pre_mint_balance": pre_mint_balance,
+                        "post_recovery_balance": post_recovery_balance,
+                        "balance_gained": balance_gained,
+                        "expected": minted_amount,
+                    },
                 )
+                if balance_gained < minted_amount:
+                    # Recovery scan ran but did NOT restore the orphaned proofs
+                    # (mint reports them as spent — they're stuck). Refuse to
+                    # credit the API key balance for proofs we don't actually hold.
+                    raise ValueError(
+                        f"Swap recovery failed: mint signed outputs but proofs are "
+                        f"unrecoverable (mint reports them spent). "
+                        f"Expected {minted_amount}, recovered {balance_gained}. "
+                        f"Local wallet DB ('.wallet/') state is corrupted — "
+                        f"the counter for keyset is stuck at a bad index range."
+                    )
+            except ValueError:
+                raise
             except Exception as recovery_err:
                 logger.error(
                     "swap_to_primary_mint: recovery failed",
@@ -483,7 +536,7 @@ async def fetch_all_balances(
                 "unit": unit,
                 "wallet_balance": proofs_balance,
                 "user_balance": user_balance,
-                "owner_balance": proofs_balance - user_balance,
+                "owner_balance": proofs_balance - user_balance if proofs_balance != 0 else 0,
             }
             return result
         except Exception as e:
@@ -531,7 +584,9 @@ async def fetch_all_balances(
             total_wallet_balance_sats += proofs_balance_sats
             total_user_balance_sats += user_balance_sats
 
-    owner_balance = total_wallet_balance_sats - total_user_balance_sats
+    owner_balance = 0
+    if total_wallet_balance_sats != 0:
+        owner_balance = total_wallet_balance_sats - total_user_balance_sats
 
     return (
         balance_details,

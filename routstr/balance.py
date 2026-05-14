@@ -337,21 +337,26 @@ async def refund_wallet_endpoint(
         )
 
     # --- MINT: balance is locked at zero, safe to create the refund token ---
+    # Proofs from untrusted mints are swapped to primary_mint on receive.
+    # Use primary_mint unless key.refund_mint_url is an explicitly trusted mint.
+    effective_refund_mint = (
+        key.refund_mint_url
+        if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints
+        else settings.primary_mint
+    )
     try:
         if key.refund_address:
-            from .core.settings import settings as global_settings
-
             await send_to_lnurl(
                 remaining_balance,
                 key.refund_currency or "sat",
-                key.refund_mint_url or global_settings.primary_mint,
+                effective_refund_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}
         else:
             refund_currency = key.refund_currency or "sat"
             token = await send_token(
-                remaining_balance, refund_currency, key.refund_mint_url
+                remaining_balance, refund_currency, effective_refund_mint
             )
             result = {"token": token}
 
