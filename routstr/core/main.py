@@ -268,21 +268,8 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     )
 
     @app.get("/", include_in_schema=False)
-    async def serve_root_ui() -> StarletteResponse:
-        index = UI_DIST_PATH / "index.html"
-        if index.exists():
-            return FileResponse(index)
-        # UI directory exists but the index page is missing — return a basic
-        # status payload so the home page never 404s.
-        from fastapi.responses import JSONResponse as _JSONResponse
-
-        return _JSONResponse(
-            {
-                "name": global_settings.name,
-                "version": __version__,
-                "status": "running",
-            }
-        )
+    async def serve_root_ui() -> FileResponse:
+        return FileResponse(UI_DIST_PATH / "index.html")
 
     # Serve the App Router RSC payload for the home page.
     @app.get("/index.txt", include_in_schema=False)

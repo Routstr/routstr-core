@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
 
 from .algorithm import create_model_mappings
@@ -174,21 +174,6 @@ async def proxy(
     # so that OpenAI-style endpoints work with or without the `v1/` prefix
     # (e.g. `/chat/completions` as well as `/v1/chat/completions`).
     if request.method == "GET" and not path.startswith(_API_PATH_PREFIXES):
-        # An empty path means the root `/` reached the catch-all because no
-        # explicit handler matched (e.g. the UI bundle is missing from the
-        # deploy). Return a small status payload instead of a 404 so that the
-        # home page never appears broken.
-        if not path:
-            from .core.version import __version__
-
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "name": settings.name,
-                    "version": __version__,
-                    "status": "running",
-                },
-            )
         return build_not_found_response(request, path)
 
     headers = dict(request.headers)
