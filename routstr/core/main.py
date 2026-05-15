@@ -30,6 +30,7 @@ from .db import create_session, init_db, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
+from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
 from .settings import SettingsService
 from .settings import settings as global_settings
 from .version import __version__
