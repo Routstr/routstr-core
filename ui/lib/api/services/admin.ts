@@ -14,6 +14,7 @@ export const ProviderTypeSchema = z.object({
 
 export const UpstreamProviderSchema = z.object({
   id: z.number(),
+  slug: z.string().nullable().optional(),
   provider_type: z.string(),
   base_url: z.string(),
   api_key: z.string().optional(),
@@ -31,6 +32,7 @@ export const CreateUpstreamProviderSchema = z.object({
   enabled: z.boolean().default(true),
   provider_fee: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
+  slug: z.string().optional(),
 });
 
 export const UpdateUpstreamProviderSchema = z.object({
@@ -41,6 +43,7 @@ export const UpdateUpstreamProviderSchema = z.object({
   enabled: z.boolean().optional(),
   provider_fee: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
+  slug: z.string().optional(),
 });
 
 export const AdminModelPricingSchema = z.object({

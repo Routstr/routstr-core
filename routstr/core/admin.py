@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, RootModel
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
@@ -456,19 +458,18 @@ class ModelCreate(BaseModel):
     dependencies=[Depends(require_admin_api)],
 )
 async def upsert_provider_model(
-    provider_id: int, payload: ModelCreate
+    provider_id: str, payload: ModelCreate
 ) -> dict[str, object]:
     print(payload)
     logger.info(
         f"UPSERT_PROVIDER_MODEL called: provider_id={provider_id}, model_id={payload.id}"
     )
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
 
         # Try to get existing model
-        existing_row = await session.get(ModelRow, (payload.id, provider_id))
+        existing_row = await session.get(ModelRow, (payload.id, provider_pk))
 
         if existing_row:
             # Update existing model
@@ -524,7 +525,7 @@ async def upsert_provider_model(
                 alias_ids=(
                     json.dumps(payload.alias_ids) if payload.alias_ids else None
                 ),
-                upstream_provider_id=provider_id,
+                upstream_provider_id=provider_pk,
                 enabled=payload.enabled,
                 forwarded_model_id=payload.forwarded_model_id or payload.id,
             )
@@ -543,7 +544,7 @@ async def upsert_provider_model(
     dependencies=[Depends(require_admin_api)],
 )
 async def update_provider_model_legacy(
-    provider_id: int, model_id: str, payload: ModelCreate
+    provider_id: str, model_id: str, payload: ModelCreate
 ) -> dict[str, object]:
     """Legacy PATCH endpoint - redirects to upsert POST endpoint for backward compatibility."""
     logger.info(
@@ -556,13 +557,12 @@ async def update_provider_model_legacy(
     "/api/upstream-providers/{provider_id}/models/{model_id:path}",
     dependencies=[Depends(require_admin_api)],
 )
-async def get_provider_model(provider_id: int, model_id: str) -> dict[str, object]:
+async def get_provider_model(provider_id: str, model_id: str) -> dict[str, object]:
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
 
-        row = await session.get(ModelRow, (model_id, provider_id))
+        row = await session.get(ModelRow, (model_id, provider_pk))
         if not row:
             raise HTTPException(
                 status_code=404, detail="Model not found for this provider"
@@ -576,9 +576,11 @@ async def get_provider_model(provider_id: int, model_id: str) -> dict[str, objec
     "/api/upstream-providers/{provider_id}/models/{model_id:path}",
     dependencies=[Depends(require_admin_api)],
 )
-async def delete_provider_model(provider_id: int, model_id: str) -> dict[str, object]:
+async def delete_provider_model(provider_id: str, model_id: str) -> dict[str, object]:
     async with create_session() as session:
-        row = await session.get(ModelRow, (model_id, provider_id))
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
+        row = await session.get(ModelRow, (model_id, provider_pk))
         if not row:
             raise HTTPException(
                 status_code=404, detail="Model not found for this provider"
@@ -593,10 +595,12 @@ async def delete_provider_model(provider_id: int, model_id: str) -> dict[str, ob
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
 )
-async def delete_all_provider_models(provider_id: int) -> dict[str, object]:
+async def delete_all_provider_models(provider_id: str) -> dict[str, object]:
     async with create_session() as session:
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
         result = await session.exec(
-            select(ModelRow).where(ModelRow.upstream_provider_id == provider_id)
+            select(ModelRow).where(ModelRow.upstream_provider_id == provider_pk)
         )  # type: ignore
         rows = result.all()
         for row in rows:
@@ -615,7 +619,7 @@ class BatchOverrideRequest(BaseModel):
     dependencies=[Depends(require_admin_api)],
 )
 async def batch_override_provider_models(
-    provider_id: int, payload: BatchOverrideRequest
+    provider_id: str, payload: BatchOverrideRequest
 ) -> dict[str, object]:
     """Batch override models for a specific provider."""
     logger.info(
@@ -623,15 +627,14 @@ async def batch_override_provider_models(
     )
 
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
 
         overridden_count = 0
 
         for model_data in payload.models:
             # Try to get existing model regardless of whether it's enabled or not
-            existing_row = await session.get(ModelRow, (model_data.id, provider_id))
+            existing_row = await session.get(ModelRow, (model_data.id, provider_pk))
 
             if existing_row:
                 # Update existing
@@ -685,7 +688,7 @@ async def batch_override_provider_models(
                         if model_data.alias_ids
                         else None
                     ),
-                    upstream_provider_id=provider_id,
+                    upstream_provider_id=provider_pk,
                     enabled=model_data.enabled,
                 )
                 session.add(row)
@@ -702,6 +705,90 @@ async def batch_override_provider_models(
     }
 
 
+_SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
+
+
+def _validate_slug(value: str) -> str:
+    candidate = value.strip().lower()
+    if not _SLUG_PATTERN.fullmatch(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slug must be 3-64 chars, lowercase letters/digits/hyphens, "
+                "and may not start or end with a hyphen"
+            ),
+        )
+    if candidate.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail="slug must not be all digits",
+        )
+    return candidate
+
+
+def _generate_slug(provider_type: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", provider_type.lower()).strip("-") or "provider"
+    return f"{base}-{secrets.token_hex(3)}"
+
+
+async def _ensure_unique_slug(
+    session: AsyncSession, slug: str, exclude_id: int | None = None
+) -> None:
+    stmt = select(UpstreamProviderRow).where(UpstreamProviderRow.slug == slug)
+    result = await session.exec(stmt)
+    existing = result.first()
+    if existing and existing.id != exclude_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Provider with this slug already exists",
+        )
+
+
+async def _get_upstream_provider_by_ref(
+    session: AsyncSession, provider_ref: str
+) -> UpstreamProviderRow:
+    if provider_ref.isdigit():
+        provider = await session.get(UpstreamProviderRow, int(provider_ref))
+    else:
+        slug = _validate_slug(provider_ref)
+        result = await session.exec(
+            select(UpstreamProviderRow).where(UpstreamProviderRow.slug == slug)
+        )
+        provider = result.first()
+
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    return provider
+
+
+def _provider_pk(provider: UpstreamProviderRow) -> int:
+    if provider.id is None:
+        raise HTTPException(status_code=500, detail="Provider has no database id")
+    return provider.id
+
+
+def _serialize_provider(
+    provider: UpstreamProviderRow, redact_api_key: bool = True
+) -> dict[str, object]:
+    return {
+        "id": provider.id,
+        "slug": provider.slug,
+        "provider_type": provider.provider_type,
+        "base_url": provider.base_url,
+        "api_key": "[REDACTED]"
+        if (redact_api_key and provider.api_key)
+        else provider.api_key
+        if not redact_api_key
+        else "",
+        "api_version": provider.api_version,
+        "enabled": provider.enabled,
+        "provider_fee": provider.provider_fee,
+        "provider_settings": json.loads(provider.provider_settings)
+        if provider.provider_settings
+        else None,
+    }
+
+
 class UpstreamProviderCreate(BaseModel):
     provider_type: str
     base_url: str
@@ -710,6 +797,7 @@ class UpstreamProviderCreate(BaseModel):
     enabled: bool = True
     provider_fee: float = 1.01
     provider_settings: dict | None = None
+    slug: str | None = None
 
 
 class UpstreamProviderUpdate(BaseModel):
@@ -720,6 +808,50 @@ class UpstreamProviderUpdate(BaseModel):
     enabled: bool | None = None
     provider_fee: float | None = None
     provider_settings: dict | None = None
+    slug: str | None = None
+
+
+class UpstreamProviderUpdateBySlug(BaseModel):
+    slug: str
+    new_slug: str | None = None
+    provider_type: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    api_version: str | None = None
+    enabled: bool | None = None
+    provider_fee: float | None = None
+    provider_settings: dict | None = None
+
+
+async def _apply_provider_update(
+    session: AsyncSession,
+    provider: UpstreamProviderRow,
+    payload: UpstreamProviderUpdate,
+    new_slug: str | None = None,
+) -> None:
+    if new_slug is not None:
+        validated = _validate_slug(new_slug)
+        await _ensure_unique_slug(session, validated, exclude_id=provider.id)
+        provider.slug = validated
+
+    if payload.provider_type is not None:
+        provider.provider_type = payload.provider_type
+    if payload.base_url is not None:
+        provider.base_url = payload.base_url
+    if payload.api_key is not None:
+        provider.api_key = payload.api_key
+    if payload.api_version is not None:
+        provider.api_version = payload.api_version
+    if payload.enabled is not None:
+        provider.enabled = payload.enabled
+    if payload.provider_fee is not None:
+        provider.provider_fee = payload.provider_fee
+    if payload.provider_settings is not None:
+        provider.provider_settings = json.dumps(payload.provider_settings)
+
+    session.add(provider)
+    await session.commit()
+    await session.refresh(provider)
 
 
 @admin_router.get("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
@@ -727,21 +859,7 @@ async def get_upstream_providers() -> list[dict[str, object]]:
     async with create_session() as session:
         result = await session.exec(select(UpstreamProviderRow))
         providers = result.all()
-        return [
-            {
-                "id": p.id,
-                "provider_type": p.provider_type,
-                "base_url": p.base_url,
-                "api_key": "[REDACTED]" if p.api_key else "",
-                "api_version": p.api_version,
-                "enabled": p.enabled,
-                "provider_fee": p.provider_fee,
-                "provider_settings": json.loads(p.provider_settings)
-                if p.provider_settings
-                else None,
-            }
-            for p in providers
-        ]
+        return [_serialize_provider(p) for p in providers]
 
 
 @admin_router.post("/api/upstream-providers", dependencies=[Depends(require_admin_api)])
@@ -761,7 +879,27 @@ async def create_upstream_provider(
                 detail="Provider with this base URL and API key already exists",
             )
 
+        if payload.slug:
+            slug = _validate_slug(payload.slug)
+            await _ensure_unique_slug(session, slug)
+        else:
+            for _ in range(8):
+                slug = _generate_slug(payload.provider_type)
+                existing = await session.exec(
+                    select(UpstreamProviderRow).where(
+                        UpstreamProviderRow.slug == slug
+                    )
+                )
+                if existing.first() is None:
+                    break
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not generate a unique slug",
+                )
+
         provider = UpstreamProviderRow(
+            slug=slug,
             provider_type=payload.provider_type,
             base_url=payload.base_url,
             api_key=payload.api_key,
@@ -778,99 +916,81 @@ async def create_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
-    return {
-        "id": provider.id,
-        "provider_type": provider.provider_type,
-        "base_url": provider.base_url,
-        "api_key": "[REDACTED]",
-        "api_version": provider.api_version,
-        "enabled": provider.enabled,
-        "provider_fee": provider.provider_fee,
-        "provider_settings": payload.provider_settings,
-    }
+    return _serialize_provider(provider)
 
 
 @admin_router.get(
     "/api/upstream-providers/{provider_id}", dependencies=[Depends(require_admin_api)]
 )
-async def get_upstream_provider(provider_id: int) -> dict[str, object]:
+async def get_upstream_provider(provider_id: str) -> dict[str, object]:
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
-        return {
-            "id": provider.id,
-            "provider_type": provider.provider_type,
-            "base_url": provider.base_url,
-            "api_key": "[REDACTED]" if provider.api_key else "",
-            "api_version": provider.api_version,
-            "enabled": provider.enabled,
-            "provider_fee": provider.provider_fee,
-            "provider_settings": json.loads(provider.provider_settings)
-            if provider.provider_settings
-            else None,
-        }
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        return _serialize_provider(provider)
 
 
 @admin_router.patch(
     "/api/upstream-providers/{provider_id}", dependencies=[Depends(require_admin_api)]
 )
 async def update_upstream_provider(
-    provider_id: int, payload: UpstreamProviderUpdate
+    provider_id: str, payload: UpstreamProviderUpdate
 ) -> dict[str, object]:
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
 
-        if payload.provider_type is not None:
-            provider.provider_type = payload.provider_type
-        if payload.base_url is not None:
-            provider.base_url = payload.base_url
-        if payload.api_key is not None:
-            provider.api_key = payload.api_key
-        if payload.api_version is not None:
-            provider.api_version = payload.api_version
-        if payload.enabled is not None:
-            provider.enabled = payload.enabled
-        if payload.provider_fee is not None:
-            provider.provider_fee = payload.provider_fee
-        if payload.provider_settings is not None:
-            provider.provider_settings = json.dumps(payload.provider_settings)
-
-        session.add(provider)
-        await session.commit()
-        await session.refresh(provider)
+        await _apply_provider_update(session, provider, payload, new_slug=payload.slug)
 
     await reinitialize_upstreams()
     await refresh_model_maps()
-    return {
-        "id": provider.id,
-        "provider_type": provider.provider_type,
-        "base_url": provider.base_url,
-        "api_key": "[REDACTED]",
-        "api_version": provider.api_version,
-        "enabled": provider.enabled,
-        "provider_fee": provider.provider_fee,
-        "provider_settings": json.loads(provider.provider_settings)
-        if provider.provider_settings
-        else None,
-    }
+    return _serialize_provider(provider)
+
+
+@admin_router.patch(
+    "/api/upstream-providers", dependencies=[Depends(require_admin_api)]
+)
+async def update_upstream_provider_by_slug(
+    payload: UpstreamProviderUpdateBySlug,
+) -> dict[str, object]:
+    lookup = _validate_slug(payload.slug)
+    async with create_session() as session:
+        result = await session.exec(
+            select(UpstreamProviderRow).where(
+                UpstreamProviderRow.slug == lookup
+            )
+        )
+        provider = result.first()
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        update_payload = UpstreamProviderUpdate(
+            provider_type=payload.provider_type,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            api_version=payload.api_version,
+            enabled=payload.enabled,
+            provider_fee=payload.provider_fee,
+            provider_settings=payload.provider_settings,
+        )
+        await _apply_provider_update(
+            session, provider, update_payload, new_slug=payload.new_slug
+        )
+
+    await reinitialize_upstreams()
+    await refresh_model_maps()
+    return _serialize_provider(provider)
 
 
 @admin_router.delete(
     "/api/upstream-providers/{provider_id}", dependencies=[Depends(require_admin_api)]
 )
-async def delete_upstream_provider(provider_id: int) -> dict[str, object]:
+async def delete_upstream_provider(provider_id: str) -> dict[str, object]:
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        deleted_id = _provider_pk(provider)
         await session.delete(provider)
         await session.commit()
     await reinitialize_upstreams()
     await refresh_model_maps()
-    return {"ok": True, "deleted_id": provider_id}
+    return {"ok": True, "deleted_id": deleted_id}
 
 
 @admin_router.get("/api/provider-types", dependencies=[Depends(require_admin_api)])
@@ -885,17 +1005,16 @@ async def get_provider_types() -> list[dict[str, object]]:
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
 )
-async def get_provider_models(provider_id: int) -> dict[str, object]:
+async def get_provider_models(provider_id: str) -> dict[str, object]:
     from ..upstream.helpers import _instantiate_provider
 
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
 
         db_models = await list_models(
             session=session,
-            upstream_id=provider_id,
+            upstream_id=provider_pk,
             include_disabled=True,
             apply_fees=False,
         )
@@ -985,13 +1104,11 @@ class TopupTokenRequest(BaseModel):
     dependencies=[Depends(require_admin_api)],
 )
 async def topup_provider_with_token(
-    provider_id: int, payload: TopupTokenRequest
+    provider_id: str, payload: TopupTokenRequest
 ) -> dict:
     """Redeem a Cashu token for an upstream provider."""
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
 
         import httpx
 
@@ -1022,15 +1139,13 @@ async def topup_provider_with_token(
     dependencies=[Depends(require_admin_api)],
 )
 async def initiate_provider_topup(
-    provider_id: int, payload: TopupRequest
+    provider_id: str, payload: TopupRequest
 ) -> dict[str, object]:
     """Initiate a Lightning Network top-up for the upstream provider account."""
     from ..upstream.helpers import _instantiate_provider
 
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
 
         try:
             logger.info(
@@ -1150,15 +1265,13 @@ async def initiate_provider_topup(
     "/api/upstream-providers/{provider_id}/topup/{invoice_id}/status",
     dependencies=[Depends(require_admin_api)],
 )
-async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, object]:
+async def check_topup_status(provider_id: str, invoice_id: str) -> dict[str, object]:
     """Check the status of a Lightning Network top-up invoice."""
     from ..upstream.helpers import _instantiate_provider
     from ..upstream.ppqai import PPQAIUpstreamProvider
 
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
 
         # For Routstr providers, proxy the status check
         if provider.provider_type == "routstr":
@@ -1205,14 +1318,12 @@ async def check_topup_status(provider_id: int, invoice_id: str) -> dict[str, obj
     "/api/upstream-providers/{provider_id}/balance",
     dependencies=[Depends(require_admin_api)],
 )
-async def get_provider_balance(provider_id: int) -> dict[str, object]:
+async def get_provider_balance(provider_id: str) -> dict[str, object]:
     """Get the current balance for an upstream provider account."""
     from ..upstream.helpers import _instantiate_provider
 
     async with create_session() as session:
-        provider = await session.get(UpstreamProviderRow, provider_id)
-        if not provider:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
 
         # For Routstr providers, proxy the balance check
         if provider.provider_type == "routstr":
@@ -1591,15 +1702,13 @@ async def get_lightning_invoices_api(
     "/api/upstream-providers/{provider_id}/routstr/refund",
     dependencies=[Depends(require_admin_api)],
 )
-async def refund_routstr_provider_balance(provider_id: int) -> dict[str, object]:
+async def refund_routstr_provider_balance(provider_id: str) -> dict[str, object]:
     """Refund balance from an upstream Routstr provider back to the local wallet."""
     from ..upstream.helpers import _instantiate_provider
     from ..upstream.routstr import RoutstrUpstreamProvider
 
     async with create_session() as session:
-        provider_row = await session.get(UpstreamProviderRow, provider_id)
-        if not provider_row:
-            raise HTTPException(status_code=404, detail="Provider not found")
+        provider_row = await _get_upstream_provider_by_ref(session, provider_id)
 
         if provider_row.provider_type != "routstr":
             raise HTTPException(
