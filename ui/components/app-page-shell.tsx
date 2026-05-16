@@ -21,6 +21,7 @@ import { adminLogout } from '@/lib/api/services/auth';
 import { Button } from '@/components/ui/button';
 import { CurrencyToggle } from '@/components/currency-toggle';
 import { ThemeToggle } from '@/components/theme-toggle';
+import { VersionStatus } from '@/components/version-status';
 import {
   Sheet,
   SheetClose,
@@ -110,6 +111,7 @@ export function AppPageShell({
                   <h1 className='truncate text-lg font-semibold tracking-tight whitespace-nowrap'>
                     Routstr Node
                   </h1>
+                  <VersionStatus className='mt-0.5' />
                 </div>
               </div>
               <Button
@@ -279,9 +281,12 @@ export function AppPageShell({
                     height={24}
                     className='rounded-sm'
                   />
-                  <p className='truncate text-base font-medium tracking-tight'>
-                    Routstr Node
-                  </p>
+                  <div className='min-w-0'>
+                    <p className='truncate text-base font-medium tracking-tight'>
+                      Routstr Node
+                    </p>
+                    <VersionStatus className='mt-0.5' />
+                  </div>
                 </div>
                 <SheetClose asChild>
                   <Button
