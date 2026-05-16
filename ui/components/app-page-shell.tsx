@@ -91,8 +91,18 @@ export function AppPageShell({
               isSidebarCollapsed && 'px-0'
             )}
           >
-            <div className='flex items-center gap-2'>
-              <div className='flex min-w-0 flex-1 items-center gap-2 overflow-hidden'>
+            <div
+              className={cn(
+                'flex items-center gap-2',
+                isSidebarCollapsed && 'justify-center'
+              )}
+            >
+              <div
+                className={cn(
+                  'flex min-w-0 items-center gap-2 overflow-hidden',
+                  !isSidebarCollapsed && 'flex-1'
+                )}
+              >
                 <Image
                   src='/icon.ico'
                   alt='Routstr Node'
@@ -114,24 +124,6 @@ export function AppPageShell({
                   <VersionStatus className='mt-0.5' />
                 </div>
               </div>
-              <Button
-                variant='ghost'
-                size='icon'
-                className={cn(
-                  'text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 transition-transform duration-300 ease-in-out',
-                  isSidebarCollapsed ? 'mx-auto' : '-mr-1 ml-auto'
-                )}
-                onClick={() => setIsSidebarCollapsed((current) => !current)}
-              >
-                {isSidebarCollapsed ? (
-                  <PanelLeftOpenIcon className='h-4 w-4' />
-                ) : (
-                  <PanelLeftCloseIcon className='h-4 w-4' />
-                )}
-                <span className='sr-only'>
-                  {isSidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-                </span>
-              </Button>
             </div>
           </div>
 
@@ -232,6 +224,28 @@ export function AppPageShell({
                 </Button>
               </div>
             )}
+            <Button
+              variant='ghost'
+              size={isSidebarCollapsed ? 'icon' : 'sm'}
+              className={cn(
+                'text-muted-foreground hover:text-foreground transition-[width,padding] duration-300 ease-in-out',
+                isSidebarCollapsed
+                  ? 'mx-auto h-8 w-8'
+                  : 'h-8 w-full justify-start gap-1.5 rounded-md px-2.5 text-[11px]'
+              )}
+              onClick={() => setIsSidebarCollapsed((current) => !current)}
+            >
+              {isSidebarCollapsed ? (
+                <PanelLeftOpenIcon className='h-4 w-4' />
+              ) : (
+                <PanelLeftCloseIcon className='h-4 w-4' />
+              )}
+              {isSidebarCollapsed ? (
+                <span className='sr-only'>Expand sidebar</span>
+              ) : (
+                'Collapse'
+              )}
+            </Button>
           </div>
         </aside>
 
