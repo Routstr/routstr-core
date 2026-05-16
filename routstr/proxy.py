@@ -232,7 +232,15 @@ async def proxy(
                     )
             except UpstreamError as e:
                 logger.warning(
-                    f"Upstream {upstream.provider_type} failed (x-cashu): {e}"
+                    "Upstream %s failed (x-cashu) for model=%s: %s",
+                    upstream.provider_type,
+                    model_id,
+                    e,
+                    extra={
+                        "provider": upstream.provider_type,
+                        "model": model_id,
+                        "status_code": e.status_code,
+                    },
                 )
                 if i == len(upstreams) - 1:
                     last_error = e
@@ -377,10 +385,14 @@ async def proxy(
                     )
 
                     logger.warning(
-                        f"Upstream {upstream.provider_type} returned {response.status_code}, trying next provider",
+                        "Upstream %s returned %s for model=%s, trying next provider",
+                        upstream.provider_type,
+                        response.status_code,
+                        model_id,
                         extra={
                             "status_code": response.status_code,
-                            "upstream": upstream.provider_type,
+                            "provider": upstream.provider_type,
+                            "model": model_id,
                         },
                     )
                     continue
@@ -388,16 +400,20 @@ async def proxy(
                 # 4xx error (user error), or other non-retryable error, or last provider failed
                 await revert_pay_for_request(key, session, max_cost_for_model)
                 logger.warning(
-                    "Upstream request failed, revert payment",
+                    "Upstream request failed, revert payment "
+                    "(provider=%s model=%s status=%s path=%s)",
+                    upstream.provider_type,
+                    model_id,
+                    response.status_code,
+                    path,
                     extra={
                         "status_code": response.status_code,
                         "path": path,
+                        "provider": upstream.provider_type,
+                        "model": model_id,
                         "key_hash": key.hashed_key[:8] + "...",
                         "key_balance": key.balance,
                         "max_cost_for_model": max_cost_for_model,
-                        "upstream_headers": response.headers
-                        if hasattr(response, "headers")
-                        else None,
                     },
                 )
                 return response
@@ -406,8 +422,16 @@ async def proxy(
 
         except UpstreamError as e:
             logger.warning(
-                f"Upstream {upstream.provider_type} failed: {e}",
-                extra={"retry": i < len(upstreams) - 1},
+                "Upstream %s failed for model=%s: %s",
+                upstream.provider_type,
+                model_id,
+                e,
+                extra={
+                    "provider": upstream.provider_type,
+                    "model": model_id,
+                    "status_code": e.status_code,
+                    "retry": i < len(upstreams) - 1,
+                },
             )
 
             # If this was the last provider
