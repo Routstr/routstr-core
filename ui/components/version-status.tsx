@@ -77,12 +77,14 @@ function pickColorClass(status: StatusKind): string {
   return 'text-emerald-600 dark:text-emerald-400';
 }
 
-function pickIcon(status: StatusKind) {
-  if (status === 'outdated') return AlertTriangleIcon;
-  if (status === 'commit-drift' || status === 'ahead' || status === 'unknown') {
-    return InfoIcon;
+function renderStatusIcon(status: StatusKind, className: string) {
+  if (status === 'outdated') {
+    return <AlertTriangleIcon className={className} />;
   }
-  return CheckCircle2Icon;
+  if (status === 'commit-drift' || status === 'ahead' || status === 'unknown') {
+    return <InfoIcon className={className} />;
+  }
+  return <CheckCircle2Icon className={className} />;
 }
 
 function describeStatus(status: StatusKind): string {
@@ -138,7 +140,6 @@ export function VersionStatus({
   };
 
   const colorClass = pickColorClass(status);
-  const StatusIcon = pickIcon(status);
   const versionLabel = currentVersion
     ? formatVersionLabel(currentVersion)
     : nodeQuery.isLoading
@@ -168,7 +169,7 @@ export function VersionStatus({
           title='View version details'
           aria-label={ariaLabel}
         >
-          <StatusIcon className='h-3 w-3 shrink-0' />
+          {renderStatusIcon(status, 'h-3 w-3 shrink-0')}
           <span className='truncate'>{versionLabel}</span>
         </button>
       </PopoverTrigger>
@@ -181,7 +182,7 @@ export function VersionStatus({
         <div className='flex items-start justify-between gap-2'>
           <div className='min-w-0 space-y-0.5'>
             <div className='flex items-center gap-1.5 text-sm font-medium'>
-              <StatusIcon className={cn('h-4 w-4 shrink-0', colorClass)} />
+              {renderStatusIcon(status, cn('h-4 w-4 shrink-0', colorClass))}
               Node Version
             </div>
             <p className='text-muted-foreground text-xs leading-snug'>
