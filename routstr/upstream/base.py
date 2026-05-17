@@ -3041,6 +3041,7 @@ class BaseUpstreamProvider:
 
         usage_data = None
         model = None
+        cost_data: CostData | MaxCostData | None = None
 
         lines = content_str.strip().split("\n")
         for line in lines:
