@@ -197,6 +197,22 @@ class BaseUpstreamProvider:
             except (TypeError, ValueError):
                 pass
 
+    def _apply_provider_field(self, response_json: object) -> None:
+        """Stamp the routstr ``provider`` field onto an upstream response payload.
+
+        Format is ``"<provider_type>:<upstream_provider>"`` when the upstream
+        already reported its own provider (e.g. OpenRouter returns
+        ``"provider": "Fireworks"``), otherwise just ``"<provider_type>"``
+        for direct upstreams.
+        """
+        if not isinstance(response_json, dict):
+            return
+        existing = response_json.get("provider")
+        if isinstance(existing, str) and existing.strip():
+            response_json["provider"] = f"{self.provider_type}:{existing.strip()}"
+        else:
+            response_json["provider"] = self.provider_type
+
     def inject_cost_metadata(
         self,
         response_json: dict,
@@ -204,6 +220,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
     ) -> None:
         """Unifies the injection of cost and usage metadata across all completion types."""
+        self._apply_provider_field(response_json)
         if isinstance(cost_data, dict):
             total_msats = cost_data.get("total_msats", 0)
             total_usd = cost_data.get("total_usd", 0.0)
@@ -723,6 +740,7 @@ class BaseUpstreamProvider:
                             ):
                                 obj = json.loads(part)
                                 if isinstance(obj, dict):
+                                    self._apply_provider_field(obj)
                                     if obj.get("model"):
                                         last_model_seen = str(obj.get("model"))
                                     if requested_model:
@@ -889,6 +907,7 @@ class BaseUpstreamProvider:
         try:
             content = await response.aread()
             response_json = json.loads(content)
+            self._apply_provider_field(response_json)
 
             logger.debug(
                 "Parsed response JSON",
@@ -1068,6 +1087,7 @@ class BaseUpstreamProvider:
                         try:
                             obj = json.loads(part)
                             if isinstance(obj, dict):
+                                self._apply_provider_field(obj)
                                 if obj.get("model"):
                                     last_model_seen = str(obj.get("model"))
                                 if requested_model:
@@ -1261,6 +1281,7 @@ class BaseUpstreamProvider:
         try:
             content = await response.aread()
             response_json = json.loads(content)
+            self._apply_provider_field(response_json)
 
             logger.debug(
                 "Parsed Responses API response JSON",
@@ -1499,6 +1520,11 @@ class BaseUpstreamProvider:
                                         if msg and msg.get("model"):
                                             last_model_seen = str(msg.get("model"))
 
+                                        provider_added = (
+                                            "provider" not in data
+                                        )
+                                        self._apply_provider_field(data)
+
                                         if requested_model:
                                             # Apply requested_model override
                                             model_updated = False
@@ -1509,9 +1535,12 @@ class BaseUpstreamProvider:
                                                 data["model"] = requested_model
                                                 model_updated = True
 
-                                            if model_updated:
+                                            if model_updated or provider_added:
                                                 line = "data: " + json.dumps(data)
                                                 changed = True
+                                        elif provider_added:
+                                            line = "data: " + json.dumps(data)
+                                            changed = True
 
                                         if usage := msg.get("usage"):
                                             input_tokens += usage.get("input_tokens", 0)
@@ -1833,6 +1862,7 @@ class BaseUpstreamProvider:
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
+        self._apply_provider_field(response_json)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
 
@@ -3146,18 +3176,29 @@ class BaseUpstreamProvider:
                     },
                 )
 
-        if cost_data:
-            for i, line in enumerate(lines):
-                if line.startswith("data: "):
-                    try:
-                        data_json = json.loads(line[6:])
-                        if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = (
-                                cost_data.total_msats // 1000
-                            )
-                            lines[i] = "data: " + json.dumps(data_json)
-                    except json.JSONDecodeError:
-                        pass
+        for i, line in enumerate(lines):
+            if line.startswith("data: "):
+                try:
+                    data_json = json.loads(line[6:])
+                    if not isinstance(data_json, dict):
+                        continue
+                    changed = False
+                    if "provider" not in data_json:
+                        self._apply_provider_field(data_json)
+                        changed = True
+                    if (
+                        cost_data
+                        and "usage" in data_json
+                        and data_json["usage"]
+                    ):
+                        data_json["usage"]["cost_sats"] = (
+                            cost_data.total_msats // 1000
+                        )
+                        changed = True
+                    if changed:
+                        lines[i] = "data: " + json.dumps(data_json)
+                except json.JSONDecodeError:
+                    pass
 
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
@@ -3201,6 +3242,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
+            self._apply_provider_field(response_json)
             cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
 
             if cost_data and "usage" in response_json:
@@ -4122,18 +4164,29 @@ class BaseUpstreamProvider:
                     },
                 )
 
-        if cost_data:
-            for i, line in enumerate(lines):
-                if line.startswith("data: "):
-                    try:
-                        data_json = json.loads(line[6:])
-                        if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = (
-                                cost_data.total_msats // 1000
-                            )
-                            lines[i] = "data: " + json.dumps(data_json)
-                    except json.JSONDecodeError:
-                        pass
+        for i, line in enumerate(lines):
+            if line.startswith("data: "):
+                try:
+                    data_json = json.loads(line[6:])
+                    if not isinstance(data_json, dict):
+                        continue
+                    changed = False
+                    if "provider" not in data_json:
+                        self._apply_provider_field(data_json)
+                        changed = True
+                    if (
+                        cost_data
+                        and "usage" in data_json
+                        and data_json["usage"]
+                    ):
+                        data_json["usage"]["cost_sats"] = (
+                            cost_data.total_msats // 1000
+                        )
+                        changed = True
+                    if changed:
+                        lines[i] = "data: " + json.dumps(data_json)
+                except json.JSONDecodeError:
+                    pass
 
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
@@ -4165,6 +4218,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
+            self._apply_provider_field(response_json)
             cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
 
             if cost_data and "usage" in response_json:
