@@ -13,6 +13,7 @@ from .base_web_searcher import BaseWebSearcher
 from .http_client import HTTPClient
 from .types import SearchResult, WebPage
 
+from .mock_utils import _save_api_response, _load_mock_data
 logger = get_logger(__name__)
 
 
@@ -58,14 +59,14 @@ class SerperWebSearcher(BaseWebSearcher):
 
         try:
             # --- MOCK DATA FOR TESTING ---
-            #api_response = await self._load_mock_data(
+            #api_response = await _load_mock_data(
             #    "serper_What_happend_between_the_US_and_Venezuela_20260115_103055.json"
                 #    "serper_trump-peace-plan.json"
                 #    serper_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_150343.json
             #)
             # ---------------------------------------------------------------
             api_response = await self._call_serper_api(query, max_results)
-            await self._save_api_response(api_response, query, "serper")
+            await _save_api_response(api_response, query, "serper")
             # ---------------------------------------------------------------
 
             return self._map_to_search_result(api_response, query)

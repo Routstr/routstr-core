@@ -105,7 +105,7 @@ class WebManager:
 
             case RAGProvider.CUSTOM:
                 try:
-                    # Initialize stages asynchonously
+                    # Initialize stages asynchronously
                     (
                         search,
                         scrape,

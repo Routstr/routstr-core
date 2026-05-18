@@ -16,7 +16,7 @@ from .http_client import HTTPClient
 from .types import SearchResult, WebPage
 from ..core.settings import settings
 
-
+from .mock_utils import _save_api_response, _load_mock_data
 logger = get_logger(__name__)
 
 
@@ -73,10 +73,10 @@ class TavilyWebRAG(BaseWebRAG):
         start_time = datetime.now()
 
         if len(query) >= 400:
-            query = query[:400]
             logger.warning(
                 f"Tavily's limit of 400 characters exceeded with {len(query)} characters. Using only first 400 characters."
             )
+            query = query[:400]
 
         logger.info(
             f"Performing Tavily API search for: '{query}'",
@@ -85,13 +85,13 @@ class TavilyWebRAG(BaseWebRAG):
 
         try:
             # --- MOCK DATA FOR TESTING  ---
-            #api_response = await self._load_mock_data(
+            api_response = await _load_mock_data(
                 #"tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
-                # tavily_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_150031.json
-            #)
+                "tavily_Gold_price_20260517_101252.json"
+           )
             # ---------------------------------------------------------------
-            api_response = await self._call_tavily_api(query, max_results)
-            await self._save_api_response(api_response, query, "tavily")
+            #api_response = await self._call_tavily_api(query, max_results)
+            #await _save_api_response(api_response, query, "tavily")
             # ---------------------------------------------------------------
 
             total_ms = int((datetime.now() - start_time).total_seconds() * 1000)

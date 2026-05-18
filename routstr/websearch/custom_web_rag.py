@@ -57,8 +57,8 @@ class CustomWebRAG(BaseWebRAG):
             raise ValueError("Ranker provider cannot be None")
 
         self.search_provider = search_provider
-        self.scraper_provider = scrape_provider
-        self.chunker_provider = chunk_provider
+        self.scrape_provider = scrape_provider
+        self.chunk_provider = chunk_provider
         self.rank_provider = rank_provider
 
         logger.info(
@@ -114,7 +114,7 @@ class CustomWebRAG(BaseWebRAG):
 
             # SCRAPE
             stage_start = datetime.now()
-            search_response = await self.scraper_provider.scrape_search_results(
+            search_response = await self.scrape_provider.scrape_search_results(
                 search_response
             )
             timings["scrape"] = int(
@@ -123,7 +123,7 @@ class CustomWebRAG(BaseWebRAG):
 
             # 3. CHUNK
             step_start = datetime.now()
-            search_response = await self.chunker_provider.chunk_search_results(
+            search_response = await self.chunk_provider.chunk_search_results(
                 search_response
             )
             timings["chunk"] = int((datetime.now() - step_start).total_seconds() * 1000)
@@ -171,17 +171,17 @@ class CustomWebRAG(BaseWebRAG):
         try:
             # Check external providers
             search_available = await self.search_provider.check_availability()
-            scraper_available = await self.scraper_provider.check_availability()
+            scraper_available = await self.scrape_provider.check_availability()
 
             # Check internal providers
-            chunker_available = await self.chunker_provider.check_availability()
-            scraper_available = await self.scraper_provider.check_availability()
-            all_available = search_available and scraper_available and chunker_available and scraper_available
+            chunker_available = await self.chunk_provider.check_availability()
+            ranker_available = await self.rank_provider.check_availability()
+            all_available = search_available and scraper_available and chunker_available and ranker_available
 
             if not all_available:
                 logger.warning(
                     f"CustomWebRAG availability check failed: "
-                    f"search={search_available}, scraper={scraper_available}, chunker={chunker_available}"
+                    f"search={search_available}, scraper={scraper_available}, chunker={chunker_available}, ranker={ranker_available}"
                 )
             else:
                 logger.debug("CustomWebRAG all components available")
