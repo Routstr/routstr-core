@@ -2818,10 +2818,13 @@ class BaseUpstreamProvider:
                         await response.aclose()
                     return mapped
 
+                response_headers = dict(response.headers)
+                response_headers.pop("content-encoding", None)
+                response_headers.pop("content-length", None)
                 return StreamingResponse(
                     response.aiter_bytes(),
                     status_code=response.status_code,
-                    headers=dict(response.headers),
+                    headers=response_headers,
                 )
             except Exception as exc:
                 tb = traceback.format_exc()
