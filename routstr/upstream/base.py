@@ -701,54 +701,100 @@ class BaseUpstreamProvider:
                         pass
 
             try:
+                sse_buffer = b""
                 async for chunk in response.aiter_bytes():
-                    # Split chunk into SSE events
-                    parts = re.split(b"data: ", chunk)
-                    for i, part in enumerate(parts):
-                        if not part:
+                    sse_buffer += chunk
+                    logger.debug(
+                        "[chat] SSE chunk from upstream",
+                        extra={"chunk_size": len(chunk), "buffer_size": len(sse_buffer)},
+                    )
+                    # SSE events are separated by \n\n (double newline).
+                    # Process complete events and keep incomplete ones in the buffer.
+                    while b"\n\n" in sse_buffer:
+                        event_raw, sse_buffer = sse_buffer.split(b"\n\n", 1)
+                        event_raw = event_raw.strip()
+                        if not event_raw:
                             continue
 
-                        stripped_part = part.strip()
-                        if not stripped_part:
-                            continue
+                        logger.debug(
+                            "[chat] SSE event from upstream",
+                            extra={"event": event_raw[:500].decode("utf-8", errors="replace")},
+                        )
 
-                        if stripped_part == b"[DONE]":
+                        if event_raw == b"data: [DONE]":
+                            logger.debug("[chat] SSE [DONE] seen")
                             done_seen = True
                             continue
 
+                        # Extract the JSON payload from "data: {...}"
+                        data_prefix = b"data: "
+                        if event_raw.startswith(data_prefix):
+                            payload_bytes = event_raw[len(data_prefix):]
+                        else:
+                            payload_bytes = event_raw
+
                         try:
-                            # Only parse if it looks like a JSON object to avoid SSE control messages or partials
-                            if part.strip().startswith(b"{") and part.strip().endswith(
-                                b"}"
-                            ):
-                                obj = json.loads(part)
-                                if isinstance(obj, dict):
-                                    if obj.get("model"):
-                                        last_model_seen = str(obj.get("model"))
-                                    if requested_model:
-                                        obj["model"] = requested_model
-                                    if (
-                                        "id" not in obj
-                                        or not isinstance(obj["id"], str)
-                                        or obj["id"] == "existing-id"
-                                    ):
-                                        if not hasattr(self, "_current_stream_id"):
-                                            self._current_stream_id = (
-                                                f"chatcmpl-{uuid.uuid4()}"
-                                            )
-                                        obj["id"] = self._current_stream_id
-                                    if isinstance(obj.get("usage"), dict):
+                            obj = json.loads(payload_bytes)
+                            if isinstance(obj, dict):
+                                if obj.get("model"):
+                                    last_model_seen = str(obj.get("model"))
+                                if requested_model:
+                                    obj["model"] = requested_model
+                                if (
+                                    "id" not in obj
+                                    or not isinstance(obj["id"], str)
+                                    or obj["id"] == "existing-id"
+                                ):
+                                    if not hasattr(self, "_current_stream_id"):
+                                        self._current_stream_id = (
+                                            f"chatcmpl-{uuid.uuid4()}"
+                                        )
+                                    obj["id"] = self._current_stream_id
+                                if isinstance(obj.get("usage"), dict):
+                                    # Check if this chunk has actual content (vs. billing-only chunks)
+                                    choices = obj.get("choices") or []
+                                    has_content = any(
+                                        c.get("delta", {}).get("content")
+                                        or c.get("delta", {}).get("reasoning")
+                                        for c in choices
+                                    )
+                                    if not has_content:
+                                        # Billing-only chunk — hold back for cost metadata injection
+                                        logger.debug(
+                                            "[chat] Holding back usage-only chunk",
+                                            extra={"model": obj.get("model"), "completion_tokens": obj.get("usage", {}).get("completion_tokens", 0)},
+                                        )
                                         usage_chunk_data = obj
                                         continue
-                                    yield b"data: " + json.dumps(obj).encode() + b"\n\n"
-                                    continue
-                        except Exception:
-                            pass
+                                    # Content-bearing chunk — yield it, but also save usage for later injection
+                                    logger.debug(
+                                        "[chat] Content chunk with usage — yielding",
+                                        extra={"model": obj.get("model"), "completion_tokens": obj.get("usage", {}).get("completion_tokens", 0)},
+                                    )
+                                    if not usage_chunk_data:
+                                        usage_chunk_data = obj
+                                logger.debug(
+                                    "[chat] Yielding chunk to client",
+                                    extra={"model": obj.get("model")},
+                                )
+                                yield b"data: " + json.dumps(obj).encode() + b"\n\n"
+                                continue
+                        except Exception as e:
+                            logger.debug(
+                                "[chat] JSON parse failed for event",
+                                extra={"error": str(e), "event_preview": event_raw[:200].decode("utf-8", errors="replace")},
+                            )
 
-                        prefix = (
-                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
-                        )
-                        yield prefix + part
+                        # If JSON parsing failed but it looks like valid SSE, pass through
+                        if event_raw.startswith(b"data: "):
+                            yield event_raw + b"\n\n"
+                        else:
+                            yield b"data: " + event_raw + b"\n\n"
+
+                logger.debug(
+                    "[chat] Upstream stream ended",
+                    extra={"usage_chunk_data": bool(usage_chunk_data), "last_model": last_model_seen},
+                )
 
                 async with create_session() as session:
                     fresh_key = await session.get(key.__class__, key.hashed_key)
@@ -1050,23 +1096,30 @@ class BaseUpstreamProvider:
                         pass
 
             try:
+                sse_buffer = b""
                 async for chunk in response.aiter_bytes():
-                    # Split chunk into SSE events
-                    parts = re.split(b"data: ", chunk)
-                    for i, part in enumerate(parts):
-                        if not part:
+                    sse_buffer += chunk
+                    # SSE events are separated by \n\n (double newline).
+                    # Process complete events and keep incomplete ones in the buffer.
+                    while b"\n\n" in sse_buffer:
+                        event_raw, sse_buffer = sse_buffer.split(b"\n\n", 1)
+                        event_raw = event_raw.strip()
+                        if not event_raw:
                             continue
 
-                        stripped_part = part.strip()
-                        if not stripped_part:
-                            continue
-
-                        if stripped_part == b"[DONE]":
+                        if event_raw == b"data: [DONE]":
                             done_seen = True
                             continue
 
+                        # Extract the JSON payload from "data: {...}"
+                        data_prefix = b"data: "
+                        if event_raw.startswith(data_prefix):
+                            payload_bytes = event_raw[len(data_prefix):]
+                        else:
+                            payload_bytes = event_raw
+
                         try:
-                            obj = json.loads(part)
+                            obj = json.loads(payload_bytes)
                             if isinstance(obj, dict):
                                 if obj.get("model"):
                                     last_model_seen = str(obj.get("model"))
@@ -1091,13 +1144,17 @@ class BaseUpstreamProvider:
                                 ):
                                     usage_chunk_data = obj
                                     continue
+
+                                yield b"data: " + json.dumps(obj).encode() + b"\n\n"
+                                continue
                         except json.JSONDecodeError:
                             pass
 
-                        prefix = (
-                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
-                        )
-                        yield prefix + part
+                        # Pass through non-JSON SSE events
+                        if event_raw.startswith(b"data: "):
+                            yield event_raw + b"\n\n"
+                        else:
+                            yield b"data: " + event_raw + b"\n\n"
 
                 # Always emit a cost-bearing data chunk
                 async with create_session() as session:
