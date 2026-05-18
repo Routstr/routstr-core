@@ -500,7 +500,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     captured_cost_call: dict[str, Any] = {}
 
     async def fake_adjust(
-        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int
+        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int, web_context = None,
     ) -> dict:
         captured_cost_call["combined_data"] = combined_data
         captured_cost_call["max_cost"] = max_cost
@@ -589,7 +589,7 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     captured: dict[str, Any] = {}
 
     async def fake_adjust(
-        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int
+        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int, web_context = None,
     ) -> dict:
         captured["combined_data"] = combined_data
         return fake_cost
