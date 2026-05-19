@@ -8,6 +8,7 @@ following the same modular pattern as the web search and scraping components.
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import replace
+
 from ..core.logging import get_logger
 from .types import SearchResult, WebPage
 
@@ -91,7 +92,6 @@ class BaseChunker(ABC):
 
         return search_result
 
-
     async def check_availability(self) -> bool:
         """
         Validate chunker parameters.
@@ -124,4 +124,3 @@ class BaseChunker(ABC):
             return False
 
         return True
-

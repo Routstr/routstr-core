@@ -8,11 +8,13 @@ class BaseRanker(ABC):
     Base class for search result ranking and pruning.
 
     Rankers are responsible for evaluating the relevance of retrieved chunks
-    against the original query and selecting the most relvant ones for
+    against the original query and selecting the most relevant ones for
     inclusion in the LLM context.
     """
 
-    def __init__(self, provider_name: str = "base", max_chunks_per_source: int = 5) -> None:
+    def __init__(
+        self, provider_name: str = "base", max_chunks_per_source: int = 5
+    ) -> None:
         self.provider_name = provider_name
         self.max_chunks_per_source = max_chunks_per_source
 

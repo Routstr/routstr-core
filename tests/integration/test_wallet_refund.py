@@ -398,9 +398,7 @@ async def test_refund_rejects_concurrent_topup_on_same_key(
         finally:
             allow_refund_to_continue.set()
 
-    with patch(
-        "routstr.balance.validate_bearer_key", new=delayed_validate_bearer_key
-    ):
+    with patch("routstr.balance.validate_bearer_key", new=delayed_validate_bearer_key):
         refund_response, topup_response = await asyncio.gather(
             issue_refund(), issue_topup()
         )

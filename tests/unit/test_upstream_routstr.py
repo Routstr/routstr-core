@@ -24,9 +24,7 @@ class DummyAsyncClient:
     ) -> bool:
         return False
 
-    async def get(
-        self, url: str, headers: dict[str, str], timeout: float
-    ) -> Mock:
+    async def get(self, url: str, headers: dict[str, str], timeout: float) -> Mock:
         self.calls.append({"url": url, "headers": headers, "timeout": timeout})
         if self.error is not None:
             raise self.error
@@ -87,8 +85,7 @@ def test_normalize_request_path_keeps_v1_prefix() -> None:
     assert provider.normalize_request_path("v1/messages") == "v1/messages"
     assert provider.normalize_request_path("/v1/messages") == "v1/messages"
     assert (
-        provider.normalize_request_path("v1/chat/completions")
-        == "v1/chat/completions"
+        provider.normalize_request_path("v1/chat/completions") == "v1/chat/completions"
     )
 
 

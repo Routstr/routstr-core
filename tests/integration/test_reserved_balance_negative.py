@@ -157,7 +157,9 @@ async def test_revert_with_zero_reserved_balance_is_noop(
 
     await integration_session.refresh(test_key)
 
-    assert result is False, "Revert should return False when reservation already released"
+    assert result is False, (
+        "Revert should return False when reservation already released"
+    )
     assert test_key.reserved_balance == 0, (
         f"Reserved balance should remain 0, got: {test_key.reserved_balance}"
     )

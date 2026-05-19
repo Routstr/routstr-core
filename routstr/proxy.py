@@ -167,8 +167,7 @@ _NOT_FOUND_HTML: str | None = _read_not_found_html()
 
 
 def _build_not_found_response(request: Request, path: str) -> Response:
-    """Return a 404 for unknown paths.
-    """
+    """Return a 404 for unknown paths."""
     accept = request.headers.get("accept", "").lower()
     prefers_json = "application/json" in accept and "text/html" not in accept
     request_id = getattr(request.state, "request_id", "unknown")

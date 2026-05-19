@@ -30,9 +30,7 @@ def test_unknown_path_returns_html_404_for_browser() -> None:
 
 def test_unknown_path_returns_json_404_for_api_client() -> None:
     client = TestClient(_make_app())
-    response = client.get(
-        "/some/random/page", headers={"accept": "application/json"}
-    )
+    response = client.get("/some/random/page", headers={"accept": "application/json"})
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
     payload = response.json()

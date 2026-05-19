@@ -73,6 +73,7 @@ class WebManager:
             case RAGProvider.TAVILY:
                 try:
                     from .tavily_web_rag import TavilyWebRAG
+
                     tavily = TavilyWebRAG(api_key=settings.tavily_api_key)
                     if not await tavily.check_availability():
                         logger.warning(
@@ -90,6 +91,7 @@ class WebManager:
             case RAGProvider.EXA:
                 try:
                     from .exa_web_rag import ExaWebRAG
+
                     exa = ExaWebRAG(api_key=settings.exa_api_key)
                     if not await exa.check_availability():
                         logger.warning(
@@ -177,6 +179,7 @@ class WebManager:
             case WebSearchProvider.SERPER:
                 try:
                     from .serper_web_searcher import SerperWebSearcher
+
                     self._search_provider = SerperWebSearcher(
                         api_key=settings.serper_api_key
                     )
@@ -446,7 +449,6 @@ class WebManager:
             for message in reversed(messages):
                 if message.get("role") == "user":
                     content = message.get("content", "")
-                    # print(f"Extracted Query: {content}")
                     return content.strip()
 
             return ""
@@ -507,7 +509,6 @@ class WebManager:
 
             enhanced_request_body = json.dumps(request_data).encode("utf-8")
             logger.info(f"Successfully injected web context for query: '{query}'")
-            # print(enhanced_request_body[:500])
             return enhanced_request_body, sources
 
         except json.JSONDecodeError as e:
@@ -555,7 +556,7 @@ class WebManager:
             "Use the sources above to answer the user's request as accurately as possible.",
             "If the sources do not contain enough information to answer the query, inform the user that the provided context is insufficient instead of speculating.",
             "Cite sources using their ID in brackets (e.g. [1]).",
-            "Pay attention to the <published> property, if available, which shows the date on which the website was first published."
+            "Pay attention to the <published> property, if available, which shows the date on which the website was first published.",
         ]
 
         parts.append("\n<instructions>")
@@ -566,7 +567,6 @@ class WebManager:
         parts.append("</search_results>")
 
         return "\n".join(parts)
-
 
 
 # Singleton instance

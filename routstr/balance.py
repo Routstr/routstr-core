@@ -172,7 +172,9 @@ async def topup_wallet_endpoint(
                 detail=f"Failed to swap foreign mint token. {error_msg}",
             )
         else:
-            raise HTTPException(status_code=400, detail=f"Failed to redeem token: {error_msg}")
+            raise HTTPException(
+                status_code=400, detail=f"Failed to redeem token: {error_msg}"
+            )
     except Exception as e:
         logger.error(
             "topup_wallet_endpoint: unhandled error",
@@ -373,11 +375,15 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
+        await _restore_balance(
+            session, key.hashed_key, pre_debit_balance, pre_debit_reserved
+        )
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved)
+        await _restore_balance(
+            session, key.hashed_key, pre_debit_balance, pre_debit_reserved
+        )
         error_msg = str(e)
         if (
             "mint" in error_msg.lower()

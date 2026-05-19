@@ -60,9 +60,7 @@ async def test_refresh_loop_picks_up_providers_added_after_startup(
         _noop_pricing_refresh,
     )
 
-    task = asyncio.create_task(
-        refresh_upstreams_models_periodically(lambda: live_list)
-    )
+    task = asyncio.create_task(refresh_upstreams_models_periodically(lambda: live_list))
 
     try:
         # Wait for the first iteration to refresh the initial upstream.

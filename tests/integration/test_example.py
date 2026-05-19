@@ -158,9 +158,6 @@ async def test_error_handling(
     assert response.status_code == 401
 
 
-
-
-
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.slow

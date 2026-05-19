@@ -50,8 +50,8 @@ async def test_openai_cache_subtraction(mock_session: AsyncMock) -> None:
             "completion_tokens": 100,
             "prompt_tokens_details": {
                 "cached_tokens": 1000  # ← Extracted separately
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -65,7 +65,9 @@ async def test_openai_cache_subtraction(mock_session: AsyncMock) -> None:
 # Test 2: Anthropic Cache Format
 # ============================================================================
 @pytest.mark.asyncio
-async def test_anthropic_cache_additive(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_anthropic_cache_additive(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Anthropic cache tokens are separate (additive) from input_tokens."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -74,7 +76,7 @@ async def test_anthropic_cache_additive(mock_session: AsyncMock, mock_fixed_pric
             "output_tokens": 100,
             "cache_creation_input_tokens": 1500,  # ← Additive, not included above
             "cache_read_input_tokens": 0,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -89,7 +91,9 @@ async def test_anthropic_cache_additive(mock_session: AsyncMock, mock_fixed_pric
 # Test 3: Invalid Cache (Edge Case)
 # ============================================================================
 @pytest.mark.asyncio
-async def test_cache_read_exceeds_prompt_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_cache_read_exceeds_prompt_tokens(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle buggy upstream reporting cached > prompt_tokens."""
     response = {
         "model": "gpt-4",
@@ -98,8 +102,8 @@ async def test_cache_read_exceeds_prompt_tokens(mock_session: AsyncMock, mock_fi
             "completion_tokens": 50,
             "prompt_tokens_details": {
                 "cached_tokens": 150  # ← Invalid! Greater than prompt
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -114,7 +118,9 @@ async def test_cache_read_exceeds_prompt_tokens(mock_session: AsyncMock, mock_fi
 # Test 4: Malformed Token Values
 # ============================================================================
 @pytest.mark.asyncio
-async def test_malformed_cache_tokens_coerce_to_zero(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_malformed_cache_tokens_coerce_to_zero(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle non-numeric cache token values."""
     response = {
         "model": "gpt-4",
@@ -124,8 +130,8 @@ async def test_malformed_cache_tokens_coerce_to_zero(mock_session: AsyncMock, mo
             "cache_read_input_tokens": "-50",  # ← String, negative
             "prompt_tokens_details": {
                 "cached_tokens": "invalid"  # ← Non-numeric string
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -139,7 +145,9 @@ async def test_malformed_cache_tokens_coerce_to_zero(mock_session: AsyncMock, mo
 # Test 5: Anthropic Cache Not Subtracted
 # ============================================================================
 @pytest.mark.asyncio
-async def test_anthropic_cache_not_subtracted(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_anthropic_cache_not_subtracted(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Anthropic cache fields should NOT be subtracted from input_tokens."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -147,7 +155,7 @@ async def test_anthropic_cache_not_subtracted(mock_session: AsyncMock, mock_fixe
             "input_tokens": 500,
             "completion_tokens": 100,
             "cache_read_input_tokens": 200,  # ← Additive, don't subtract
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -161,17 +169,17 @@ async def test_anthropic_cache_not_subtracted(mock_session: AsyncMock, mock_fixe
 # Test 6: Only Cache Read, No Regular Input
 # ============================================================================
 @pytest.mark.asyncio
-async def test_only_cache_read_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_only_cache_read_tokens(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle response with only cache read tokens."""
     response = {
         "model": "gpt-4",
         "usage": {
             "prompt_tokens": 0,
             "completion_tokens": 50,
-            "prompt_tokens_details": {
-                "cached_tokens": 1000
-            }
-        }
+            "prompt_tokens_details": {"cached_tokens": 1000},
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -185,7 +193,9 @@ async def test_only_cache_read_tokens(mock_session: AsyncMock, mock_fixed_pricin
 # Test 7: Only Cache Creation
 # ============================================================================
 @pytest.mark.asyncio
-async def test_only_cache_creation_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_only_cache_creation_tokens(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle response with only cache creation tokens (Anthropic)."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -194,7 +204,7 @@ async def test_only_cache_creation_tokens(mock_session: AsyncMock, mock_fixed_pr
             "output_tokens": 100,
             "cache_creation_input_tokens": 2000,
             "cache_read_input_tokens": 0,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -209,7 +219,9 @@ async def test_only_cache_creation_tokens(mock_session: AsyncMock, mock_fixed_pr
 # Test 8: Both Cache Read and Creation
 # ============================================================================
 @pytest.mark.asyncio
-async def test_both_cache_read_and_creation(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_both_cache_read_and_creation(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle response with both cache read and creation."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -218,7 +230,7 @@ async def test_both_cache_read_and_creation(mock_session: AsyncMock, mock_fixed_
             "output_tokens": 100,
             "cache_creation_input_tokens": 2000,
             "cache_read_input_tokens": 500,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -233,7 +245,9 @@ async def test_both_cache_read_and_creation(mock_session: AsyncMock, mock_fixed_
 # Test 9: Token Field Fallback
 # ============================================================================
 @pytest.mark.asyncio
-async def test_token_field_fallback_order(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_token_field_fallback_order(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Verify fallback order for token extraction."""
     # When prompt_tokens is not present, fall back to input_tokens
     response = {
@@ -241,7 +255,7 @@ async def test_token_field_fallback_order(mock_session: AsyncMock, mock_fixed_pr
         "usage": {
             "input_tokens": 250,
             "completion_tokens": 50,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -254,7 +268,9 @@ async def test_token_field_fallback_order(mock_session: AsyncMock, mock_fixed_pr
 # Test 10: Float Token Values
 # ============================================================================
 @pytest.mark.asyncio
-async def test_float_token_values_coerced_to_int(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_float_token_values_coerced_to_int(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle float token values by converting to int."""
     response = {
         "model": "gpt-4",
@@ -262,7 +278,7 @@ async def test_float_token_values_coerced_to_int(mock_session: AsyncMock, mock_f
             "prompt_tokens": 100.7,  # Float
             "completion_tokens": 50.3,  # Float
             "cache_read_input_tokens": 25.9,  # Float
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -276,7 +292,9 @@ async def test_float_token_values_coerced_to_int(mock_session: AsyncMock, mock_f
 # Test 11: Boolean Cache Tokens
 # ============================================================================
 @pytest.mark.asyncio
-async def test_boolean_cache_tokens_coerced_to_zero(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_boolean_cache_tokens_coerced_to_zero(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle boolean cache token values by coercing to zero."""
     response = {
         "model": "gpt-4",
@@ -284,7 +302,7 @@ async def test_boolean_cache_tokens_coerced_to_zero(mock_session: AsyncMock, moc
             "prompt_tokens": 100,
             "completion_tokens": 50,
             "cache_read_input_tokens": True,  # Boolean
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -297,17 +315,17 @@ async def test_boolean_cache_tokens_coerced_to_zero(mock_session: AsyncMock, moc
 # Test 12: Zero Cache Tokens
 # ============================================================================
 @pytest.mark.asyncio
-async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_zero_cache_tokens(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """Handle explicit zero cache tokens."""
     response = {
         "model": "gpt-4",
         "usage": {
             "prompt_tokens": 100,
             "completion_tokens": 50,
-            "prompt_tokens_details": {
-                "cached_tokens": 0
-            }
-        }
+            "prompt_tokens_details": {"cached_tokens": 0},
+        },
     }
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
 
@@ -320,7 +338,9 @@ async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: No
 # Test 13: Missing Usage Block
 # ============================================================================
 @pytest.mark.asyncio
-async def test_missing_usage_block(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_missing_usage_block(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """When usage is missing, return MaxCostData with zero tokens."""
     response = {"model": "gpt-4", "choices": [{"message": {"content": "test"}}]}
     result = await calculate_cost(response, max_cost=100000, session=mock_session)
@@ -335,7 +355,9 @@ async def test_missing_usage_block(mock_session: AsyncMock, mock_fixed_pricing: 
 # Test 14: Null Usage Block
 # ============================================================================
 @pytest.mark.asyncio
-async def test_null_usage_block(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_null_usage_block(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
     """When usage is null, return MaxCostData with zero tokens."""
     response = {"model": "gpt-4", "usage": None}
     result = await calculate_cost(response, max_cost=100000, session=mock_session)

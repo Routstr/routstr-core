@@ -28,6 +28,7 @@ from routstr.core.db import AsyncSession, CliToken
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def admin_session_token() -> AsyncGenerator[str, None]:
     """Inject a short-lived admin session token into admin_sessions."""
@@ -49,6 +50,7 @@ async def admin_client(
 # ──────────────────────────────────────────────────────────────────────────────
 # Creation
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -93,9 +95,7 @@ async def test_create_cli_token_with_expiry(admin_client: AsyncClient) -> None:
 async def test_create_cli_token_rejects_empty_name(
     admin_client: AsyncClient,
 ) -> None:
-    resp = await admin_client.post(
-        "/admin/api/cli-tokens", json={"name": "   "}
-    )
+    resp = await admin_client.post("/admin/api/cli-tokens", json={"name": "   "})
     assert resp.status_code == 400
 
 
@@ -114,6 +114,7 @@ async def test_create_cli_token_requires_admin(
 # ──────────────────────────────────────────────────────────────────────────────
 # Listing
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -153,6 +154,7 @@ async def test_list_cli_tokens_requires_admin(
 # Using a CLI token as admin auth
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cli_token_authorizes_admin_endpoints(
@@ -161,9 +163,7 @@ async def test_cli_token_authorizes_admin_endpoints(
     integration_session: AsyncSession,
 ) -> None:
     """A freshly-created CLI token can be used as Bearer on admin endpoints."""
-    create = await admin_client.post(
-        "/admin/api/cli-tokens", json={"name": "cli-auth"}
-    )
+    create = await admin_client.post("/admin/api/cli-tokens", json={"name": "cli-auth"})
     assert create.status_code == 200
     cli_token = create.json()["token"]
     token_id = create.json()["id"]
@@ -222,6 +222,7 @@ async def test_invalid_bearer_token_is_rejected(
 # Revocation
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_revoke_cli_token_removes_auth(
@@ -272,6 +273,7 @@ async def test_revoke_cli_token_requires_admin(
 # Lifecycle / uniqueness
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_multiple_tokens_are_independent(
@@ -283,9 +285,7 @@ async def test_multiple_tokens_are_independent(
     raw_tokens: list[str] = []
     ids: list[str] = []
     for name in names:
-        r = await admin_client.post(
-            "/admin/api/cli-tokens", json={"name": name}
-        )
+        r = await admin_client.post("/admin/api/cli-tokens", json={"name": name})
         assert r.status_code == 200
         raw_tokens.append(r.json()["token"])
         ids.append(r.json()["id"])

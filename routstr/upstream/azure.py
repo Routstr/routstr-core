@@ -94,9 +94,7 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
         deployment_id = deployment_id.split("/")[-1]
         return f"openai/deployments/{deployment_id}/{clean_path}"
 
-    def get_request_base_url(
-        self, path: str, model_obj: "Model | None" = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: "Model | None" = None) -> str:
         """Use endpoint root, stripping accidental /openai/v1 suffix if present."""
         base_url = self.base_url.rstrip("/")
         marker = "/openai/v1"

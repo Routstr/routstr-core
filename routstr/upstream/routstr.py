@@ -50,8 +50,7 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
     def normalize_request_path(
         self, path: str, model_obj: "Model | None" = None
     ) -> str:
-        """Preserve the ``v1/`` prefix when forwarding to an upstream Routstr.
-        """
+        """Preserve the ``v1/`` prefix when forwarding to an upstream Routstr."""
         return path.lstrip("/")
 
     @classmethod

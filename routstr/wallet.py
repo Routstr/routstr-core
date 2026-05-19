@@ -633,7 +633,11 @@ async def periodic_routstr_fee_payout() -> None:
                         wallet, settings.primary_mint, "sat", not_reserved=True
                     )
                     amount_received = await raw_send_to_lnurl(
-                        wallet, proofs, ROUTSTR_LN_ADDRESS, "sat", amount=accumulated_sats
+                        wallet,
+                        proofs,
+                        ROUTSTR_LN_ADDRESS,
+                        "sat",
+                        amount=accumulated_sats,
                     )
                     paid_msats = accumulated_sats * 1000
                     await db.reset_routstr_fee(session, paid_msats)

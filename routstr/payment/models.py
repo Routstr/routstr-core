@@ -363,7 +363,9 @@ async def _update_sats_pricing_once() -> None:
             for m in upstream.get_cached_models()
         ]
         upstream._models_cache = updated_models
-        upstream._models_by_id = {m.forwarded_model_id or m.id: m for m in updated_models}
+        upstream._models_by_id = {
+            m.forwarded_model_id or m.id: m for m in updated_models
+        }
         updated_count += len(updated_models)
 
     if updated_count > 0:

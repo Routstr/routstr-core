@@ -8,6 +8,7 @@ Offers flexibility to use different providers for each pipeline stage.
 
 from dataclasses import replace
 from datetime import datetime, timezone
+
 from ..core.logging import get_logger
 from .base_chunker import BaseChunker
 from .base_ranker import BaseRanker
@@ -176,7 +177,12 @@ class CustomWebRAG(BaseWebRAG):
             # Check internal providers
             chunker_available = await self.chunk_provider.check_availability()
             ranker_available = await self.rank_provider.check_availability()
-            all_available = search_available and scraper_available and chunker_available and ranker_available
+            all_available = (
+                search_available
+                and scraper_available
+                and chunker_available
+                and ranker_available
+            )
 
             if not all_available:
                 logger.warning(

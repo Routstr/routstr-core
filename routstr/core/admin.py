@@ -57,7 +57,9 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+        if cli_token and (
+            cli_token.expires_at is None or cli_token.expires_at > now_ts
+        ):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -1467,7 +1469,11 @@ async def get_transactions_api(
         )
         total = count_result.one()
 
-        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
+        stmt = (
+            base.order_by(col(CashuTransaction.created_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
         results = await session.exec(stmt)
         transactions = results.all()
 

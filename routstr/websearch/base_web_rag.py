@@ -6,16 +6,12 @@ that combine web search, content extraction, and chunking into a unified solutio
 AI context enhancement.
 """
 
-import json
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Any
 
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .types import SearchResult
 
-from .mock_utils import _save_api_response, _load_mock_data
 logger = get_logger(__name__)
 
 

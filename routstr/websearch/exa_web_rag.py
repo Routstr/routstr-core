@@ -11,12 +11,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..core.logging import get_logger
+from ..core.settings import settings
 from .base_web_rag import BaseWebRAG
 from .http_client import HTTPClient
+from .mock_utils import _save_api_response
 from .types import SearchResult, WebPage
-from ..core.settings import settings
-
-from .mock_utils import _save_api_response, _load_mock_data
 
 logger = get_logger(__name__)
 
@@ -74,11 +73,11 @@ class ExaWebRAG(BaseWebRAG):
 
         try:
             # --- MOCK DATA FOR TESTING ---
-            #api_response = await _load_mock_data(
+            # api_response = await _load_mock_data(
             #    "exa_What_happend_between_the_US_and_Venezuela_20260116_122619.json"
-                # "exa_what_is_the_latest_news_about_the_Donald_Trump_peace_deal_Which_websites_did_you_search_be_brief_20251219_163302.json"
-                # exa_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_145745.json
-            #)
+            # "exa_what_is_the_latest_news_about_the_Donald_Trump_peace_deal_Which_websites_did_you_search_be_brief_20251219_163302.json"
+            # exa_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_145745.json
+            # )
             # ---------------------------------------------------------------
             api_response = await self._call_exa_api(query, max_results)
             await _save_api_response(api_response, query, "exa")
@@ -171,9 +170,7 @@ class ExaWebRAG(BaseWebRAG):
         payload = {
             "query": query,
             "type": "neural",
-            "numResults": min(
-                max_results, 100
-            ),  # Exa's max is 100
+            "numResults": min(max_results, 100),  # Exa's max is 100
             "contents": {
                 "text": False,  # Complete page content
                 "summary": False,  # Short summary of page content

@@ -289,9 +289,6 @@ async def test_proxy_post_unauthorized_access(integration_client: AsyncClient) -
     assert response.status_code in [400, 401]
 
 
-
-
-
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_proxy_post_model_specific_endpoints(

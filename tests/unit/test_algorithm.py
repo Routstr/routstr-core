@@ -133,7 +133,9 @@ def test_create_model_mappings_includes_db_override_for_missing_cached_model(
 
     monkeypatch.setattr("routstr.payment.models._row_to_model", fake_row_to_model)
 
-    override_row = SimpleNamespace(id="azure/gpt-4o", upstream_provider_id=7, enabled=True)
+    override_row = SimpleNamespace(
+        id="azure/gpt-4o", upstream_provider_id=7, enabled=True
+    )
 
     model_instances, provider_map, unique_models = create_model_mappings(
         upstreams=[provider],
@@ -178,7 +180,9 @@ def test_create_model_mappings_dedupes_with_provider_identity_not_provider_type(
 
     monkeypatch.setattr("routstr.payment.models._row_to_model", fake_row_to_model)
 
-    override_row = SimpleNamespace(id="azure/gpt-4o", upstream_provider_id=2, enabled=True)
+    override_row = SimpleNamespace(
+        id="azure/gpt-4o", upstream_provider_id=2, enabled=True
+    )
 
     _, provider_map, _ = create_model_mappings(
         upstreams=[provider_a, provider_b],

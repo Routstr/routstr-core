@@ -6,6 +6,7 @@ the logical flow of the document better than fixed-size chunking.
 """
 
 import re
+
 from ..core.logging import get_logger
 from .base_chunker import BaseChunker
 
@@ -35,8 +36,7 @@ class RecursiveChunker(BaseChunker):
         # Adds 5% overlap in total, half on each side, in addition to chunk_size
         chunk_overlap = int(chunk_size * chunk_overlap_perc)
         super().__init__(chunk_size, chunk_overlap)
-        
-  
+
         logger.info(
             f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={self.chunk_overlap}"
         )
@@ -175,27 +175,27 @@ class RecursiveChunker(BaseChunker):
         """
         merged_chunks = []
         num_chunks = len(chunks)
-        
+
         # Calculate half-overlap to keep chunk size growth under control
         half_overlap = int(self.chunk_overlap // 2)
 
         # If overlap is too small to split across both sides, return as-is
         if half_overlap <= 0:
-           return chunks   
-    
+            return chunks
+
         for i in range(num_chunks):
             current = chunks[i]
-            
+
             # Add tail of previous chunk to the START
             prefix = ""
             if i > 0:
-                prefix = chunks[i-1][-half_overlap:]
-                
+                prefix = chunks[i - 1][-half_overlap:]
+
             # Add head of next chunk to the END
             suffix = ""
             if i < num_chunks - 1:
-                suffix = chunks[i+1][:half_overlap]
-                
+                suffix = chunks[i + 1][:half_overlap]
+
             merged_chunks.append(prefix + current + suffix)
-            
+
         return merged_chunks

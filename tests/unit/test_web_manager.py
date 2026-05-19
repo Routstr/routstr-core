@@ -414,7 +414,9 @@ async def test_web_manager_custom_rag_factory_success() -> None:
     settings.web_chunker_provider = "recursive"
     settings.web_ranking_provider = "bm25"
 
-    with patch.object(CustomWebRAG, "check_availability", new_callable=AsyncMock) as mock:
+    with patch.object(
+        CustomWebRAG, "check_availability", new_callable=AsyncMock
+    ) as mock:
         mock.return_value = True
         provider = await manager.get_rag_provider()
         assert isinstance(provider, CustomWebRAG)

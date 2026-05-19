@@ -173,8 +173,16 @@ def test_create_stats_snapshot_event_tags() -> None:
 
 
 def test_fingerprint_payload_ignores_generated_at() -> None:
-    a = {"schema": analytics.ANALYTICS_SCHEMA, "generated_at": 1000, "summary": {"x": 1}}
-    b = {"schema": analytics.ANALYTICS_SCHEMA, "generated_at": 2000, "summary": {"x": 1}}
+    a = {
+        "schema": analytics.ANALYTICS_SCHEMA,
+        "generated_at": 1000,
+        "summary": {"x": 1},
+    }
+    b = {
+        "schema": analytics.ANALYTICS_SCHEMA,
+        "generated_at": 2000,
+        "summary": {"x": 1},
+    }
 
     assert analytics._fingerprint_payload(a) == analytics._fingerprint_payload(b)
 
@@ -221,7 +229,9 @@ async def test_publish_usage_analytics_skips_without_nsec(monkeypatch: Any) -> N
 
 
 @pytest.mark.asyncio
-async def test_publish_usage_analytics_dedupes_unchanged_payload(monkeypatch: Any) -> None:
+async def test_publish_usage_analytics_dedupes_unchanged_payload(
+    monkeypatch: Any,
+) -> None:
     published_events: list[dict[str, Any]] = []
     sleep_calls = 0
 

@@ -38,6 +38,7 @@ async def _refresh(session: AsyncSession, key: ApiKey) -> ApiKey:
 # Helper: build a CostData where token cost > deducted_max_cost
 # ---------------------------------------------------------------------------
 
+
 def _cost_data(total_msats: int) -> CostData:
     return CostData(
         base_msats=0,
@@ -61,6 +62,7 @@ def _cost_data(total_msats: int) -> CostData:
 #             deducted_max_cost → balance reaches 0, never negative.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_balance_never_negative_when_cost_exceeds_reservation(
     integration_session: AsyncSession,
@@ -76,25 +78,35 @@ async def test_balance_never_negative_when_cost_exceeds_reservation(
     integration_session.add(key)
     await integration_session.commit()
 
-    response_data = {"model": "test-model", "usage": {"prompt_tokens": 100, "completion_tokens": 100}}
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+    }
 
     with patch(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost
+        )
 
     await _refresh(integration_session, key)
 
     assert key.balance >= 0, f"Balance went negative: {key.balance}"
-    assert key.reserved_balance >= 0, f"Reserved balance went negative: {key.reserved_balance}"
-    assert key.reserved_balance == 0, "Reservation must be fully released after finalization"
+    assert key.reserved_balance >= 0, (
+        f"Reserved balance went negative: {key.reserved_balance}"
+    )
+    assert key.reserved_balance == 0, (
+        "Reservation must be fully released after finalization"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Test 2 — balance is ZERO after the reservation is accounted for
 #           (absolute floor case)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_balance_floor_at_zero_on_overrun(
@@ -110,20 +122,27 @@ async def test_balance_floor_at_zero_on_overrun(
     integration_session.add(key)
     await integration_session.commit()
 
-    response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 50}}
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 50, "completion_tokens": 50},
+    }
 
     with patch(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost
+        )
 
     await _refresh(integration_session, key)
 
     assert key.balance == 0, (
         f"Expected balance=0 (charged deducted_max_cost fallback), got {key.balance}"
     )
-    assert key.reserved_balance == 0, f"Reserved balance should be 0, got {key.reserved_balance}"
+    assert key.reserved_balance == 0, (
+        f"Reserved balance should be 0, got {key.reserved_balance}"
+    )
     # Fallback charges deducted_max_cost
     assert key.total_spent == deducted_max_cost, (
         f"Expected total_spent={deducted_max_cost}, got {key.total_spent}"
@@ -133,6 +152,7 @@ async def test_balance_floor_at_zero_on_overrun(
 # ---------------------------------------------------------------------------
 # Test 3 — balance has enough room: full token cost should be charged
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_full_cost_charged_when_balance_sufficient_for_overrun(
@@ -149,18 +169,25 @@ async def test_full_cost_charged_when_balance_sufficient_for_overrun(
     integration_session.add(key)
     await integration_session.commit()
 
-    response_data = {"model": "test-model", "usage": {"prompt_tokens": 100, "completion_tokens": 100}}
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+    }
 
     with patch(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost
+        )
 
     await _refresh(integration_session, key)
 
     assert key.balance >= 0, f"Balance went negative: {key.balance}"
-    assert key.reserved_balance == 0, f"Reservation not released: {key.reserved_balance}"
+    assert key.reserved_balance == 0, (
+        f"Reservation not released: {key.reserved_balance}"
+    )
     assert key.total_spent == actual_token_cost, (
         f"Expected full charge of {actual_token_cost}, got {key.total_spent}"
     )
@@ -175,6 +202,7 @@ async def test_full_cost_charged_when_balance_sufficient_for_overrun(
 # Multiple requests finish concurrently. Each has a small overrun.
 # None should drive balance negative.
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_concurrent_cost_overruns_never_negative(
@@ -258,6 +286,7 @@ async def test_concurrent_cost_overruns_never_negative(
 #           simulates a user who topped up to exactly the reservation floor
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_zero_free_balance_overrun_is_safe(
     integration_session: AsyncSession,
@@ -273,18 +302,25 @@ async def test_zero_free_balance_overrun_is_safe(
     integration_session.add(key)
     await integration_session.commit()
 
-    response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 100}}
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 50, "completion_tokens": 100},
+    }
 
     with patch(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost
+        )
 
     await _refresh(integration_session, key)
 
     assert key.balance >= 0, f"Balance went negative: {key.balance}"
-    assert key.reserved_balance >= 0, f"Reserved balance went negative: {key.reserved_balance}"
+    assert key.reserved_balance >= 0, (
+        f"Reserved balance went negative: {key.reserved_balance}"
+    )
 
 
 # ---------------------------------------------------------------------------

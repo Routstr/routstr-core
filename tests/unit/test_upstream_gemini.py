@@ -81,9 +81,7 @@ def test_inject_thought_signatures_preserves_existing_signature() -> None:
     inject_thought_signatures(messages)
 
     assert (
-        messages[0]["tool_calls"][0]["extra_content"]["google"][
-            "thought_signature"
-        ]
+        messages[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
         == "real-signature"
     )
 
@@ -187,9 +185,7 @@ async def test_translator_emits_text_only_response() -> None:
     ]
     # Text deltas concatenate to "Hello, world".
     text_deltas = [
-        e["delta"]["text"]
-        for e in events
-        if e["type"] == "content_block_delta"
+        e["delta"]["text"] for e in events if e["type"] == "content_block_delta"
     ]
     assert "".join(text_deltas) == "Hello, world"
     # Stop reason was mapped from openai's "stop".
@@ -270,9 +266,7 @@ async def test_translator_emits_tool_use_block() -> None:
     # Argument deltas were forwarded as input_json_delta partials.
     deltas = [e for e in events if e["type"] == "content_block_delta"]
     assert all(d["delta"]["type"] == "input_json_delta" for d in deltas)
-    assert "".join(d["delta"]["partial_json"] for d in deltas) == (
-        '{"cmd": "ls"}'
-    )
+    assert "".join(d["delta"]["partial_json"] for d in deltas) == ('{"cmd": "ls"}')
     # tool_calls finish_reason → tool_use stop_reason.
     msg_delta = next(e for e in events if e["type"] == "message_delta")
     assert msg_delta["delta"]["stop_reason"] == "tool_use"
@@ -306,8 +300,6 @@ async def test_translator_handles_done_sentinel_and_blank_lines() -> None:
     assert events[0]["type"] == "message_start"
     assert events[-1]["type"] == "message_stop"
     text = "".join(
-        e["delta"]["text"]
-        for e in events
-        if e["type"] == "content_block_delta"
+        e["delta"]["text"] for e in events if e["type"] == "content_block_delta"
     )
     assert text == "ok"

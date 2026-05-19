@@ -26,6 +26,7 @@ from routstr.core.db import ApiKey, create_session
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_key(balance: int, reserved: int = 0) -> ApiKey:
     return ApiKey(
         hashed_key=f"test_{uuid.uuid4().hex}",
@@ -47,6 +48,7 @@ async def _persist(session: AsyncSession, key: ApiKey) -> ApiKey:
 # Test 1 — Reserve: reserved_balance increases, available balance decreases
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_reserve_increases_reserved_balance(
     integration_session: AsyncSession,
@@ -66,6 +68,7 @@ async def test_reserve_increases_reserved_balance(
 # ---------------------------------------------------------------------------
 # Test 2 — Revert: reserved_balance restored, balance untouched
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_revert_releases_reservation(
@@ -89,6 +92,7 @@ async def test_revert_releases_reservation(
 # ---------------------------------------------------------------------------
 # Test 3 — Finalise: reservation released + balance charged
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_finalise_releases_reservation_and_charges_balance(
@@ -117,7 +121,10 @@ async def test_finalise_releases_reservation_and_charges_balance(
         input_tokens=50,
         output_tokens=50,
     )
-    response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 50}}
+    response_data = {
+        "model": "test-model",
+        "usage": {"prompt_tokens": 50, "completion_tokens": 50},
+    }
 
     with patch("routstr.auth.calculate_cost", return_value=cost_data):
         await adjust_payment_for_tokens(key, response_data, integration_session, cost)
@@ -133,6 +140,7 @@ async def test_finalise_releases_reservation_and_charges_balance(
 # Test 4 — Concurrent: second parallel reserve blocked when balance exhausted
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
     patched_db_engine: None,
@@ -144,7 +152,7 @@ async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
     async with create_session() as session:
         key = ApiKey(
             hashed_key=key_hash,
-            balance=300,       # exactly enough for ONE reservation
+            balance=300,  # exactly enough for ONE reservation
             reserved_balance=0,
             total_spent=0,
             total_requests=0,
@@ -186,6 +194,7 @@ async def test_concurrent_second_reserve_blocked_when_balance_exhausted(
 # Test 5 — Concurrent: three requests, two fit, third blocked
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_three_parallel_reserves_third_blocked(
     patched_db_engine: None,
@@ -197,7 +206,7 @@ async def test_three_parallel_reserves_third_blocked(
     async with create_session() as session:
         key = ApiKey(
             hashed_key=key_hash,
-            balance=200,       # fits exactly 2 reservations of 100
+            balance=200,  # fits exactly 2 reservations of 100
             reserved_balance=0,
             total_spent=0,
             total_requests=0,
@@ -243,6 +252,7 @@ async def test_three_parallel_reserves_third_blocked(
 # ---------------------------------------------------------------------------
 # Test 6 — Sequential exhaustion: reserve until empty, next request blocked
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_sequential_reserves_block_when_balance_exhausted(

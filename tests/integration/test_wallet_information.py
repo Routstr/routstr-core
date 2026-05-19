@@ -3,7 +3,6 @@ Integration tests for wallet information retrieval endpoints.
 Tests GET /v1/wallet/ and GET /v1/wallet/info endpoints with various scenarios.
 """
 
-
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -365,6 +364,3 @@ async def test_wallet_info_with_special_characters_in_headers(
 
     assert response.status_code == 200
     # Note: Current implementation doesn't return refund_address in response
-
-
-

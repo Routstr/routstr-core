@@ -28,7 +28,9 @@ payments_logger = get_logger("routstr.payments")
 
 # Routstr platform fee constants
 ROUTSTR_FEE_PERCENT: float = 2.1
-ROUTSTR_LN_ADDRESS: str = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
+ROUTSTR_LN_ADDRESS: str = (
+    "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qqdufs7ql29s@npub.cash"
+)
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
 ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
 
@@ -761,6 +763,7 @@ async def adjust_payment_for_tokens(
                     "Failed to accumulate Routstr fee",
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
+
     # Add web_search_executed flag for cost calculation if it was executed
     if web_context.executed and "web_search_executed" not in response_data:
         response_data["web_search_executed"] = True
@@ -793,8 +796,10 @@ async def adjust_payment_for_tokens(
                 )
 
             safe_reserved = case(
-                (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                 col(ApiKey.reserved_balance) - deducted_max_cost),
+                (
+                    col(ApiKey.reserved_balance) >= deducted_max_cost,
+                    col(ApiKey.reserved_balance) - deducted_max_cost,
+                ),
                 else_=0,
             )
 
@@ -812,8 +817,10 @@ async def adjust_payment_for_tokens(
             # Also update total_spent and reserved_balance on the child key if it's different
             if billing_key.hashed_key != key.hashed_key:
                 child_safe_reserved = case(
-                    (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                     col(ApiKey.reserved_balance) - deducted_max_cost),
+                    (
+                        col(ApiKey.reserved_balance) >= deducted_max_cost,
+                        col(ApiKey.reserved_balance) - deducted_max_cost,
+                    ),
                     else_=0,
                 )
                 child_stmt = (
@@ -923,8 +930,10 @@ async def adjust_payment_for_tokens(
                     )
 
                 exact_safe_reserved = case(
-                    (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                     col(ApiKey.reserved_balance) - deducted_max_cost),
+                    (
+                        col(ApiKey.reserved_balance) >= deducted_max_cost,
+                        col(ApiKey.reserved_balance) - deducted_max_cost,
+                    ),
                     else_=0,
                 )
 
@@ -942,8 +951,10 @@ async def adjust_payment_for_tokens(
                 # Also update total_spent and reserved_balance on the child key if it's different
                 if billing_key.hashed_key != key.hashed_key:
                     child_exact_safe_reserved = case(
-                        (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                         col(ApiKey.reserved_balance) - deducted_max_cost),
+                        (
+                            col(ApiKey.reserved_balance) >= deducted_max_cost,
+                            col(ApiKey.reserved_balance) - deducted_max_cost,
+                        ),
                         else_=0,
                     )
                     child_stmt = (
@@ -995,7 +1006,8 @@ async def adjust_payment_for_tokens(
                     .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
                     .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
                     .values(
-                        reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
+                        reserved_balance=col(ApiKey.reserved_balance)
+                        - deducted_max_cost,
                         balance=col(ApiKey.balance) - chargeable,
                         total_spent=col(ApiKey.total_spent) + chargeable,
                     )
@@ -1008,8 +1020,10 @@ async def adjust_payment_for_tokens(
                         .where(col(ApiKey.hashed_key) == key.hashed_key)
                         .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
                         .values(
-                            reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
-                            total_spent=col(ApiKey.total_spent) + min(billing_key.balance, total_cost_msats),
+                            reserved_balance=col(ApiKey.reserved_balance)
+                            - deducted_max_cost,
+                            total_spent=col(ApiKey.total_spent)
+                            + min(billing_key.balance, total_cost_msats),
                         )
                     )
                     await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -1092,8 +1106,10 @@ async def adjust_payment_for_tokens(
                     )
 
                 refund_safe_reserved = case(
-                    (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                     col(ApiKey.reserved_balance) - deducted_max_cost),
+                    (
+                        col(ApiKey.reserved_balance) >= deducted_max_cost,
+                        col(ApiKey.reserved_balance) - deducted_max_cost,
+                    ),
                     else_=0,
                 )
 
@@ -1111,8 +1127,10 @@ async def adjust_payment_for_tokens(
                 # Also update total_spent and reserved_balance on the child key if it's different
                 if billing_key.hashed_key != key.hashed_key:
                     child_refund_safe_reserved = case(
-                        (col(ApiKey.reserved_balance) >= deducted_max_cost,
-                         col(ApiKey.reserved_balance) - deducted_max_cost),
+                        (
+                            col(ApiKey.reserved_balance) >= deducted_max_cost,
+                            col(ApiKey.reserved_balance) - deducted_max_cost,
+                        ),
                         else_=0,
                     )
                     child_stmt = (

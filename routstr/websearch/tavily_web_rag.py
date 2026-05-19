@@ -11,12 +11,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..core.logging import get_logger
+from ..core.settings import settings
 from .base_web_rag import BaseWebRAG
 from .http_client import HTTPClient
+from .mock_utils import _load_mock_data
 from .types import SearchResult, WebPage
-from ..core.settings import settings
 
-from .mock_utils import _save_api_response, _load_mock_data
 logger = get_logger(__name__)
 
 
@@ -86,12 +86,12 @@ class TavilyWebRAG(BaseWebRAG):
         try:
             # --- MOCK DATA FOR TESTING  ---
             api_response = await _load_mock_data(
-                #"tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
+                # "tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
                 "tavily_Gold_price_20260517_101252.json"
-           )
+            )
             # ---------------------------------------------------------------
-            #api_response = await self._call_tavily_api(query, max_results)
-            #await _save_api_response(api_response, query, "tavily")
+            # api_response = await self._call_tavily_api(query, max_results)
+            # await _save_api_response(api_response, query, "tavily")
             # ---------------------------------------------------------------
 
             total_ms = int((datetime.now() - start_time).total_seconds() * 1000)
@@ -206,7 +206,9 @@ class TavilyWebRAG(BaseWebRAG):
             "time_range": None,  # No filtering by publishing date
             "start_date": None,
             "end_date": None,
-            "chunks_per_source": min(3, settings.max_chunks_per_source),  # Tavily's max: 3
+            "chunks_per_source": min(
+                3, settings.max_chunks_per_source
+            ),  # Tavily's max: 3
             "include_usage": True,  # Can be used to update admin interface in the future
         }
 

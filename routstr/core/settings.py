@@ -88,7 +88,9 @@ class Settings(BaseSettings):
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
-    refund_sweep_ttl_seconds: int = Field(default=604800, env="REFUND_SWEEP_TTL_SECONDS")
+    refund_sweep_ttl_seconds: int = Field(
+        default=604800, env="REFUND_SWEEP_TTL_SECONDS"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
@@ -136,9 +138,8 @@ class Settings(BaseSettings):
 
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
-    enable_analytics_sharing: bool = Field(
-        default=True, env="ENABLE_ANALYTICS_SHARING"
-    )
+    enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+
 
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
     """Discard unknown keys from persisted settings."""
@@ -301,7 +302,11 @@ class SettingsService:
             valid_fields = set(env_resolved.dict().keys())
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "", [], {}) and k in valid_fields}
+                {
+                    k: v
+                    for k, v in db_json.items()
+                    if v not in (None, "", [], {}) and k in valid_fields
+                }
             )
             merged_dict = Settings(**merged_dict).dict()
 

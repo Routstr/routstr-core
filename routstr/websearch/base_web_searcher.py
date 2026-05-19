@@ -3,10 +3,7 @@ Base class for Web search for AI context enhancement using Retrieval Augmented G
 
 """
 
-import json
 from abc import ABC, abstractmethod
-from datetime import datetime
-from typing import Any
 from urllib.parse import urlparse
 
 from ..core.logging import get_logger

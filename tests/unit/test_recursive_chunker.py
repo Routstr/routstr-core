@@ -51,8 +51,8 @@ async def test_recursive_chunker_truncate_text() -> None:
 async def test_recursive_chunker_overlap_logic() -> None:
     """Verify that chunk_overlap correctly prepends the tail of the previous chunk."""
     chunk_size = 15
-    overlap_perc = 0.15 # 15 * 0.15 = 2.25 = 2, so 1 char on each side
-    chunker = RecursiveChunker(chunk_size=chunk_size, chunk_overlap_perc = overlap_perc)
+    overlap_perc = 0.15  # 15 * 0.15 = 2.25 = 2, so 1 char on each side
+    chunker = RecursiveChunker(chunk_size=chunk_size, chunk_overlap_perc=overlap_perc)
 
     # Text will be split into [0:16] and [14:30]
     text = "123456789ABCDEFGHIJKLMNOPQRSTU"

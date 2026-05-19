@@ -106,9 +106,7 @@ def parse_sse_blocks(buffer: bytes) -> tuple[list[dict], bytes]:
     return events, buffer
 
 
-def events_from_chunk(
-    chunk: object, sse_buffer: bytes
-) -> tuple[list[dict], bytes]:
+def events_from_chunk(chunk: object, sse_buffer: bytes) -> tuple[list[dict], bytes]:
     """Normalize a stream chunk into one or more event dicts.
 
     ``litellm.anthropic.messages.acreate(stream=True)`` yields raw SSE
@@ -199,9 +197,7 @@ async def aggregate_anthropic_events_to_message(
                 raw_json = partial_json.pop(idx, None)
                 if raw_json is not None and idx < len(blocks):
                     try:
-                        blocks[idx]["input"] = (
-                            json.loads(raw_json) if raw_json else {}
-                        )
+                        blocks[idx]["input"] = json.loads(raw_json) if raw_json else {}
                     except json.JSONDecodeError:
                         blocks[idx]["input"] = raw_json
             elif etype == "message_delta":
@@ -443,9 +439,7 @@ async def dispatch_anthropic_messages(
     on bad input or upstream failure.
     """
     if not request_body:
-        raise UpstreamError(
-            "Missing request body for /v1/messages", status_code=400
-        )
+        raise UpstreamError("Missing request body for /v1/messages", status_code=400)
 
     try:
         body: dict = json.loads(request_body)

@@ -66,8 +66,10 @@ class CashuTokenGenerator:
             # Missing cashuA prefix
             lambda: base64.urlsafe_b64encode(b'{"token": []}').decode(),
             # Invalid JSON structure
-            lambda: "cashuA"
-            + base64.urlsafe_b64encode(b'{"invalid": "structure"}').decode(),
+            lambda: (
+                "cashuA"
+                + base64.urlsafe_b64encode(b'{"invalid": "structure"}').decode()
+            ),
             # Invalid proof structure
             lambda: CashuTokenGenerator._encode_token(
                 {

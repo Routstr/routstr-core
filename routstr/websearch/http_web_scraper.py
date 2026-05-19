@@ -14,6 +14,7 @@ TRAFILATURA_AVAILABLE = False
 trafilatura: Any = None
 try:
     import trafilatura as tf
+
     trafilatura = tf
 
     logging.getLogger("trafilatura").setLevel(logging.WARNING)
@@ -136,7 +137,9 @@ class HTTPWebScraper(BaseWebScraper):
                 )
 
         except Exception as e:
-            logger.debug(f"Fetch failed for {url}: {e}", extra={"url": url, "error": str(e)})
+            logger.debug(
+                f"Fetch failed for {url}: {e}", extra={"url": url, "error": str(e)}
+            )
             return None
         finally:
             if local_client:

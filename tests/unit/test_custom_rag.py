@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -78,8 +78,8 @@ async def test_custom_rag_availability_check() -> None:
     """Verify that check_availability only returns True if ALL components are healthy."""
     mock_search = AsyncMock()
     mock_scrape = AsyncMock()
-    mock_chunk = AsyncMock()  
-    mock_rank = AsyncMock()  
+    mock_chunk = AsyncMock()
+    mock_rank = AsyncMock()
 
     pipeline = CustomWebRAG(mock_search, mock_scrape, mock_chunk, mock_rank)
 

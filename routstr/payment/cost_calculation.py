@@ -88,12 +88,13 @@ async def calculate_cost(
     # Calculate web search cost (model-specific or fixed)
     web_search_cost_msats = _calculate_web_search_cost(response_data)
 
-
     usage_data = response_data["usage"]
 
     # Extract token counts
     input_tokens = _extract_token_pair(usage_data, "prompt_tokens", "input_tokens")
-    output_tokens = _extract_token_pair(usage_data, "completion_tokens", "output_tokens")
+    output_tokens = _extract_token_pair(
+        usage_data, "completion_tokens", "output_tokens"
+    )
 
     # Extract cache tokens (handles OpenAI vs Anthropic formats)
     cache_read_tokens, cache_creation_tokens, input_tokens = _extract_cache_tokens(
@@ -167,9 +168,7 @@ async def calculate_cost(
             "Token counts %s in the upstream response but cannot be "
             "priced; the request will appear in dashboards with the "
             "raw counts and a fixed max-cost charge.",
-            "are present"
-            if (input_tokens > 0 or output_tokens > 0)
-            else "are zero",
+            "are present" if (input_tokens > 0 or output_tokens > 0) else "are zero",
             extra={
                 "base_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
@@ -209,6 +208,7 @@ async def calculate_cost(
 # Helper Functions (ordered by call sequence in calculate_cost)
 # ============================================================================
 
+
 def _calculate_web_search_cost(response_data: dict) -> int:
     """Calculate web search cost (model-specific or fixed). From your feature branch."""
     if not response_data.get("web_search_executed"):
@@ -224,9 +224,11 @@ def _calculate_web_search_cost(response_data: dict) -> int:
         return 0
 
     from ..proxy import get_model_instance
+
     model_obj = get_model_instance(response_model)
     if (
-        model_obj and model_obj.sats_pricing
+        model_obj
+        and model_obj.sats_pricing
         and hasattr(model_obj.sats_pricing, "web_search")
         and model_obj.sats_pricing.web_search is not None
     ):
@@ -269,9 +271,7 @@ def _coerce_usd(value: object) -> float:
         return 0.0
 
 
-def _extract_token_pair(
-    usage_data: dict, standard_field: str, alt_field: str
-) -> int:
+def _extract_token_pair(usage_data: dict, standard_field: str, alt_field: str) -> int:
     """Extract token count trying two field names in order."""
     value = parse_token_count(usage_data.get(standard_field, 0))
     if value > 0:
@@ -285,9 +285,7 @@ def _extract_cache_tokens(usage_data: dict, input_tokens: int) -> tuple[int, int
     Returns: (cache_read_tokens, cache_creation_tokens, adjusted_input_tokens)
     """
     cache_read = parse_token_count(usage_data.get("cache_read_input_tokens", 0))
-    cache_creation = parse_token_count(
-        usage_data.get("cache_creation_input_tokens", 0)
-    )
+    cache_creation = parse_token_count(usage_data.get("cache_creation_input_tokens", 0))
 
     # OpenAI: cache is included in input_tokens, subtract it
     prompt_details = usage_data.get("prompt_tokens_details")
@@ -338,7 +336,9 @@ def _get_pricing_rates(
     model_obj = get_model_instance(response_model)
 
     if not model_obj:
-        logger.error("Invalid model in response", extra={"response_model": response_model})
+        logger.error(
+            "Invalid model in response", extra={"response_model": response_model}
+        )
         raise ValueError(f"Invalid model: {response_model}")
 
     if not model_obj.sats_pricing:

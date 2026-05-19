@@ -36,6 +36,7 @@ def _make_cost_data(total_msats: int = 5000) -> CostData:
 # Non-streaming (chat completions)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_non_streaming_includes_cost_sats() -> None:
     provider = _make_provider()
@@ -54,8 +55,12 @@ async def test_non_streaming_includes_cost_sats() -> None:
     httpx_response = _make_httpx_response()
 
     with (
-        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
-        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+        patch.object(
+            provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)
+        ),
+        patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")
+        ),
     ):
         response = await provider.handle_x_cashu_non_streaming_response(
             content_str=content_str,
@@ -81,8 +86,12 @@ async def test_non_streaming_cost_sats_value_rounds_down() -> None:
     content_str = json.dumps(response_body)
 
     with (
-        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
-        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+        patch.object(
+            provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)
+        ),
+        patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")
+        ),
     ):
         response = await provider.handle_x_cashu_non_streaming_response(
             content_str=content_str,
@@ -112,8 +121,12 @@ async def test_non_streaming_preserves_existing_usage_fields() -> None:
     }
 
     with (
-        patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)),
-        patch.object(provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")),
+        patch.object(
+            provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)
+        ),
+        patch.object(
+            provider, "send_refund", new=AsyncMock(return_value="cashuA_refund_token")
+        ),
     ):
         response = await provider.handle_x_cashu_non_streaming_response(
             content_str=json.dumps(response_body),
@@ -136,6 +149,7 @@ async def test_non_streaming_preserves_existing_usage_fields() -> None:
 # Streaming (chat completions)
 # ---------------------------------------------------------------------------
 
+
 async def _collect_streaming(response: object) -> list[str]:
     chunks: list[str] = []
     async for chunk in response.body_iterator:  # type: ignore[attr-defined]
@@ -156,13 +170,17 @@ async def test_streaming_includes_cost_sats_in_usage_chunk() -> None:
         "model": "gpt-4o",
         "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
     }
-    content_str = "\n".join([
-        'data: {"id":"chatcmpl-123","model":"gpt-4o","choices":[]}',
-        f"data: {json.dumps(usage_chunk)}",
-        "data: [DONE]",
-    ])
+    content_str = "\n".join(
+        [
+            'data: {"id":"chatcmpl-123","model":"gpt-4o","choices":[]}',
+            f"data: {json.dumps(usage_chunk)}",
+            "data: [DONE]",
+        ]
+    )
 
-    with patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)):
+    with patch.object(
+        provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)
+    ):
         response = await provider.handle_x_cashu_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
@@ -177,7 +195,9 @@ async def test_streaming_includes_cost_sats_in_usage_chunk() -> None:
 
     full_output = "".join(chunks)
     usage_line = next(
-        line for line in full_output.split("\n") if '"usage"' in line and "cost_sats" in line
+        line
+        for line in full_output.split("\n")
+        if '"usage"' in line and "cost_sats" in line
     )
     data_json = json.loads(usage_line.lstrip("data: ").strip())
     assert data_json["usage"]["cost_sats"] == 7  # 7000 // 1000
@@ -188,15 +208,27 @@ async def test_streaming_non_usage_chunks_unmodified() -> None:
     provider = _make_provider()
     cost_data = _make_cost_data(total_msats=2000)
 
-    regular_chunk = {"id": "chatcmpl-123", "model": "gpt-4o", "choices": [{"delta": {"content": "hi"}}]}
-    usage_chunk = {"id": "chatcmpl-123", "model": "gpt-4o", "usage": {"prompt_tokens": 10}}
-    content_str = "\n".join([
-        f"data: {json.dumps(regular_chunk)}",
-        f"data: {json.dumps(usage_chunk)}",
-        "data: [DONE]",
-    ])
+    regular_chunk = {
+        "id": "chatcmpl-123",
+        "model": "gpt-4o",
+        "choices": [{"delta": {"content": "hi"}}],
+    }
+    usage_chunk = {
+        "id": "chatcmpl-123",
+        "model": "gpt-4o",
+        "usage": {"prompt_tokens": 10},
+    }
+    content_str = "\n".join(
+        [
+            f"data: {json.dumps(regular_chunk)}",
+            f"data: {json.dumps(usage_chunk)}",
+            "data: [DONE]",
+        ]
+    )
 
-    with patch.object(provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)):
+    with patch.object(
+        provider, "get_x_cashu_cost", new=AsyncMock(return_value=cost_data)
+    ):
         response = await provider.handle_x_cashu_streaming_response(
             content_str=content_str,
             response=_make_httpx_response(),
@@ -208,7 +240,8 @@ async def test_streaming_non_usage_chunks_unmodified() -> None:
     chunks = await _collect_streaming(response)
 
     lines = [
-        line for line in "".join(chunks).split("\n")
+        line
+        for line in "".join(chunks).split("\n")
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
     regular_line_data = json.loads(lines[0][6:])

@@ -7,11 +7,10 @@ for testing and development.
 """
 
 import asyncio
-import os
-import re
 from abc import ABC, abstractmethod
 from dataclasses import replace
 from datetime import datetime
+
 from ..core.logging import get_logger
 from .types import SearchResult, WebPage
 
@@ -85,7 +84,9 @@ class BaseWebScraper(ABC):
             if isinstance(res, WebPage):
                 valid_results.append(res)
             else:
-                logger.error(f"Task failed with exception: {res}", extra={"error": str(res)})
+                logger.error(
+                    f"Task failed with exception: {res}", extra={"error": str(res)}
+                )
 
         return valid_results
 
@@ -129,5 +130,3 @@ class BaseWebScraper(ABC):
             },
         )
         return replace(search_result, webpages=scraped_pages)
-
-   

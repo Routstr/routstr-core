@@ -1,5 +1,6 @@
 import string
 from dataclasses import replace
+
 from ..core.logging import get_logger
 from .base_ranker import BaseRanker
 from .types import SearchResult
@@ -29,13 +30,13 @@ class BM25Ranker(BaseRanker):
         # Number of selected Chunks per Website during _rank_local
         # This acts as an upperlimit as _rank_global removes the most irrelevant chunks
         # Default: 5
-        self.local_k = max_chunks_per_source 
+        self.local_k = max_chunks_per_source
 
         # We prune the most irrelevant chunks globally
         # global_multiplier defines how many websites' worth of chunks are retained
         self.global_multiplier = 6
         # Number of overall selected Chunks during _rank_global
-        self.global_k = self.local_k * self.global_multiplier 
+        self.global_k = self.local_k * self.global_multiplier
 
     async def check_availability(self) -> bool:
         """Returns True if rank_bm25 is installed and available."""

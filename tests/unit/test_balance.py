@@ -18,7 +18,9 @@ def _make_cashu_tx(
     swept: bool = False,
     collected: bool = False,
 ) -> CashuTransaction:
-    tx = CashuTransaction(token=token, amount=amount, unit=unit, type=type, request_id=request_id)
+    tx = CashuTransaction(
+        token=token, amount=amount, unit=unit, type=type, request_id=request_id
+    )
     tx.swept = swept
     tx.collected = collected
     return tx
@@ -39,8 +41,16 @@ def _update_result(rowcount: int) -> MagicMock:
 @pytest.mark.asyncio
 async def test_refund_x_cashu_returns_token() -> None:
     x_cashu_token = "cashuAtest_token_value"
-    in_tx = _make_cashu_tx(token=x_cashu_token, amount=0, unit="msat", type="in", request_id="req-abc")
-    out_tx = _make_cashu_tx(token="cashuArefund_token", amount=1000, unit="msat", type="out", request_id="req-abc")
+    in_tx = _make_cashu_tx(
+        token=x_cashu_token, amount=0, unit="msat", type="in", request_id="req-abc"
+    )
+    out_tx = _make_cashu_tx(
+        token="cashuArefund_token",
+        amount=1000,
+        unit="msat",
+        type="out",
+        request_id="req-abc",
+    )
 
     session = MagicMock()
     session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
@@ -64,8 +74,16 @@ async def test_refund_x_cashu_returns_token() -> None:
 @pytest.mark.asyncio
 async def test_refund_x_cashu_sat_unit() -> None:
     x_cashu_token = "cashuAsat_token"
-    in_tx = _make_cashu_tx(token=x_cashu_token, amount=0, unit="sat", type="in", request_id="req-sat")
-    out_tx = _make_cashu_tx(token="cashuArefund_sat", amount=500, unit="sat", type="out", request_id="req-sat")
+    in_tx = _make_cashu_tx(
+        token=x_cashu_token, amount=0, unit="sat", type="in", request_id="req-sat"
+    )
+    out_tx = _make_cashu_tx(
+        token="cashuArefund_sat",
+        amount=500,
+        unit="sat",
+        type="out",
+        request_id="req-sat",
+    )
 
     session = MagicMock()
     session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
@@ -107,8 +125,21 @@ async def test_refund_x_cashu_not_found_raises_404() -> None:
 async def test_refund_x_cashu_swept_raises_410() -> None:
     from fastapi import HTTPException
 
-    in_tx = _make_cashu_tx(token="cashuAswept_token", amount=0, unit="msat", type="in", request_id="req-swept")
-    out_tx = _make_cashu_tx(token="cashuAswept", amount=100, unit="msat", type="out", request_id="req-swept", swept=True)
+    in_tx = _make_cashu_tx(
+        token="cashuAswept_token",
+        amount=0,
+        unit="msat",
+        type="in",
+        request_id="req-swept",
+    )
+    out_tx = _make_cashu_tx(
+        token="cashuAswept",
+        amount=100,
+        unit="msat",
+        type="out",
+        request_id="req-swept",
+        swept=True,
+    )
 
     session = MagicMock()
     session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(out_tx)])
@@ -253,7 +284,8 @@ async def test_apikey_refund_log_includes_path() -> None:
 
     # Find the "cashu token issued" call and verify extra contains the path
     token_issued_calls = [
-        c for c in mock_logger.info.call_args_list
+        c
+        for c in mock_logger.info.call_args_list
         if c.args and "cashu token issued" in c.args[0]
     ]
     assert len(token_issued_calls) == 1
@@ -339,7 +371,9 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
     with (
         patch("routstr.balance.validate_bearer_key", AsyncMock(return_value=key)),
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
-        patch("routstr.balance.send_token", AsyncMock(side_effect=Exception("mint down"))),
+        patch(
+            "routstr.balance.send_token", AsyncMock(side_effect=Exception("mint down"))
+        ),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),

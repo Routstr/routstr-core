@@ -45,7 +45,9 @@ def _make_model(
     return Model(
         id=model_id,
         name=model_id,
-        forwarded_model_id=forwarded_model_id if forwarded_model_id is not None else model_id,
+        forwarded_model_id=forwarded_model_id
+        if forwarded_model_id is not None
+        else model_id,
         created=0,
         description="",
         context_length=8192,
@@ -170,9 +172,7 @@ def test_events_from_chunk_handles_bytes_chunks() -> None:
 
 def test_events_from_chunk_handles_str_chunks() -> None:
     provider = _make_provider()
-    events, buf = provider._events_from_chunk(
-        'event: a\ndata: {"type":"a"}\n\n', b""
-    )
+    events, buf = provider._events_from_chunk('event: a\ndata: {"type":"a"}\n\n', b"")
     assert events == [{"type": "a"}]
     assert buf == b""
 
@@ -215,9 +215,7 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     )
     assert groq.get_litellm_provider_prefix() == "groq/"
 
-    xai = BaseUpstreamProvider(
-        base_url="https://api.x.ai/v1", api_key="sk-test"
-    )
+    xai = BaseUpstreamProvider(base_url="https://api.x.ai/v1", api_key="sk-test")
     assert xai.get_litellm_provider_prefix() == "xai/"
 
     deepseek = BaseUpstreamProvider(
@@ -225,9 +223,7 @@ def test_base_provider_resolves_prefix_from_base_url() -> None:
     )
     assert deepseek.get_litellm_provider_prefix() == "deepseek/"
 
-    unknown = BaseUpstreamProvider(
-        base_url="https://example.com/v1", api_key="sk-test"
-    )
+    unknown = BaseUpstreamProvider(base_url="https://example.com/v1", api_key="sk-test")
     assert unknown.get_litellm_provider_prefix() == "openai/"
 
 
@@ -500,7 +496,11 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     captured_cost_call: dict[str, Any] = {}
 
     async def fake_adjust(
-        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int, web_context = None,
+        fresh_key: Any,
+        combined_data: Any,
+        sess: Any,
+        max_cost: int,
+        web_context=None,
     ) -> dict:
         captured_cost_call["combined_data"] = combined_data
         captured_cost_call["max_cost"] = max_cost
@@ -589,7 +589,11 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     captured: dict[str, Any] = {}
 
     async def fake_adjust(
-        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int, web_context = None,
+        fresh_key: Any,
+        combined_data: Any,
+        sess: Any,
+        max_cost: int,
+        web_context=None,
     ) -> dict:
         captured["combined_data"] = combined_data
         return fake_cost
@@ -1153,7 +1157,7 @@ async def test_aggregator_parses_tool_use_input_json_delta() -> None:
         {
             "type": "content_block_delta",
             "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": ' 7}'},
+            "delta": {"type": "input_json_delta", "partial_json": " 7}"},
         },
         {"type": "content_block_stop", "index": 0},
         {
@@ -1181,18 +1185,18 @@ async def test_aggregator_parses_sse_byte_chunks() -> None:
     provider = _make_provider()
 
     sse = (
-        b'event: message_start\n'
+        b"event: message_start\n"
         b'data: {"type":"message_start","message":{"id":"m1","type":"message",'
         b'"role":"assistant","model":"x","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
-        b'event: content_block_start\n'
+        b"event: content_block_start\n"
         b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
-        b'event: content_block_delta\n'
+        b"event: content_block_delta\n"
         b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
-        b'event: content_block_stop\n'
+        b"event: content_block_stop\n"
         b'data: {"type":"content_block_stop","index":0}\n\n'
-        b'event: message_delta\n'
+        b"event: message_delta\n"
         b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
-        b'event: message_stop\n'
+        b"event: message_stop\n"
         b'data: {"type":"message_stop"}\n\n'
     )
 
@@ -1261,11 +1265,13 @@ async def test_dispatch_always_streams_upstream_and_aggregates_for_non_streaming
         "litellm.anthropic.messages.acreate",
         new=AsyncMock(side_effect=fake_acreate),
     ):
-        client_stream, result, requested_model = (
-            await provider._dispatch_anthropic_messages(
-                request_body=body,
-                model_obj=model,
-            )
+        (
+            client_stream,
+            result,
+            requested_model,
+        ) = await provider._dispatch_anthropic_messages(
+            request_body=body,
+            model_obj=model,
         )
 
     # Upstream was streamed regardless of client preference.
@@ -1303,11 +1309,7 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
         "litellm.anthropic.messages.acreate",
         new=AsyncMock(side_effect=fake_acreate),
     ):
-        await provider._dispatch_anthropic_messages(
-            request_body=body, model_obj=model
-        )
+        await provider._dispatch_anthropic_messages(request_body=body, model_obj=model)
 
-    assert captured_kwargs["model"] == (
-        "fireworks_ai/accounts/fireworks/models/glm-5"
-    )
+    assert captured_kwargs["model"] == ("fireworks_ai/accounts/fireworks/models/glm-5")
     assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"

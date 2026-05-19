@@ -29,7 +29,7 @@ class FixedSizeChunker(BaseChunker):
         # 10% overlap is included in the this length
         chunk_overlap: int = int(chunk_size * chunk_overlap_perc)
         super().__init__(chunk_size, chunk_overlap)
-        
+
         logger.info(
             f"Initialized {self.chunker_name} chunker with size={chunk_size}, overlap={self.chunk_overlap}"
         )
@@ -86,5 +86,3 @@ class FixedSizeChunker(BaseChunker):
                 start = self.chunk_size
 
         return chunks
-
-   

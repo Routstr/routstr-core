@@ -22,7 +22,7 @@ def test_annotate_event_extracts_costs() -> None:
     """Each event should report its own costs."""
     event = {
         "type": "content_block_start",
-        "usage": {"total_cost": 0.010, "input_cost": 0.008, "output_cost": 0.002}
+        "usage": {"total_cost": 0.010, "input_cost": 0.008, "output_cost": 0.002},
     }
     result = annotate_event(event, None)
 
@@ -40,21 +40,21 @@ def test_multiple_events_sum_costs() -> None:
     # Event 1: initial costs
     event1 = {
         "type": "message_start",
-        "usage": {"input_tokens": 100, "total_cost": 0.010}
+        "usage": {"input_tokens": 100, "total_cost": 0.010},
     }
     result1 = annotate_event(event1, None)
 
     # Event 2: additional costs
     event2 = {
         "type": "content_block_start",
-        "usage": {"output_tokens": 50, "total_cost": 0.005}
+        "usage": {"output_tokens": 50, "total_cost": 0.005},
     }
     result2 = annotate_event(event2, None)
 
     # Event 3: more costs
     event3 = {
         "type": "message_delta",
-        "usage": {"output_tokens": 25, "total_cost": 0.008}
+        "usage": {"output_tokens": 25, "total_cost": 0.008},
     }
     result3 = annotate_event(event3, None)
 
@@ -83,8 +83,8 @@ def test_tokens_and_costs_extracted_independently() -> None:
             "cache_read_input_tokens": 30,
             "total_cost": 0.007,
             "input_cost": 0.005,
-            "output_cost": 0.002
-        }
+            "output_cost": 0.002,
+        },
     }
     result = annotate_event(event, None)
 
@@ -110,9 +110,9 @@ def test_cost_extracted_from_message_usage() -> None:
                 "input_tokens": 100,
                 "total_cost": 0.010,
                 "input_cost": 0.008,
-                "output_cost": 0.002
+                "output_cost": 0.002,
             }
-        }
+        },
     }
     result = annotate_event(event, None)
 
@@ -132,7 +132,7 @@ def test_cost_extracted_from_event_root() -> None:
         "type": "content_block_delta",
         "usage": {"output_tokens": 25},
         "total_cost": 0.005,  # ← At root level
-        "cost": 0.005
+        "cost": 0.005,
     }
     result = annotate_event(event, None)
 
@@ -151,8 +151,8 @@ def test_cost_details_extracted_from_event_root() -> None:
         "cost_details": {
             "total_cost": 0.015,
             "input_cost": 0.010,
-            "output_cost": 0.005
-        }
+            "output_cost": 0.005,
+        },
     }
     result = annotate_event(event, None)
 
@@ -173,8 +173,8 @@ def test_annotate_event_no_duplicate_lookups() -> None:
         "cost_details": {
             "total_cost": 0.020,
             "input_cost": 0.015,
-            "output_cost": 0.005
-        }
+            "output_cost": 0.005,
+        },
     }
     result = annotate_event(event, None)
 
@@ -190,10 +190,7 @@ def test_annotate_event_no_duplicate_lookups() -> None:
 @pytest.mark.unit
 def test_model_extracted_from_event() -> None:
     """Model name should be extracted from event."""
-    event = {
-        "type": "message_start",
-        "message": {"model": "claude-3-5-sonnet"}
-    }
+    event = {"type": "message_start", "message": {"model": "claude-3-5-sonnet"}}
     result = annotate_event(event, None)
 
     assert result.model == "claude-3-5-sonnet"
@@ -205,10 +202,7 @@ def test_model_extracted_from_event() -> None:
 @pytest.mark.unit
 def test_model_name_override() -> None:
     """Requested model should override actual model in event."""
-    event = {
-        "type": "message_start",
-        "message": {"model": "actual-model"}
-    }
+    event = {"type": "message_start", "message": {"model": "actual-model"}}
     # Override with requested_model
     result = annotate_event(event, requested_model="alias-model")
 
@@ -226,13 +220,16 @@ def test_sse_bytes_encoded() -> None:
     event = {
         "type": "content_block_start",
         "index": 0,
-        "content_block": {"type": "text", "text": ""}
+        "content_block": {"type": "text", "text": ""},
     }
     result = annotate_event(event, None)
 
     assert result.sse_bytes is not None
     assert isinstance(result.sse_bytes, bytes)
-    assert b"event: content_block_start" in result.sse_bytes or b"data:" in result.sse_bytes
+    assert (
+        b"event: content_block_start" in result.sse_bytes
+        or b"data:" in result.sse_bytes
+    )
 
 
 # ============================================================================
@@ -243,7 +240,7 @@ def test_missing_cost_fields_default_to_zero() -> None:
     """When cost fields are missing, should default to 0.0."""
     event = {
         "type": "content_block_delta",
-        "usage": {"output_tokens": 25}
+        "usage": {"output_tokens": 25},
         # No cost fields
     }
     result = annotate_event(event, None)
@@ -265,8 +262,8 @@ def test_cache_tokens_extracted_from_event() -> None:
             "input_tokens": 100,
             "output_tokens": 50,
             "cache_read_input_tokens": 200,
-            "cache_creation_input_tokens": 0
-        }
+            "cache_creation_input_tokens": 0,
+        },
     }
     result = annotate_event(event, None)
 
@@ -288,7 +285,7 @@ def test_malformed_cost_values_coerced() -> None:
             "input_tokens": 100,
             "output_tokens": 50,
             "total_cost": "invalid",  # ← Non-numeric
-        }
+        },
     }
     result = annotate_event(event, None)
 
@@ -307,8 +304,8 @@ def test_negative_cost_values_clamped() -> None:
         "usage": {
             "input_tokens": 100,
             "output_tokens": 50,
-            "total_cost": -0.05  # ← Negative
-        }
+            "total_cost": -0.05,  # ← Negative
+        },
     }
     result = annotate_event(event, None)
 
@@ -322,7 +319,12 @@ def test_negative_cost_values_clamped() -> None:
 @pytest.mark.unit
 def test_event_type_preserved_in_sse() -> None:
     """Event type should be preserved in SSE encoding."""
-    event_types = ["message_start", "content_block_start", "content_block_delta", "message_delta"]
+    event_types = [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "message_delta",
+    ]
     for event_type in event_types:
         event = {"type": event_type}
         result = annotate_event(event, None)
