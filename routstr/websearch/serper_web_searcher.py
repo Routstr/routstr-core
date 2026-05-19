@@ -66,7 +66,7 @@ class SerperWebSearcher(BaseWebSearcher):
             # )
             # ---------------------------------------------------------------
             api_response = await self._call_serper_api(query, max_results)
-            await _save_api_response(api_response, query, "serper")
+            #await _save_api_response(api_response, query, "serper")
             # ---------------------------------------------------------------
 
             return self._map_to_search_result(api_response, query)

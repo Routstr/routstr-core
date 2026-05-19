@@ -78,9 +78,9 @@ class ExaWebRAG(BaseWebRAG):
             # "exa_what_is_the_latest_news_about_the_Donald_Trump_peace_deal_Which_websites_did_you_search_be_brief_20251219_163302.json"
             # exa_what_is_the_state_of_the_US_jobmarket_currently_Which_websites_did_you_search_be_brief_20251223_145745.json
             # )
-            # ---------------------------------------------------------------
+            # ---------------------
             api_response = await self._call_exa_api(query, max_results)
-            await _save_api_response(api_response, query, "exa")
+            # await _save_api_response(api_response, query, "exa")
             # ---------------------------------------------------------------
 
             total_ms = int((datetime.now() - start_time).total_seconds() * 1000)
