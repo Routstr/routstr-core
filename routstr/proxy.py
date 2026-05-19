@@ -162,6 +162,7 @@ _API_PATH_PREFIXES = (
     "images/",
     "moderations",
     "providers",
+    "tee/",
 )
 
 
@@ -181,6 +182,40 @@ async def proxy(
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
     request_body_dict = parse_request_body_json(request_body, path)
+
+    # /tee/* GET requests (e.g. attestation) don't map to models — just
+    # forward to all enabled upstreams without model/cost/auth lookups.
+    if request.method == "GET" and path.startswith("tee/"):
+        all_upstreams = _upstreams
+        last_error_response = None
+        for i, upstream in enumerate(all_upstreams):
+            try:
+                headers = upstream.prepare_headers(dict(request.headers))
+                response = await upstream.forward_get_request(request, path, headers)
+                if response.status_code in [502, 429] and i < len(all_upstreams) - 1:
+                    logger.warning(
+                        "Upstream %s returned %s for tee GET %s, trying next",
+                        upstream.provider_type,
+                        response.status_code,
+                        path,
+                    )
+                    continue
+                return response
+            except UpstreamError as e:
+                logger.warning(
+                    "Upstream %s failed for tee GET %s: %s",
+                    upstream.provider_type,
+                    path,
+                    e,
+                )
+                if i == len(all_upstreams) - 1:
+                    last_error_response = create_error_response(
+                        "upstream_error", str(e), 502, request=request
+                    )
+                continue
+        return last_error_response or create_error_response(
+            "upstream_error", "All upstreams failed", 502, request=request
+        )
 
     if is_responses_api:
         model_id = extract_model_from_responses_request(request_body_dict)
