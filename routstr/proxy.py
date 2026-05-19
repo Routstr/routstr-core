@@ -1,9 +1,8 @@
 import json
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
 
 from .algorithm import create_model_mappings
@@ -18,6 +17,7 @@ from .core.db import (
     get_session,
 )
 from .core.exceptions import UpstreamError
+from .core.not_found import build_not_found_response
 from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
@@ -151,49 +151,30 @@ async def refresh_model_maps_periodically() -> None:
             )
 
 
-_API_PATH_PREFIXES = ("v1/", "responses")
-
-_NOT_FOUND_HTML_FILE = Path(__file__).parent.parent / "ui_out" / "404.html"
-
-
-def _read_not_found_html() -> str | None:
-    try:
-        return _NOT_FOUND_HTML_FILE.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-
-_NOT_FOUND_HTML: str | None = _read_not_found_html()
-
-
-def _build_not_found_response(request: Request, path: str) -> Response:
-    """Return a 404 for unknown paths."""
-    accept = request.headers.get("accept", "").lower()
-    prefers_json = "application/json" in accept and "text/html" not in accept
-    request_id = getattr(request.state, "request_id", "unknown")
-
-    if not prefers_json and _NOT_FOUND_HTML is not None:
-        return HTMLResponse(content=_NOT_FOUND_HTML, status_code=404)
-
-    return JSONResponse(
-        status_code=404,
-        content={
-            "error": {
-                "message": f"Path '/{path}' not found",
-                "type": "not_found",
-                "code": 404,
-            },
-            "request_id": request_id,
-        },
-    )
+_API_PATH_PREFIXES = (
+    "v1/",
+    "responses",
+    "chat/",
+    "completions",
+    "models",
+    "embeddings",
+    "audio/",
+    "images/",
+    "moderations",
+    "providers",
+)
 
 
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
 ) -> Response | StreamingResponse:
-    if not path.startswith(_API_PATH_PREFIXES):
-        return _build_not_found_response(request, path)
+    # GET requests must hit a known API prefix; otherwise return a 404 (HTML
+    # for browsers, JSON for API clients). POST requests are always forwarded
+    # so that OpenAI-style endpoints work with or without the `v1/` prefix
+    # (e.g. `/chat/completions` as well as `/v1/chat/completions`).
+    if request.method == "GET" and not path.startswith(_API_PATH_PREFIXES):
+        return build_not_found_response(request, path)
 
     headers = dict(request.headers)
 
@@ -251,7 +232,15 @@ async def proxy(
                     )
             except UpstreamError as e:
                 logger.warning(
-                    f"Upstream {upstream.provider_type} failed (x-cashu): {e}"
+                    "Upstream %s failed (x-cashu) for model=%s: %s",
+                    upstream.provider_type,
+                    model_id,
+                    e,
+                    extra={
+                        "provider": upstream.provider_type,
+                        "model": model_id,
+                        "status_code": e.status_code,
+                    },
                 )
                 if i == len(upstreams) - 1:
                     last_error = e
@@ -396,10 +385,14 @@ async def proxy(
                     )
 
                     logger.warning(
-                        f"Upstream {upstream.provider_type} returned {response.status_code}, trying next provider",
+                        "Upstream %s returned %s for model=%s, trying next provider",
+                        upstream.provider_type,
+                        response.status_code,
+                        model_id,
                         extra={
                             "status_code": response.status_code,
-                            "upstream": upstream.provider_type,
+                            "provider": upstream.provider_type,
+                            "model": model_id,
                         },
                     )
                     continue
@@ -407,16 +400,20 @@ async def proxy(
                 # 4xx error (user error), or other non-retryable error, or last provider failed
                 await revert_pay_for_request(key, session, max_cost_for_model)
                 logger.warning(
-                    "Upstream request failed, revert payment",
+                    "Upstream request failed, revert payment "
+                    "(provider=%s model=%s status=%s path=%s)",
+                    upstream.provider_type,
+                    model_id,
+                    response.status_code,
+                    path,
                     extra={
                         "status_code": response.status_code,
                         "path": path,
+                        "provider": upstream.provider_type,
+                        "model": model_id,
                         "key_hash": key.hashed_key[:8] + "...",
                         "key_balance": key.balance,
                         "max_cost_for_model": max_cost_for_model,
-                        "upstream_headers": response.headers
-                        if hasattr(response, "headers")
-                        else None,
                     },
                 )
                 return response
@@ -425,8 +422,16 @@ async def proxy(
 
         except UpstreamError as e:
             logger.warning(
-                f"Upstream {upstream.provider_type} failed: {e}",
-                extra={"retry": i < len(upstreams) - 1},
+                "Upstream %s failed for model=%s: %s",
+                upstream.provider_type,
+                model_id,
+                e,
+                extra={
+                    "provider": upstream.provider_type,
+                    "model": model_id,
+                    "status_code": e.status_code,
+                    "retry": i < len(upstreams) - 1,
+                },
             )
 
             # If this was the last provider

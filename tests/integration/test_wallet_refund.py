@@ -372,17 +372,17 @@ async def test_refund_rejects_concurrent_topup_on_same_key(
     topup_amount_sat = 500
     topup_token = await testmint_wallet.mint_tokens(topup_amount_sat)
 
-    validate_called = asyncio.Event()
+    key_looked_up = asyncio.Event()
     allow_refund_to_continue = asyncio.Event()
-    original_validate_bearer_key = balance_module.validate_bearer_key
+    original_lookup = balance_module._lookup_key_no_create
     delayed_once = False
 
-    async def delayed_validate_bearer_key(*args: Any, **kwargs: Any) -> ApiKey:
+    async def delayed_lookup_key_no_create(*args: Any, **kwargs: Any) -> ApiKey | None:
         nonlocal delayed_once
-        key = await original_validate_bearer_key(*args, **kwargs)
-        if not delayed_once:
+        key = await original_lookup(*args, **kwargs)
+        if not delayed_once and key is not None:
             delayed_once = True
-            validate_called.set()
+            key_looked_up.set()
             await allow_refund_to_continue.wait()
         return key
 
@@ -390,7 +390,7 @@ async def test_refund_rejects_concurrent_topup_on_same_key(
         return await authenticated_client.post("/v1/wallet/refund")
 
     async def issue_topup() -> Any:
-        await validate_called.wait()
+        await key_looked_up.wait()
         try:
             return await authenticated_client.post(
                 "/v1/wallet/topup", params={"cashu_token": topup_token}
@@ -398,7 +398,9 @@ async def test_refund_rejects_concurrent_topup_on_same_key(
         finally:
             allow_refund_to_continue.set()
 
-    with patch("routstr.balance.validate_bearer_key", new=delayed_validate_bearer_key):
+    with patch(
+        "routstr.balance._lookup_key_no_create", new=delayed_lookup_key_no_create
+    ):
         refund_response, topup_response = await asyncio.gather(
             issue_refund(), issue_topup()
         )

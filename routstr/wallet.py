@@ -58,17 +58,56 @@ async def recieve_token(
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
     """Internal send function - returns amount and serialized token"""
-    wallet: Wallet = await get_wallet(mint_url or settings.primary_mint, unit)
-    proofs = get_proofs_per_mint_and_unit(
-        wallet, mint_url or settings.primary_mint, unit
+    effective_mint_url = mint_url or settings.primary_mint
+    wallet: Wallet = await get_wallet(effective_mint_url, unit)
+    proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+    proofs_for_mint = sum(p.amount for p in proofs)
+
+    # Fallback: proofs from untrusted source mints are swapped to primary_mint
+    # during receive, so the user's preferred refund_mint_url may have no proofs
+    # even though the global wallet has the balance.
+    if proofs_for_mint < amount and effective_mint_url != settings.primary_mint:
+        logger.info(
+            f"send: insufficient proofs at {effective_mint_url} "
+            f"(have {proofs_for_mint}, need {amount}), falling back to primary_mint={settings.primary_mint}"
+        )
+        effective_mint_url = settings.primary_mint
+        wallet = await get_wallet(effective_mint_url, unit)
+        proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+        proofs_for_mint = sum(p.amount for p in proofs)
+
+    all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
+    proof_summary = {
+        f"{k.mint_url}/{k.unit.name}": sum(p.amount for p in wallet.proofs if p.id == k.id)
+        for k in wallet.keysets.values()
+    }
+    # Show ALL proofs in DB by keyset_id, regardless of whether the loaded wallet
+    # knows about that keyset. This reveals proofs orphaned under stale keysets.
+    raw_proofs_by_keyset: dict[str, int] = {}
+    for p in wallet.proofs:
+        raw_proofs_by_keyset[p.id] = raw_proofs_by_keyset.get(p.id, 0) + p.amount
+    logger.info(
+        f"send: proof inventory | mint={effective_mint_url} unit={unit} amount={amount} "
+        f"primary_mint={settings.primary_mint} proofs_for_mint={proofs_for_mint} "
+        f"all_mints={all_mint_urls} by_keyset={proof_summary} "
+        f"raw_proofs_by_keyset_id={raw_proofs_by_keyset} "
+        f"total_wallet_proofs={sum(p.amount for p in wallet.proofs)}"
     )
 
+    # Reserve proofs only after serialization succeeds — if serialize_proofs or
+    # swap_to_send fails mid-way, proofs stay unreserved so dashboard balance
+    # doesn't go negative.
     send_proofs, _ = await wallet.select_to_send(
-        proofs, amount, set_reserved=True, include_fees=False
+        proofs, amount, set_reserved=False, include_fees=False
     )
-    token = await wallet.serialize_proofs(
-        send_proofs, include_dleq=False, legacy=False, memo=None
-    )
+    try:
+        token = await wallet.serialize_proofs(
+            send_proofs, include_dleq=False, legacy=False, memo=None
+        )
+    except Exception:
+        await wallet.set_reserved_for_send(send_proofs, reserved=False)
+        raise
+    await wallet.set_reserved_for_send(send_proofs, reserved=True)
     return amount, token
 
 
@@ -83,10 +122,11 @@ async def _calculate_swap_amount(
     token_mint_url: str,
     token_wallet: Wallet,
     primary_wallet: Wallet,
+    proofs: list,
 ) -> int:
     """
     Calculate the amount to mint on the primary mint after accounting for
-    potential swap fees (melt fees) on the foreign mint.
+    melt fees and NUT-02 input fees on the foreign mint.
     """
     if settings.primary_mint_unit == "sat":
         receive_amount = amount_msat // 1000
@@ -113,10 +153,11 @@ async def _calculate_swap_amount(
         dummy_melt_quote = await token_wallet.melt_quote(dummy_mint_quote.request)
 
         fee_reserve = dummy_melt_quote.fee_reserve
+        input_fees = token_wallet.get_fees_for_proofs(proofs)
         if token_unit == "sat":
-            fee_msat = fee_reserve * 1000
+            fee_msat = (fee_reserve + input_fees) * 1000
         else:
-            fee_msat = fee_reserve
+            fee_msat = fee_reserve + input_fees
 
         amount_msat_after_fee = amount_msat - fee_msat
 
@@ -126,13 +167,14 @@ async def _calculate_swap_amount(
             minted_amount = int(amount_msat_after_fee)
 
         if minted_amount <= 0:
-            raise ValueError(f"Fees ({fee_reserve} {token_unit}) exceed token amount")
+            raise ValueError(f"Fees ({fee_reserve + input_fees} {token_unit}) exceed token amount")
 
         logger.info(
             "swap_to_primary_mint: fee estimation result",
             extra={
                 "token_amount_sat": amount_msat // 1000,
                 "estimated_fee_sat": fee_msat // 1000,
+                "input_fees": input_fees,
                 "minted_amount": minted_amount,
                 "minted_unit": settings.primary_mint_unit,
             },
@@ -193,6 +235,7 @@ async def swap_to_primary_mint(
         token_obj.mint,
         token_wallet,
         primary_wallet,
+        token_obj.proofs,
     )
 
     mint_quote = await primary_wallet.request_mint(minted_amount)
@@ -202,13 +245,15 @@ async def swap_to_primary_mint(
     )
 
     melt_quote = await token_wallet.melt_quote(mint_quote.request)
-    total_needed = melt_quote.amount + melt_quote.fee_reserve
+    input_fees = token_wallet.get_fees_for_proofs(token_obj.proofs)
+    total_needed = melt_quote.amount + melt_quote.fee_reserve + input_fees
     logger.info(
         "swap_to_primary_mint: melt quote received",
         extra={
             "melt_quote_id": melt_quote.quote,
             "melt_amount": melt_quote.amount,
             "melt_fee_reserve": melt_quote.fee_reserve,
+            "input_fees": input_fees,
             "total_needed": total_needed,
             "token_amount": token_amount,
         },
@@ -221,6 +266,7 @@ async def swap_to_primary_mint(
                 "token_amount": token_amount,
                 "melt_amount": melt_quote.amount,
                 "melt_fee_reserve": melt_quote.fee_reserve,
+                "input_fees": input_fees,
                 "total_needed": total_needed,
                 "shortfall": total_needed - token_amount,
             },
@@ -228,7 +274,7 @@ async def swap_to_primary_mint(
         raise ValueError(
             f"Token amount ({token_amount} {token_obj.unit}) is insufficient to cover "
             f"melt fees. Needed: {total_needed} {token_obj.unit} "
-            f"(amount: {melt_quote.amount} + fee: {melt_quote.fee_reserve})"
+            f"(amount: {melt_quote.amount} + fee: {melt_quote.fee_reserve} + input_fees: {input_fees})"
         )
 
     try:
@@ -259,19 +305,66 @@ async def swap_to_primary_mint(
         extra={"minted_amount": minted_amount, "mint_quote_id": mint_quote.quote},
     )
 
+    await primary_wallet.load_proofs(reload=True)
+    pre_mint_balance = primary_wallet.available_balance.amount
     try:
         _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
     except Exception as e:
-        logger.error(
-            "swap_to_primary_mint: mint on primary failed after successful melt",
-            extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "minted_amount": minted_amount,
-                "mint_quote_id": mint_quote.quote,
-            },
-        )
-        raise
+        if "11003" in str(e) or "outputs already signed" in str(e).lower():
+            # Previous mint call signed outputs at the mint but failed before
+            # bump_secret_derivation ran locally. Recover orphaned proofs and
+            # advance the counter so the next request derives fresh secrets.
+            logger.warning(
+                "swap_to_primary_mint: outputs already signed — recovering orphaned proofs",
+                extra={"mint_quote_id": mint_quote.quote, "minted_amount": minted_amount},
+            )
+            try:
+                for keyset_id in primary_wallet.keysets:
+                    await primary_wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
+                await primary_wallet.load_proofs(reload=True)
+                post_recovery_balance = primary_wallet.available_balance.amount
+                balance_gained = post_recovery_balance - pre_mint_balance
+                logger.info(
+                    "swap_to_primary_mint: recovery scan completed",
+                    extra={
+                        "pre_mint_balance": pre_mint_balance,
+                        "post_recovery_balance": post_recovery_balance,
+                        "balance_gained": balance_gained,
+                        "expected": minted_amount,
+                    },
+                )
+                if balance_gained < minted_amount:
+                    # Recovery scan ran but did NOT restore the orphaned proofs
+                    # (mint reports them as spent — they're stuck). Refuse to
+                    # credit the API key balance for proofs we don't actually hold.
+                    raise ValueError(
+                        f"Swap recovery failed: mint signed outputs but proofs are "
+                        f"unrecoverable (mint reports them spent). "
+                        f"Expected {minted_amount}, recovered {balance_gained}. "
+                        f"Local wallet DB ('.wallet/') state is corrupted — "
+                        f"the counter for keyset is stuck at a bad index range."
+                    )
+            except ValueError:
+                raise
+            except Exception as recovery_err:
+                logger.error(
+                    "swap_to_primary_mint: recovery failed",
+                    extra={"error": str(recovery_err)},
+                )
+                raise ValueError(
+                    f"Mint on primary failed and recovery unsuccessful: {e}"
+                ) from e
+        else:
+            logger.error(
+                "swap_to_primary_mint: mint on primary failed after successful melt",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "minted_amount": minted_amount,
+                    "mint_quote_id": mint_quote.quote,
+                },
+            )
+            raise
 
     logger.info(
         "swap_to_primary_mint: completed successfully",
@@ -445,7 +538,7 @@ async def fetch_all_balances(
                 "unit": unit,
                 "wallet_balance": proofs_balance,
                 "user_balance": user_balance,
-                "owner_balance": proofs_balance - user_balance,
+                "owner_balance": proofs_balance - user_balance if proofs_balance != 0 else 0,
             }
             return result
         except Exception as e:
@@ -493,7 +586,9 @@ async def fetch_all_balances(
             total_wallet_balance_sats += proofs_balance_sats
             total_user_balance_sats += user_balance_sats
 
-    owner_balance = total_wallet_balance_sats - total_user_balance_sats
+    owner_balance = 0
+    if total_wallet_balance_sats != 0:
+        owner_balance = total_wallet_balance_sats - total_user_balance_sats
 
     return (
         balance_details,

@@ -196,6 +196,22 @@ class BaseUpstreamProvider:
             except (TypeError, ValueError):
                 pass
 
+    def _apply_provider_field(self, response_json: object) -> None:
+        """Stamp the routstr ``provider`` field onto an upstream response payload.
+
+        Format is ``"<provider_type>:<upstream_provider>"`` when the upstream
+        already reported its own provider (e.g. OpenRouter returns
+        ``"provider": "Fireworks"``), otherwise just ``"<provider_type>"``
+        for direct upstreams.
+        """
+        if not isinstance(response_json, dict):
+            return
+        existing = response_json.get("provider")
+        if isinstance(existing, str) and existing.strip():
+            response_json["provider"] = f"{self.provider_type}:{existing.strip()}"
+        else:
+            response_json["provider"] = self.provider_type
+
     def inject_cost_metadata(
         self,
         response_json: dict,
@@ -203,6 +219,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
     ) -> None:
         """Unifies the injection of cost and usage metadata across all completion types."""
+        self._apply_provider_field(response_json)
         if isinstance(cost_data, dict):
             total_msats = cost_data.get("total_msats", 0)
             total_usd = cost_data.get("total_usd", 0.0)
@@ -532,7 +549,11 @@ class BaseUpstreamProvider:
         pass
 
     async def forward_upstream_error_response(
-        self, request: Request, path: str, upstream_response: httpx.Response
+        self,
+        request: Request,
+        path: str,
+        upstream_response: httpx.Response,
+        model_id: str | None = None,
     ) -> Response:
         """Log upstream errors and forward the response in a JSON envelope."""
         status_code = upstream_response.status_code
@@ -559,10 +580,16 @@ class BaseUpstreamProvider:
         is_json_body = _is_json_content_type(content_type)
 
         logger.warning(
-            "Forwarding upstream error response",
+            "Upstream %s returned %s for model=%s path=%s: %s",
+            self.provider_type,
+            status_code,
+            model_id or "unknown",
+            path,
+            (message or body_preview or "<empty>")[:300],
             extra={
                 "path": path,
                 "provider": self.provider_type,
+                "model": model_id or "unknown",
                 "upstream_status": status_code,
                 "upstream_code": upstream_code,
                 "upstream_content_type": content_type,
@@ -655,7 +682,7 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
-        logger.info(
+        logger.debug(
             "Processing streaming chat completion",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
@@ -735,6 +762,7 @@ class BaseUpstreamProvider:
                             ):
                                 obj = json.loads(part)
                                 if isinstance(obj, dict):
+                                    self._apply_provider_field(obj)
                                     if obj.get("model"):
                                         last_model_seen = str(obj.get("model"))
                                     if requested_model:
@@ -891,7 +919,7 @@ class BaseUpstreamProvider:
         Returns:
             Response with cost data added to JSON body
         """
-        logger.info(
+        logger.debug(
             "Processing non-streaming chat completion",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
@@ -905,6 +933,7 @@ class BaseUpstreamProvider:
             content = await response.aread()
             # TODO: rename to response_data, in line with auth/adjust_payment_for_tokens
             response_json = json.loads(content)
+            self._apply_provider_field(response_json)
 
             logger.debug(
                 "Parsed response JSON",
@@ -959,7 +988,7 @@ class BaseUpstreamProvider:
             if web_context.sources:
                 response_json["sources"] = web_context.sources
 
-            logger.info(
+            logger.debug(
                 "Payment adjustment completed for non-streaming",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
@@ -1037,7 +1066,7 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
-        logger.info(
+        logger.debug(
             "Processing streaming Responses API completion",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
@@ -1094,6 +1123,7 @@ class BaseUpstreamProvider:
                         try:
                             obj = json.loads(part)
                             if isinstance(obj, dict):
+                                self._apply_provider_field(obj)
                                 if obj.get("model"):
                                     last_model_seen = str(obj.get("model"))
                                 if requested_model:
@@ -1273,7 +1303,7 @@ class BaseUpstreamProvider:
         Returns:
             Response with cost data added to JSON body
         """
-        logger.info(
+        logger.debug(
             "Processing non-streaming Responses API completion",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
@@ -1286,6 +1316,7 @@ class BaseUpstreamProvider:
         try:
             content = await response.aread()
             response_json = json.loads(content)
+            self._apply_provider_field(response_json)
 
             logger.debug(
                 "Parsed Responses API response JSON",
@@ -1344,7 +1375,7 @@ class BaseUpstreamProvider:
             response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
             response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
 
-            logger.info(
+            logger.debug(
                 "Payment adjustment completed for non-streaming Responses API",
                 extra={
                     "key_hash": key.hashed_key[:8] + "...",
@@ -1425,7 +1456,7 @@ class BaseUpstreamProvider:
                     session,
                     max_cost,
                 )
-                logger.info(
+                logger.debug(
                     "Finalized generic streaming payment in background",
                     extra={
                         "path": path,
@@ -1543,6 +1574,11 @@ class BaseUpstreamProvider:
                                         if msg and msg.get("model"):
                                             last_model_seen = str(msg.get("model"))
 
+                                        provider_added = (
+                                            "provider" not in data
+                                        )
+                                        self._apply_provider_field(data)
+
                                         if requested_model:
                                             # Apply requested_model override
                                             model_updated = False
@@ -1553,9 +1589,12 @@ class BaseUpstreamProvider:
                                                 data["model"] = requested_model
                                                 model_updated = True
 
-                                            if model_updated:
+                                            if model_updated or provider_added:
                                                 line = "data: " + json.dumps(data)
                                                 changed = True
+                                        elif provider_added:
+                                            line = "data: " + json.dumps(data)
+                                            changed = True
 
                                         if usage := msg.get("usage"):
                                             input_tokens += usage.get("input_tokens", 0)
@@ -1895,6 +1934,7 @@ class BaseUpstreamProvider:
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
+        self._apply_provider_field(response_json)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
 
@@ -2311,15 +2351,15 @@ class BaseUpstreamProvider:
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
 
-        logger.info(
+        logger.debug(
             "Forwarding request to upstream",
             extra={
                 "url": url,
                 "method": request.method,
                 "path": path,
+                "model": original_model_id or "unknown",
+                "provider": self.provider_type,
                 "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "has_request_body": request_body is not None,
             },
         )
         client = httpx.AsyncClient(
@@ -2351,40 +2391,42 @@ class BaseUpstreamProvider:
                 )
 
             if response.status_code != 200:
-                logger.error(
-                    "Received upstream response",
-                    extra={
-                        "reason_phrase": response.reason_phrase,
-                        "status_code": response.status_code,
-                        "path": path,
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "content_type": response.headers.get("content-type", "unknown"),
-                    },
-                )
-            else:
-                logger.info(
-                    "Received upstream response",
-                    extra={
-                        "reason_phrase": response.reason_phrase,
-                        "status_code": response.status_code,
-                        "path": path,
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "content_type": response.headers.get("content-type", "unknown"),
-                    },
-                )
-
-            if response.status_code != 200:
                 if response.status_code >= 500:
+                    try:
+                        body_bytes = await response.aread()
+                    except Exception:
+                        body_bytes = b""
+                    body_preview = body_bytes.decode(
+                        "utf-8", errors="ignore"
+                    ).strip()[:500]
+                    logger.error(
+                        "Upstream %s returned %s for model=%s path=%s: %s",
+                        self.provider_type,
+                        response.status_code,
+                        original_model_id or "unknown",
+                        path,
+                        body_preview or "<empty>",
+                        extra={
+                            "provider": self.provider_type,
+                            "model": original_model_id or "unknown",
+                            "status_code": response.status_code,
+                            "reason_phrase": response.reason_phrase,
+                            "path": path,
+                            "body_preview": body_preview,
+                        },
+                    )
                     await response.aclose()
                     await client.aclose()
                     raise UpstreamError(
-                        f"Upstream returned status {response.status_code}",
+                        f"Upstream {self.provider_type} returned {response.status_code} "
+                        f"for model {original_model_id or 'unknown'}: "
+                        f"{body_preview[:200] or '<empty>'}",
                         status_code=response.status_code,
                     )
 
                 try:
                     mapped_error = await self.forward_upstream_error_response(
-                        request, path, response
+                        request, path, response, model_id=original_model_id
                     )
                 finally:
                     await response.aclose()
@@ -2638,15 +2680,15 @@ class BaseUpstreamProvider:
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
 
-        logger.info(
+        logger.debug(
             "Forwarding Responses API request to upstream",
             extra={
                 "url": url,
                 "method": request.method,
                 "path": path,
+                "model": original_model_id or "unknown",
+                "provider": self.provider_type,
                 "key_hash": key.hashed_key[:8] + "...",
-                "key_balance": key.balance,
-                "has_request_body": request_body is not None,
             },
         )
 
@@ -2679,28 +2721,42 @@ class BaseUpstreamProvider:
                     stream=True,
                 )
 
-            logger.info(
-                "Received upstream Responses API response",
-                extra={
-                    "status_code": response.status_code,
-                    "path": path,
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "content_type": response.headers.get("content-type", "unknown"),
-                },
-            )
-
             if response.status_code != 200:
                 if response.status_code >= 500:
+                    try:
+                        body_bytes = await response.aread()
+                    except Exception:
+                        body_bytes = b""
+                    body_preview = body_bytes.decode(
+                        "utf-8", errors="ignore"
+                    ).strip()[:500]
+                    logger.error(
+                        "Upstream %s returned %s for model=%s path=%s: %s",
+                        self.provider_type,
+                        response.status_code,
+                        original_model_id or "unknown",
+                        path,
+                        body_preview or "<empty>",
+                        extra={
+                            "provider": self.provider_type,
+                            "model": original_model_id or "unknown",
+                            "status_code": response.status_code,
+                            "path": path,
+                            "body_preview": body_preview,
+                        },
+                    )
                     await response.aclose()
                     await client.aclose()
                     raise UpstreamError(
-                        f"Upstream returned status {response.status_code}",
+                        f"Upstream {self.provider_type} returned {response.status_code} "
+                        f"for model {original_model_id or 'unknown'}: "
+                        f"{body_preview[:200] or '<empty>'}",
                         status_code=response.status_code,
                     )
 
                 try:
                     mapped_error = await self.forward_upstream_error_response(
-                        request, path, response
+                        request, path, response, model_id=original_model_id
                     )
                 finally:
                     await response.aclose()
@@ -2847,9 +2903,14 @@ class BaseUpstreamProvider:
         path = self.normalize_request_path(path)
         url = self.build_request_url(path)
 
-        logger.info(
+        logger.debug(
             "Forwarding GET request to upstream",
-            extra={"url": url, "method": request.method, "path": path},
+            extra={
+                "url": url,
+                "method": request.method,
+                "path": path,
+                "provider": self.provider_type,
+            },
         )
 
         async with httpx.AsyncClient(
@@ -2867,9 +2928,13 @@ class BaseUpstreamProvider:
                     ),
                 )
 
-                logger.info(
-                    "GET request forwarded successfully",
-                    extra={"path": path, "status_code": response.status_code},
+                logger.debug(
+                    "GET request forwarded",
+                    extra={
+                        "path": path,
+                        "status_code": response.status_code,
+                        "provider": self.provider_type,
+                    },
                 )
                 if response.status_code != 200:
                     try:
@@ -3105,7 +3170,7 @@ class BaseUpstreamProvider:
 
         usage_data = None
         model = None
-        cost_data = None
+        cost_data: CostData | MaxCostData | None = None
 
         lines = content_str.strip().split("\n")
         for line in lines:
@@ -3165,7 +3230,7 @@ class BaseUpstreamProvider:
                         raise ValueError(f"Invalid unit: {unit}")
 
                     if refund_amount > 0:
-                        logger.info(
+                        logger.debug(
                             "Processing refund for streaming response",
                             extra={
                                 "original_amount": amount,
@@ -3216,18 +3281,29 @@ class BaseUpstreamProvider:
                     },
                 )
 
-        if cost_data:
-            for i, line in enumerate(lines):
-                if line.startswith("data: "):
-                    try:
-                        data_json = json.loads(line[6:])
-                        if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = (
-                                cost_data.total_msats // 1000
-                            )
-                            lines[i] = "data: " + json.dumps(data_json)
-                    except json.JSONDecodeError:
-                        pass
+        for i, line in enumerate(lines):
+            if line.startswith("data: "):
+                try:
+                    data_json = json.loads(line[6:])
+                    if not isinstance(data_json, dict):
+                        continue
+                    changed = False
+                    if "provider" not in data_json:
+                        self._apply_provider_field(data_json)
+                        changed = True
+                    if (
+                        cost_data
+                        and "usage" in data_json
+                        and data_json["usage"]
+                    ):
+                        data_json["usage"]["cost_sats"] = (
+                            cost_data.total_msats // 1000
+                        )
+                        changed = True
+                    if changed:
+                        lines[i] = "data: " + json.dumps(data_json)
+                except json.JSONDecodeError:
+                    pass
 
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
@@ -3280,6 +3356,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
+            self._apply_provider_field(response_json)
 
             # Add web_search_executed flag when websearch was executed
             if web_context.executed:
@@ -3326,7 +3403,7 @@ class BaseUpstreamProvider:
             else:
                 raise ValueError(f"Invalid unit: {unit}")
 
-            logger.info(
+            logger.debug(
                 "Processing non-streaming response cost calculation",
                 extra={
                     "original_amount": amount,
@@ -3738,7 +3815,7 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with refund if applicable
         """
-        logger.info(
+        logger.debug(
             "Processing X-Cashu payment for Responses API",
             extra={
                 "path": path,
@@ -4191,7 +4268,7 @@ class BaseUpstreamProvider:
                         raise ValueError(f"Invalid unit: {unit}")
 
                     if refund_amount > 0:
-                        logger.info(
+                        logger.debug(
                             "Processing refund for streaming Responses API response",
                             extra={
                                 "original_amount": amount,
@@ -4243,18 +4320,29 @@ class BaseUpstreamProvider:
                     },
                 )
 
-        if cost_data:
-            for i, line in enumerate(lines):
-                if line.startswith("data: "):
-                    try:
-                        data_json = json.loads(line[6:])
-                        if "usage" in data_json and data_json["usage"]:
-                            data_json["usage"]["cost_sats"] = (
-                                cost_data.total_msats // 1000
-                            )
-                            lines[i] = "data: " + json.dumps(data_json)
-                    except json.JSONDecodeError:
-                        pass
+        for i, line in enumerate(lines):
+            if line.startswith("data: "):
+                try:
+                    data_json = json.loads(line[6:])
+                    if not isinstance(data_json, dict):
+                        continue
+                    changed = False
+                    if "provider" not in data_json:
+                        self._apply_provider_field(data_json)
+                        changed = True
+                    if (
+                        cost_data
+                        and "usage" in data_json
+                        and data_json["usage"]
+                    ):
+                        data_json["usage"]["cost_sats"] = (
+                            cost_data.total_msats // 1000
+                        )
+                        changed = True
+                    if changed:
+                        lines[i] = "data: " + json.dumps(data_json)
+                except json.JSONDecodeError:
+                    pass
 
         async def generate() -> AsyncGenerator[bytes, None]:
             for line in lines:
@@ -4295,6 +4383,7 @@ class BaseUpstreamProvider:
 
         try:
             response_json = json.loads(content_str)
+            self._apply_provider_field(response_json)
             if web_context.executed:
                 response_json["web_search_executed"] = True
             if web_context.sources:
@@ -4340,7 +4429,7 @@ class BaseUpstreamProvider:
             else:
                 raise ValueError(f"Invalid unit: {unit}")
 
-            logger.info(
+            logger.debug(
                 "Processing non-streaming Responses API cost calculation",
                 extra={
                     "original_amount": amount,
@@ -4441,7 +4530,7 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with refund if applicable
         """
-        logger.info(
+        logger.debug(
             "Processing X-Cashu payment request",
             extra={
                 "path": path,

@@ -213,8 +213,20 @@ async def _refund_cache_set(authorization: str, value: dict[str, str]) -> None:
         _refund_cache[key] = (expiry, value)
 
 
+async def _lookup_key_no_create(
+    bearer_value: str, session: AsyncSession
+) -> ApiKey | None:
+    """Look up an existing API key without creating one Used by the refund endpoint"""
+    if bearer_value.startswith("sk-"):
+        return await session.get(ApiKey, bearer_value[3:])
+    if bearer_value.startswith("cashu"):
+        hashed = hashlib.sha256(bearer_value.encode()).hexdigest()
+        return await session.get(ApiKey, hashed)
+    return None
+
+
 async def _restore_balance(
-    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int
+    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int, mint_url: str
 ) -> None:
     """Restore balance after a failed refund mint attempt."""
     restore_stmt = (
@@ -229,7 +241,7 @@ async def _restore_balance(
     await session.commit()
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
-        extra={"hashed_key": hashed_key, "restored_balance": balance},
+        extra={"hashed_key": hashed_key, "restored_balance": balance, "mint_url": mint_url},
     )
 
 
@@ -284,7 +296,12 @@ async def refund_wallet_endpoint(
         )
 
     bearer_value: str = authorization[7:]
-    key: ApiKey = await validate_bearer_key(bearer_value, session)
+    key: ApiKey | None = await _lookup_key_no_create(bearer_value, session)
+    if key is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Key not found. Deposit first via /v1/wallet/create before requesting a refund.",
+        )
 
     if key.total_balance <= 0:
         if cached := await _refund_cache_get(bearer_value):
@@ -339,21 +356,26 @@ async def refund_wallet_endpoint(
         )
 
     # --- MINT: balance is locked at zero, safe to create the refund token ---
+    # Proofs from untrusted mints are swapped to primary_mint on receive.
+    # Use primary_mint unless key.refund_mint_url is an explicitly trusted mint.
+    effective_refund_mint = (
+        key.refund_mint_url
+        if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints
+        else settings.primary_mint
+    )
     try:
         if key.refund_address:
-            from .core.settings import settings as global_settings
-
             await send_to_lnurl(
                 remaining_balance,
                 key.refund_currency or "sat",
-                key.refund_mint_url or global_settings.primary_mint,
+                effective_refund_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}
         else:
             refund_currency = key.refund_currency or "sat"
             token = await send_token(
-                remaining_balance, refund_currency, key.refund_mint_url
+                remaining_balance, refund_currency, effective_refund_mint
             )
             result = {"token": token}
 
@@ -375,25 +397,32 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(
-            session, key.hashed_key, pre_debit_balance, pre_debit_reserved
-        )
+        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(
-            session, key.hashed_key, pre_debit_balance, pre_debit_reserved
-        )
+        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
         error_msg = str(e)
+        logger.error(
+            "refund_wallet_endpoint: mint/send failed",
+            extra={
+                "error": error_msg,
+                "error_type": type(e).__name__,
+                "hashed_key": key.hashed_key,
+                "remaining_balance": remaining_balance,
+                "refund_currency": key.refund_currency,
+                "refund_mint_url": key.refund_mint_url,
+                "has_refund_address": bool(key.refund_address),
+            },
+        )
         if (
             "mint" in error_msg.lower()
             or "connection" in error_msg.lower()
-            or isinstance(e, Exception)
-            and "ConnectError" in str(type(e))
+            or "ConnectError" in str(type(e))
         ):
-            raise HTTPException(status_code=503, detail="Mint service unavailable")
+            raise HTTPException(status_code=503, detail=f"Mint service unavailable: {error_msg}")
         else:
-            raise HTTPException(status_code=500, detail="Refund failed")
+            raise HTTPException(status_code=500, detail=f"Refund failed: {error_msg}")
 
     await _refund_cache_set(bearer_value, result)
 

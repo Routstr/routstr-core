@@ -375,6 +375,22 @@ def _get_pricing_rates(
         raise ValueError("Invalid pricing data") from e
 
 
+def _resolve_provider_fee(model_id: str) -> float:
+    """Resolve the provider fee multiplier for the given model id.
+
+    Falls back to 1.0 (no markup) when the provider cannot be resolved so
+    the USD cost path never silently double-applies or omits the fee.
+    """
+    from ..proxy import get_provider_for_model
+
+    if not model_id:
+        return 1.0
+    providers = get_provider_for_model(model_id)
+    if not providers:
+        return 1.0
+    return float(providers[0].provider_fee)
+
+
 def _calculate_from_usd_cost(
     usd_cost: float,
     input_usd: float,
@@ -387,6 +403,10 @@ def _calculate_from_usd_cost(
     response_data: dict,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
+    provider_fee = _resolve_provider_fee(response_data.get("model", ""))
+    usd_cost = usd_cost * provider_fee
+    input_usd = input_usd * provider_fee
+    output_usd = output_usd * provider_fee
     sats_per_usd = 1.0 / sats_usd_price()
     cost_in_sats = usd_cost * sats_per_usd
     cost_in_msats = math.ceil(cost_in_sats * 1000)
