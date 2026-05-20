@@ -2,7 +2,7 @@ import hashlib
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -19,13 +19,27 @@ lightning_router = APIRouter(prefix="/lightning")
 
 class InvoiceCreateRequest(BaseModel):
     amount_sats: int = Field(gt=0, le=1_000_000, description="Amount in satoshis")
-    purpose: str = Field(description="create or topup", pattern="^(create|topup)$")
+    purpose: str = Field(
+        default="create",
+        description="create or topup",
+        pattern="^(create|topup)$",
+    )
     api_key: str | None = Field(
-        default=None, description="Required for topup operations"
+        default=None,
+        description="Deprecated: legacy field for topup. Prefer Authorization header.",
     )
     balance_limit: int | None = Field(default=None)
     balance_limit_reset: str | None = Field(default=None)
     validity_date: int | None = Field(default=None)
+
+
+def _extract_bearer_api_key(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    token = authorization.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token or None
 
 
 class InvoiceCreateResponse(BaseModel):
@@ -64,18 +78,21 @@ def generate_invoice_id() -> str:
 @lightning_router.post("/invoice", response_model=InvoiceCreateResponse)
 async def create_invoice(
     request: InvoiceCreateRequest,
+    authorization: str | None = Header(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> InvoiceCreateResponse:
-    if request.purpose == "topup" and not request.api_key:
-        raise HTTPException(
-            status_code=400, detail="api_key is required for topup operations"
-        )
+    api_key_token = _extract_bearer_api_key(authorization) or request.api_key
 
-    if request.purpose == "topup" and request.api_key:
-        if not request.api_key.startswith("sk-"):
+    if request.purpose == "topup":
+        if not api_key_token:
+            raise HTTPException(
+                status_code=401,
+                detail="Authorization bearer api key is required for topup",
+            )
+        if not api_key_token.startswith("sk-"):
             raise HTTPException(status_code=400, detail="Invalid API key format")
 
-        api_key = await session.get(ApiKey, request.api_key[3:])
+        api_key = await session.get(ApiKey, api_key_token[3:])
         if not api_key:
             raise HTTPException(status_code=404, detail="API key not found")
 
@@ -95,7 +112,7 @@ async def create_invoice(
             description=description,
             payment_hash=payment_hash,
             status="pending",
-            api_key_hash=request.api_key[3:] if request.api_key else None,
+            api_key_hash=api_key_token[3:] if api_key_token else None,
             purpose=request.purpose,
             balance_limit=request.balance_limit,
             balance_limit_reset=request.balance_limit_reset,
