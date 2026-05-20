@@ -32,6 +32,7 @@ class BaseChunker(ABC):
 
         Args:
             chunk_size: Maximum size of each chunk in characters
+            chunk_overlap: Number of overlapping characters between consecutive chunks
         """
         self.chunk_size: int = chunk_size
         self.chunk_overlap: int = chunk_overlap

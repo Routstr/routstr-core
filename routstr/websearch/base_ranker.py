@@ -1,3 +1,5 @@
+"""Abstract base class for search result ranking and pruning of low-ranking chunks."""
+
 from abc import ABC, abstractmethod
 
 from .types import SearchResult

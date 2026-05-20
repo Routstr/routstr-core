@@ -1,7 +1,7 @@
 """
 Base classes for Retrieval Augmented Generation (RAG) providers.
 
-This module defines the core interfaces and data structures for all-in-one RAG providers
+This module defines the core interfaces and data structures for RAG modules
 that combine web search, content extraction, and chunking into a unified solution for
 AI context enhancement.
 """

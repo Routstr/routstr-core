@@ -1,3 +1,5 @@
+"""Central manager for the websearch subsystem: provider initialization, caching, and request enhancement."""
+
 import asyncio
 import json
 from typing import Any
@@ -24,9 +26,11 @@ logger = get_logger(__name__)
 
 
 class WebManager:
-    """
-    Manager class for web search and RAG functionality.
-    Handles provider initialization, caching, and request enhancement.
+    """Central orchestrator for the websearch subsystem.
+
+    Handles lazy provider initialization with caching, request enhancement
+    by injecting web context into LLM prompts, and parameter extraction.
+    Exposed as a singleton via the module-level `web_manager` instance.
     """
 
     def __init__(self) -> None:
@@ -538,7 +542,7 @@ class WebManager:
                 res_block.append(f"  <published>{page.publication_date}</published>")
 
             if page.summary:
-                res_block.append(f" <summary>{page.summary}</summary>")
+                res_block.append(f" <page_summary>{page.summary}</page_summary>")
 
             if page.chunks:
                 content = " [...] ".join(page.chunks)
@@ -568,6 +572,6 @@ class WebManager:
 
         return "\n".join(parts)
 
-
-# Singleton instance
+# Module-level singleton: shared across the application so provider
+# instances are initialized once and reused across requests
 web_manager = WebManager()

@@ -1,3 +1,5 @@
+"""Shared async HTTP client wrapping httpx with centralized logging and connection pooling."""
+
 from typing import Any
 
 import httpx
@@ -8,8 +10,10 @@ logger = get_logger(__name__)
 
 
 class HTTPClient:
-    """
-    A HTTP utility with centralized logging and connection pooling.
+    """Reusable async HTTP client wrapping httpx.
+
+    Provides centralized logging, connection pooling, and error handling
+    for all external API calls (Serper, Tavily, Exa).
     """
 
     def __init__(

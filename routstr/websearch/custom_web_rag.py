@@ -42,8 +42,9 @@ class CustomWebRAG(BaseWebRAG):
 
         Args:
             search_provider: Web search provider (e.g., SerperWebSearch)
-            scraper_provider: Web scraper for content extraction
-            chunker_provider: Text chunker for content processing
+            scrape_provider: Web scraper for content extraction
+            chunk_provider: Text chunker for content processing
+            rank_provider: Ranker for relevance scoring and chunk pruning
 
         Raises:
             ValueError: If any provider is None

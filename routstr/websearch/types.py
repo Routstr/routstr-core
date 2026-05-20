@@ -1,3 +1,5 @@
+"""Shared type definitions for the websearch pipeline (enums, dataclasses)."""
+
 from dataclasses import dataclass, field
 from enum import StrEnum
 

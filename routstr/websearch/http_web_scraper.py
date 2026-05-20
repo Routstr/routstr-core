@@ -1,3 +1,5 @@
+"""HTTP-based web scraper using httpx for fetching and trafilatura for content extraction."""
+
 import logging
 from dataclasses import replace
 from typing import Any

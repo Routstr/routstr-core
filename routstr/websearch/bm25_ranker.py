@@ -1,3 +1,5 @@
+"""BM25-based ranker implementing two-phase local-then-global chunk pruning."""
+
 import string
 from dataclasses import replace
 
@@ -18,15 +20,17 @@ except ImportError:
 
 
 class BM25Ranker(BaseRanker):
-    """
-    BM25-based ranker that performs local-to-global pruning.
+    """BM25-based ranker implementing two-phase chunk pruning.
+
+    Phase 1 (local): Keeps top-k chunks per webpage.
+    Phase 2 (global): Keeps top-k chunks across all webpages.
     """
 
     def __init__(self, max_chunks_per_source: int = 5) -> None:
         super().__init__(
             provider_name="bm25", max_chunks_per_source=max_chunks_per_source
         )
-
+    
         # Number of selected Chunks per Website during _rank_local
         # This acts as an upperlimit as _rank_global removes the most irrelevant chunks
         # Default: 5

@@ -23,7 +23,7 @@ class FixedSizeChunker(BaseChunker):
 
         Args:
             chunk_size: Maximum size of each chunk in characters
-            chunk_overlap: Number of characters to overlap between chunks
+            chunk_overlap_perc: Percentage of chunk_size to use as overlap (default 0.1 = 10%)
         """
         # Chunks are exactly chunks_size long
         # 10% overlap is included in the this length
