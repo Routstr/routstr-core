@@ -124,6 +124,40 @@ async def test_pay_for_request_raises_402_when_all_balance_reserved(
     assert key.reserved_balance == 50_000
 
 
+@pytest.mark.asyncio
+async def test_balance_info_matches_chat_available_balance(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """
+    Regression for /v1/balance/info showing gross funds while chat admission
+    rejects with a negative available balance.
+    """
+    from routstr.auth import pay_for_request
+
+    key = _key(balance=4_404_339, reserved=4_410_636)
+    integration_session.add(key)
+    await integration_session.commit()
+
+    response = await integration_client.get(
+        "/v1/balance/info",
+        headers={"Authorization": f"Bearer sk-{key.hashed_key}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["balance"] == -6_297
+    assert body["reserved"] == 4_410_636
+
+    with pytest.raises(HTTPException) as exc_info:
+        await pay_for_request(key, 1, integration_session)
+
+    assert exc_info.value.status_code == 402
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert "-6297 available" in detail["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # Test 4 — balance just one msat below model cost
 # ---------------------------------------------------------------------------
