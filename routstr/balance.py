@@ -642,7 +642,7 @@ async def wallet_catch_all(path: str) -> NoReturn:
     )
 
 
-balance_router.include_router(lightning_router)
+balance_router.include_router(lightning_router, include_in_schema=False)
 balance_router.include_router(router)
 
 deprecated_wallet_router = APIRouter(prefix="/v1/wallet", include_in_schema=False)

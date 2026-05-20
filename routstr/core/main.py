@@ -13,6 +13,7 @@ from starlette.types import Scope
 
 from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
+from ..lightning import lightning_router
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
@@ -365,6 +366,7 @@ else:
 app.include_router(models_router)
 app.include_router(admin_router)
 app.include_router(balance_router)
+app.include_router(lightning_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)

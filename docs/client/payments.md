@@ -53,8 +53,10 @@ If your balance runs low, you don't need a new key. You can top up the existing 
 
 ### Via Lightning
 
-`POST /lightning/invoice` with `{"amount_sats": 1000, "purpose": "topup", "api_key": "sk-..."}`.
+`POST /lightning/invoice` with `Authorization: Bearer sk-...` header and body `{"amount_sats": 1000, "purpose": "topup"}`.
 *Once paid, the funds are added to your existing key.*
+
+> Legacy: the endpoint is also exposed at `/v1/balance/lightning/invoice`, and accepts an `api_key` field in the body as a fallback for older clients. New integrations should use the RIP-08 path with the `Authorization` header.
 
 ### Via Cashu
 
