@@ -14,7 +14,6 @@ dependencies = [
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
     "cashu>=0.20",
-    "secp256k1",
     "marshmallow>=3.13,<4.0",
     "websockets>=12.0",
     "nostr>=0.0.2",
@@ -22,6 +21,7 @@ dependencies = [
     "pillow>=10",
     "openai>=1.98.0",
     "litellm>=1.55.0",
+    "secp256k1",
 ]
 
 [dependency-groups]
@@ -87,4 +87,4 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 routstr = { workspace = true }
-secp256k1 = { git = "https://github.com/saschanaz/secp256k1-py", branch = "upgrade060" }
+secp256k1 = { git = "https://github.com/saschanaz/secp256k1-py.git" }
