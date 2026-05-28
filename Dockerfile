@@ -1,6 +1,6 @@
 FROM ghcr.io/astral-sh/uv:python3.11-alpine
 
-# Install system dependencies required for secp256k1
+# Install system dependencies required to compile secp256k1 from sdist on musl
 RUN apk add --no-cache \
     pkgconf \
     build-base \
@@ -8,14 +8,12 @@ RUN apk add --no-cache \
     autoconf \
     libtool \
     m4 \
-    perl
-RUN apk add git
+    perl \
+    git
 
 COPY uv.lock pyproject.toml ./
 RUN mkdir -p /routstr
-
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
-# RUN uv sync
+RUN uv sync --frozen --no-install-project
 
 WORKDIR /app
 
