@@ -22,6 +22,7 @@ from .db import (
     ApiKey,
     CashuTransaction,
     CliToken,
+    LightningInvoice,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -1473,6 +1474,52 @@ async def get_transactions_api(
 
         return {
             "transactions": [tx.dict() for tx in transactions],
+            "total": total,
+        }
+
+
+@admin_router.get(
+    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
+)
+async def get_lightning_invoices_api(
+    status: str | None = None,
+    purpose: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    async with create_session() as session:
+        from sqlmodel import col, func
+
+        base = select(LightningInvoice)
+        if status:
+            base = base.where(LightningInvoice.status == status)
+        if purpose:
+            base = base.where(LightningInvoice.purpose == purpose)
+        if search:
+            pattern = f"%{search}%"
+            base = base.where(
+                (col(LightningInvoice.id).like(pattern))
+                | (col(LightningInvoice.bolt11).like(pattern))
+                | (col(LightningInvoice.payment_hash).like(pattern))
+                | (col(LightningInvoice.api_key_hash).like(pattern))
+            )
+
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
+
+        stmt = (
+            base.order_by(col(LightningInvoice.created_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        results = await session.exec(stmt)
+        invoices = results.all()
+
+        return {
+            "invoices": [inv.dict() for inv in invoices],
             "total": total,
         }
 

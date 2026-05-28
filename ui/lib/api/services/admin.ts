@@ -908,6 +908,25 @@ export class AdminService {
     );
   }
 
+  static async getLightningInvoices(
+    status?: string,
+    purpose?: string,
+    search?: string,
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<LightningInvoicesResponse> {
+    const params = new URLSearchParams();
+    if (status) params.append('status', status);
+    if (purpose) params.append('purpose', purpose);
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
+
+    return await apiClient.get<LightningInvoicesResponse>(
+      `/admin/api/lightning-invoices?${params.toString()}`
+    );
+  }
+
   static async createProviderAccountByType(providerType: string): Promise<{
     ok: boolean;
     account_data: Record<string, unknown>;
@@ -1184,5 +1203,24 @@ export interface Transaction {
 
 export interface TransactionsResponse {
   transactions: Transaction[];
+  total: number;
+}
+
+export interface LightningInvoice {
+  id: string;
+  bolt11: string;
+  amount_sats: number;
+  description: string;
+  payment_hash: string;
+  status: 'pending' | 'paid' | 'expired' | 'cancelled';
+  api_key_hash: string | null;
+  purpose: 'create' | 'topup';
+  created_at: number;
+  expires_at: number;
+  paid_at: number | null;
+}
+
+export interface LightningInvoicesResponse {
+  invoices: LightningInvoice[];
   total: number;
 }
