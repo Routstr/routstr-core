@@ -34,8 +34,7 @@ WORKDIR /app
 # Copy the rest of the application (required for uv sync to find the package)
 COPY . .
 
-# Install dependencies including the specific secp256k1 branch
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
+# Install dependencies
 RUN uv sync --no-dev
 
 # Copy the built UI from the ui-builder stage

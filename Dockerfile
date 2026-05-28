@@ -1,6 +1,6 @@
 FROM ghcr.io/astral-sh/uv:python3.11-alpine
 
-# Install system dependencies required for secp256k1
+# Install system dependencies
 RUN apk add --no-cache \
     pkgconf \
     build-base \
@@ -8,18 +8,17 @@ RUN apk add --no-cache \
     autoconf \
     libtool \
     m4 \
-    perl
-RUN apk add git
-
-COPY uv.lock pyproject.toml ./
-RUN mkdir -p /routstr
-
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
-# RUN uv sync
+    perl \
+    git \
+    linux-headers
 
 WORKDIR /app
 
+# Copy the rest of the application (required for uv sync to find the package)
 COPY . .
+
+# Install dependencies
+RUN uv sync
 
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
@@ -30,4 +29,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
+# Run the application
+CMD ["/app/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
