@@ -693,7 +693,6 @@ async def test_x_cashu_non_streaming_dispatches_and_refunds_overpaid_amount() ->
             max_cost_for_model=10_000,
             model_obj=model,
             mint="https://mint.example",
-            payment_token_hash="hash123",
             request_id="req-1",
         )
 
@@ -972,7 +971,6 @@ async def test_forward_x_cashu_request_routes_messages_via_litellm() -> None:
             max_cost_for_model=10_000,
             model_obj=model,
             mint="https://mint",
-            payment_token_hash="h",
         )
 
     mock_helper.assert_awaited_once()
@@ -1041,7 +1039,6 @@ async def test_forward_x_cashu_request_handles_count_tokens_locally() -> None:
                 max_cost_for_model=10_000,
                 model_obj=model,
                 mint="https://mint",
-                payment_token_hash="h",
             )
 
     assert response.status_code == 200
