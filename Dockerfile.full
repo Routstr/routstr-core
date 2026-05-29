@@ -16,26 +16,13 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm run build
 
 # Stage 2: Build the Routstr Node
-FROM ghcr.io/astral-sh/uv:python3.11-alpine AS runner
-
-# Install system dependencies
-RUN apk add --no-cache \
-    pkgconf \
-    build-base \
-    automake \
-    autoconf \
-    libtool \
-    m4 \
-    perl \
-    git
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS runner
 
 WORKDIR /app
 
 # Copy the rest of the application (required for uv sync to find the package)
 COPY . .
 
-# Install dependencies including the specific secp256k1 branch
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
 RUN uv sync --no-dev
 
 # Copy the built UI from the ui-builder stage

@@ -2400,7 +2400,6 @@ dependencies = [
     { name = "openai" },
     { name = "pillow" },
     { name = "python-json-logger" },
-    { name = "secp256k1" },
     { name = "sqlmodel" },
     { name = "websockets" },
 ]
@@ -2435,7 +2434,6 @@ requires-dist = [
     { name = "openai", specifier = ">=1.98.0" },
     { name = "pillow", specifier = ">=10" },
     { name = "python-json-logger", specifier = ">=2.0.0" },
-    { name = "secp256k1", git = "https://github.com/saschanaz/secp256k1-py?branch=upgrade060" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
     { name = "websockets", specifier = ">=12.0" },
 ]
@@ -2591,9 +2589,21 @@ wheels = [
 [[package]]
 name = "secp256k1"
 version = "0.14.0"
-source = { git = "https://github.com/saschanaz/secp256k1-py?branch=upgrade060#7d70a8ec7ca2db050d292c3759e49e75e21ac533" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cffi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/41/bb668a6e4192303542d2d90c3b38d564af3c17c61bd7d4039af4f29405fe/secp256k1-0.14.0.tar.gz", hash = "sha256:82c06712d69ef945220c8b53c1a0d424c2ff6a1f64aee609030df79ad8383397", size = 2420607, upload-time = "2021-11-06T01:36:10.707Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/12/4c9815a819816587df70aa38fe7d09b54724a0b1b9b8e8ea2af1c205f2a5/secp256k1-0.14.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:539d1d9750299ec4e8df6211978ba78779f5095c7ef19985313f03d1d1b816bd", size = 1298105, upload-time = "2026-01-29T16:26:28.697Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/86/f01ee0f4c44e12933c460f2b868a3888b93a7c7f4e9fc9be173401b55e8d/secp256k1-0.14.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:85d597a59e3918b0e41181a1c872851ac2e6137882de7f0487b8c42b25333ada", size = 1498906, upload-time = "2026-01-29T16:26:30.138Z" },
+    { url = "https://files.pythonhosted.org/packages/05/c8/79f2990b72556c3f416ecfde2116a08afb41e324f51b8bf61268d7b72715/secp256k1-0.14.0-cp311-cp311-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:393d189b4ada9ab3de0b053f484a3b7e86024f4b8cd36616c05f07dbae3ca180", size = 1494612, upload-time = "2026-01-29T16:26:32.252Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/e8/8dd140270b4e12a7f5876f1641f996854d700866352875f161f770b69ebb/secp256k1-0.14.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:e4ec14534c1e8b8991376915ef059b7a3e62366aeda60df50b3932ad6529d26a", size = 1298100, upload-time = "2026-01-29T16:26:33.481Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/6c/e63892de8d7582ab30602ccc1cf0ecd88a30b1a09424eb847c863fd46d9f/secp256k1-0.14.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1041694e429eb465123cb742911d2aad5cbd9e0cf2891aaaf794a887938647d1", size = 1499269, upload-time = "2026-01-29T16:26:35.717Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/5c/2faa8c523c0204af249890eb51b697e9a19d59d101625149d7b4f482e894/secp256k1-0.14.0-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:bf03e6d45892172046d4e085d5cc91d13a73a465c0f4c8b5633d823b0ca667e2", size = 1494878, upload-time = "2026-01-29T16:26:37.857Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/27/702d5683d211644f4d286463d7b1c25aeed26275f7b0e2a5a8dc83e7a598/secp256k1-0.14.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:d90725a63e8e1d6d1483a135649c30ba949185702d3e5acbc075cdab3a44a37f", size = 1298097, upload-time = "2026-01-29T16:26:39.653Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/1e/928647ac138fddfb4c5ee8aa4140a5786e51c75e9062b7f8d1a0362565df/secp256k1-0.14.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7cd60d76d95e2eb977edc6523d1178a496fa1634517b497d4cdc7c9aa5e93aa3", size = 1499198, upload-time = "2026-01-29T16:26:41.169Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/30/c4168076a3cd66ce8ddb28ea127a5f97b088452f1ccb2a3208219fc4f77b/secp256k1-0.14.0-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:245b91f4bfe3a151e3e361f7e7ed634744d35e87c9ac6cf3eb0e4269801d9f7e", size = 1494778, upload-time = "2026-01-29T16:26:43.167Z" },
 ]
 
 [[package]]
