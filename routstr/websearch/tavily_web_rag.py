@@ -14,10 +14,12 @@ from ..core.logging import get_logger
 from ..core.settings import settings
 from .base_web_rag import BaseWebRAG
 from .http_client import HTTPClient
-from .mock_utils import _load_mock_data
 from .types import SearchResult, WebPage
 
 logger = get_logger(__name__)
+
+# Currently unused import for mock websearch
+# from .mock_utils import _load_mock_data
 
 
 class TavilyWebRAG(BaseWebRAG):
@@ -85,10 +87,10 @@ class TavilyWebRAG(BaseWebRAG):
 
         try:
             # --- MOCK DATA FOR TESTING  ---
-            #api_response = await _load_mock_data(
-                # "tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
+            # api_response = await _load_mock_data(
+            # "tavily_What_are_the_current_developments_between_the_USA_and_Greenl_20260118_122001.json"
             #    "tavily_Gold_price_20260517_101252.json"
-            #)
+            # )
             # ---------------------------------------------------------------
             api_response = await self._call_tavily_api(query, max_results)
             # await _save_api_response(api_response, query, "tavily")

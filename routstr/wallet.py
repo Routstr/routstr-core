@@ -78,7 +78,9 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 
     all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
     proof_summary = {
-        f"{k.mint_url}/{k.unit.name}": sum(p.amount for p in wallet.proofs if p.id == k.id)
+        f"{k.mint_url}/{k.unit.name}": sum(
+            p.amount for p in wallet.proofs if p.id == k.id
+        )
         for k in wallet.keysets.values()
     }
     # Show ALL proofs in DB by keyset_id, regardless of whether the loaded wallet
@@ -167,7 +169,9 @@ async def _calculate_swap_amount(
             minted_amount = int(amount_msat_after_fee)
 
         if minted_amount <= 0:
-            raise ValueError(f"Fees ({fee_reserve + input_fees} {token_unit}) exceed token amount")
+            raise ValueError(
+                f"Fees ({fee_reserve + input_fees} {token_unit}) exceed token amount"
+            )
 
         logger.info(
             "swap_to_primary_mint: fee estimation result",
@@ -316,11 +320,16 @@ async def swap_to_primary_mint(
             # advance the counter so the next request derives fresh secrets.
             logger.warning(
                 "swap_to_primary_mint: outputs already signed — recovering orphaned proofs",
-                extra={"mint_quote_id": mint_quote.quote, "minted_amount": minted_amount},
+                extra={
+                    "mint_quote_id": mint_quote.quote,
+                    "minted_amount": minted_amount,
+                },
             )
             try:
                 for keyset_id in primary_wallet.keysets:
-                    await primary_wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
+                    await primary_wallet.restore_tokens_for_keyset(
+                        keyset_id, to=1, batch=25
+                    )
                 await primary_wallet.load_proofs(reload=True)
                 post_recovery_balance = primary_wallet.available_balance.amount
                 balance_gained = post_recovery_balance - pre_mint_balance
@@ -538,7 +547,9 @@ async def fetch_all_balances(
                 "unit": unit,
                 "wallet_balance": proofs_balance,
                 "user_balance": user_balance,
-                "owner_balance": proofs_balance - user_balance if proofs_balance != 0 else 0,
+                "owner_balance": proofs_balance - user_balance
+                if proofs_balance != 0
+                else 0,
             }
             return result
         except Exception as e:

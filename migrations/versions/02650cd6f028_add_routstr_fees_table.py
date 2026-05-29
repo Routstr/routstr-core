@@ -19,13 +19,17 @@ def upgrade() -> None:
     op.create_table(
         "routstr_fees",
         sa.Column("id", sa.Integer(), nullable=False),
-        sa.Column("accumulated_msats", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "accumulated_msats", sa.Integer(), nullable=False, server_default="0"
+        ),
         sa.Column("total_paid_msats", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("last_paid_at", sa.Integer(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
     # Seed with a single row
-    op.execute("INSERT INTO routstr_fees (id, accumulated_msats, total_paid_msats) VALUES (1, 0, 0)")
+    op.execute(
+        "INSERT INTO routstr_fees (id, accumulated_msats, total_paid_msats) VALUES (1, 0, 0)"
+    )
 
 
 def downgrade() -> None:

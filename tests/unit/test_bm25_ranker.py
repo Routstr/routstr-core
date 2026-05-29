@@ -38,6 +38,7 @@ async def test_bm25_local_pruning() -> None:
     pruned_result = ranker._rank_local(mock_result, "test", top_k=local_limit)
 
     # Assert
+    assert pruned_result.webpages[0].chunks is not None
     assert len(pruned_result.webpages[0].chunks) == local_limit
 
 
@@ -86,6 +87,7 @@ async def test_bm25_relevance_ranking_accuracy() -> None:
     final_result = await ranker.rank(mock_result, query)
 
     surviving_chunks = final_result.webpages[0].chunks
+    assert surviving_chunks is not None
     assert len(surviving_chunks) == 1
     assert "The Lightning Network is a layer 2 scaling solution." == surviving_chunks[0]
 

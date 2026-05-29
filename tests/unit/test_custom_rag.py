@@ -41,6 +41,7 @@ async def test_custom_rag_pipeline_flow() -> None:
     mock_rank.rank.assert_called_once()
 
     # Timing Metadata
+    assert result.time_ms is not None
     assert "search" in result.time_ms
     assert "scrape" in result.time_ms
     assert "chunk" in result.time_ms

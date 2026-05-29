@@ -572,6 +572,7 @@ class WebManager:
 
         return "\n".join(parts)
 
+
 # Module-level singleton: shared across the application so provider
 # instances are initialized once and reused across requests
 web_manager = WebManager()

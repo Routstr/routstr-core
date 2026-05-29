@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Generator
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -245,10 +245,16 @@ def provider() -> BaseUpstreamProvider:
 
 
 @pytest.fixture(autouse=True)
-def mock_adjust_payment():
+def mock_adjust_payment() -> Generator[MagicMock, None, None]:
     with patch("routstr.upstream.base.adjust_payment_for_tokens") as mock:
 
-        async def side_effect(key, response_data, session, max_cost, web_context=None):
+        async def side_effect(
+            key: Any,
+            response_data: dict[str, Any],
+            session: AsyncSession,
+            max_cost: int,
+            web_context: WebSearchContext | None = None,
+        ) -> dict[str, Any]:
             if web_context and web_context.executed:
                 return {
                     "base_msats": 100,
@@ -276,7 +282,7 @@ def mock_adjust_payment():
 
 
 @pytest.fixture(autouse=True)
-def mock_create_session(mock_key: MagicMock):
+def mock_create_session(mock_key: MagicMock) -> Generator[MagicMock, None, None]:
     with patch("routstr.upstream.base.create_session") as mock:
         session = AsyncMock()
         session.get.return_value = mock_key
@@ -411,8 +417,9 @@ async def assert_websearch_in_non_streaming_response(
 ) -> dict:
     """Assert web search fields are present in a non-streaming response."""
     assert response.status_code == 200
-    body = json.loads(response.body)
-
+    body = json.loads(
+        bytes(response.body) if isinstance(response.body, memoryview) else response.body
+    )
     # Check web_search_executed flag - only required if expected True
     if expected.web_search_executed:
         assert "web_search_executed" in body, (
@@ -455,8 +462,12 @@ async def assert_websearch_in_streaming_response(
     """Assert web search fields are present in streaming response."""
     chunks: list[bytes] = []
     async for chunk in response.body_iterator:
-        chunks.append(chunk)
-
+        if isinstance(chunk, memoryview):
+            chunks.append(bytes(chunk))
+        elif isinstance(chunk, str):
+            chunks.append(chunk.encode())
+        else:
+            chunks.append(chunk)
     data_chunks: list[dict] = []
     for chunk in chunks:
         chunk_str = chunk.decode("utf-8")
@@ -533,7 +544,7 @@ def _mock_streaming_response(chunks: list[bytes]) -> MagicMock:
     response.status_code = 200
     response.headers = {"content-type": "text/event-stream"}
 
-    async def aiter_bytes():
+    async def aiter_bytes() -> AsyncIterator[bytes]:
         for chunk in chunks:
             yield chunk
 
@@ -677,7 +688,7 @@ async def _run_litellm_handler(
     elif handler_path.method == "_stream_litellm_messages":
         # Streaming: takes iterator (AsyncIterator), returns StreamingResponse
 
-        async def mock_iterator():
+        async def mock_iterator() -> AsyncIterator[bytes]:
             """Mock AsyncIterator that yields SSE chunks."""
             for chunk in build_anthropic_messages_streaming_chunks():
                 yield chunk
@@ -791,7 +802,7 @@ async def test_websearch_executed_all_paths(
     mock_key: MagicMock,
     mock_session: AsyncSession,
     handler_path: HandlerPath,
-):
+) -> None:
     """Test that web search is properly reported across ALL handler paths."""
     web_context = WebSearchContext(
         executed=True,
@@ -834,7 +845,7 @@ async def test_websearch_not_executed_all_paths(
     mock_key: MagicMock,
     mock_session: AsyncSession,
     handler_path: HandlerPath,
-):
+) -> None:
     """Test that when web search is NOT executed, the flags are not set."""
     web_context = WebSearchContext(executed=False, sources={})
 
@@ -866,7 +877,7 @@ async def test_full_flow_websearch_injection(
     mock_key: MagicMock,
     mock_session: AsyncSession,
     mock_model: Model,
-):
+) -> None:
     """Integration test verifying web search context through full request flow."""
     from fastapi import Request
 
@@ -931,6 +942,11 @@ async def test_full_flow_websearch_injection(
                 mock_wm.enhance_request_with_web_context.assert_called_once()
 
                 if hasattr(result, "body"):
-                    body = json.loads(result.body)
+                    body = json.loads(
+                        bytes(result.body)
+                        if isinstance(result.body, memoryview)
+                        else result.body
+                    )
+
                     assert body.get("web_search_executed") is True
                     assert "sources" in body

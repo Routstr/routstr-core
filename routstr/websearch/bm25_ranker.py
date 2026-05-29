@@ -30,7 +30,7 @@ class BM25Ranker(BaseRanker):
         super().__init__(
             provider_name="bm25", max_chunks_per_source=max_chunks_per_source
         )
-    
+
         # Number of selected Chunks per Website during _rank_local
         # This acts as an upperlimit as _rank_global removes the most irrelevant chunks
         # Default: 5

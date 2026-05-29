@@ -280,7 +280,11 @@ async def proxy(
                     try:
                         if hasattr(response, "body"):
                             body_bytes = response.body
-                            data = json.loads(body_bytes)
+                            data = json.loads(
+                                bytes(body_bytes)
+                                if isinstance(body_bytes, memoryview)
+                                else body_bytes
+                            )
                             if "error" in data:
                                 error_data = data["error"]
                                 if isinstance(error_data, dict):
@@ -370,7 +374,11 @@ async def proxy(
                     try:
                         if hasattr(response, "body"):
                             body_bytes = response.body
-                            data = json.loads(body_bytes)
+                            data = json.loads(
+                                bytes(body_bytes)
+                                if isinstance(body_bytes, memoryview)
+                                else body_bytes
+                            )
                             if "error" in data:
                                 error_data = data["error"]
                                 if isinstance(error_data, dict):

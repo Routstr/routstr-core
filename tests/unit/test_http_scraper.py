@@ -42,6 +42,7 @@ async def test_http_scrape_real_extraction_logic() -> None:
         result = await scraper.scrape_url(page)
 
         assert result.title == "Bitcoin reaches $100k"
+        assert result.content is not None
         assert (
             "This is the actual content that should be extracted by Trafilatura."
             in result.content

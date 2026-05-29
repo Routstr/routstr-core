@@ -11,10 +11,12 @@ from typing import Any
 from ..core.logging import get_logger
 from .base_web_searcher import BaseWebSearcher
 from .http_client import HTTPClient
-from .mock_utils import _save_api_response
 from .types import SearchResult, WebPage
 
 logger = get_logger(__name__)
+
+# Currently unused import for mock websearch
+# from .mock_utils import _save_api_response
 
 
 class SerperWebSearcher(BaseWebSearcher):
@@ -66,7 +68,7 @@ class SerperWebSearcher(BaseWebSearcher):
             # )
             # ---------------------------------------------------------------
             api_response = await self._call_serper_api(query, max_results)
-            #await _save_api_response(api_response, query, "serper")
+            # await _save_api_response(api_response, query, "serper")
             # ---------------------------------------------------------------
 
             return self._map_to_search_result(api_response, query)

@@ -26,7 +26,9 @@ def upgrade() -> None:
         ),
     )
     # Backfill: set forwarded_model_id = id for all existing rows
-    op.execute("UPDATE models SET forwarded_model_id = id WHERE forwarded_model_id IS NULL")
+    op.execute(
+        "UPDATE models SET forwarded_model_id = id WHERE forwarded_model_id IS NULL"
+    )
 
 
 def downgrade() -> None:

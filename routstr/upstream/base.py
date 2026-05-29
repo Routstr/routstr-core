@@ -1574,9 +1574,7 @@ class BaseUpstreamProvider:
                                         if msg and msg.get("model"):
                                             last_model_seen = str(msg.get("model"))
 
-                                        provider_added = (
-                                            "provider" not in data
-                                        )
+                                        provider_added = "provider" not in data
                                         self._apply_provider_field(data)
 
                                         if requested_model:
@@ -2396,9 +2394,9 @@ class BaseUpstreamProvider:
                         body_bytes = await response.aread()
                     except Exception:
                         body_bytes = b""
-                    body_preview = body_bytes.decode(
-                        "utf-8", errors="ignore"
-                    ).strip()[:500]
+                    body_preview = body_bytes.decode("utf-8", errors="ignore").strip()[
+                        :500
+                    ]
                     logger.error(
                         "Upstream %s returned %s for model=%s path=%s: %s",
                         self.provider_type,
@@ -2727,9 +2725,9 @@ class BaseUpstreamProvider:
                         body_bytes = await response.aread()
                     except Exception:
                         body_bytes = b""
-                    body_preview = body_bytes.decode(
-                        "utf-8", errors="ignore"
-                    ).strip()[:500]
+                    body_preview = body_bytes.decode("utf-8", errors="ignore").strip()[
+                        :500
+                    ]
                     logger.error(
                         "Upstream %s returned %s for model=%s path=%s: %s",
                         self.provider_type,
@@ -3291,14 +3289,8 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if (
-                        cost_data
-                        and "usage" in data_json
-                        and data_json["usage"]
-                    ):
-                        data_json["usage"]["cost_sats"] = (
-                            cost_data.total_msats // 1000
-                        )
+                    if cost_data and "usage" in data_json and data_json["usage"]:
+                        data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
                         changed = True
                     if changed:
                         lines[i] = "data: " + json.dumps(data_json)
@@ -4330,14 +4322,8 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if (
-                        cost_data
-                        and "usage" in data_json
-                        and data_json["usage"]
-                    ):
-                        data_json["usage"]["cost_sats"] = (
-                            cost_data.total_msats // 1000
-                        )
+                    if cost_data and "usage" in data_json and data_json["usage"]:
+                        data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
                         changed = True
                     if changed:
                         lines[i] = "data: " + json.dumps(data_json)

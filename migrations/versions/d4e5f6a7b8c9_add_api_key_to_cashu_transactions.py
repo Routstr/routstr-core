@@ -42,5 +42,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_cashu_transactions_api_key_hashed_key", table_name="cashu_transactions")
+    op.drop_index(
+        "ix_cashu_transactions_api_key_hashed_key", table_name="cashu_transactions"
+    )
     op.drop_column("cashu_transactions", "api_key_hashed_key")

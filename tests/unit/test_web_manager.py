@@ -1,4 +1,5 @@
 import json
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -114,6 +115,8 @@ async def test_extract_web_search_parameter() -> None:
 
     import json
 
+    assert cleaned_body is not None
+
     cleaned_dict = json.loads(cleaned_body)
 
     assert enabled is True
@@ -175,7 +178,9 @@ async def test_generate_xml_context_complex_validation() -> None:
 
     # Source 1: Check Page Summary exists
     assert '<source id="1">' in xml
-    assert "<summary>This is a brief overview of the article.</summary>" in xml
+    assert (
+        "<page_summary>This is a brief overview of the article.</page_summary>" in xml
+    )
     assert "Content chunk 1. [...] Content chunk 2." in xml
 
     # Source 2: Check Page Summary does NOT exist
@@ -302,7 +307,9 @@ async def test_inject_context_general_exception() -> None:
     """
     manager = WebManager()
     # Passing None to an operation expecting bytes will trigger the general Exception block
-    body, sources = await manager.inject_web_context_into_request(None, None, "q")
+    body, sources = await manager.inject_web_context_into_request(
+        cast(bytes, None), cast(SearchResult, None), "q"
+    )
 
     assert body is None
     assert sources == {}

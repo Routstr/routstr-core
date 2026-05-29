@@ -14,10 +14,12 @@ from ..core.logging import get_logger
 from ..core.settings import settings
 from .base_web_rag import BaseWebRAG
 from .http_client import HTTPClient
-from .mock_utils import _save_api_response
 from .types import SearchResult, WebPage
 
 logger = get_logger(__name__)
+
+# Currently unused import for mock websearch
+# from .mock_utils import _save_api_response
 
 
 class ExaWebRAG(BaseWebRAG):
