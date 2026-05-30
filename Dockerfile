@@ -1,21 +1,20 @@
-FROM ghcr.io/astral-sh/uv:python3.11-alpine
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
-# Install system dependencies required for secp256k1
-RUN apk add --no-cache \
-    pkgconf \
-    build-base \
-    automake \
-    autoconf \
-    libtool \
-    m4 \
-    perl
-RUN apk add git
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        build-essential \
+        pkg-config \
+        libsecp256k1-dev \
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY uv.lock pyproject.toml ./
 RUN mkdir -p /routstr
 
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
-# RUN uv sync
+RUN uv sync --frozen --no-dev --no-install-project
 
 WORKDIR /app
 

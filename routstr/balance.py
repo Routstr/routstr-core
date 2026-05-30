@@ -45,7 +45,7 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
     billing_key = await get_billing_key(key, session)
     info = {
         "api_key": "sk-" + key.hashed_key,
-        "balance": billing_key.balance,
+        "balance": billing_key.total_balance,
         "reserved": billing_key.reserved_balance,
         "is_child": key.parent_key_hash is not None,
         "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
@@ -642,7 +642,7 @@ async def wallet_catch_all(path: str) -> NoReturn:
     )
 
 
-balance_router.include_router(lightning_router)
+balance_router.include_router(lightning_router, include_in_schema=False)
 balance_router.include_router(router)
 
 deprecated_wallet_router = APIRouter(prefix="/v1/wallet", include_in_schema=False)

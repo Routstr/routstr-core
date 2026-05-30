@@ -8,8 +8,9 @@ services:
       args:
         # NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
         NEXT_PUBLIC_ADMIN_API_KEY: ${NEXT_PUBLIC_ADMIN_API_KEY:-}
+    user: root
     volumes:
-      - ./ui_out:/output
+      - ./ui_out:/output:z
     command:
       ["sh", "-c", "mkdir -p /output && cp -r /app/built/. /output/ && echo 'UI build copied to mounted volume' && ls -la /output/ && echo 'UI built and ready' && tail -f /dev/null"]
 
@@ -18,10 +19,10 @@ services:
     depends_on:
       - ui
     volumes:
-      - .:/app
-      - ./logs:/app/logs
+      - .:/app:z
+      - ./logs:/app/logs:z
       - tor-data:/var/lib/tor:ro
-      - ./ui_out:/app/ui_out:ro
+      - ./ui_out:/app/ui_out:ro,z
     env_file:
       - .env
     environment:
