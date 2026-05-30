@@ -20,6 +20,16 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS runner
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libsecp256k1-dev \
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the rest of the application (required for uv sync to find the package)
 COPY . .
 
