@@ -18,12 +18,23 @@ RUN pnpm run build
 # Stage 2: Build the Routstr Node
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS runner
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libsecp256k1-dev \
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY uv.lock pyproject.toml ./
+
+RUN uv sync --no-dev --no-install-project
+
 WORKDIR /app
 
-# Copy the rest of the application (required for uv sync to find the package)
 COPY . .
-
-RUN uv sync --no-dev
 
 # Copy the built UI from the ui-builder stage
 COPY --from=ui-builder /app/ui/out ./ui_out
@@ -38,4 +49,4 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
 # Run the application
-CMD ["/app/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
+CMD ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
