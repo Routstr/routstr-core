@@ -2,6 +2,7 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        git \
         build-essential \
         pkg-config \
         libsecp256k1-dev \
