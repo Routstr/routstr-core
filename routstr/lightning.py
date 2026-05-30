@@ -1,13 +1,14 @@
+import asyncio
 import hashlib
 import secrets
 import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlmodel import select
+from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from .core.db import ApiKey, LightningInvoice, get_session
+from .core.db import ApiKey, LightningInvoice, create_session, get_session
 from .core.logging import get_logger
 from .core.settings import settings
 from .wallet import get_wallet
@@ -159,12 +160,12 @@ async def get_invoice_status(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
+    if invoice.status == "pending":
+        await check_invoice_payment(invoice, session)
+
     if invoice.status == "pending" and int(time.time()) > invoice.expires_at:
         invoice.status = "expired"
         await session.commit()
-
-    if invoice.status == "pending":
-        await check_invoice_payment(invoice, session)
 
     api_key = None
     if invoice.status == "paid" and invoice.purpose == "create":
@@ -291,3 +292,41 @@ async def topup_api_key_from_invoice(
 
     api_key.balance += invoice.amount_sats * 1000  # Convert to msats
     await session.flush()
+
+
+INVOICE_WATCH_INTERVAL_SECONDS = 5
+INVOICE_WATCH_BATCH_LIMIT = 100
+
+
+async def periodic_invoice_watcher() -> None:
+    """Background task: detect paid Lightning invoices and credit balances.
+
+    Removes the need for clients to poll the status endpoint after paying.
+    """
+    while True:
+        try:
+            async with create_session() as session:
+                now = int(time.time())
+                result = await session.exec(
+                    select(LightningInvoice)
+                    .where(
+                        LightningInvoice.status == "pending",
+                        col(LightningInvoice.expires_at) > now,
+                    )
+                    .limit(INVOICE_WATCH_BATCH_LIMIT)
+                )
+                pending = result.all()
+                for invoice in pending:
+                    try:
+                        await check_invoice_payment(invoice, session)
+                    except Exception as e:
+                        logger.error(
+                            "Invoice watcher failed for invoice",
+                            extra={"invoice_id": invoice.id, "error": str(e)},
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Invoice watcher loop error: {e}")
+
+        await asyncio.sleep(INVOICE_WATCH_INTERVAL_SECONDS)

@@ -13,7 +13,7 @@ from starlette.types import Scope
 
 from ..auth import periodic_key_reset
 from ..balance import balance_router, deprecated_wallet_router
-from ..lightning import lightning_router
+from ..lightning import lightning_router, periodic_invoice_watcher
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
@@ -57,6 +57,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     auto_topup_task = None
     refund_sweep_task = None
     routstr_fee_task = None
+    invoice_watcher_task = None
 
     try:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
@@ -124,6 +125,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
+        invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
 
         yield
 
@@ -163,6 +165,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             refund_sweep_task.cancel()
         if routstr_fee_task is not None:
             routstr_fee_task.cancel()
+        if invoice_watcher_task is not None:
+            invoice_watcher_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -190,6 +194,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(refund_sweep_task)
             if routstr_fee_task is not None:
                 tasks_to_wait.append(routstr_fee_task)
+            if invoice_watcher_task is not None:
+                tasks_to_wait.append(invoice_watcher_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)
