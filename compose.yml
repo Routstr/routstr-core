@@ -20,7 +20,6 @@ services:
       - ui
     volumes:
       - .:/app:z
-      - /app/.venv
       - ./logs:/app/logs:z
       - tor-data:/var/lib/tor:ro
       - ./ui_out:/app/ui_out:ro,z

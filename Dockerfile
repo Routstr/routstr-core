@@ -1,7 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
-WORKDIR /app
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -15,9 +13,11 @@ RUN apt-get update \
 COPY uv.lock pyproject.toml ./
 RUN mkdir -p /routstr
 
-COPY . .
+RUN uv sync --frozen --no-dev --no-install-project
 
-RUN uv sync --frozen --no-dev
+WORKDIR /app
+
+COPY . .
 
 ARG GIT_COMMIT=""
 ARG GIT_TAG=""
@@ -28,4 +28,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["/app/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
+CMD ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
