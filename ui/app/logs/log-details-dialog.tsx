@@ -71,8 +71,8 @@ export function LogDetailsDialog({
           <div className='space-y-6'>
             <div>
               <h4 className='mb-2 text-sm font-medium'>Message</h4>
-              <div className='bg-muted max-h-48 overflow-auto rounded-md p-3'>
-                <pre className='font-mono text-sm break-all whitespace-pre'>
+              <div className='bg-muted max-h-96 overflow-auto rounded-md p-3'>
+                <pre className='font-mono text-sm break-words whitespace-pre-wrap'>
                   {log.message}
                 </pre>
               </div>
@@ -113,8 +113,8 @@ export function LogDetailsDialog({
                         </Button>
                       )}
                     </div>
-                    <div className='bg-muted max-h-32 overflow-auto rounded p-2'>
-                      <pre className='font-mono text-sm break-all whitespace-pre-wrap'>
+                    <div className='bg-muted max-h-64 overflow-auto rounded p-2'>
+                      <pre className='font-mono text-sm break-words whitespace-pre-wrap'>
                         {String(log[field as keyof LogEntry] || 'N/A')}
                       </pre>
                     </div>
@@ -132,13 +132,13 @@ export function LogDetailsDialog({
                       <span className='text-muted-foreground truncate text-xs font-medium uppercase'>
                         {field}
                       </span>
-                      <div className='bg-muted max-h-48 overflow-auto rounded p-2'>
+                      <div className='bg-muted max-h-80 overflow-auto rounded p-2'>
                         {typeof log[field] === 'object' ? (
-                          <pre className='font-mono text-xs break-all whitespace-pre-wrap'>
+                          <pre className='font-mono text-xs break-words whitespace-pre-wrap'>
                             {JSON.stringify(log[field], null, 2)}
                           </pre>
                         ) : (
-                          <pre className='font-mono text-sm break-all whitespace-pre-wrap'>
+                          <pre className='font-mono text-sm break-words whitespace-pre-wrap'>
                             {String(log[field] || 'N/A')}
                           </pre>
                         )}
@@ -173,8 +173,8 @@ export function LogDetailsDialog({
                   )}
                 </Button>
               </div>
-              <div className='bg-muted max-h-64 overflow-auto rounded-md p-4'>
-                <pre className='text-xs break-all whitespace-pre-wrap'>
+              <div className='bg-muted max-h-[32rem] overflow-auto rounded-md p-4'>
+                <pre className='text-xs break-words whitespace-pre-wrap'>
                   {JSON.stringify(log, null, 2)}
                 </pre>
               </div>
