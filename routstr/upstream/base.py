@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import traceback
 import uuid
@@ -1891,7 +1890,6 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> Response | StreamingResponse:
         """Dispatch /v1/messages via litellm for x-cashu payments.
@@ -1913,7 +1911,6 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 requested_model,
                 mint,
-                payment_token_hash,
                 request_id,
             )
 
@@ -1940,7 +1937,6 @@ class BaseUpstreamProvider:
                     refund_amount,
                     unit,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -2127,7 +2123,6 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         requested_model: str | None,
         mint: str | None,
-        payment_token_hash: str | None,
         request_id: str | None,
     ) -> StreamingResponse:
         """Buffer a litellm stream end-to-end, compute cost, then replay.
@@ -2231,7 +2226,6 @@ class BaseUpstreamProvider:
                             refund_amount,
                             unit,
                             mint,
-                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -2996,7 +2990,6 @@ class BaseUpstreamProvider:
         amount: int,
         unit: str,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> str:
         """Create and send a refund token to the user.
@@ -3005,7 +2998,6 @@ class BaseUpstreamProvider:
             amount: Refund amount
             unit: Unit of the refund (sat or msat)
             mint: Optional mint URL for the refund token
-            payment_token_hash: Optional SHA-256 hash of the original payment token for storage
             request_id: Optional HTTP request ID for tracking
 
         Returns:
@@ -3097,7 +3089,6 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
@@ -3108,7 +3099,6 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
-            payment_token_hash: Optional hash of original payment token for refund storage
 
         Returns:
             StreamingResponse with refund token in header if applicable
@@ -3199,7 +3189,6 @@ class BaseUpstreamProvider:
                             refund_amount,
                             unit,
                             mint,
-                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -3278,7 +3267,6 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
@@ -3289,7 +3277,6 @@ class BaseUpstreamProvider:
             amount: Payment amount received
             unit: Payment unit (sat or msat)
             max_cost_for_model: Maximum cost for the model
-            payment_token_hash: Optional hash of original payment token for refund storage
 
         Returns:
             Response with refund token in header if applicable
@@ -3359,7 +3346,6 @@ class BaseUpstreamProvider:
                     refund_amount,
                     unit,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -3431,7 +3417,6 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
@@ -3475,7 +3460,6 @@ class BaseUpstreamProvider:
                     unit,
                     max_cost_for_model,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
             else:
@@ -3486,7 +3470,6 @@ class BaseUpstreamProvider:
                     unit,
                     max_cost_for_model,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
 
@@ -3516,7 +3499,6 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward request paid with X-Cashu token to upstream service.
 
@@ -3555,7 +3537,6 @@ class BaseUpstreamProvider:
                 max_cost_for_model=max_cost_for_model,
                 model_obj=model_obj,
                 mint=mint,
-                payment_token_hash=payment_token_hash,
                 request_id=getattr(request.state, "request_id", None),
             )
 
@@ -3625,7 +3606,6 @@ class BaseUpstreamProvider:
                         amount,
                         unit,
                         mint,
-                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -3675,7 +3655,6 @@ class BaseUpstreamProvider:
                         unit,
                         max_cost_for_model,
                         mint,
-                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
                     background_tasks = BackgroundTasks()
@@ -3751,7 +3730,6 @@ class BaseUpstreamProvider:
         )
 
         try:
-            payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
@@ -3784,7 +3762,6 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
-                payment_token_hash,
             )
         except Exception as e:
             error_message = str(e)
@@ -3844,7 +3821,6 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
     ) -> Response | StreamingResponse:
         """Forward Responses API request paid with X-Cashu token to upstream service.
 
@@ -3920,7 +3896,6 @@ class BaseUpstreamProvider:
                         amount,
                         unit,
                         mint,
-                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
 
@@ -3965,7 +3940,6 @@ class BaseUpstreamProvider:
                         unit,
                         max_cost_for_model,
                         mint,
-                        payment_token_hash,
                         request_id=getattr(request.state, "request_id", None),
                     )
                     background_tasks = BackgroundTasks()
@@ -4016,7 +3990,6 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> StreamingResponse | Response:
         """Handle Responses API completion response for X-Cashu payment.
@@ -4061,7 +4034,6 @@ class BaseUpstreamProvider:
                     unit,
                     max_cost_for_model,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
             else:
@@ -4072,7 +4044,6 @@ class BaseUpstreamProvider:
                     unit,
                     max_cost_for_model,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
 
@@ -4100,7 +4071,6 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API response for X-Cashu payment.
@@ -4187,7 +4157,6 @@ class BaseUpstreamProvider:
                             refund_amount,
                             unit,
                             mint,
-                            payment_token_hash,
                             request_id=request_id,
                         )
                         response_headers["X-Cashu"] = refund_token
@@ -4266,7 +4235,6 @@ class BaseUpstreamProvider:
         unit: str,
         max_cost_for_model: int,
         mint: str | None = None,
-        payment_token_hash: str | None = None,
         request_id: str | None = None,
     ) -> Response:
         """Handle non-streaming Responses API response for X-Cashu payment."""
@@ -4335,7 +4303,6 @@ class BaseUpstreamProvider:
                     refund_amount,
                     unit,
                     mint,
-                    payment_token_hash,
                     request_id=request_id,
                 )
                 response_headers["X-Cashu"] = refund_token
@@ -4432,7 +4399,6 @@ class BaseUpstreamProvider:
         )
 
         try:
-            payment_token_hash = hashlib.sha256(x_cashu_token.encode()).hexdigest()
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
             headers = self.prepare_headers(dict(request.headers))
@@ -4465,7 +4431,6 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
-                payment_token_hash,
             )
         except Exception as e:
             error_message = str(e)

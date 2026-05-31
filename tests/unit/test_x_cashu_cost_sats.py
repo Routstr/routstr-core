@@ -64,7 +64,6 @@ async def test_non_streaming_includes_cost_sats() -> None:
             unit="msat",
             max_cost_for_model=10000,
             mint=None,
-            payment_token_hash=None,
         )
 
     body = json.loads(response.body)
@@ -170,7 +169,6 @@ async def test_streaming_includes_cost_sats_in_usage_chunk() -> None:
             unit="msat",
             max_cost_for_model=10000,
             mint=None,
-            payment_token_hash=None,
         )
 
     chunks = await _collect_streaming(response)

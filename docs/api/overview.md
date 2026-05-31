@@ -155,7 +155,7 @@ The response includes your change in the same header:
 X-Cashu: cashuA7k2mNp4...
 ```
 
-This is fully stateless—no session, no `/v1/balance/refund` call needed. However, **streaming does not work with `X-Cashu`** because the refund can only be calculated after the full response is generated.
+This is fully stateless—no session, no `/v1/balance/refund` call needed. However, **streaming does not work with `X-Cashu`** because the refund can only be calculated after the full response is generated. If you lose the `X-Cashu` response header before claiming your change, you can reclaim the refund via `POST /v1/wallet/refund` by supplying the original payment token in the `x-cashu` header.
 
 ## Response Headers
 
