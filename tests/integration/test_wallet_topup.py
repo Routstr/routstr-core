@@ -436,9 +436,9 @@ async def test_topup_with_zero_amount_token(  # type: ignore[no-untyped-def]
             "/v1/wallet/topup", params={"cashu_token": token}
         )
 
-        # Should succeed but add 0 msats
-        assert response.status_code == 200
-        assert response.json()["msats"] == 0
+        # Zero/negative redemptions are refused to avoid crediting empty
+        # or dust tokens (and to prevent orphan zero-balance keys).
+        assert response.status_code == 400
 
 
 @pytest.mark.integration
