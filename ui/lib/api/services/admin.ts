@@ -831,9 +831,18 @@ export class AdminService {
     return await apiClient.get<{ dates: string[] }>('/admin/api/logs/dates');
   }
 
-  static async getTemporaryBalances(): Promise<TemporaryBalance[]> {
-    return await apiClient.get<TemporaryBalance[]>(
-      '/admin/api/temporary-balances'
+  static async getTemporaryBalances(
+    search?: string,
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<TemporaryBalancesResponse> {
+    const params = new URLSearchParams();
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
+
+    return await apiClient.get<TemporaryBalancesResponse>(
+      `/admin/api/temporary-balances?${params.toString()}`
     );
   }
 
@@ -1034,9 +1043,20 @@ export const TemporaryBalanceSchema = z.object({
   refund_address: z.string().nullable(),
   key_expiry_time: z.number().nullable(),
   parent_key_hash: z.string().nullable().optional(),
+  created_at: z.number().nullable().optional(),
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
+
+export interface TemporaryBalancesResponse {
+  balances: TemporaryBalance[];
+  total: number;
+  totals: {
+    total_balance: number;
+    total_spent: number;
+    total_requests: number;
+  };
+}
 
 export interface UsageMetricData {
   timestamp: string;

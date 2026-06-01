@@ -45,6 +45,14 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=0, description="Total spent in millisatoshis (msats)"
     )
     total_requests: int = Field(default=0)
+    created_at: int | None = Field(
+        default_factory=lambda: int(time.time()),
+        nullable=True,
+        description=(
+            "Unix timestamp when the key was created. Nullable: keys created "
+            "before this column existed have no value and sort last."
+        ),
+    )
     refund_mint_url: str | None = Field(
         default=None,
         description="URL of the mint used to create the cashu-token",
