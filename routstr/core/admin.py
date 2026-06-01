@@ -68,26 +68,89 @@ async def require_admin_api(request: Request) -> None:
 
 
 @admin_router.get("/api/temporary-balances", dependencies=[Depends(require_admin_api)])
-async def get_temporary_balances_api(request: Request) -> list[dict[str, object]]:
+async def get_temporary_balances_api(
+    request: Request,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, object]:
+    from sqlalchemy import case
+    from sqlmodel import col, func
+
+    filters = []
+    if search:
+        pattern = f"%{search}%"
+        filters.append(
+            col(ApiKey.hashed_key).like(pattern)
+            | col(ApiKey.refund_address).like(pattern)
+        )
+
     async with create_session() as session:
-        result = await session.exec(select(ApiKey))
+        base = select(ApiKey).where(*filters)
+
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
+
+        # Aggregate totals across the whole (search-filtered) set, not just the
+        # current page. Balance counts only parent (non-child) keys to avoid
+        # double-counting, since child keys draw from their parent's balance.
+        totals_result = await session.exec(
+            select(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (col(ApiKey.parent_key_hash).is_(None), ApiKey.balance),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(func.sum(ApiKey.total_spent), 0),
+                func.coalesce(func.sum(ApiKey.total_requests), 0),
+            ).where(*filters)
+        )
+        total_balance, total_spent, total_requests = totals_result.one()
+
+        # Latest created first; keys with no created_at (legacy rows) sort last.
+        # Use an explicit CASE rather than relying on dialect NULL-ordering so
+        # the behaviour is identical on SQLite and Postgres.
+        stmt = (
+            base.order_by(
+                case((col(ApiKey.created_at).is_(None), 1), else_=0),
+                col(ApiKey.created_at).desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await session.exec(stmt)
         api_keys = result.all()
 
-    return [
-        {
-            "hashed_key": key.hashed_key,
-            "balance": key.balance,
-            "total_spent": key.total_spent,
-            "total_requests": key.total_requests,
-            "refund_address": key.refund_address,
-            "key_expiry_time": key.key_expiry_time,
-            "parent_key_hash": key.parent_key_hash,
-            "balance_limit": key.balance_limit,
-            "balance_limit_reset": key.balance_limit_reset,
-            "validity_date": key.validity_date,
-        }
-        for key in api_keys
-    ]
+    return {
+        "balances": [
+            {
+                "hashed_key": key.hashed_key,
+                "balance": key.balance,
+                "total_spent": key.total_spent,
+                "total_requests": key.total_requests,
+                "refund_address": key.refund_address,
+                "key_expiry_time": key.key_expiry_time,
+                "parent_key_hash": key.parent_key_hash,
+                "balance_limit": key.balance_limit,
+                "balance_limit_reset": key.balance_limit_reset,
+                "validity_date": key.validity_date,
+                "created_at": key.created_at,
+            }
+            for key in api_keys
+        ],
+        "total": total,
+        "totals": {
+            "total_balance": total_balance,
+            "total_spent": total_spent,
+            "total_requests": total_requests,
+        },
+    }
 
 
 class ApiKeyUpdate(BaseModel):
