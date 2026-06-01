@@ -109,6 +109,39 @@ async def test_credit_balance() -> None:
 
 
 @pytest.mark.asyncio
+async def test_credit_balance_rejects_zero_amount() -> None:
+    """A zero/dust redemption must raise BEFORE any commit, so no orphan
+    zero-balance key (balance 0, total_spent 0, total_requests 0) is persisted."""
+    token_data = {
+        "token": [{"mint": "http://mint:3338", "proofs": [{"amount": 0}]}],
+        "unit": "sat",
+    }
+    token_json = json.dumps(token_data)
+    token_b64 = base64.urlsafe_b64encode(token_json.encode()).decode()
+    token_str = f"cashuA{token_b64}"
+
+    mock_key = Mock()
+    mock_key.balance = 0
+    mock_key.hashed_key = "test_hash"
+    mock_session = AsyncMock()
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
+        with patch(
+            "routstr.wallet.recieve_token",
+            return_value=(0, "sat", "http://mint:3338"),
+        ):
+            with pytest.raises(ValueError, match="must be positive"):
+                await credit_balance(token_str, mock_key, mock_session)
+
+    # Critically: no balance UPDATE and no commit happened, so the caller's
+    # uncommitted key row rolls back instead of persisting as an orphan.
+    assert not mock_session.exec.called
+    assert not mock_session.commit.called
+
+
+@pytest.mark.asyncio
 async def test_swap_to_primary_mint_insufficient_for_fees() -> None:
     """Token amount is less than melt_quote.amount + melt_quote.fee_reserve."""
     from routstr.wallet import swap_to_primary_mint
