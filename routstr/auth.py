@@ -341,6 +341,11 @@ async def validate_bearer_key(
                     "Token redemption returned zero or negative amount",
                     extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
                 )
+                # Defense-in-depth: credit_balance now refuses to commit on a
+                # zero/negative redemption, but if a row was nonetheless
+                # persisted, drop it so we never leave an orphan zero-balance key.
+                await session.delete(new_key)
+                await session.commit()
                 raise Exception("Token redemption failed")
 
             await session.refresh(new_key)

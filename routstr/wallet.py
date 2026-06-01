@@ -403,6 +403,20 @@ async def credit_balance(
                 "credit_balance: Converted to msat", extra={"amount_msat": amount}
             )
 
+        # Guard against zero/negative redemptions (empty or dust tokens, or
+        # swap-to-primary-mint amounts that net to <= 0 after fees). Raising here
+        # — before the UPDATE/commit below — leaves any freshly-created, still
+        # uncommitted ApiKey row to be rolled back when the request session
+        # closes, instead of persisting an orphan key with balance 0.
+        if amount <= 0:
+            logger.error(
+                "credit_balance: Redeemed amount is zero or negative; refusing to credit",
+                extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+            )
+            raise ValueError(
+                f"Redeemed token amount must be positive, got {amount} msats"
+            )
+
         logger.info(
             "credit_balance: Updating balance",
             extra={"old_balance": key.balance, "credit_amount": amount},
