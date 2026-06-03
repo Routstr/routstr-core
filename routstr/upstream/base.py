@@ -790,6 +790,33 @@ class BaseUpstreamProvider:
                             self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
                         obj["id"] = self._current_stream_id
                     if isinstance(obj.get("usage"), dict):
+                        # Capture usage for end-of-stream cost reconciliation.
+                        # Some models (e.g. Gemini thinking models over the
+                        # OpenAI-compat endpoint) attach ``usage`` to the SAME
+                        # chunk that carries the final content/finish_reason
+                        # rather than sending a separate ``choices: []`` usage
+                        # chunk. Only swallow the chunk when it is a pure usage
+                        # chunk (no choices); otherwise the content would be
+                        # silently dropped and the client would receive no
+                        # assistant message at all.
+                        if obj.get("choices"):
+                            # Capture usage (with model) for the cost trailer,
+                            # but with choices stripped so the trailer never
+                            # re-emits this chunk's content.
+                            usage_chunk_data = {
+                                k: v for k, v in obj.items() if k != "choices"
+                            }
+                            usage_chunk_data["choices"] = []
+                            # Forward the content now, without usage, so token
+                            # usage is reported exactly once (in the trailer).
+                            forward = {k: v for k, v in obj.items() if k != "usage"}
+                            yield (
+                                prefix
+                                + b"data: "
+                                + json.dumps(forward).encode()
+                                + b"\n\n"
+                            )
+                            return
                         usage_chunk_data = obj
                         return
                     yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"

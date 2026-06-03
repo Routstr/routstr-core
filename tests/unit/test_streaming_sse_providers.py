@@ -255,6 +255,51 @@ async def test_openrouter_mid_stream_error_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gemini_combined_content_and_usage_chunk() -> None:
+    """Gemini thinking models pack usage into the final *content* chunk.
+
+    Regression: the parser swallowed any chunk carrying a ``usage`` dict, so
+    when content + usage arrived together the assistant text was dropped and
+    the client saw "no assistant messages" despite a 200 + token accounting.
+    """
+    chunks = [
+        b'data: {"id":"g","choices":[{"delta":{"content":"the answer"},'
+        b'"finish_reason":"stop"}],"usage":{"prompt_tokens":3,'
+        b'"completion_tokens":2,"total_tokens":5}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    out = await _drive(chunks)
+    objs = _assert_clean(out)
+    contents = [
+        c["delta"]["content"]
+        for o in objs
+        for c in o.get("choices", [])
+        if "delta" in c
+    ]
+    # Content delivered exactly once (not dropped, not duplicated by the trailer).
+    assert contents == ["the answer"]
+
+
+@pytest.mark.asyncio
+async def test_separate_usage_chunk_not_forwarded_as_content() -> None:
+    """A pure usage chunk (choices: []) is still swallowed, content intact."""
+    chunks = [
+        b'data: {"id":"x","choices":[{"delta":{"content":"hello"}}]}\n\n',
+        b'data: {"id":"x","choices":[],"usage":{"total_tokens":4}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    out = await _drive(chunks)
+    objs = _assert_clean(out)
+    contents = [
+        c["delta"]["content"]
+        for o in objs
+        for c in o.get("choices", [])
+        if "delta" in c
+    ]
+    assert contents == ["hello"]
+
+
+@pytest.mark.asyncio
 async def test_requested_model_override_applied() -> None:
     """Model rewriting still works through the buffered parser."""
     chunks = [
