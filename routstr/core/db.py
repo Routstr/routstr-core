@@ -140,6 +140,18 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     )
     expires_at: int = Field(description="Unix timestamp when invoice expires")
     paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
+    balance_limit: int | None = Field(
+        default=None,
+        description="Max spendable msats for the created key",
+    )
+    balance_limit_reset: str | None = Field(
+        default=None,
+        description="Reset policy for balance limit (daily, weekly, monthly)",
+    )
+    validity_date: int | None = Field(
+        default=None,
+        description="Unix timestamp after which the created key expires",
+    )
 
 
 class CashuTransaction(SQLModel, table=True):  # type: ignore
