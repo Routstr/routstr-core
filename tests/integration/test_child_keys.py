@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 from typing import Any
 
@@ -7,7 +8,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import adjust_payment_for_tokens, pay_for_request
 from routstr.balance import ChildKeyRequest, create_child_key
-from routstr.core.db import ApiKey
+from routstr.core.db import ApiKey, create_session
 from routstr.core.settings import settings
 
 
@@ -117,6 +118,54 @@ async def test_child_key_insufficient_balance(
             ChildKeyRequest(count=1), parent_key, integration_session
         )
     assert exc.value.status_code == 402
+
+
+@pytest.mark.asyncio
+async def test_concurrent_child_key_creation_is_atomic(
+    patched_db_engine: None,
+) -> None:
+    """Two concurrent create_child_key() calls with balance for exactly one must
+    result in exactly one success and one 402, with the parent balance deducted
+    only once."""
+    child_key_cost = 1000
+    settings.child_key_cost = child_key_cost
+
+    parent_hash = f"parent_concurrent_{secrets.token_hex(8)}"
+    async with create_session() as session:
+        parent = ApiKey(hashed_key=parent_hash, balance=child_key_cost)
+        session.add(parent)
+        await session.commit()
+
+    results: list[str] = []
+
+    async def attempt() -> None:
+        async with create_session() as session:
+            fresh_parent = await session.get(ApiKey, parent_hash)
+            assert fresh_parent is not None
+            try:
+                await create_child_key(ChildKeyRequest(count=1), fresh_parent, session)
+                results.append("success")
+            except HTTPException as exc:
+                assert exc.status_code == 402
+                results.append("blocked")
+
+    await asyncio.gather(attempt(), attempt())
+
+    assert sorted(results) == ["blocked", "success"], (
+        f"Expected exactly one success and one 402, got: {results}"
+    )
+
+    async with create_session() as session:
+        final = await session.get(ApiKey, parent_hash)
+        assert final is not None
+
+    assert final.balance == 0, (
+        f"Balance should be fully deducted once: expected 0, got {final.balance}"
+    )
+    assert final.total_spent == child_key_cost, (
+        f"total_spent should equal one deduction: expected {child_key_cost}, "
+        f"got {final.total_spent}"
+    )
 
 
 @pytest.mark.asyncio
