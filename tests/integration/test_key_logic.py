@@ -1,12 +1,14 @@
+import asyncio
 import time
 from datetime import datetime, timedelta
 
 import pytest
+from fastapi import HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import pay_for_request
-from routstr.core.db import ApiKey
+from routstr.core.db import ApiKey, create_session
 
 
 @pytest.mark.asyncio
@@ -118,6 +120,56 @@ async def test_periodic_key_reset_job(integration_session: AsyncSession) -> None
     await integration_session.refresh(key2)
     assert key1.total_spent == 0
     assert key2.total_spent == 0
+
+
+@pytest.mark.asyncio
+async def test_balance_limit_enforced_atomically_under_concurrency(
+    patched_db_engine: None,
+) -> None:
+    parent_hash = "parent_limit_atomic"
+    child_hash = "child_limit_atomic"
+    cost = 300
+
+    async with create_session() as session:
+        parent = ApiKey(hashed_key=parent_hash, balance=10000)
+        child = ApiKey(
+            hashed_key=child_hash,
+            balance=0,
+            parent_key_hash=parent_hash,
+            balance_limit=cost,
+            total_spent=0,
+        )
+        session.add(parent)
+        session.add(child)
+        await session.commit()
+
+    results: list[str] = []
+
+    async def attempt() -> None:
+        async with create_session() as session:
+            fresh_child = await session.get(ApiKey, child_hash)
+            assert fresh_child is not None
+            try:
+                await pay_for_request(fresh_child, cost, session)
+                results.append("success")
+            except HTTPException as exc:
+                assert exc.status_code == 402
+                results.append("blocked")
+
+    await asyncio.gather(attempt(), attempt())
+
+    assert sorted(results) == ["blocked", "success"], (
+        f"Expected exactly one success and one 402, got: {results}"
+    )
+
+    async with create_session() as session:
+        final_child = await session.get(ApiKey, child_hash)
+        assert final_child is not None
+
+    assert final_child.reserved_balance == cost, (
+        f"Child reserved_balance should equal one reservation, "
+        f"got {final_child.reserved_balance}"
+    )
 
 
 @pytest.mark.asyncio
