@@ -535,10 +535,24 @@ async def create_child_key(
             detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
         )
 
-    # Deduct cost from parent
-    key.balance -= total_cost
-    key.total_spent += total_cost
-    session.add(key)
+    # Deduct cost from parent atomically — guards against concurrent requests
+    # that both pass the balance check above on stale in-memory state.
+    deduct_stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= total_cost)
+        .values(
+            balance=col(ApiKey.balance) - total_cost,
+            total_spent=col(ApiKey.total_spent) + total_cost,
+        )
+    )
+    result = await session.exec(deduct_stmt)  # type: ignore[call-overload]
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
+        )
 
     # Generate new keys
     import secrets
@@ -563,6 +577,7 @@ async def create_child_key(
         new_keys.append("sk-" + new_key_hash)
 
     await session.commit()
+    await session.refresh(key)
 
     response_data = {
         "api_keys": new_keys,
