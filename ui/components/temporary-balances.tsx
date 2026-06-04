@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useEffect, useState } from 'react';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
   RefreshCw,
   AlertCircle,
@@ -9,8 +9,10 @@ import {
   Clock,
   DollarSign,
   Activity,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
-import { AdminService, TemporaryBalance } from '@/lib/api/services/admin';
+import { AdminService } from '@/lib/api/services/admin';
 import {
   Card,
   CardContent,
@@ -41,52 +43,12 @@ import {
 import { cn } from '@/lib/utils';
 import type { DisplayUnit } from '@/lib/types/units';
 import { formatFromMsat } from '@/lib/currency';
+import { format } from 'date-fns';
 
-function getTotals(balances: TemporaryBalance[]) {
-  let totalBalance = 0;
-  let totalSpent = 0;
-  let totalRequests = 0;
+const PAGE_SIZE = 50;
 
-  balances.forEach((balance) => {
-    if (!balance.parent_key_hash) {
-      totalBalance += balance.balance || 0;
-    }
-    totalSpent += balance.total_spent || 0;
-    totalRequests += balance.total_requests || 0;
-  });
-
-  return { totalBalance, totalSpent, totalRequests };
-}
-
-function buildHierarchicalData(
-  allBalances: TemporaryBalance[],
-  filteredBalances: TemporaryBalance[]
-) {
-  const parents = filteredBalances.filter((item) => !item.parent_key_hash);
-  const result: Array<TemporaryBalance & { isChild?: boolean }> = [];
-
-  parents.forEach((parent) => {
-    result.push(parent);
-
-    const children = allBalances.filter(
-      (item) => item.parent_key_hash === parent.hashed_key
-    );
-
-    children.forEach((child) => {
-      result.push({ ...child, isChild: true });
-    });
-  });
-
-  const orphans = filteredBalances.filter(
-    (item) =>
-      item.parent_key_hash &&
-      !result.some((r) => r.hashed_key === item.hashed_key)
-  );
-
-  result.push(...orphans.map((item) => ({ ...item, isChild: true })));
-
-  return result;
-}
+const formatCreatedAt = (createdAt: number | null | undefined) =>
+  createdAt ? format(createdAt * 1000, 'yyyy-MM-dd HH:mm:ss') : '—';
 
 export function TemporaryBalances({
   refreshInterval = 10000,
@@ -98,38 +60,55 @@ export function TemporaryBalances({
   usdPerSat: number | null;
 }) {
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(0);
+
+  // Debounce the search input so we don't refetch on every keystroke.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(searchTerm), 300);
+    return () => clearTimeout(handle);
+  }, [searchTerm]);
+
+  // Reset to the first page whenever the active search changes.
+  useEffect(() => {
+    setPage(0);
+  }, [debouncedSearch]);
+
+  const searchParam = debouncedSearch || undefined;
 
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
-    queryKey: ['temporary-balances'],
-    queryFn: async () => AdminService.getTemporaryBalances(),
+    queryKey: ['temporary-balances', searchParam, page],
+    queryFn: async () =>
+      AdminService.getTemporaryBalances(
+        searchParam,
+        PAGE_SIZE,
+        page * PAGE_SIZE
+      ),
     refetchInterval: refreshInterval,
+    placeholderData: keepPreviousData,
   });
 
   const formatBalance = (msat: number) =>
     formatFromMsat(msat, displayUnit, usdPerSat);
 
-  const filteredData = data
-    ? data.filter(
-        (item) =>
-          item.hashed_key.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          item.refund_address?.toLowerCase().includes(searchTerm.toLowerCase())
-      )
-    : [];
-
-  const totals = data
-    ? getTotals(data)
-    : { totalBalance: 0, totalSpent: 0, totalRequests: 0 };
-
-  const rows = data ? buildHierarchicalData(data, filteredData) : [];
+  const rows = data?.balances ?? [];
+  const total = data?.total ?? 0;
+  const totals = data?.totals ?? {
+    total_balance: 0,
+    total_spent: 0,
+    total_requests: 0,
+  };
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
     <Card>
       <CardHeader className='pb-4'>
         <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
           <div className='space-y-1.5'>
-            <CardTitle>Temporary Balances</CardTitle>
+            <CardTitle>API Keys</CardTitle>
             <CardDescription className='max-w-2xl'>
-              API keys with their current balances and usage statistics
+              API keys with their current balances and usage statistics, newest
+              first
             </CardDescription>
           </div>
 
@@ -156,7 +135,7 @@ export function TemporaryBalances({
                   (isFetching || isLoading) && 'animate-spin'
                 )}
               />
-              <span className='sr-only'>Refresh temporary balances</span>
+              <span className='sr-only'>Refresh API keys</span>
             </Button>
           </div>
         </div>
@@ -190,7 +169,7 @@ export function TemporaryBalances({
           <Alert variant='destructive'>
             <AlertCircle className='h-5 w-5' />
             <AlertDescription>
-              Error loading temporary balances: {(error as Error).message}
+              Error loading API keys: {(error as Error).message}
             </AlertDescription>
           </Alert>
         ) : (
@@ -207,7 +186,7 @@ export function TemporaryBalances({
                 </CardHeader>
                 <CardContent className='pt-0'>
                   <p className='text-2xl font-semibold tracking-tight tabular-nums'>
-                    {formatBalance(totals.totalBalance)}
+                    {formatBalance(totals.total_balance)}
                   </p>
                 </CardContent>
               </Card>
@@ -222,7 +201,7 @@ export function TemporaryBalances({
                 </CardHeader>
                 <CardContent className='pt-0'>
                   <p className='text-2xl font-semibold tracking-tight tabular-nums'>
-                    {formatBalance(totals.totalSpent)}
+                    {formatBalance(totals.total_spent)}
                   </p>
                 </CardContent>
               </Card>
@@ -237,11 +216,43 @@ export function TemporaryBalances({
                 </CardHeader>
                 <CardContent className='pt-0'>
                   <p className='text-2xl font-semibold tracking-tight tabular-nums'>
-                    {totals.totalRequests.toLocaleString()}
+                    {totals.total_requests.toLocaleString()}
                   </p>
                 </CardContent>
               </Card>
             </div>
+
+            {totalPages > 1 && (
+              <div className='flex flex-col gap-2 border-b pb-3 sm:flex-row sm:items-center sm:justify-between'>
+                <span className='text-muted-foreground text-xs sm:text-sm'>
+                  {page * PAGE_SIZE + 1}–
+                  {Math.min((page + 1) * PAGE_SIZE, total)} of {total}
+                </span>
+                <div className='flex items-center gap-2'>
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    disabled={page === 0}
+                    onClick={() => setPage(page - 1)}
+                  >
+                    <ChevronLeft className='h-4 w-4' />
+                    <span className='hidden sm:inline'>Previous</span>
+                  </Button>
+                  <span className='text-xs sm:text-sm'>
+                    {page + 1} / {totalPages}
+                  </span>
+                  <Button
+                    variant='outline'
+                    size='sm'
+                    disabled={page >= totalPages - 1}
+                    onClick={() => setPage(page + 1)}
+                  >
+                    <span className='hidden sm:inline'>Next</span>
+                    <ChevronRight className='h-4 w-4' />
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {rows.length > 0 ? (
               <>
@@ -257,6 +268,7 @@ export function TemporaryBalances({
                         <TableHead className='text-right'>
                           Total Requests
                         </TableHead>
+                        <TableHead>Created</TableHead>
                         <TableHead>Refund Address</TableHead>
                         <TableHead className='text-right'>
                           Expiry Time
@@ -264,178 +276,192 @@ export function TemporaryBalances({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {rows.map((balance, index) => (
-                        <TableRow
-                          key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-${index}`}
-                          className={cn(
-                            balance.balance === 0 &&
-                              !balance.isChild &&
-                              'opacity-60',
-                            balance.isChild && 'bg-muted/30'
-                          )}
-                        >
-                          <TableCell className='max-w-[16rem] font-mono text-xs break-all whitespace-normal'>
-                            <div className='flex items-center gap-2'>
-                              {balance.isChild && (
-                                <Badge
-                                  variant='outline'
-                                  className='h-4 px-1 text-[10px] uppercase'
-                                >
-                                  Child
-                                </Badge>
-                              )}
-                              <span>{balance.hashed_key}</span>
-                            </div>
-                          </TableCell>
-                          <TableCell className='text-right font-mono'>
-                            {balance.isChild ? (
-                              <span className='text-muted-foreground italic'>
-                                (Parent)
-                              </span>
-                            ) : (
-                              formatBalance(balance.balance)
+                      {rows.map((balance, index) => {
+                        const isChild = Boolean(balance.parent_key_hash);
+                        return (
+                          <TableRow
+                            key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-${index}`}
+                            className={cn(
+                              balance.balance === 0 && !isChild && 'opacity-60',
+                              isChild && 'bg-muted/30'
                             )}
-                          </TableCell>
-                          <TableCell className='text-right font-mono'>
-                            {formatBalance(balance.total_spent)}
-                          </TableCell>
-                          <TableCell className='text-right font-mono'>
-                            {balance.total_requests.toLocaleString()}
-                          </TableCell>
-                          <TableCell className='max-w-[14rem] font-mono text-xs break-all whitespace-normal'>
-                            {balance.refund_address || '-'}
-                          </TableCell>
-                          <TableCell className='text-right font-mono text-xs'>
-                            {balance.key_expiry_time ? (
-                              <div className='inline-flex items-center justify-end gap-1'>
-                                <Clock className='h-3 w-3' />
-                                <span>
-                                  {new Date(
-                                    balance.key_expiry_time * 1000
-                                  ).toLocaleDateString()}
-                                </span>
+                          >
+                            <TableCell className='max-w-[16rem] font-mono text-xs break-all whitespace-normal'>
+                              <div className='flex items-center gap-2'>
+                                {isChild && (
+                                  <Badge
+                                    variant='outline'
+                                    className='h-4 px-1 text-[10px] uppercase'
+                                  >
+                                    Child
+                                  </Badge>
+                                )}
+                                <span>{balance.hashed_key}</span>
                               </div>
-                            ) : (
-                              '-'
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                            </TableCell>
+                            <TableCell className='text-right font-mono'>
+                              {isChild ? (
+                                <span className='text-muted-foreground italic'>
+                                  (Parent)
+                                </span>
+                              ) : (
+                                formatBalance(balance.balance)
+                              )}
+                            </TableCell>
+                            <TableCell className='text-right font-mono'>
+                              {formatBalance(balance.total_spent)}
+                            </TableCell>
+                            <TableCell className='text-right font-mono'>
+                              {balance.total_requests.toLocaleString()}
+                            </TableCell>
+                            <TableCell className='font-mono text-xs whitespace-nowrap'>
+                              {formatCreatedAt(balance.created_at)}
+                            </TableCell>
+                            <TableCell className='max-w-[14rem] font-mono text-xs break-all whitespace-normal'>
+                              {balance.refund_address || '-'}
+                            </TableCell>
+                            <TableCell className='text-right font-mono text-xs'>
+                              {balance.key_expiry_time ? (
+                                <div className='inline-flex items-center justify-end gap-1'>
+                                  <Clock className='h-3 w-3' />
+                                  <span>
+                                    {new Date(
+                                      balance.key_expiry_time * 1000
+                                    ).toLocaleDateString()}
+                                  </span>
+                                </div>
+                              ) : (
+                                '-'
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>
 
                 <div className='space-y-2 md:hidden'>
-                  {rows.map((balance, index) => (
-                    <Card
-                      key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
-                      className={cn(
-                        balance.balance === 0 &&
-                          !balance.isChild &&
-                          'opacity-80',
-                        balance.isChild && 'bg-muted/30'
-                      )}
-                    >
-                      <CardHeader className='p-4 pb-2'>
-                        <div className='flex items-center justify-between gap-2'>
-                          <CardDescription className='font-mono text-xs break-all'>
-                            {balance.hashed_key}
-                          </CardDescription>
-                          {balance.isChild && (
-                            <Badge
-                              variant='outline'
-                              className='h-4 px-1.5 text-[10px] uppercase'
-                            >
-                              Child
-                            </Badge>
-                          )}
-                        </div>
-                      </CardHeader>
-                      <CardContent className='grid grid-cols-2 gap-3 p-4 pt-0'>
-                        <div>
-                          <p className='text-muted-foreground text-xs'>
-                            Balance
-                          </p>
-                          <p className='font-mono text-sm'>
-                            {balance.isChild
-                              ? '(Uses Parent)'
-                              : formatBalance(balance.balance)}
-                          </p>
-                        </div>
-                        <div>
-                          <p className='text-muted-foreground text-xs'>Spent</p>
-                          <p className='font-mono text-sm'>
-                            {formatBalance(balance.total_spent)}
-                          </p>
-                        </div>
-                        <div>
-                          <p className='text-muted-foreground text-xs'>
-                            Requests
-                          </p>
-                          <p className='font-mono text-sm'>
-                            {balance.total_requests.toLocaleString()}
-                          </p>
-                        </div>
-                        <div>
-                          <p className='text-muted-foreground text-xs'>
-                            Expires
-                          </p>
-                          <p className='font-mono text-xs'>
-                            {balance.key_expiry_time ? (
-                              <span className='inline-flex items-center gap-1'>
-                                <Clock className='h-3 w-3' />
-                                {new Date(
-                                  balance.key_expiry_time * 1000
-                                ).toLocaleDateString()}
-                              </span>
-                            ) : (
-                              '-'
+                  {rows.map((balance, index) => {
+                    const isChild = Boolean(balance.parent_key_hash);
+                    return (
+                      <Card
+                        key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
+                        className={cn(
+                          balance.balance === 0 && !isChild && 'opacity-80',
+                          isChild && 'bg-muted/30'
+                        )}
+                      >
+                        <CardHeader className='p-4 pb-2'>
+                          <div className='flex items-center justify-between gap-2'>
+                            <CardDescription className='font-mono text-xs break-all'>
+                              {balance.hashed_key}
+                            </CardDescription>
+                            {isChild && (
+                              <Badge
+                                variant='outline'
+                                className='h-4 px-1.5 text-[10px] uppercase'
+                              >
+                                Child
+                              </Badge>
                             )}
-                          </p>
-                        </div>
-                        {balance.refund_address && (
-                          <div className='col-span-2'>
+                          </div>
+                        </CardHeader>
+                        <CardContent className='grid grid-cols-2 gap-3 p-4 pt-0'>
+                          <div>
                             <p className='text-muted-foreground text-xs'>
-                              Refund Address
+                              Balance
                             </p>
-                            <p className='font-mono text-xs break-all'>
-                              {balance.refund_address}
+                            <p className='font-mono text-sm'>
+                              {isChild
+                                ? '(Uses Parent)'
+                                : formatBalance(balance.balance)}
                             </p>
                           </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  ))}
+                          <div>
+                            <p className='text-muted-foreground text-xs'>
+                              Spent
+                            </p>
+                            <p className='font-mono text-sm'>
+                              {formatBalance(balance.total_spent)}
+                            </p>
+                          </div>
+                          <div>
+                            <p className='text-muted-foreground text-xs'>
+                              Requests
+                            </p>
+                            <p className='font-mono text-sm'>
+                              {balance.total_requests.toLocaleString()}
+                            </p>
+                          </div>
+                          <div>
+                            <p className='text-muted-foreground text-xs'>
+                              Created
+                            </p>
+                            <p className='font-mono text-xs'>
+                              {formatCreatedAt(balance.created_at)}
+                            </p>
+                          </div>
+                          <div>
+                            <p className='text-muted-foreground text-xs'>
+                              Expires
+                            </p>
+                            <p className='font-mono text-xs'>
+                              {balance.key_expiry_time ? (
+                                <span className='inline-flex items-center gap-1'>
+                                  <Clock className='h-3 w-3' />
+                                  {new Date(
+                                    balance.key_expiry_time * 1000
+                                  ).toLocaleDateString()}
+                                </span>
+                              ) : (
+                                '-'
+                              )}
+                            </p>
+                          </div>
+                          {balance.refund_address && (
+                            <div className='col-span-2'>
+                              <p className='text-muted-foreground text-xs'>
+                                Refund Address
+                              </p>
+                              <p className='font-mono text-xs break-all'>
+                                {balance.refund_address}
+                              </p>
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
                 </div>
               </>
             ) : (
               <Empty className='py-8'>
                 <EmptyHeader>
                   <EmptyMedia variant='icon'>
-                    {searchTerm ? (
+                    {debouncedSearch ? (
                       <AlertCircle className='h-4 w-4' />
                     ) : (
                       <Key className='h-4 w-4' />
                     )}
                   </EmptyMedia>
                   <EmptyTitle>
-                    {searchTerm
-                      ? 'No temporary balances match your search'
-                      : 'No temporary balances found'}
+                    {debouncedSearch
+                      ? 'No API keys match your search'
+                      : 'No API keys found'}
                   </EmptyTitle>
                   <EmptyDescription>
-                    {searchTerm
+                    {debouncedSearch
                       ? 'Try a different key hash or refund address.'
-                      : 'Temporary balances will appear here once API keys are used.'}
+                      : 'API keys will appear here once they are created.'}
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
             )}
 
-            {data && data.length > 0 && (
+            {total > 0 && (
               <p className='text-muted-foreground text-xs'>
-                Showing {filteredData.length} of {data.length} temporary
-                balances
+                Showing {rows.length} of {total} API keys
               </p>
             )}
           </div>

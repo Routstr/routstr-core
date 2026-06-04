@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
+from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 
 from ..payment.models import _row_to_model, list_models
@@ -20,6 +21,8 @@ from ..wallet import (
 from .db import (
     ApiKey,
     CashuTransaction,
+    CliToken,
+    LightningInvoice,
     ModelRow,
     UpstreamProviderRow,
     create_session,
@@ -38,38 +41,116 @@ ADMIN_SESSION_DURATION = 3600
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
-def require_admin_api(request: Request) -> None:
+async def require_admin_api(request: Request) -> None:
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1]
-        expiry = admin_sessions.get(token)
-        if expiry and expiry > int(datetime.now(timezone.utc).timestamp()):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    token = auth_header.split(" ", 1)[1]
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+
+    # 1) Short-lived session token (in-memory)
+    expiry = admin_sessions.get(token)
+    if expiry and expiry > now_ts:
+        return
+
+    # 2) Long-lived CLI token (DB-backed)
+    async with create_session() as session:
+        result = await session.exec(select(CliToken).where(CliToken.token == token))
+        cli_token = result.first()
+        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+            cli_token.last_used_at = now_ts
+            session.add(cli_token)
+            await session.commit()
             return
 
     raise HTTPException(status_code=403, detail="Unauthorized")
 
 
 @admin_router.get("/api/temporary-balances", dependencies=[Depends(require_admin_api)])
-async def get_temporary_balances_api(request: Request) -> list[dict[str, object]]:
+async def get_temporary_balances_api(
+    request: Request,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, object]:
+    from sqlalchemy import case
+    from sqlmodel import col, func
+
+    filters = []
+    if search:
+        pattern = f"%{search}%"
+        filters.append(
+            col(ApiKey.hashed_key).like(pattern)
+            | col(ApiKey.refund_address).like(pattern)
+        )
+
     async with create_session() as session:
-        result = await session.exec(select(ApiKey))
+        base = select(ApiKey).where(*filters)
+
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
+
+        # Aggregate totals across the whole (search-filtered) set, not just the
+        # current page. Balance counts only parent (non-child) keys to avoid
+        # double-counting, since child keys draw from their parent's balance.
+        totals_result = await session.exec(
+            select(
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (col(ApiKey.parent_key_hash).is_(None), ApiKey.balance),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(func.sum(ApiKey.total_spent), 0),
+                func.coalesce(func.sum(ApiKey.total_requests), 0),
+            ).where(*filters)
+        )
+        total_balance, total_spent, total_requests = totals_result.one()
+
+        # Latest created first; keys with no created_at (legacy rows) sort last.
+        # Use an explicit CASE rather than relying on dialect NULL-ordering so
+        # the behaviour is identical on SQLite and Postgres.
+        stmt = (
+            base.order_by(
+                case((col(ApiKey.created_at).is_(None), 1), else_=0),
+                col(ApiKey.created_at).desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await session.exec(stmt)
         api_keys = result.all()
 
-    return [
-        {
-            "hashed_key": key.hashed_key,
-            "balance": key.balance,
-            "total_spent": key.total_spent,
-            "total_requests": key.total_requests,
-            "refund_address": key.refund_address,
-            "key_expiry_time": key.key_expiry_time,
-            "parent_key_hash": key.parent_key_hash,
-            "balance_limit": key.balance_limit,
-            "balance_limit_reset": key.balance_limit_reset,
-            "validity_date": key.validity_date,
-        }
-        for key in api_keys
-    ]
+    return {
+        "balances": [
+            {
+                "hashed_key": key.hashed_key,
+                "balance": key.balance,
+                "total_spent": key.total_spent,
+                "total_requests": key.total_requests,
+                "refund_address": key.refund_address,
+                "key_expiry_time": key.key_expiry_time,
+                "parent_key_hash": key.parent_key_hash,
+                "balance_limit": key.balance_limit,
+                "balance_limit_reset": key.balance_limit_reset,
+                "validity_date": key.validity_date,
+                "created_at": key.created_at,
+            }
+            for key in api_keys
+        ],
+        "total": total,
+        "totals": {
+            "total_balance": total_balance,
+            "total_spent": total_spent,
+            "total_requests": total_requests,
+        },
+    }
 
 
 class ApiKeyUpdate(BaseModel):
@@ -126,8 +207,8 @@ async def get_settings(request: Request) -> dict:
     return data
 
 
-class SettingsUpdate(BaseModel):
-    __root__: dict[str, object]
+class SettingsUpdate(RootModel[dict[str, object]]):
+    pass
 
 
 class PasswordUpdate(BaseModel):
@@ -138,14 +219,19 @@ class PasswordUpdate(BaseModel):
 @admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
 async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     # Remove sensitive fields from general settings update
-    settings_data = update.__root__.copy()
+    settings_data = update.root.copy()
     sensitive_fields = ["admin_password", "upstream_api_key", "nsec"]
     for field in sensitive_fields:
         if field in settings_data:
             del settings_data[field]
 
-    async with create_session() as session:
-        new_settings = await SettingsService.update(settings_data, session)
+    try:
+        async with create_session() as session:
+            new_settings = await SettingsService.update(settings_data, session)
+    except PydanticValidationError as e:
+        # Surface validation issues (e.g. non-positive payout amounts)
+        # as a clean 400 instead of a 500.
+        raise HTTPException(status_code=400, detail=e.errors()) from e
     data = new_settings.dict()
     if "upstream_api_key" in data:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
@@ -242,6 +328,73 @@ async def admin_logout(request: Request) -> dict[str, object]:
     return {"ok": True}
 
 
+# ─── CLI Tokens (long-lived bearer tokens for CLI/agent use) ───
+
+
+class CliTokenCreate(BaseModel):
+    name: str
+    expires_in_days: int | None = None
+
+
+@admin_router.get("/api/cli-tokens", dependencies=[Depends(require_admin_api)])
+async def list_cli_tokens() -> list[dict[str, object]]:
+    async with create_session() as session:
+        result = await session.exec(select(CliToken))
+        tokens = result.all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "token_preview": f"{t.token[:8]}...{t.token[-4:]}",
+            "created_at": t.created_at,
+            "last_used_at": t.last_used_at,
+            "expires_at": t.expires_at,
+        }
+        for t in tokens
+    ]
+
+
+@admin_router.post("/api/cli-tokens", dependencies=[Depends(require_admin_api)])
+async def create_cli_token(payload: CliTokenCreate) -> dict[str, object]:
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    raw_token = secrets.token_urlsafe(32)
+    expires_at: int | None = None
+    if payload.expires_in_days is not None and payload.expires_in_days > 0:
+        expires_at = int(datetime.now(timezone.utc).timestamp()) + (
+            payload.expires_in_days * 86400
+        )
+
+    async with create_session() as session:
+        cli_token = CliToken(token=raw_token, name=name, expires_at=expires_at)
+        session.add(cli_token)
+        await session.commit()
+        await session.refresh(cli_token)
+
+    return {
+        "id": cli_token.id,
+        "name": cli_token.name,
+        "token": raw_token,  # full token returned only on creation
+        "created_at": cli_token.created_at,
+        "expires_at": cli_token.expires_at,
+    }
+
+
+@admin_router.delete(
+    "/api/cli-tokens/{token_id}", dependencies=[Depends(require_admin_api)]
+)
+async def revoke_cli_token(token_id: str) -> dict[str, object]:
+    async with create_session() as session:
+        cli_token = await session.get(CliToken, token_id)
+        if not cli_token:
+            raise HTTPException(status_code=404, detail="Token not found")
+        await session.delete(cli_token)
+        await session.commit()
+    return {"ok": True, "deleted_id": token_id}
+
+
 class WithdrawRequest(BaseModel):
     amount: int
     mint_url: str | None = None
@@ -295,6 +448,7 @@ class ModelCreate(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     enabled: bool = True
+    forwarded_model_id: str | None = None
 
 
 @admin_router.post(
@@ -339,6 +493,7 @@ async def upsert_provider_model(
                 json.dumps(payload.alias_ids) if payload.alias_ids else None
             )
             existing_row.enabled = payload.enabled
+            existing_row.forwarded_model_id = payload.forwarded_model_id or payload.id
 
             session.add(existing_row)
             await session.commit()
@@ -371,6 +526,7 @@ async def upsert_provider_model(
                 ),
                 upstream_provider_id=provider_id,
                 enabled=payload.enabled,
+                forwarded_model_id=payload.forwarded_model_id or payload.id,
             )
             session.add(row)
             await session.commit()
@@ -1332,41 +1488,102 @@ async def get_transactions_api(
     type: str | None = None,
     status: str | None = None,
     search: str | None = None,
-    limit: int = 100,
+    source: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     async with create_session() as session:
-        from sqlmodel import col
+        from sqlmodel import col, func
 
-        stmt = select(CashuTransaction)
+        base = select(CashuTransaction)
         if type:
-            stmt = stmt.where(CashuTransaction.type == type)
+            base = base.where(CashuTransaction.type == type)
+        if source:
+            if source == "x-cashu":
+                base = base.where(
+                    (CashuTransaction.source == "x-cashu")
+                    | (CashuTransaction.source == None)  # noqa: E711
+                )
+            else:
+                base = base.where(CashuTransaction.source == source)
         if status:
             if status == "collected":
-                stmt = stmt.where(CashuTransaction.collected == True)  # noqa: E712
+                base = base.where(CashuTransaction.collected == True)  # noqa: E712
             elif status == "swept":
-                stmt = stmt.where(CashuTransaction.swept == True)  # noqa: E712
+                base = base.where(CashuTransaction.swept == True)  # noqa: E712
             elif status == "pending":
-                stmt = stmt.where(
+                base = base.where(
                     CashuTransaction.collected == False,  # noqa: E712
                     CashuTransaction.swept == False,  # noqa: E712
                 )
 
         if search:
             search_pattern = f"%{search}%"
-            stmt = stmt.where(
+            base = base.where(
                 (col(CashuTransaction.id).like(search_pattern))
                 | (col(CashuTransaction.token).like(search_pattern))
                 | (col(CashuTransaction.request_id).like(search_pattern))
+                | (col(CashuTransaction.api_key_hashed_key).like(search_pattern))
             )
 
-        stmt = stmt.order_by(col(CashuTransaction.created_at).desc()).limit(limit)
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
 
+        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
         results = await session.exec(stmt)
         transactions = results.all()
 
         return {
             "transactions": [tx.dict() for tx in transactions],
-            "total": len(transactions),
+            "total": total,
+        }
+
+
+@admin_router.get(
+    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
+)
+async def get_lightning_invoices_api(
+    status: str | None = None,
+    purpose: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    async with create_session() as session:
+        from sqlmodel import col, func
+
+        base = select(LightningInvoice)
+        if status:
+            base = base.where(LightningInvoice.status == status)
+        if purpose:
+            base = base.where(LightningInvoice.purpose == purpose)
+        if search:
+            pattern = f"%{search}%"
+            base = base.where(
+                (col(LightningInvoice.id).like(pattern))
+                | (col(LightningInvoice.bolt11).like(pattern))
+                | (col(LightningInvoice.payment_hash).like(pattern))
+                | (col(LightningInvoice.api_key_hash).like(pattern))
+            )
+
+        count_result = await session.exec(
+            select(func.count()).select_from(base.subquery())
+        )
+        total = count_result.one()
+
+        stmt = (
+            base.order_by(col(LightningInvoice.created_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        results = await session.exec(stmt)
+        invoices = results.all()
+
+        return {
+            "invoices": [inv.dict() for inv in invoices],
+            "total": total,
         }
 
 

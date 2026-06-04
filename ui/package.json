@@ -1,5 +1,6 @@
 {
   "name": "routstr-service",
+  "packageManager": "pnpm@10.15.0",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -88,5 +89,11 @@
     "prettier-plugin-tailwindcss": "^0.7.2",
     "tailwindcss": "^4.2.0",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }

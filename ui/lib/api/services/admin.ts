@@ -76,6 +76,7 @@ export const AdminModelSchema = z.object({
   canonical_slug: z.string().nullable().optional(),
   alias_ids: z.array(z.string()).nullable().optional(),
   enabled: z.boolean().default(true),
+  forwarded_model_id: z.string().nullable().optional(),
 });
 
 export const ProviderModelsSchema = z.object({
@@ -830,9 +831,18 @@ export class AdminService {
     return await apiClient.get<{ dates: string[] }>('/admin/api/logs/dates');
   }
 
-  static async getTemporaryBalances(): Promise<TemporaryBalance[]> {
-    return await apiClient.get<TemporaryBalance[]>(
-      '/admin/api/temporary-balances'
+  static async getTemporaryBalances(
+    search?: string,
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<TemporaryBalancesResponse> {
+    const params = new URLSearchParams();
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
+
+    return await apiClient.get<TemporaryBalancesResponse>(
+      `/admin/api/temporary-balances?${params.toString()}`
     );
   }
 
@@ -890,16 +900,39 @@ export class AdminService {
     type?: string,
     status?: string,
     search?: string,
-    limit: number = 100
+    source?: string,
+    limit: number = 50,
+    offset: number = 0
   ): Promise<TransactionsResponse> {
     const params = new URLSearchParams();
     if (type) params.append('type', type);
     if (status) params.append('status', status);
     if (search) params.append('search', search);
+    if (source) params.append('source', source);
     params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
 
     return await apiClient.get<TransactionsResponse>(
       `/admin/api/transactions?${params.toString()}`
+    );
+  }
+
+  static async getLightningInvoices(
+    status?: string,
+    purpose?: string,
+    search?: string,
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<LightningInvoicesResponse> {
+    const params = new URLSearchParams();
+    if (status) params.append('status', status);
+    if (purpose) params.append('purpose', purpose);
+    if (search) params.append('search', search);
+    params.append('limit', limit.toString());
+    params.append('offset', offset.toString());
+
+    return await apiClient.get<LightningInvoicesResponse>(
+      `/admin/api/lightning-invoices?${params.toString()}`
     );
   }
 
@@ -961,6 +994,45 @@ export class AdminService {
       balance_data: number | null | Record<string, unknown>;
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
+
+  // ── CLI Tokens ──
+
+  static async listCliTokens(): Promise<CliTokenListItem[]> {
+    return await apiClient.get<CliTokenListItem[]>('/admin/api/cli-tokens');
+  }
+
+  static async createCliToken(
+    name: string,
+    expiresInDays?: number
+  ): Promise<CliTokenCreated> {
+    return await apiClient.post<CliTokenCreated>('/admin/api/cli-tokens', {
+      name,
+      expires_in_days: expiresInDays ?? null,
+    });
+  }
+
+  static async revokeCliToken(tokenId: string): Promise<{ ok: boolean }> {
+    return await apiClient.delete<{ ok: boolean }>(
+      `/admin/api/cli-tokens/${encodeURIComponent(tokenId)}`
+    );
+  }
+}
+
+export interface CliTokenListItem {
+  id: string;
+  name: string;
+  token_preview: string;
+  created_at: number;
+  last_used_at: number | null;
+  expires_at: number | null;
+}
+
+export interface CliTokenCreated {
+  id: string;
+  name: string;
+  token: string;
+  created_at: number;
+  expires_at: number | null;
 }
 
 export const TemporaryBalanceSchema = z.object({
@@ -971,9 +1043,20 @@ export const TemporaryBalanceSchema = z.object({
   refund_address: z.string().nullable(),
   key_expiry_time: z.number().nullable(),
   parent_key_hash: z.string().nullable().optional(),
+  created_at: z.number().nullable().optional(),
 });
 
 export type TemporaryBalance = z.infer<typeof TemporaryBalanceSchema>;
+
+export interface TemporaryBalancesResponse {
+  balances: TemporaryBalance[];
+  total: number;
+  totals: {
+    total_balance: number;
+    total_spent: number;
+    total_requests: number;
+  };
+}
 
 export interface UsageMetricData {
   timestamp: string;
@@ -1134,9 +1217,30 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
+  source: 'x-cashu' | 'apikey';
+  api_key_hashed_key?: string;
 }
 
 export interface TransactionsResponse {
   transactions: Transaction[];
+  total: number;
+}
+
+export interface LightningInvoice {
+  id: string;
+  bolt11: string;
+  amount_sats: number;
+  description: string;
+  payment_hash: string;
+  status: 'pending' | 'paid' | 'expired' | 'cancelled';
+  api_key_hash: string | null;
+  purpose: 'create' | 'topup';
+  created_at: number;
+  expires_at: number;
+  paid_at: number | null;
+}
+
+export interface LightningInvoicesResponse {
+  invoices: LightningInvoice[];
   total: number;
 }

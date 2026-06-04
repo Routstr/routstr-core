@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from ..core.settings import Settings
@@ -122,12 +122,16 @@ async def get_all_models_with_overrides(
 
 
 async def refresh_upstreams_models_periodically(
-    upstreams: list[BaseUpstreamProvider],
+    upstreams_provider: (
+        Callable[[], list[BaseUpstreamProvider]] | list[BaseUpstreamProvider]
+    ),
 ) -> None:
     """Background task to periodically refresh models cache for all providers.
 
     Args:
-        upstreams: List of upstream provider instances
+        upstreams_provider: Either a callable returning the live upstream list
+            (preferred — picks up providers added/changed via reinitialize_upstreams),
+            or a static list (legacy, will go stale after reinitialize_upstreams).
     """
     import asyncio
     import random
@@ -139,9 +143,14 @@ async def refresh_upstreams_models_periodically(
         logger.info("Provider models refresh disabled (interval <= 0)")
         return
 
+    def _resolve_upstreams() -> list[BaseUpstreamProvider]:
+        if callable(upstreams_provider):
+            return upstreams_provider()
+        return upstreams_provider
+
     while True:
         try:
-            for upstream in upstreams:
+            for upstream in _resolve_upstreams():
                 try:
                     await upstream.refresh_models_cache()
                 except Exception as e:
@@ -188,13 +197,14 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
         existing_providers = result.all()
 
         if not existing_providers:
-            logger.info(
-                "No upstream providers found in database, seeding from settings"
-            )
             await _seed_providers_from_settings(session, settings)
             await session.commit()
             result = await session.exec(select(UpstreamProviderRow))
             existing_providers = result.all()
+            if existing_providers:
+                logger.info(
+                    f"Seeded {len(existing_providers)} upstream providers from settings"
+                )
 
         async def _init_single_provider(
             provider_row: UpstreamProviderRow,

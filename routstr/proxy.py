@@ -17,6 +17,7 @@ from .core.db import (
     get_session,
 )
 from .core.exceptions import UpstreamError
+from .core.not_found import build_not_found_response
 from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
@@ -69,7 +70,25 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
 
 def get_model_instance(model_id: str) -> Model | None:
     """Get Model instance by ID from global cache."""
-    return _model_instances.get(model_id.lower())
+    if not model_id:
+        return None
+
+    model_id_lower = model_id.lower()
+    # Try exact match first
+    if model := _model_instances.get(model_id_lower):
+        return model
+
+    # Try stripping common version suffixes (e.g., -20251222)
+    # This handles cases where upstream returns a specific version
+    # but we only track the base model name.
+    import re
+
+    base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
+    if base_model_id != model_id_lower:
+        if model := _model_instances.get(base_model_id):
+            return model
+
+    return None
 
 
 def get_provider_for_model(model_id: str) -> list[BaseUpstreamProvider] | None:
@@ -132,15 +151,71 @@ async def refresh_model_maps_periodically() -> None:
             )
 
 
+_API_PATH_PREFIXES = (
+    "v1/",
+    "responses",
+    "chat/",
+    "completions",
+    "models",
+    "embeddings",
+    "audio/",
+    "images/",
+    "moderations",
+    "providers",
+    "tee/",
+)
+
+
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
 ) -> Response | StreamingResponse:
+    # GET requests must hit a known API prefix; otherwise return a 404 (HTML
+    # for browsers, JSON for API clients). POST requests are always forwarded
+    # so that OpenAI-style endpoints work with or without the `v1/` prefix
+    # (e.g. `/chat/completions` as well as `/v1/chat/completions`).
+    if request.method == "GET" and not path.startswith(_API_PATH_PREFIXES):
+        return build_not_found_response(request, path)
+
     headers = dict(request.headers)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
     request_body_dict = parse_request_body_json(request_body, path)
+
+    # /tee/* GET requests (e.g. attestation) don't map to models — just
+    # forward to all enabled upstreams without model/cost/auth lookups.
+    if request.method == "GET" and path.startswith("tee/"):
+        all_upstreams = _upstreams
+        last_error_response = None
+        for i, upstream in enumerate(all_upstreams):
+            try:
+                headers = upstream.prepare_headers(dict(request.headers))
+                response = await upstream.forward_get_request(request, path, headers)
+                if response.status_code in [502, 429] and i < len(all_upstreams) - 1:
+                    logger.warning(
+                        "Upstream %s returned %s for tee GET %s, trying next",
+                        upstream.provider_type,
+                        response.status_code,
+                        path,
+                    )
+                    continue
+                return response
+            except UpstreamError as e:
+                logger.warning(
+                    "Upstream %s failed for tee GET %s: %s",
+                    upstream.provider_type,
+                    path,
+                    e,
+                )
+                if i == len(all_upstreams) - 1:
+                    last_error_response = create_error_response(
+                        "upstream_error", str(e), 502, request=request
+                    )
+                continue
+        return last_error_response or create_error_response(
+            "upstream_error", "All upstreams failed", 502, request=request
+        )
 
     if is_responses_api:
         model_id = extract_model_from_responses_request(request_body_dict)
@@ -192,7 +267,15 @@ async def proxy(
                     )
             except UpstreamError as e:
                 logger.warning(
-                    f"Upstream {upstream.provider_type} failed (x-cashu): {e}"
+                    "Upstream %s failed (x-cashu) for model=%s: %s",
+                    upstream.provider_type,
+                    model_id,
+                    e,
+                    extra={
+                        "provider": upstream.provider_type,
+                        "model": model_id,
+                        "status_code": e.status_code,
+                    },
                 )
                 if i == len(upstreams) - 1:
                     last_error = e
@@ -207,7 +290,7 @@ async def proxy(
 
     elif auth := headers.get("authorization", None):
         key = await get_bearer_token_key(
-            headers, path, session, auth, max_cost_for_model
+            headers, path, session, auth, max_cost_for_model, model_id
         )
 
     else:
@@ -337,10 +420,14 @@ async def proxy(
                     )
 
                     logger.warning(
-                        f"Upstream {upstream.provider_type} returned {response.status_code}, trying next provider",
+                        "Upstream %s returned %s for model=%s, trying next provider",
+                        upstream.provider_type,
+                        response.status_code,
+                        model_id,
                         extra={
                             "status_code": response.status_code,
-                            "upstream": upstream.provider_type,
+                            "provider": upstream.provider_type,
+                            "model": model_id,
                         },
                     )
                     continue
@@ -348,16 +435,20 @@ async def proxy(
                 # 4xx error (user error), or other non-retryable error, or last provider failed
                 await revert_pay_for_request(key, session, max_cost_for_model)
                 logger.warning(
-                    "Upstream request failed, revert payment",
+                    "Upstream request failed, revert payment "
+                    "(provider=%s model=%s status=%s path=%s)",
+                    upstream.provider_type,
+                    model_id,
+                    response.status_code,
+                    path,
                     extra={
                         "status_code": response.status_code,
                         "path": path,
+                        "provider": upstream.provider_type,
+                        "model": model_id,
                         "key_hash": key.hashed_key[:8] + "...",
                         "key_balance": key.balance,
                         "max_cost_for_model": max_cost_for_model,
-                        "upstream_headers": response.headers
-                        if hasattr(response, "headers")
-                        else None,
                     },
                 )
                 return response
@@ -366,8 +457,16 @@ async def proxy(
 
         except UpstreamError as e:
             logger.warning(
-                f"Upstream {upstream.provider_type} failed: {e}",
-                extra={"retry": i < len(upstreams) - 1},
+                "Upstream %s failed for model=%s: %s",
+                upstream.provider_type,
+                model_id,
+                e,
+                extra={
+                    "provider": upstream.provider_type,
+                    "model": model_id,
+                    "status_code": e.status_code,
+                    "retry": i < len(upstreams) - 1,
+                },
             )
 
             # If this was the last provider
@@ -387,7 +486,12 @@ async def proxy(
 
 
 async def get_bearer_token_key(
-    headers: dict, path: str, session: AsyncSession, auth: str, min_cost: int = 0
+    headers: dict,
+    path: str,
+    session: AsyncSession,
+    auth: str,
+    min_cost: int = 0,
+    model_id: str = "unknown",
 ) -> ApiKey:
     """Handle bearer token authentication proxy requests."""
     parts = auth.split()
@@ -457,11 +561,13 @@ async def get_bearer_token_key(
     except Exception as e:
         key_preview = bearer_key[:20] + "..." if len(bearer_key) > 20 else bearer_key
         logger.error(
-            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} key={key_preview!r}",
+            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} model={model_id!r} min_cost={min_cost} key={key_preview!r}",
             extra={
                 "error": str(e),
                 "error_type": type(e).__name__,
                 "path": path,
+                "model_id": model_id,
+                "min_cost_msat": min_cost,
                 "bearer_key_preview": key_preview,
             },
         )

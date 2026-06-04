@@ -12,6 +12,7 @@ class GroqUpstreamProvider(BaseUpstreamProvider):
     provider_type = "groq"
     default_base_url = "https://api.groq.com/openai/v1"
     platform_url = "https://console.groq.com/keys"
+    litellm_provider_prefix = "groq/"
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(

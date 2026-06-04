@@ -21,6 +21,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
     provider_type = "ollama"
     default_base_url = "http://localhost:11434"
     platform_url = None
+    litellm_provider_prefix = "ollama_chat/"
 
     def __init__(
         self,
@@ -184,7 +185,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             except Exception:
                 self._models_cache = models_with_fees
 
-            self._models_by_id = {m.id: m for m in self._models_cache}
+            self._models_by_id = {m.forwarded_model_id or m.id: m for m in self._models_cache}
             logger.info(
                 f"Refreshed models cache for {self.base_url}",
                 extra={"model_count": len(models)},

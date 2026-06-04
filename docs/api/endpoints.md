@@ -396,6 +396,8 @@ Authorization: Bearer sk-...
 }
 ```
 
+`balance` is the spendable balance used by request admission.
+
 ### Check Balance
 
 Get current wallet balance.

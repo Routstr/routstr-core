@@ -13,6 +13,7 @@ class PerplexityUpstreamProvider(BaseUpstreamProvider):
     provider_type = "perplexity"
     default_base_url = "https://api.perplexity.ai/"
     platform_url = "https://www.perplexity.ai/account/api/keys"
+    litellm_provider_prefix = "perplexity/"
 
     def __init__(self, api_key: str, provider_fee: float = 1.01):
         super().__init__(

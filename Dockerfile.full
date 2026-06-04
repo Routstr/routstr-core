@@ -4,7 +4,7 @@ FROM node:23-alpine AS ui-builder
 WORKDIR /app/ui
 
 # Install pnpm
-RUN corepack enable pnpm && corepack prepare pnpm@latest --activate
+RUN corepack enable pnpm && corepack prepare pnpm@10.15.0 --activate
 
 # Copy UI source
 COPY ui/package.json ui/pnpm-lock.yaml* ./
@@ -16,35 +16,38 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm run build
 
 # Stage 2: Build the Routstr Node
-FROM ghcr.io/astral-sh/uv:python3.11-alpine AS runner
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS runner
 
-# Install system dependencies
-RUN apk add --no-cache \
-    pkgconf \
-    build-base \
-    automake \
-    autoconf \
-    libtool \
-    m4 \
-    perl \
-    git
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        build-essential \
+        pkg-config \
+        libsecp256k1-dev \
+        autoconf \
+        automake \
+        libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY uv.lock pyproject.toml ./
+
+RUN uv sync --no-dev --no-install-project
 
 WORKDIR /app
 
-# Copy the rest of the application (required for uv sync to find the package)
 COPY . .
-
-# Install dependencies including the specific secp256k1 branch
-RUN uv add git+https://github.com/saschanaz/secp256k1-py.git#branch=upgrade060
-RUN uv sync --no-dev
 
 # Copy the built UI from the ui-builder stage
 COPY --from=ui-builder /app/ui/out ./ui_out
 
+ARG GIT_COMMIT=""
+ARG GIT_TAG=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+ENV GIT_TAG=${GIT_TAG}
 ENV PORT=8000
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
 # Run the application
-CMD ["/app/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]
+CMD ["/.venv/bin/fastapi", "run", "routstr", "--host", "0.0.0.0"]

@@ -195,14 +195,15 @@ def create_model_mappings(
 
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
-            if not is_openrouter or base_id not in unique_models:
+            unique_key = model_to_use.forwarded_model_id or base_id
+            if not is_openrouter or unique_key not in unique_models:
                 unique_model = model_to_use.copy(
                     update={
                         "id": base_id,
                         "upstream_provider_id": upstream.provider_type,
                     }
                 )
-                unique_models[base_id] = unique_model
+                unique_models[unique_key] = unique_model
 
             # Get all aliases for this model
             aliases = resolve_model_alias(
@@ -216,6 +217,10 @@ def create_model_mappings(
                 prefixed_id = f"{upstream_prefix}/{model_to_use.id}"
                 if prefixed_id not in aliases:
                     aliases.append(prefixed_id)
+
+            # Register forwarded_model_id as a routable alias
+            if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
+                aliases.append(model_to_use.forwarded_model_id)
 
             # Try to set each alias
             for alias in aliases:
@@ -268,18 +273,19 @@ def create_model_mappings(
             continue
 
         base_id = get_base_model_id(model_to_use.id)
+        unique_key = model_to_use.forwarded_model_id or base_id
         is_openrouter = (
             getattr(upstream_for_override, "base_url", "")
             == "https://openrouter.ai/api/v1"
         )
-        if not is_openrouter or base_id not in unique_models:
+        if not is_openrouter or unique_key not in unique_models:
             unique_model = model_to_use.copy(
                 update={
                     "id": base_id,
                     "upstream_provider_id": upstream_for_override.provider_type,
                 }
             )
-            unique_models[base_id] = unique_model
+            unique_models[unique_key] = unique_model
 
         try:
             aliases = resolve_model_alias(
@@ -305,6 +311,10 @@ def create_model_mappings(
             if prefixed_id not in aliases:
                 aliases.append(prefixed_id)
 
+        # Register forwarded_model_id as a routable alias
+        if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
+            aliases.append(model_to_use.forwarded_model_id)
+
         for alias in aliases:
             _add_candidate(alias, model_to_use, upstream_for_override)
         seen_model_provider.add(dedupe_key)
@@ -314,7 +324,26 @@ def create_model_mappings(
     provider_map: dict[str, list["BaseUpstreamProvider"]] = {}
 
     def alias_priority(model: "Model", alias: str) -> int:
-        """Rank how strong the mapping of alias->model is."""
+        """Rank how strong the mapping of alias->model is.
+
+        forwarded_model_id is the most specific identifier (set per-provider
+        instance), so a match there should beat a model_id match. This way,
+        when multiple providers have the same model_id but different
+        forwarded_model_ids, the one whose forwarded_model_id equals the
+        requested alias wins.
+        """
+        if (
+            model.forwarded_model_id
+            and model.forwarded_model_id.lower() == alias
+        ):
+            return 5
+
+        if (
+            model.id
+            and model.id.lower() == alias
+        ):
+            return 4
+
         model_base = get_base_model_id(model.id)
         if model_base == alias:
             return 3

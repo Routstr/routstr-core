@@ -18,6 +18,10 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
     provider_type = "routstr"
     default_base_url = None
     platform_url = None
+    # Upstream Routstr nodes serve `/v1/messages` natively, so forward the
+    # request as-is instead of round-tripping through litellm's
+    # Anthropic→OpenAI translator.
+    supports_anthropic_messages = True
 
     def __init__(
         self,
@@ -42,6 +46,13 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
             provider_fee=provider_fee,
         )
         self.settings = provider_settings or {}
+
+    def normalize_request_path(
+        self, path: str, model_obj: "Model | None" = None
+    ) -> str:
+        """Preserve the ``v1/`` prefix when forwarding to an upstream Routstr.
+        """
+        return path.lstrip("/")
 
     @classmethod
     def from_db_row(
