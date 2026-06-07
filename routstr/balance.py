@@ -48,7 +48,6 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "balance": billing_key.total_balance,
         "reserved": billing_key.reserved_balance,
         "is_child": key.parent_key_hash is not None,
-        "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
         "total_requests": key.total_requests,
         "total_spent": key.total_spent,
         "balance_limit": key.balance_limit,
@@ -56,7 +55,9 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "validity_date": key.validity_date,
     }
 
-    if not key.parent_key_hash:
+    if key.parent_key_hash:
+        info["parent_key_preview"] = key.parent_key_hash[:8] + "..."
+    else:
         # Fetch child keys if this is a parent key
         statement = select(ApiKey).where(ApiKey.parent_key_hash == key.hashed_key)
         results = await session.exec(statement)
