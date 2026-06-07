@@ -3,7 +3,7 @@ import json
 import random
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel as V2BaseModel
 from pydantic.v1 import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -16,6 +16,24 @@ from .price import sats_usd_price
 logger = get_logger(__name__)
 
 models_router = APIRouter()
+
+_MODEL_TEST_ENDPOINT_PATHS = {
+    "chat-completions": "chat/completions",
+    "completions": "completions",
+    "embeddings": "embeddings",
+    "responses": "responses",
+}
+
+# Cap the caller-supplied test payload to avoid forwarding oversized bodies
+# upstream on the operator's credentials.
+_MODEL_TEST_MAX_REQUEST_BYTES = 64 * 1024
+
+
+async def _require_admin_api(request: Request) -> None:
+    """Require admin auth without creating an import-time cycle with core.admin."""
+    from ..core.admin import require_admin_api
+
+    await require_admin_api(request)
 
 
 class Architecture(BaseModel):
@@ -418,7 +436,9 @@ class ModelTestRequest(V2BaseModel):
     request_data: dict
 
 
-@models_router.post("/api/models/test")
+@models_router.post(
+    "/api/models/test", dependencies=[Depends(_require_admin_api)]
+)
 async def test_model(
     payload: ModelTestRequest,
     session: AsyncSession = Depends(get_session),
@@ -446,15 +466,34 @@ async def test_model(
             "status_code": 404,
         }
 
-    base_url = provider.base_url.rstrip("/")
-    if payload.endpoint_type == "chat-completions":
-        url = f"{base_url}/chat/completions"
-    else:
-        url = f"{base_url}/{payload.endpoint_type}"
+    endpoint_path = _MODEL_TEST_ENDPOINT_PATHS.get(payload.endpoint_type)
+    if endpoint_path is None:
+        raise HTTPException(status_code=400, detail="Unsupported endpoint_type")
 
     actual_model_id = model_row.forwarded_model_id or model_row.id
     request_data = dict(payload.request_data)
     request_data["model"] = actual_model_id
+
+    try:
+        request_size = len(json.dumps(request_data).encode("utf-8"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid request_data")
+    if request_size > _MODEL_TEST_MAX_REQUEST_BYTES:
+        raise HTTPException(status_code=413, detail="request_data too large")
+
+    base_url = provider.base_url.rstrip("/")
+    url = f"{base_url}/{endpoint_path}"
+
+    logger.info(
+        "admin model test",
+        extra={
+            "model_id": payload.model_id,
+            "forwarded_model_id": actual_model_id,
+            "endpoint_type": payload.endpoint_type,
+            "upstream_provider_id": model_row.upstream_provider_id,
+            "request_bytes": request_size,
+        },
+    )
 
     headers = {
         "Content-Type": "application/json",
