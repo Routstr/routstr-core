@@ -174,17 +174,20 @@ class TestmintWallet:
         """Fallback method to create a basic test token"""
         import base64
         import json
-        import random
-        import time
+        import secrets
 
-        unique_id = int(time.time() * 1000000) + random.randint(1000, 9999)
+        # Use a cryptographically random id/secret so every minted token is
+        # guaranteed unique. Time/PRNG-based ids can collide on hosts with
+        # coarse clock resolution, producing byte-identical tokens that hash to
+        # the same api_key and silently dedupe (flaky concurrency tests).
+        unique_id = secrets.token_hex(16)
         token_data = {
             "token": [
                 {
                     "mint": self.mint_url,
                     "proofs": [
                         {
-                            "id": f"009a1f293253e41e{unique_id % 100000000:08d}",
+                            "id": f"009a1f293253e41e{unique_id[:8]}",
                             "amount": amount,
                             "secret": f"test-secret-{amount}-{unique_id}",
                             "C": "02194603ffa36356f4a56b7df9371fc3192472351453ec7398b8da8117e7c3e104",
