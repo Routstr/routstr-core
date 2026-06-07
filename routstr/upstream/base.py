@@ -203,14 +203,26 @@ class BaseUpstreamProvider:
         already reported its own provider (e.g. OpenRouter returns
         ``"provider": "Fireworks"``), otherwise just ``"<provider_type>"``
         for direct upstreams.
+
+        Idempotent: re-stamping an already-stamped payload must not nest the
+        prefix repeatedly (e.g. never ``"anthropic:anthropic"``). This matters
+        because streaming paths can apply the field more than once per chunk.
         """
         if not isinstance(response_json, dict):
             return
+        provider_type = (self.provider_type or "").strip()
         existing = response_json.get("provider")
-        if isinstance(existing, str) and existing.strip():
-            response_json["provider"] = f"{self.provider_type}:{existing.strip()}"
-        else:
-            response_json["provider"] = self.provider_type
+        existing_str = existing.strip() if isinstance(existing, str) else ""
+        if not existing_str:
+            response_json["provider"] = provider_type
+            return
+        # Already stamped by a previous pass — leave it untouched.
+        if existing_str == provider_type or existing_str.startswith(
+            f"{provider_type}:"
+        ):
+            response_json["provider"] = existing_str
+            return
+        response_json["provider"] = f"{provider_type}:{existing_str}"
 
     def inject_cost_metadata(
         self,

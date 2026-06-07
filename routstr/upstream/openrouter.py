@@ -18,6 +18,33 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     supports_anthropic_messages = True
     litellm_provider_prefix = "openrouter/"
 
+    def _apply_provider_field(self, response_json: object) -> None:
+        """Stamp the ``provider`` field for OpenRouter responses.
+
+        OpenRouter is a router, not the real serving provider, so a bare
+        ``"openrouter"`` value carries no useful information. Rules:
+
+        - Real upstream sub-provider (e.g. ``"GMICloud"``) -> ``"openrouter:GMICloud"``.
+        - Missing sub-provider, or one that merely echoes ``"openrouter"`` ->
+          ``"unknown"``.
+        - Idempotent: re-stamping never produces ``"openrouter:openrouter:..."``;
+          the ``openrouter:`` prefix appears at most once.
+        """
+        if not isinstance(response_json, dict):
+            return
+        provider_type = (self.provider_type or "").strip()
+        existing = response_json.get("provider")
+        sub = existing.strip() if isinstance(existing, str) else ""
+        # Strip any already-applied "openrouter:" prefixes (idempotency).
+        prefix = f"{provider_type}:"
+        while sub.lower().startswith(prefix.lower()):
+            sub = sub[len(prefix) :].strip()
+        # No real sub-provider, or it just echoes our own router name.
+        if not sub or sub.lower() == provider_type.lower():
+            response_json["provider"] = "unknown"
+            return
+        response_json["provider"] = f"{provider_type}:{sub}"
+
     def __init__(self, api_key: str, provider_fee: float = 1.06):
         """Initialize OpenRouter provider with API key.
 

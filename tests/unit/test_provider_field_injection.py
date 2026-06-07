@@ -32,11 +32,39 @@ def test_apply_provider_field_openrouter_passthrough() -> None:
 
 
 def test_apply_provider_field_openrouter_no_upstream_provider() -> None:
-    """If OpenRouter omits the provider field, fall back to provider_type."""
+    """If OpenRouter omits the provider field, the real serving provider is
+    unknown — a bare ``openrouter`` value carries no information."""
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"id": "gen-abc"}
     p._apply_provider_field(data)
-    assert data["provider"] == "openrouter"
+    assert data["provider"] == "unknown"
+
+
+def test_apply_provider_field_openrouter_echoes_router_name() -> None:
+    """If OpenRouter reports its own name as the provider, treat as unknown."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    data: dict = {"provider": "openrouter"}
+    p._apply_provider_field(data)
+    assert data["provider"] == "unknown"
+
+
+def test_apply_provider_field_openrouter_idempotent_no_double_prefix() -> None:
+    """Re-stamping must never nest the prefix: openrouter only once."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    data: dict = {"provider": "GMICloud"}
+    p._apply_provider_field(data)
+    assert data["provider"] == "openrouter:GMICloud"
+    # Second pass (e.g. streaming) keeps a single prefix.
+    p._apply_provider_field(data)
+    assert data["provider"] == "openrouter:GMICloud"
+
+
+def test_apply_provider_field_openrouter_collapses_existing_double_prefix() -> None:
+    """A pre-existing double prefix is collapsed to a single one."""
+    p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
+    data: dict = {"provider": "openrouter:openrouter:GMICloud"}
+    p._apply_provider_field(data)
+    assert data["provider"] == "openrouter:GMICloud"
 
 
 def test_apply_provider_field_strips_whitespace() -> None:
@@ -50,28 +78,24 @@ def test_apply_provider_field_blank_upstream_treated_as_missing() -> None:
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"provider": "   "}
     p._apply_provider_field(data)
-    assert data["provider"] == "openrouter"
+    assert data["provider"] == "unknown"
 
 
 def test_apply_provider_field_non_string_upstream_treated_as_missing() -> None:
     p = _make_provider(OpenRouterUpstreamProvider, "openrouter")
     data: dict = {"provider": 42}
     p._apply_provider_field(data)
-    assert data["provider"] == "openrouter"
+    assert data["provider"] == "unknown"
 
 
 def test_apply_provider_field_idempotent_for_direct_upstream() -> None:
-    """Calling twice on a direct upstream payload should keep the same
-    value, not nest the prefix repeatedly."""
+    """Calling twice on a direct upstream payload keeps the same value and
+    never nests the prefix (no ``anthropic:anthropic``)."""
     p = _make_provider(AnthropicUpstreamProvider, "anthropic")
     data: dict = {}
     p._apply_provider_field(data)
     p._apply_provider_field(data)
-    assert data["provider"] == "anthropic:anthropic"
-    # Document current (deliberate) behavior: second pass treats the
-    # first-pass value as an upstream-reported provider. Callers should
-    # only invoke this once per chunk — guarded via the
-    # ``"provider" not in data`` checks in streaming paths.
+    assert data["provider"] == "anthropic"
 
 
 def test_apply_provider_field_ignores_non_dict() -> None:
