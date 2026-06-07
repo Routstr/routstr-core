@@ -28,6 +28,7 @@ from .payment.helpers import (
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.helpers import init_upstreams
+from .upstream.request_correction import correct_request, extract_error_message
 
 logger = get_logger(__name__)
 proxy_router = APIRouter()
@@ -352,50 +353,89 @@ async def proxy(
     if request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
+    # Tracks request params already removed in response to upstream rejections,
+    # shared across providers so a stripped param stays stripped on failover and
+    # the reactive retry can never loop unboundedly.
+    already_stripped: set[str] = set()
+
     for i, upstream in enumerate(upstreams):
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
-            try:
-                if is_responses_api:
-                    response = await upstream.forward_responses_request(
-                        request,
-                        path,
-                        headers,
-                        request_body,
-                        key,
-                        max_cost_for_model,
-                        session,
-                        model_obj,
+            while True:
+                try:
+                    if is_responses_api:
+                        response = await upstream.forward_responses_request(
+                            request,
+                            path,
+                            headers,
+                            request_body,
+                            key,
+                            max_cost_for_model,
+                            session,
+                            model_obj,
+                        )
+                    else:
+                        response = await upstream.forward_request(
+                            request,
+                            path,
+                            headers,
+                            request_body,
+                            key,
+                            max_cost_for_model,
+                            session,
+                            model_obj,
+                        )
+                except UpstreamError:
+                    # Let the outer UpstreamError handler manage retry/revert
+                    raise
+                except Exception as e:
+                    # Unexpected error (not an upstream failure) — revert and propagate
+                    logger.error(
+                        "Unexpected error in upstream request, reverting payment",
+                        extra={
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                            "path": path,
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "max_cost_for_model": max_cost_for_model,
+                        },
                     )
-                else:
-                    response = await upstream.forward_request(
-                        request,
-                        path,
-                        headers,
+                    await revert_pay_for_request(key, session, max_cost_for_model)
+                    raise
+
+                # Reactive recovery: some models reject one specific request
+                # param (e.g. newer Anthropic models deprecating `temperature`).
+                # When the upstream 400s naming such a param, strip it from the
+                # body and retry the SAME upstream. ``already_stripped`` bounds
+                # this to one retry per distinct param so it always terminates.
+                if response.status_code == 400:
+                    correction = correct_request(
                         request_body,
-                        key,
-                        max_cost_for_model,
-                        session,
-                        model_obj,
+                        extract_error_message(response),
+                        already_stripped,
                     )
-            except UpstreamError:
-                # Let the outer UpstreamError handler manage retry/revert
-                raise
-            except Exception as e:
-                # Unexpected error (not an upstream failure) — revert and propagate
-                logger.error(
-                    "Unexpected error in upstream request, reverting payment",
-                    extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "path": path,
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "max_cost_for_model": max_cost_for_model,
-                    },
-                )
-                await revert_pay_for_request(key, session, max_cost_for_model)
-                raise
+                    if correction is not None:
+                        request_body, bad_param = correction.body, correction.label
+                        already_stripped.add(bad_param)
+                        request_body_dict = parse_request_body_json(
+                            request_body, path
+                        )
+                        logger.warning(
+                            "Upstream %s rejected param '%s' for model=%s; "
+                            "stripping and retrying same upstream",
+                            upstream.provider_type,
+                            bad_param,
+                            model_id,
+                            extra={
+                                "provider": upstream.provider_type,
+                                "model": model_id,
+                                "stripped_param": bad_param,
+                                "path": path,
+                            },
+                        )
+                        continue
+                break
 
             if response.status_code != 200:
                 # Check if we should retry (502 Upstream Error or 429 Rate Limit)
