@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 import typing
 from typing import TypedDict
@@ -116,6 +117,62 @@ async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str
     return token
 
 
+# A foreign mint's fee_reserve is a non-binding estimate (NUT-05): the mint may
+# demand more when re-quoting or at melt execution. Instead of padding the
+# estimate with a safety buffer (which strands the margin at the foreign mint
+# on every swap), the swap retries with the amount recomputed from the fees the
+# mint actually demands, up to this many attempts.
+_MAX_SWAP_ATTEMPTS = 3
+
+_MINT_ERROR_CODE_RE = re.compile(r"\(Code: (\d+)\)")
+_MELT_SHORTFALL_RE = re.compile(r"Provided: (\d+), needed: (\d+)")
+
+# Insufficient melt inputs across implementations: 11005 is the registered
+# "Transaction is not balanced" code (used by cdk); 11000 is nutshell's
+# generic TransactionError, which is unregistered but what nutshell sends.
+_RETRYABLE_MELT_CODES = frozenset({"11000", "11005"})
+
+
+def _net_minted_amount(amount_msat: int, token_unit: str, fees: int) -> int:
+    """
+    Convert the token value minus fees (given in the token unit) into an
+    amount in the primary mint's unit.
+    """
+    fee_msat = fees * 1000 if token_unit == "sat" else fees
+    remaining_msat = amount_msat - fee_msat
+    if settings.primary_mint_unit == "sat":
+        return int(remaining_msat // 1000)
+    return int(remaining_msat)
+
+
+def _melt_insufficient_shortfall(error: Exception) -> int | None:
+    """
+    Classify a melt failure: return the observed shortfall (in the token unit)
+    when the mint rejected the inputs as insufficient, or None when the failure
+    is unrelated to fees and must not be retried (e.g. a Lightning payment
+    failure, where a smaller invoice would not help).
+
+    Cashu errors carry no structured amounts (NUT-00 defines only detail/code,
+    flattened to "Mint Error: <detail> (Code: <code>)" by cashu-py), so the
+    classification uses the code and the shortfall must be inferred: the
+    "Provided: X, needed: Y" amounts are nutshell-specific free text and only
+    refine the shortfall when present; otherwise shrink one unit at a time.
+    """
+    message = str(error)
+    code_match = _MINT_ERROR_CODE_RE.search(message)
+    if code_match is not None:
+        if code_match.group(1) not in _RETRYABLE_MELT_CODES:
+            return None
+    elif "not enough inputs" not in message.lower():
+        return None
+    amounts = _MELT_SHORTFALL_RE.search(message)
+    if amounts is not None:
+        provided, needed = int(amounts.group(1)), int(amounts.group(2))
+        if needed > provided:
+            return needed - provided
+    return 1
+
+
 async def _calculate_swap_amount(
     amount_msat: int,
     token_unit: str,
@@ -154,26 +211,18 @@ async def _calculate_swap_amount(
 
         fee_reserve = dummy_melt_quote.fee_reserve
         input_fees = token_wallet.get_fees_for_proofs(proofs)
-        if token_unit == "sat":
-            fee_msat = (fee_reserve + input_fees) * 1000
-        else:
-            fee_msat = fee_reserve + input_fees
-
-        amount_msat_after_fee = amount_msat - fee_msat
-
-        if settings.primary_mint_unit == "sat":
-            minted_amount = int(amount_msat_after_fee // 1000)
-        else:
-            minted_amount = int(amount_msat_after_fee)
+        total_fees = fee_reserve + input_fees
+        minted_amount = _net_minted_amount(amount_msat, token_unit, total_fees)
 
         if minted_amount <= 0:
-            raise ValueError(f"Fees ({fee_reserve + input_fees} {token_unit}) exceed token amount")
+            raise ValueError(f"Fees ({total_fees} {token_unit}) exceed token amount")
 
         logger.info(
             "swap_to_primary_mint: fee estimation result",
             extra={
                 "token_amount_sat": amount_msat // 1000,
-                "estimated_fee_sat": fee_msat // 1000,
+                "estimated_fee": total_fees,
+                "estimated_fee_unit": token_unit,
                 "input_fees": input_fees,
                 "minted_amount": minted_amount,
                 "minted_unit": settings.primary_mint_unit,
@@ -238,67 +287,116 @@ async def swap_to_primary_mint(
         token_obj.proofs,
     )
 
-    mint_quote = await primary_wallet.request_mint(minted_amount)
-    logger.info(
-        "swap_to_primary_mint: mint quote received",
-        extra={"mint_quote_id": mint_quote.quote},
-    )
+    # The estimate above is non-binding: the mint may demand a higher fee on the
+    # real quote or reject the melt outright. Retry the quote/melt cycle with the
+    # amount recomputed from the fees the mint actually demands.
+    observed_extra_fee = 0
+    attempt = 0
+    while True:
+        attempt += 1
+        mint_quote = await primary_wallet.request_mint(minted_amount)
+        logger.info(
+            "swap_to_primary_mint: mint quote received",
+            extra={"mint_quote_id": mint_quote.quote, "attempt": attempt},
+        )
 
-    melt_quote = await token_wallet.melt_quote(mint_quote.request)
-    input_fees = token_wallet.get_fees_for_proofs(token_obj.proofs)
-    total_needed = melt_quote.amount + melt_quote.fee_reserve + input_fees
-    logger.info(
-        "swap_to_primary_mint: melt quote received",
-        extra={
-            "melt_quote_id": melt_quote.quote,
-            "melt_amount": melt_quote.amount,
-            "melt_fee_reserve": melt_quote.fee_reserve,
-            "input_fees": input_fees,
-            "total_needed": total_needed,
-            "token_amount": token_amount,
-        },
-    )
-
-    if total_needed > token_amount:
-        logger.warning(
-            "swap_to_primary_mint: insufficient token amount for melt fees",
+        melt_quote = await token_wallet.melt_quote(mint_quote.request)
+        input_fees = token_wallet.get_fees_for_proofs(token_obj.proofs)
+        total_needed = melt_quote.amount + melt_quote.fee_reserve + input_fees
+        logger.info(
+            "swap_to_primary_mint: melt quote received",
             extra={
-                "token_amount": token_amount,
+                "melt_quote_id": melt_quote.quote,
                 "melt_amount": melt_quote.amount,
                 "melt_fee_reserve": melt_quote.fee_reserve,
                 "input_fees": input_fees,
                 "total_needed": total_needed,
-                "shortfall": total_needed - token_amount,
+                "token_amount": token_amount,
+                "attempt": attempt,
             },
-        )
-        raise ValueError(
-            f"Token amount ({token_amount} {token_obj.unit}) is insufficient to cover "
-            f"melt fees. Needed: {total_needed} {token_obj.unit} "
-            f"(amount: {melt_quote.amount} + fee: {melt_quote.fee_reserve} + input_fees: {input_fees})"
         )
 
-    try:
-        _ = await token_wallet.melt(
-            proofs=token_obj.proofs,
-            invoice=mint_quote.request,
-            fee_reserve_sat=melt_quote.fee_reserve,
-            quote_id=melt_quote.quote,
-        )
-    except Exception as e:
-        logger.error(
-            "swap_to_primary_mint: melt failed",
-            extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "foreign_mint": token_obj.mint,
-                "token_amount": token_amount,
-                "melt_quote_id": melt_quote.quote,
-                "total_needed": total_needed,
-            },
-        )
-        raise ValueError(
-            f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
-        ) from e
+        if total_needed > token_amount:
+            recomputed = _net_minted_amount(
+                amount_msat,
+                token_obj.unit,
+                melt_quote.fee_reserve + input_fees + observed_extra_fee,
+            )
+            if attempt >= _MAX_SWAP_ATTEMPTS or recomputed <= 0:
+                logger.warning(
+                    "swap_to_primary_mint: insufficient token amount for melt fees",
+                    extra={
+                        "token_amount": token_amount,
+                        "melt_amount": melt_quote.amount,
+                        "melt_fee_reserve": melt_quote.fee_reserve,
+                        "input_fees": input_fees,
+                        "total_needed": total_needed,
+                        "shortfall": total_needed - token_amount,
+                        "attempts": attempt,
+                    },
+                )
+                raise ValueError(
+                    f"Token amount ({token_amount} {token_obj.unit}) is insufficient to cover "
+                    f"melt fees. Needed: {total_needed} {token_obj.unit} "
+                    f"(amount: {melt_quote.amount} + fee: {melt_quote.fee_reserve} + input_fees: {input_fees})"
+                )
+            logger.warning(
+                "swap_to_primary_mint: melt quote exceeds token amount, retrying",
+                extra={
+                    "total_needed": total_needed,
+                    "token_amount": token_amount,
+                    "retry_minted_amount": recomputed,
+                    "attempt": attempt,
+                },
+            )
+            minted_amount = recomputed
+            continue
+
+        try:
+            _ = await token_wallet.melt(
+                proofs=token_obj.proofs,
+                invoice=mint_quote.request,
+                fee_reserve_sat=melt_quote.fee_reserve,
+                quote_id=melt_quote.quote,
+            )
+        except Exception as e:
+            shortfall = _melt_insufficient_shortfall(e)
+            recomputed = 0
+            if shortfall is not None:
+                observed_extra_fee += shortfall
+                recomputed = _net_minted_amount(
+                    amount_msat,
+                    token_obj.unit,
+                    melt_quote.fee_reserve + input_fees + observed_extra_fee,
+                )
+            if shortfall is None or attempt >= _MAX_SWAP_ATTEMPTS or recomputed <= 0:
+                logger.error(
+                    "swap_to_primary_mint: melt failed",
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "foreign_mint": token_obj.mint,
+                        "token_amount": token_amount,
+                        "melt_quote_id": melt_quote.quote,
+                        "total_needed": total_needed,
+                        "attempts": attempt,
+                    },
+                )
+                raise ValueError(
+                    f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
+                ) from e
+            logger.warning(
+                "swap_to_primary_mint: mint demanded more than quoted at melt, retrying",
+                extra={
+                    "shortfall": shortfall,
+                    "retry_minted_amount": recomputed,
+                    "attempt": attempt,
+                },
+            )
+            minted_amount = recomputed
+            continue
+
+        break
 
     logger.info(
         "swap_to_primary_mint: melt succeeded, minting on primary",
