@@ -772,7 +772,7 @@ async def adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    match await calculate_cost(response_data, deducted_max_cost, session, usage=usage):
+    match await calculate_cost(response_data, deducted_max_cost, usage=usage):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",

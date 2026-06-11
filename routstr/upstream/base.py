@@ -3071,49 +3071,47 @@ class BaseUpstreamProvider:
             extra={"model": model, "has_usage": "usage" in response_data},
         )
 
-        async with create_session() as session:
-            match await calculate_cost(
-                response_data,
-                max_cost_for_model,
-                session,
-                usage=self.normalize_usage(response_data.get("usage")),
-            ):
-                case MaxCostData() as cost:
-                    logger.debug(
-                        "Using max cost pricing",
-                        extra={"model": model, "max_cost_msats": cost.total_msats},
-                    )
-                    return cost
-                case CostData() as cost:
-                    logger.debug(
-                        "Using token-based pricing",
-                        extra={
-                            "model": model,
-                            "total_cost_msats": cost.total_msats,
-                            "input_msats": cost.input_msats,
-                            "output_msats": cost.output_msats,
-                        },
-                    )
-                    return cost
-                case CostDataError() as error:
-                    logger.error(
-                        "Cost calculation error",
-                        extra={
-                            "model": model,
-                            "error_message": error.message,
-                            "error_code": error.code,
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": {
-                                "message": error.message,
-                                "type": "invalid_request_error",
-                                "code": error.code,
-                            }
-                        },
-                    )
+        match await calculate_cost(
+            response_data,
+            max_cost_for_model,
+            usage=self.normalize_usage(response_data.get("usage")),
+        ):
+            case MaxCostData() as cost:
+                logger.debug(
+                    "Using max cost pricing",
+                    extra={"model": model, "max_cost_msats": cost.total_msats},
+                )
+                return cost
+            case CostData() as cost:
+                logger.debug(
+                    "Using token-based pricing",
+                    extra={
+                        "model": model,
+                        "total_cost_msats": cost.total_msats,
+                        "input_msats": cost.input_msats,
+                        "output_msats": cost.output_msats,
+                    },
+                )
+                return cost
+            case CostDataError() as error:
+                logger.error(
+                    "Cost calculation error",
+                    extra={
+                        "model": model,
+                        "error_message": error.message,
+                        "error_code": error.code,
+                    },
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "message": error.message,
+                            "type": "invalid_request_error",
+                            "code": error.code,
+                        }
+                    },
+                )
         return None
 
     async def send_refund(

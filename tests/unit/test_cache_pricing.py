@@ -13,7 +13,7 @@ Specifies two things:
 """
 
 import os
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import litellm
 import pytest
@@ -178,7 +178,7 @@ async def test_deepseek_cache_hits_billed_at_cache_rate(model_pricing: Mock) -> 
     }
 
     with patch("routstr.proxy.get_model_instance", return_value=model_pricing):
-        result = await calculate_cost(response, max_cost=100000, session=AsyncMock())
+        result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     # 1000 input @ 1 msat + 9000 cache reads @ 0.1 msat + 500 output @ 2 msat
@@ -203,7 +203,7 @@ async def test_anthropic_cache_write_billed_at_write_rate(model_pricing: Mock) -
     }
 
     with patch("routstr.proxy.get_model_instance", return_value=model_pricing):
-        result = await calculate_cost(response, max_cost=100000, session=AsyncMock())
+        result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     # 300 @ 1 + 500 @ 0.1 + 2000 @ 1.25 + 100 @ 2
@@ -234,7 +234,7 @@ async def test_missing_cache_rate_falls_back_to_input_rate(
     }
 
     with patch("routstr.proxy.get_model_instance", return_value=model):
-        result = await calculate_cost(response, max_cost=100000, session=AsyncMock())
+        result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     # 1000 @ 1 + 9000 @ 1 (fallback) + 500 @ 2

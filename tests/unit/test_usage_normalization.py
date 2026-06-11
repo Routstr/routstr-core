@@ -10,7 +10,7 @@ needs no vendor knowledge of its own.
 """
 
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -175,7 +175,6 @@ async def test_provider_override_is_honored_by_calculate_cost() -> None:
     result = await calculate_cost(
         response,
         max_cost=100000,
-        session=AsyncMock(),
         usage=provider.normalize_usage(response["usage"]),
     )
 
@@ -197,7 +196,6 @@ async def test_explicit_usage_param_wins_over_response_extraction() -> None:
     result = await calculate_cost(
         response,
         max_cost=100000,
-        session=AsyncMock(),
         usage=NormalizedUsage(input_tokens=10, output_tokens=5),
     )
 

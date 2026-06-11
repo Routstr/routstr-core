@@ -3,7 +3,6 @@ import math
 from pydantic.v1 import BaseModel
 
 from ..core import get_logger
-from ..core.db import AsyncSession
 from ..core.settings import settings
 from .price import sats_usd_price
 from .usage import NormalizedUsage, normalize_usage, parse_token_count
@@ -45,7 +44,6 @@ class CostDataError(BaseModel):
 async def calculate_cost(
     response_data: dict,
     max_cost: int,
-    session: AsyncSession,
     usage: NormalizedUsage | None = None,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
