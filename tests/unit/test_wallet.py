@@ -556,6 +556,13 @@ async def test_net_minted_amount_unit_conversions(
             "Provided: 179, needed: 182 (Code: 11000)",
             3,
         ),
+        # verbatim production error from issue #468, including cashu-py's
+        # "could not pay invoice" wrapper around the mint detail
+        (
+            "could not pay invoice: Mint Error: not enough inputs provided "
+            "for melt. Provided: 179, needed: 180 (Code: 11000)",
+            1,
+        ),
         # cdk: registered TransactionUnbalanced code, no parsable amounts
         ("Mint Error: Transaction unbalanced: 179, 178, 2 (Code: 11005)", 1),
         # nutshell wording without a code suffix
