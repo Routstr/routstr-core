@@ -1,6 +1,7 @@
 """Tests for cache token handling in cost calculation.
 
-Covers OpenAI vs Anthropic caching formats, edge cases, and billing accuracy.
+Covers OpenAI, Anthropic and DeepSeek caching formats, dialect precedence,
+edge cases, and billing accuracy.
 """
 
 import os
@@ -314,6 +315,98 @@ async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: No
     assert isinstance(result, CostData)
     assert result.cache_read_input_tokens == 0
     assert result.input_tokens == 100
+
+
+# ============================================================================
+# DeepSeek Cache Format
+# DeepSeek emits neither OpenAI's prompt_tokens_details nor Anthropic's
+# cache_read_input_tokens — only prompt_cache_hit_tokens and
+# prompt_cache_miss_tokens, with the documented guarantee
+# prompt_tokens = hit + miss. Hits are ~10x cheaper upstream, so billing
+# them as regular input is a large overcharge.
+# ============================================================================
+@pytest.mark.asyncio
+async def test_deepseek_cache_hit_tokens_extracted(mock_session: AsyncMock) -> None:
+    """DeepSeek cache hits are extracted and removed from regular input.
+
+    Payload shape verbatim from the DeepSeek API reference (usage object).
+    """
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 10000,  # = hit + miss
+            "completion_tokens": 500,
+            "total_tokens": 10500,
+            "prompt_cache_hit_tokens": 9000,
+            "prompt_cache_miss_tokens": 1000,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000  # only the cache misses
+    assert result.cache_read_input_tokens == 9000
+    assert result.output_tokens == 500
+
+
+@pytest.mark.asyncio
+async def test_deepseek_all_tokens_cached(mock_session: AsyncMock) -> None:
+    """A fully cached DeepSeek prompt bills zero regular input tokens."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 5000,
+            "completion_tokens": 100,
+            "prompt_cache_hit_tokens": 5000,
+            "prompt_cache_miss_tokens": 0,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 0
+    assert result.cache_read_input_tokens == 5000
+
+
+@pytest.mark.asyncio
+async def test_dialect_precedence_never_double_subtracts(mock_session: AsyncMock) -> None:
+    """If a vendor emits both OpenAI-style and DeepSeek-style cache fields for
+    the same cached tokens, they are counted once, not subtracted twice."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 10000,
+            "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 9000},
+            "prompt_cache_hit_tokens": 9000,
+            "prompt_cache_miss_tokens": 1000,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000  # 10000 - 9000, applied exactly once
+    assert result.cache_read_input_tokens == 9000
+
+
+@pytest.mark.asyncio
+async def test_deepseek_malformed_hit_tokens_coerce_to_zero(mock_session: AsyncMock) -> None:
+    """Malformed DeepSeek cache fields degrade to billing all input at full
+    rate instead of crashing or going negative."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": "garbage",
+            "prompt_cache_miss_tokens": -5,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000
+    assert result.cache_read_input_tokens == 0
 
 
 # ============================================================================
