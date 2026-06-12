@@ -269,6 +269,9 @@ async def create_api_key_from_invoice(
         balance=invoice.amount_sats * 1000,  # Convert to msats
         refund_currency="sat",
         refund_mint_url=settings.primary_mint,
+        balance_limit=invoice.balance_limit,
+        balance_limit_reset=invoice.balance_limit_reset,
+        validity_date=invoice.validity_date,
     )
 
     session.add(api_key)

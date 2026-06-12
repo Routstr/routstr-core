@@ -48,7 +48,6 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "balance": billing_key.total_balance,
         "reserved": billing_key.reserved_balance,
         "is_child": key.parent_key_hash is not None,
-        "parent_key": "sk-" + key.parent_key_hash if key.parent_key_hash else None,
         "total_requests": key.total_requests,
         "total_spent": key.total_spent,
         "balance_limit": key.balance_limit,
@@ -56,7 +55,9 @@ async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
         "validity_date": key.validity_date,
     }
 
-    if not key.parent_key_hash:
+    if key.parent_key_hash:
+        info["parent_key_preview"] = key.parent_key_hash[:8] + "..."
+    else:
         # Fetch child keys if this is a parent key
         statement = select(ApiKey).where(ApiKey.parent_key_hash == key.hashed_key)
         results = await session.exec(statement)
@@ -535,10 +536,24 @@ async def create_child_key(
             detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
         )
 
-    # Deduct cost from parent
-    key.balance -= total_cost
-    key.total_spent += total_cost
-    session.add(key)
+    # Deduct cost from parent atomically — guards against concurrent requests
+    # that both pass the balance check above on stale in-memory state.
+    deduct_stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key.hashed_key)
+        .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= total_cost)
+        .values(
+            balance=col(ApiKey.balance) - total_cost,
+            total_spent=col(ApiKey.total_spent) + total_cost,
+        )
+    )
+    result = await session.exec(deduct_stmt)  # type: ignore[call-overload]
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=402,
+            detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
+        )
 
     # Generate new keys
     import secrets
@@ -563,6 +578,7 @@ async def create_child_key(
         new_keys.append("sk-" + new_key_hash)
 
     await session.commit()
+    await session.refresh(key)
 
     response_data = {
         "api_keys": new_keys,

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import traceback
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import Any, Mapping, cast
 
 import httpx
@@ -203,14 +202,26 @@ class BaseUpstreamProvider:
         already reported its own provider (e.g. OpenRouter returns
         ``"provider": "Fireworks"``), otherwise just ``"<provider_type>"``
         for direct upstreams.
+
+        Idempotent: re-stamping an already-stamped payload must not nest the
+        prefix repeatedly (e.g. never ``"anthropic:anthropic"``). This matters
+        because streaming paths can apply the field more than once per chunk.
         """
         if not isinstance(response_json, dict):
             return
+        provider_type = (self.provider_type or "").strip()
         existing = response_json.get("provider")
-        if isinstance(existing, str) and existing.strip():
-            response_json["provider"] = f"{self.provider_type}:{existing.strip()}"
-        else:
-            response_json["provider"] = self.provider_type
+        existing_str = existing.strip() if isinstance(existing, str) else ""
+        if not existing_str:
+            response_json["provider"] = provider_type
+            return
+        # Already stamped by a previous pass — leave it untouched.
+        if existing_str == provider_type or existing_str.startswith(
+            f"{provider_type}:"
+        ):
+            response_json["provider"] = existing_str
+            return
+        response_json["provider"] = f"{provider_type}:{existing_str}"
 
     def inject_cost_metadata(
         self,
@@ -716,56 +727,140 @@ class BaseUpstreamProvider:
                     except Exception:
                         pass
 
+            def _process_event(raw_event: bytes) -> Iterator[bytes]:
+                """Process one complete SSE event block (lines up to a blank line).
+
+                Handles arbitrary upstream framing across every supported
+                provider:
+
+                * ``data:`` lines are gathered and concatenated per the SSE
+                  spec, so a payload split across network chunks is reassembled
+                  before parsing.
+                * Comment/keepalive lines (those beginning with ``:`` such as
+                  OpenRouter's ``: OPENROUTER PROCESSING``) are dropped. They
+                  carry no JSON and forwarding them downstream breaks naive SSE
+                  clients; the keepalive only matters for the upstream hop.
+                * Other SSE fields (``event:``/``id:``/``retry:``) are preserved
+                  and kept attached to the event's ``data:`` line, which the
+                  OpenAI Responses API and Anthropic-style streams rely on.
+                * ``[DONE]`` is swallowed so it can be re-emitted exactly once at
+                  end of stream.
+                """
+                nonlocal last_model_seen, usage_chunk_data, done_seen
+
+                event = raw_event.strip(b"\r\n")
+                if not event:
+                    return
+
+                field_lines: list[bytes] = []
+                data_lines: list[bytes] = []
+                for line in event.split(b"\n"):
+                    line = line.rstrip(b"\r")
+                    if line.startswith(b"data:"):
+                        # Strip the field name and a single optional leading space.
+                        data_lines.append(line[len(b"data:") :].lstrip(b" "))
+                    elif line.startswith(b":"):
+                        # SSE comment / keepalive - drop.
+                        continue
+                    elif line:
+                        # Other SSE field (event:/id:/retry:) - preserve in order.
+                        field_lines.append(line)
+
+                if not data_lines:
+                    return
+
+                data = b"\n".join(data_lines)
+                if not data.strip():
+                    return
+
+                # Re-emit preserved SSE fields immediately before the data line so
+                # event/data framing stays intact (single trailing newline each;
+                # the blank-line terminator is appended to the data line below).
+                prefix = b"".join(fl + b"\n" for fl in field_lines)
+
+                if data.strip() == b"[DONE]":
+                    done_seen = True
+                    return
+
+                try:
+                    obj = json.loads(data)
+                except Exception:
+                    obj = None
+
+                if isinstance(obj, dict):
+                    self._apply_provider_field(obj)
+                    if obj.get("model"):
+                        last_model_seen = str(obj.get("model"))
+                    if requested_model:
+                        obj["model"] = requested_model
+                    if (
+                        "id" not in obj
+                        or not isinstance(obj["id"], str)
+                        or obj["id"] == "existing-id"
+                    ):
+                        if not hasattr(self, "_current_stream_id"):
+                            self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
+                        obj["id"] = self._current_stream_id
+                    if isinstance(obj.get("usage"), dict):
+                        # Capture usage for end-of-stream cost reconciliation.
+                        # Some models (e.g. Gemini thinking models over the
+                        # OpenAI-compat endpoint) attach ``usage`` to the SAME
+                        # chunk that carries the final content/finish_reason
+                        # rather than sending a separate ``choices: []`` usage
+                        # chunk. Only swallow the chunk when it is a pure usage
+                        # chunk (no choices); otherwise the content would be
+                        # silently dropped and the client would receive no
+                        # assistant message at all.
+                        if obj.get("choices"):
+                            # Capture usage (with model) for the cost trailer,
+                            # but with choices stripped so the trailer never
+                            # re-emits this chunk's content.
+                            usage_chunk_data = {
+                                k: v for k, v in obj.items() if k != "choices"
+                            }
+                            usage_chunk_data["choices"] = []
+                            # Forward the content now, without usage, so token
+                            # usage is reported exactly once (in the trailer).
+                            forward = {k: v for k, v in obj.items() if k != "usage"}
+                            yield (
+                                prefix
+                                + b"data: "
+                                + json.dumps(forward).encode()
+                                + b"\n\n"
+                            )
+                            return
+                        usage_chunk_data = obj
+                        return
+                    yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
+                else:
+                    # Non-JSON data payload (partial fragment already reassembled
+                    # by buffering, or a provider control string). Re-prefix each
+                    # line so multi-line ``data`` stays valid SSE framing - a bare
+                    # second line would otherwise reach the client without its
+                    # ``data:`` field and break naive parsers.
+                    body = b"".join(
+                        b"data: " + ln + b"\n" for ln in data.split(b"\n")
+                    )
+                    yield prefix + body + b"\n"
+
             try:
+                # Buffer bytes across network chunks and dispatch only on the SSE
+                # event delimiter (a blank line). ``aiter_bytes`` yields arbitrary
+                # byte boundaries, so a single event's JSON can span chunks and
+                # multiple events can arrive together; buffering makes parsing
+                # boundary-independent for every provider.
+                buffer = b""
                 async for chunk in response.aiter_bytes():
-                    # Split chunk into SSE events
-                    parts = re.split(b"data: ", chunk)
-                    for i, part in enumerate(parts):
-                        if not part:
-                            continue
+                    buffer += chunk.replace(b"\r\n", b"\n")
+                    while b"\n\n" in buffer:
+                        raw_event, buffer = buffer.split(b"\n\n", 1)
+                        for out in _process_event(raw_event):
+                            yield out
 
-                        stripped_part = part.strip()
-                        if not stripped_part:
-                            continue
-
-                        if stripped_part == b"[DONE]":
-                            done_seen = True
-                            continue
-
-                        try:
-                            # Only parse if it looks like a JSON object to avoid SSE control messages or partials
-                            if part.strip().startswith(b"{") and part.strip().endswith(
-                                b"}"
-                            ):
-                                obj = json.loads(part)
-                                if isinstance(obj, dict):
-                                    self._apply_provider_field(obj)
-                                    if obj.get("model"):
-                                        last_model_seen = str(obj.get("model"))
-                                    if requested_model:
-                                        obj["model"] = requested_model
-                                    if (
-                                        "id" not in obj
-                                        or not isinstance(obj["id"], str)
-                                        or obj["id"] == "existing-id"
-                                    ):
-                                        if not hasattr(self, "_current_stream_id"):
-                                            self._current_stream_id = (
-                                                f"chatcmpl-{uuid.uuid4()}"
-                                            )
-                                        obj["id"] = self._current_stream_id
-                                    if isinstance(obj.get("usage"), dict):
-                                        usage_chunk_data = obj
-                                        continue
-                                    yield b"data: " + json.dumps(obj).encode() + b"\n\n"
-                                    continue
-                        except Exception:
-                            pass
-
-                        prefix = (
-                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
-                        )
-                        yield prefix + part
+                # Flush any trailing event that lacked a final blank line.
+                if buffer.strip():
+                    for out in _process_event(buffer):
+                        yield out
 
                 async with create_session() as session:
                     fresh_key = await session.get(key.__class__, key.hashed_key)
@@ -1067,56 +1162,97 @@ class BaseUpstreamProvider:
                     except Exception:
                         pass
 
+            def _process_event(raw_event: bytes) -> Iterator[bytes]:
+                """Process one complete SSE event block for the Responses API.
+
+                Buffers full events (delimited by a blank line) so parsing is
+                boundary-independent, gathers ``data:`` lines, drops comment/
+                keepalive lines (e.g. OpenRouter's ``: OPENROUTER PROCESSING``),
+                and preserves ``event:``/``id:`` fields attached to their data
+                line so Responses API event framing stays intact.
+                """
+                nonlocal last_model_seen, usage_chunk_data, done_seen
+                nonlocal reasoning_tokens
+
+                event = raw_event.strip(b"\r\n")
+                if not event:
+                    return
+
+                field_lines: list[bytes] = []
+                data_lines: list[bytes] = []
+                for line in event.split(b"\n"):
+                    line = line.rstrip(b"\r")
+                    if line.startswith(b"data:"):
+                        data_lines.append(line[len(b"data:") :].lstrip(b" "))
+                    elif line.startswith(b":"):
+                        # SSE comment / keepalive - drop.
+                        continue
+                    elif line:
+                        # Preserve event:/id:/retry: (Responses API event names).
+                        field_lines.append(line)
+
+                if not data_lines:
+                    return
+
+                data = b"\n".join(data_lines)
+                if not data.strip():
+                    return
+
+                prefix = b"".join(fl + b"\n" for fl in field_lines)
+
+                if data.strip() == b"[DONE]":
+                    done_seen = True
+                    return
+
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    obj = None
+
+                if isinstance(obj, dict):
+                    self._apply_provider_field(obj)
+                    if obj.get("model"):
+                        last_model_seen = str(obj.get("model"))
+                    if requested_model:
+                        obj["model"] = requested_model
+
+                    # Track reasoning tokens for Responses API
+                    if usage := obj.get("usage", {}):
+                        if isinstance(usage, dict) and "reasoning_tokens" in usage:
+                            reasoning_tokens += usage.get("reasoning_tokens", 0)
+
+                    # Responses API usage is in response.completed/incomplete events
+                    chunk_type = obj.get("type", "")
+                    if chunk_type in (
+                        "response.completed",
+                        "response.incomplete",
+                    ):
+                        usage_chunk_data = obj
+                        return
+
+                    yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
+                else:
+                    # Re-prefix each line so multi-line ``data`` stays valid SSE
+                    # framing for the client.
+                    body = b"".join(
+                        b"data: " + ln + b"\n" for ln in data.split(b"\n")
+                    )
+                    yield prefix + body + b"\n"
+
             try:
+                # Buffer across network chunks; dispatch only on the SSE event
+                # delimiter so parsing is independent of byte boundaries.
+                buffer = b""
                 async for chunk in response.aiter_bytes():
-                    # Split chunk into SSE events
-                    parts = re.split(b"data: ", chunk)
-                    for i, part in enumerate(parts):
-                        if not part:
-                            continue
+                    buffer += chunk.replace(b"\r\n", b"\n")
+                    while b"\n\n" in buffer:
+                        raw_event, buffer = buffer.split(b"\n\n", 1)
+                        for out in _process_event(raw_event):
+                            yield out
 
-                        stripped_part = part.strip()
-                        if not stripped_part:
-                            continue
-
-                        if stripped_part == b"[DONE]":
-                            done_seen = True
-                            continue
-
-                        try:
-                            obj = json.loads(part)
-                            if isinstance(obj, dict):
-                                self._apply_provider_field(obj)
-                                if obj.get("model"):
-                                    last_model_seen = str(obj.get("model"))
-                                if requested_model:
-                                    obj["model"] = requested_model
-
-                                # Track reasoning tokens for Responses API
-                                if usage := obj.get("usage", {}):
-                                    if (
-                                        isinstance(usage, dict)
-                                        and "reasoning_tokens" in usage
-                                    ):
-                                        reasoning_tokens += usage.get(
-                                            "reasoning_tokens", 0
-                                        )
-
-                                # Responses API usage is in response.completed/incomplete events
-                                chunk_type = obj.get("type", "")
-                                if chunk_type in (
-                                    "response.completed",
-                                    "response.incomplete",
-                                ):
-                                    usage_chunk_data = obj
-                                    continue
-                        except json.JSONDecodeError:
-                            pass
-
-                        prefix = (
-                            b"data: " if (i > 0 or chunk.startswith(b"data: ")) else b""
-                        )
-                        yield prefix + part
+                if buffer.strip():
+                    for out in _process_event(buffer):
+                        yield out
 
                 # Always emit a cost-bearing data chunk
                 async with create_session() as session:

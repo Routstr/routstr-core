@@ -69,9 +69,14 @@ async def test_wallet_info_child_key_no_child_keys(
     info_response = await integration_client.get("/v1/wallet/info")
     assert info_response.status_code == 200
     info_data = info_response.json()
+    parent_key = authenticated_client._test_api_key  # type: ignore[attr-defined]
+    parent_key_hash = parent_key.removeprefix("sk-")
 
     assert info_data["is_child"] is True
     assert "child_keys" not in info_data
+    assert "parent_key" not in info_data
+    assert info_data["parent_key_preview"] == parent_key_hash[:8] + "..."
+    assert info_data["parent_key_preview"] not in {parent_key, parent_key_hash}
 
 
 @pytest.mark.integration
