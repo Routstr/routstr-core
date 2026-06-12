@@ -173,8 +173,7 @@ def resolve_bootstrap() -> Settings:
         pass
     if not base.onion_url:
         try:
-            from ..nostr.listing import \
-                discover_onion_url_from_tor  # type: ignore
+            from ..nostr.listing import discover_onion_url_from_tor  # type: ignore
 
             discovered = discover_onion_url_from_tor()
             if discovered:

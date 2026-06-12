@@ -16,8 +16,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Nullable on purpose: existing keys keep NULL (no reservation recorded
-    # yet). New reservations populate it via pay_for_request.
+    # existing keys keep NULL
+    # New reservations populate it via pay_for_request.
     op.add_column("api_keys", sa.Column("reserved_at", sa.Integer(), nullable=True))
 
 

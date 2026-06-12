@@ -313,10 +313,7 @@ async def refund_wallet_endpoint(
         )
 
     if key.reserved_balance > 0:
-        # Self-heal: reservations leaked by client disconnects or crashes would
-        # otherwise lock the user out of refunding forever. Release the
-        # reservation if it is stale (or predates reserved_at tracking) and
-        # proceed; only reject when a reservation is genuinely recent.
+        # Release the reservation if it is stale
         cutoff = int(time.time()) - settings.stale_reservation_timeout_seconds
         stale_release_stmt = (
             update(ApiKey)

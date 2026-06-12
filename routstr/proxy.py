@@ -9,14 +9,23 @@ from sqlmodel import select
 from .algorithm import create_model_mappings
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
-from .core.db import (ApiKey, AsyncSession, ModelRow, UpstreamProviderRow,
-                      create_session, get_session)
+from .core.db import (
+    ApiKey,
+    AsyncSession,
+    ModelRow,
+    UpstreamProviderRow,
+    create_session,
+    get_session,
+)
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
 from .core.settings import settings
-from .payment.helpers import (calculate_discounted_max_cost,
-                              check_token_balance, create_error_response,
-                              get_max_cost_for_model)
+from .payment.helpers import (
+    calculate_discounted_max_cost,
+    check_token_balance,
+    create_error_response,
+    get_max_cost_for_model,
+)
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.helpers import init_upstreams

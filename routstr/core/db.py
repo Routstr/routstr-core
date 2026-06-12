@@ -105,11 +105,6 @@ async def release_stale_reservations(
     session: AsyncSession, max_age_seconds: int
 ) -> int:
     """Release reservations whose last reserve is older than max_age_seconds.
-
-    Only rows with a known reservation time are touched — NULL `reserved_at`
-    rows are left alone here so reservations made by instances running older
-    code (rolling deploys) are never killed mid-flight. Those rows are healed
-    on demand by the refund endpoint instead.
     """
     cutoff = int(time.time()) - max_age_seconds
     stmt = (
