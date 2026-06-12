@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -8,23 +9,14 @@ from sqlmodel import select
 from .algorithm import create_model_mappings
 from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
 from .core import get_logger
-from .core.db import (
-    ApiKey,
-    AsyncSession,
-    ModelRow,
-    UpstreamProviderRow,
-    create_session,
-    get_session,
-)
+from .core.db import (ApiKey, AsyncSession, ModelRow, UpstreamProviderRow,
+                      create_session, get_session)
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
 from .core.settings import settings
-from .payment.helpers import (
-    calculate_discounted_max_cost,
-    check_token_balance,
-    create_error_response,
-    get_max_cost_for_model,
-)
+from .payment.helpers import (calculate_discounted_max_cost,
+                              check_token_balance, create_error_response,
+                              get_max_cost_for_model)
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.helpers import init_upstreams
@@ -491,6 +483,21 @@ async def proxy(
                 return response
 
             return response
+
+        except asyncio.CancelledError:
+            logger.warning(
+                "Client disconnected mid-request, reverting reservation",
+                extra={
+                    "path": path,
+                    "model": model_id,
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "max_cost_for_model": max_cost_for_model,
+                },
+            )
+            await asyncio.shield(
+                revert_pay_for_request(key, session, max_cost_for_model)
+            )
+            raise
 
         except UpstreamError as e:
             logger.warning(

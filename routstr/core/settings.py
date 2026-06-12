@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     reset_reserved_balance_on_startup: bool = Field(
         default=True, env="RESET_RESERVED_BALANCE_ON_STARTUP"
     )  # deactivate in horizontal scaling setups
+    # Reservations older than this are considered leaked (client disconnect,
+    # crash, abandoned stream) and released by the background sweeper and the
+    # refund endpoint.
+    stale_reservation_timeout_seconds: int = Field(
+        default=300, env="STALE_RESERVATION_TIMEOUT_SECONDS"
+    )
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
@@ -167,7 +173,8 @@ def resolve_bootstrap() -> Settings:
         pass
     if not base.onion_url:
         try:
-            from ..nostr.listing import discover_onion_url_from_tor  # type: ignore
+            from ..nostr.listing import \
+                discover_onion_url_from_tor  # type: ignore
 
             discovered = discover_onion_url_from_tor()
             if discovered:

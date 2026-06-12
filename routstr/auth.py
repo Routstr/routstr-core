@@ -534,12 +534,14 @@ async def pay_for_request(
     )
 
     # Charge the base cost for the request atomically to avoid race conditions
+    reserved_at_now = int(time.time())
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
         .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
+            reserved_at=reserved_at_now,
             total_requests=col(ApiKey.total_requests) + 1,
         )
     )
@@ -553,6 +555,7 @@ async def pay_for_request(
             .values(
                 total_requests=col(ApiKey.total_requests) + 1,
                 reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
+                reserved_at=reserved_at_now,
             )
         )
         await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -620,12 +623,20 @@ async def revert_pay_for_request(
     False if the reservation was already released (prevents negative reserved_balance)."""
     billing_key = await get_billing_key(key, session)
 
+    # Keep reserved_at while other reservations remain; clear it once the
+    # reservation drains to zero so no stale-looking metadata lingers.
+    cleared_reserved_at = case(
+        (col(ApiKey.reserved_balance) - cost_per_request > 0, col(ApiKey.reserved_at)),
+        else_=None,
+    )
+
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
         .where(col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
+            reserved_at=cleared_reserved_at,
             total_requests=col(ApiKey.total_requests) - 1,
         )
     )
@@ -641,6 +652,7 @@ async def revert_pay_for_request(
             .values(
                 total_requests=col(ApiKey.total_requests) - 1,
                 reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
+                reserved_at=cleared_reserved_at,
             )
         )
         await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -1263,3 +1275,29 @@ async def periodic_key_reset() -> None:
             break
         except Exception as e:
             logger.error(f"Error in periodic_key_reset: {e}")
+
+
+STALE_RESERVATION_SWEEP_INTERVAL_SECONDS: int = 60
+
+
+async def periodic_stale_reservation_sweep() -> None:
+    """Background task that releases reservations leaked by client disconnects,
+    crashes or abandoned streams. Without it, a single interrupted request can
+    lock a key's balance (and block refunds) until the next process restart."""
+    from .core.db import create_session, release_stale_reservations
+
+    while True:
+        try:
+            await asyncio.sleep(STALE_RESERVATION_SWEEP_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            break
+
+        try:
+            async with create_session() as session:
+                await release_stale_reservations(
+                    session, settings.stale_reservation_timeout_seconds
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in periodic_stale_reservation_sweep: {e}")

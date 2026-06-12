@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException
 from starlette.responses import Response as StarletteResponse
 from starlette.types import Scope
 
-from ..auth import periodic_key_reset
+from ..auth import periodic_key_reset, periodic_stale_reservation_sweep
 from ..balance import balance_router, deprecated_wallet_router
 from ..lightning import lightning_router, periodic_invoice_watcher
 from ..nostr import (
@@ -54,6 +54,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     models_refresh_task = None
     model_maps_refresh_task = None
     key_reset_task = None
+    stale_reservation_task = None
     auto_topup_task = None
     refund_sweep_task = None
     routstr_fee_task = None
@@ -122,6 +123,9 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         key_reset_task = asyncio.create_task(periodic_key_reset())
+        stale_reservation_task = asyncio.create_task(
+            periodic_stale_reservation_sweep()
+        )
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
@@ -159,6 +163,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             model_maps_refresh_task.cancel()
         if key_reset_task is not None:
             key_reset_task.cancel()
+        if stale_reservation_task is not None:
+            stale_reservation_task.cancel()
         if auto_topup_task is not None:
             auto_topup_task.cancel()
         if refund_sweep_task is not None:
@@ -188,6 +194,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(model_maps_refresh_task)
             if key_reset_task is not None:
                 tasks_to_wait.append(key_reset_task)
+            if stale_reservation_task is not None:
+                tasks_to_wait.append(stale_reservation_task)
             if auto_topup_task is not None:
                 tasks_to_wait.append(auto_topup_task)
             if refund_sweep_task is not None:
