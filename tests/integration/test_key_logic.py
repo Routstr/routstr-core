@@ -173,6 +173,220 @@ async def test_balance_limit_enforced_atomically_under_concurrency(
 
 
 @pytest.mark.asyncio
+async def test_parallel_payments_with_parent_and_child_key(
+    patched_db_engine: None,
+) -> None:
+    parent_hash = "parent_parallel_mixed"
+    child_hash = "child_parallel_mixed"
+    cost = 300
+
+    async with create_session() as session:
+        parent = ApiKey(hashed_key=parent_hash, balance=10000)
+        child = ApiKey(
+            hashed_key=child_hash,
+            balance=0,
+            parent_key_hash=parent_hash,
+            balance_limit=2 * cost,
+        )
+        session.add(parent)
+        session.add(child)
+        await session.commit()
+
+    async def attempt(key_hash: str) -> str:
+        async with create_session() as session:
+            fresh_key = await session.get(ApiKey, key_hash)
+            assert fresh_key is not None
+            try:
+                await pay_for_request(fresh_key, cost, session)
+                return "success"
+            except HTTPException as exc:
+                assert exc.status_code == 402
+                return "blocked"
+
+    results = await asyncio.gather(attempt(parent_hash), attempt(child_hash))
+
+    assert results == ["success", "success"], (
+        f"Both parent and child payments should succeed, got: {results}"
+    )
+
+    async with create_session() as session:
+        final_parent = await session.get(ApiKey, parent_hash)
+        final_child = await session.get(ApiKey, child_hash)
+        assert final_parent is not None
+        assert final_child is not None
+
+    # Both requests bill the parent; only the child request reserves on the child.
+    assert final_parent.reserved_balance == 2 * cost
+    assert final_parent.total_requests == 2
+    assert final_child.reserved_balance == cost
+    assert final_child.total_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_balance_limit_with_existing_total_spent_under_concurrency(
+    patched_db_engine: None,
+) -> None:
+    parent_hash = "parent_total_spent"
+    child_hash = "child_total_spent"
+    cost = 300
+
+    async with create_session() as session:
+        parent = ApiKey(hashed_key=parent_hash, balance=10000)
+        # 700 already spent against a 1000 limit: only one more 300 request fits.
+        child = ApiKey(
+            hashed_key=child_hash,
+            balance=0,
+            parent_key_hash=parent_hash,
+            balance_limit=1000,
+            total_spent=700,
+        )
+        session.add(parent)
+        session.add(child)
+        await session.commit()
+
+    results: list[str] = []
+
+    async def attempt() -> None:
+        async with create_session() as session:
+            fresh_child = await session.get(ApiKey, child_hash)
+            assert fresh_child is not None
+            try:
+                await pay_for_request(fresh_child, cost, session)
+                results.append("success")
+            except HTTPException as exc:
+                assert exc.status_code == 402
+                results.append("blocked")
+
+    await asyncio.gather(attempt(), attempt())
+
+    assert sorted(results) == ["blocked", "success"], (
+        f"Expected exactly one success and one 402, got: {results}"
+    )
+
+    async with create_session() as session:
+        final_child = await session.get(ApiKey, child_hash)
+        assert final_child is not None
+
+    assert final_child.reserved_balance == cost
+    assert final_child.total_spent == 700
+
+
+@pytest.mark.asyncio
+async def test_balance_limit_with_existing_reserved_balance(
+    patched_db_engine: None,
+) -> None:
+    parent_hash = "parent_reserved_set"
+    blocked_hash = "child_reserved_blocked"
+    allowed_hash = "child_reserved_allowed"
+    cost = 300
+
+    async with create_session() as session:
+        parent = ApiKey(hashed_key=parent_hash, balance=10000)
+        # 800 already reserved against a 1000 limit: another 300 must be rejected.
+        blocked_child = ApiKey(
+            hashed_key=blocked_hash,
+            balance=0,
+            parent_key_hash=parent_hash,
+            balance_limit=1000,
+            reserved_balance=800,
+        )
+        # 500 reserved against a 1000 limit: another 300 still fits.
+        allowed_child = ApiKey(
+            hashed_key=allowed_hash,
+            balance=0,
+            parent_key_hash=parent_hash,
+            balance_limit=1000,
+            reserved_balance=500,
+        )
+        session.add(parent)
+        session.add(blocked_child)
+        session.add(allowed_child)
+        await session.commit()
+
+    async with create_session() as session:
+        fresh_blocked = await session.get(ApiKey, blocked_hash)
+        assert fresh_blocked is not None
+        with pytest.raises(HTTPException) as exc_info:
+            await pay_for_request(fresh_blocked, cost, session)
+        assert exc_info.value.status_code == 402
+
+    async with create_session() as session:
+        fresh_allowed = await session.get(ApiKey, allowed_hash)
+        assert fresh_allowed is not None
+        await pay_for_request(fresh_allowed, cost, session)
+
+    async with create_session() as session:
+        final_blocked = await session.get(ApiKey, blocked_hash)
+        final_allowed = await session.get(ApiKey, allowed_hash)
+        final_parent = await session.get(ApiKey, parent_hash)
+        assert final_blocked is not None
+        assert final_allowed is not None
+        assert final_parent is not None
+
+    assert final_blocked.reserved_balance == 800, "Rejected request must not reserve"
+    assert final_blocked.total_requests == 0
+    assert final_allowed.reserved_balance == 500 + cost
+    assert final_allowed.total_requests == 1
+    # Only the allowed request should have billed the parent.
+    assert final_parent.reserved_balance == cost
+    assert final_parent.total_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_child_reservation_discarded_when_parent_balance_depleted(
+    patched_db_engine: None,
+) -> None:
+    parent_hash = "parent_depleted"
+    child_hash = "child_depleted"
+    cost = 300
+
+    async with create_session() as session:
+        # Parent can only afford one request; child has no balance_limit.
+        parent = ApiKey(hashed_key=parent_hash, balance=cost)
+        child = ApiKey(
+            hashed_key=child_hash,
+            balance=0,
+            parent_key_hash=parent_hash,
+        )
+        session.add(parent)
+        session.add(child)
+        await session.commit()
+
+    results: list[str] = []
+
+    async def attempt() -> None:
+        async with create_session() as session:
+            fresh_child = await session.get(ApiKey, child_hash)
+            assert fresh_child is not None
+            try:
+                await pay_for_request(fresh_child, cost, session)
+                results.append("success")
+            except HTTPException as exc:
+                assert exc.status_code == 402
+                results.append("blocked")
+
+    await asyncio.gather(attempt(), attempt())
+
+    assert sorted(results) == ["blocked", "success"], (
+        f"Expected exactly one success and one 402, got: {results}"
+    )
+
+    async with create_session() as session:
+        final_parent = await session.get(ApiKey, parent_hash)
+        final_child = await session.get(ApiKey, child_hash)
+        assert final_parent is not None
+        assert final_child is not None
+
+    assert final_parent.reserved_balance == cost
+    # The failed request must not leave a committed reservation on the child.
+    assert final_child.reserved_balance == cost, (
+        f"Child reserved_balance should reflect only the successful request, "
+        f"got {final_child.reserved_balance}"
+    )
+    assert final_child.total_requests == 1
+
+
+@pytest.mark.asyncio
 async def test_refund_does_not_delete_key(integration_session: AsyncSession) -> None:
     # This requires mocking the router call or testing the logic in balance.py
     from routstr.balance import ApiKey

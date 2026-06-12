@@ -545,6 +545,28 @@ async def pay_for_request(
     )
     result = await session.exec(stmt)  # type: ignore[call-overload]
 
+    if result.rowcount == 0:
+        logger.error(
+            "Concurrent request depleted balance",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                "required_cost": cost_per_request,
+                "current_balance": billing_key.balance,
+            },
+        )
+
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": {
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.balance} available.",
+                    "type": "insufficient_quota",
+                    "code": "insufficient_balance",
+                }
+            },
+        )
+
     # Also increment total_requests and reserved_balance on the child key if it's different.
     # The balance_limit guard is enforced atomically here — the Python pre-check above
     # is a fast-path rejection only and provides no concurrency guarantee.
@@ -581,29 +603,6 @@ async def pay_for_request(
             )
 
     await session.commit()
-
-    if result.rowcount == 0:
-        logger.error(
-            "Concurrent request depleted balance",
-            extra={
-                "key_hash": key.hashed_key[:8] + "...",
-                "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                "required_cost": cost_per_request,
-                "current_balance": billing_key.balance,
-            },
-        )
-
-        # Another concurrent request spent the balance first
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.balance} available.",
-                    "type": "insufficient_quota",
-                    "code": "insufficient_balance",
-                }
-            },
-        )
 
     await session.refresh(billing_key)
     if billing_key.hashed_key != key.hashed_key:
