@@ -7,7 +7,7 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlmodel import col, select, update
+from sqlmodel import col, or_, select, update
 
 from .auth import get_billing_key, validate_bearer_key
 from .core.db import (
@@ -313,9 +313,36 @@ async def refund_wallet_endpoint(
         )
 
     if key.reserved_balance > 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot refund key. There are ongoing requests for this api key.",
+        # Release the reservation if it is stale
+        cutoff = int(time.time()) - settings.stale_reservation_timeout_seconds
+        stale_release_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .where(col(ApiKey.reserved_balance) > 0)
+            .where(
+                or_(
+                    col(ApiKey.reserved_at).is_(None),
+                    col(ApiKey.reserved_at) < cutoff,
+                )
+            )
+            .values(reserved_balance=0, reserved_at=None)
+        )
+        stale_result = await session.exec(stale_release_stmt)  # type: ignore[call-overload]
+        await session.commit()
+
+        if stale_result.rowcount == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot refund key. There are ongoing requests for this api key.",
+            )
+
+        await session.refresh(key)
+        logger.warning(
+            "refund_wallet_endpoint: released stale reservation before refund",
+            extra={
+                "hashed_key": key.hashed_key,
+                "stale_timeout_seconds": settings.stale_reservation_timeout_seconds,
+            },
         )
 
     remaining_balance_msats: int = key.total_balance
@@ -342,7 +369,7 @@ async def refund_wallet_endpoint(
         .where(col(ApiKey.hashed_key) == key.hashed_key)
         .where(col(ApiKey.balance) == pre_debit_balance)
         .where(col(ApiKey.reserved_balance) == pre_debit_reserved)
-        .values(balance=0, reserved_balance=0)
+        .values(balance=0, reserved_balance=0, reserved_at=None)
     )
     debit_result = await session.exec(debit_stmt)  # type: ignore[call-overload]
     await session.commit()

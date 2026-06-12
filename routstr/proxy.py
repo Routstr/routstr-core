@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -491,6 +492,21 @@ async def proxy(
                 return response
 
             return response
+
+        except asyncio.CancelledError:
+            logger.warning(
+                "Client disconnected mid-request, reverting reservation",
+                extra={
+                    "path": path,
+                    "model": model_id,
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "max_cost_for_model": max_cost_for_model,
+                },
+            )
+            await asyncio.shield(
+                revert_pay_for_request(key, session, max_cost_for_model)
+            )
+            raise
 
         except UpstreamError as e:
             logger.warning(
