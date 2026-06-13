@@ -5,7 +5,7 @@ from pydantic.v1 import BaseModel
 from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
-from .usage import NormalizedUsage, normalize_usage, parse_token_count
+from .usage import normalize_usage, parse_token_count
 
 __all__ = [
     "CostData",
@@ -44,20 +44,18 @@ class CostDataError(BaseModel):
 async def calculate_cost(
     response_data: dict,
     max_cost: int,
-    usage: NormalizedUsage | None = None,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
 
     Args:
         response_data: Response data containing usage information
         max_cost: Maximum cost in millisats
-        usage: Pre-normalized usage from the upstream provider's
-            ``normalize_usage`` hook. When omitted, the response's usage
-            object is normalized with the default union parser. This function
-            holds no vendor-dialect knowledge of its own.
 
     Returns:
         Cost data or error information
+
+    The response's usage object is normalized with the default union parser;
+    this function holds no vendor-dialect knowledge of its own.
     """
     logger.debug(
         "Starting cost calculation",
@@ -68,8 +66,7 @@ async def calculate_cost(
         },
     )
 
-    if usage is None:
-        usage = normalize_usage(response_data.get("usage"))
+    usage = normalize_usage(response_data.get("usage"))
 
     if usage is None:
         logger.warning(

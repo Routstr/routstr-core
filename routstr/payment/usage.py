@@ -27,8 +27,8 @@ What decides whether cached tokens must be subtracted out of the input count is
 
 ``normalize_usage`` maps all of them onto one canonical ``NormalizedUsage``
 shape so billing code needs no vendor knowledge. The known dialects' field
-names do not collide, so a single union parser is safe; vendors whose fields
-would genuinely conflict override ``BaseUpstreamProvider.normalize_usage``.
+names do not collide, so a single union parser is safe; a vendor whose fields
+would genuinely conflict needs a dedicated branch here.
 """
 
 from pydantic.v1 import BaseModel

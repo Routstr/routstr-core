@@ -39,7 +39,6 @@ from ..payment.models import (
     list_models,
 )
 from ..payment.price import sats_usd_price
-from ..payment.usage import NormalizedUsage, normalize_usage
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
 from .cache_breakpoints import (
@@ -106,17 +105,6 @@ class BaseUpstreamProvider:
         self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
-
-    def normalize_usage(self, usage_data: object) -> NormalizedUsage | None:
-        """Map this provider's usage dialect onto the canonical shape.
-
-        The default union parser covers the known dialects (OpenAI, Anthropic,
-        DeepSeek), whose field names do not collide. Override in a subclass
-        when a vendor's usage fields would conflict with another dialect or
-        need bespoke interpretation; billing code consumes only the canonical
-        result and holds no vendor knowledge.
-        """
-        return normalize_usage(usage_data)
 
     def get_litellm_provider_prefix(self) -> str:
         """Resolve the litellm provider prefix for this provider instance.
@@ -931,9 +919,6 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
-                                usage=self.normalize_usage(
-                                    adjustment_input.get("usage")
-                                ),
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1076,7 +1061,6 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
-                usage=self.normalize_usage(response_json.get("usage")),
             )
 
             await session.refresh(key)
@@ -1331,9 +1315,6 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
-                                usage=self.normalize_usage(
-                                    adjustment_input.get("usage")
-                                ),
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1501,7 +1482,6 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
-                usage=self.normalize_usage(response_json.get("usage")),
             )
 
             await session.refresh(key)
@@ -1700,7 +1680,6 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
-                            usage=self.normalize_usage(fallback.get("usage")),
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1852,9 +1831,6 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
-                                    usage=self.normalize_usage(
-                                        combined_data.get("usage")
-                                    ),
                                 )
 
                                 self.inject_cost_metadata(
@@ -1926,7 +1902,6 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
-                usage=self.normalize_usage(response_json.get("usage")),
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2032,7 +2007,6 @@ class BaseUpstreamProvider:
             response_json,
             session,
             max_cost_for_model,
-            usage=self.normalize_usage(response_json.get("usage")),
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2174,7 +2148,6 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
-                            usage=self.normalize_usage(fallback.get("usage")),
                         )
                         usage_finalized = True
                         return (
@@ -2248,9 +2221,6 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
-                                    usage=self.normalize_usage(
-                                        combined_data.get("usage")
-                                    ),
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -3112,7 +3082,6 @@ class BaseUpstreamProvider:
         match await calculate_cost(
             response_data,
             max_cost_for_model,
-            usage=self.normalize_usage(response_data.get("usage")),
         ):
             case MaxCostData() as cost:
                 logger.debug(
