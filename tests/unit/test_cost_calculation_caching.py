@@ -1,10 +1,11 @@
 """Tests for cache token handling in cost calculation.
 
-Covers OpenAI vs Anthropic caching formats, edge cases, and billing accuracy.
+Covers OpenAI, Anthropic and DeepSeek caching formats, dialect precedence,
+edge cases, and billing accuracy.
 """
 
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -14,12 +15,6 @@ os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
 from routstr.core.settings import settings
 from routstr.payment.cost_calculation import CostData, MaxCostData, calculate_cost
-
-
-@pytest.fixture
-def mock_session() -> AsyncMock:
-    """Mock AsyncSession for cost calculation tests."""
-    return AsyncMock()
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +36,7 @@ def patch_sats_usd_price() -> None:  # type: ignore[misc]
 # Test 1: OpenAI Cache Format
 # ============================================================================
 @pytest.mark.asyncio
-async def test_openai_cache_subtraction(mock_session: AsyncMock) -> None:
+async def test_openai_cache_subtraction() -> None:
     """OpenAI includes cached_tokens in prompt_tokens, subtract them."""
     response = {
         "model": "gpt-4",
@@ -53,7 +48,7 @@ async def test_openai_cache_subtraction(mock_session: AsyncMock) -> None:
             }
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 1000  # 2000 - 1000
@@ -65,7 +60,7 @@ async def test_openai_cache_subtraction(mock_session: AsyncMock) -> None:
 # Test 2: Anthropic Cache Format
 # ============================================================================
 @pytest.mark.asyncio
-async def test_anthropic_cache_additive(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_anthropic_cache_additive(mock_fixed_pricing: None) -> None:
     """Anthropic cache tokens are separate (additive) from input_tokens."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -76,7 +71,7 @@ async def test_anthropic_cache_additive(mock_session: AsyncMock, mock_fixed_pric
             "cache_read_input_tokens": 0,
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 500
@@ -89,7 +84,7 @@ async def test_anthropic_cache_additive(mock_session: AsyncMock, mock_fixed_pric
 # Test 3: Invalid Cache (Edge Case)
 # ============================================================================
 @pytest.mark.asyncio
-async def test_cache_read_exceeds_prompt_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_cache_read_exceeds_prompt_tokens(mock_fixed_pricing: None) -> None:
     """Handle buggy upstream reporting cached > prompt_tokens."""
     response = {
         "model": "gpt-4",
@@ -101,7 +96,7 @@ async def test_cache_read_exceeds_prompt_tokens(mock_session: AsyncMock, mock_fi
             }
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     # Should not go negative
     assert isinstance(result, CostData)
@@ -114,7 +109,7 @@ async def test_cache_read_exceeds_prompt_tokens(mock_session: AsyncMock, mock_fi
 # Test 4: Malformed Token Values
 # ============================================================================
 @pytest.mark.asyncio
-async def test_malformed_cache_tokens_coerce_to_zero(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_malformed_cache_tokens_coerce_to_zero(mock_fixed_pricing: None) -> None:
     """Handle non-numeric cache token values."""
     response = {
         "model": "gpt-4",
@@ -127,7 +122,7 @@ async def test_malformed_cache_tokens_coerce_to_zero(mock_session: AsyncMock, mo
             }
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     # Both should coerce to 0
     assert isinstance(result, CostData)
@@ -139,7 +134,7 @@ async def test_malformed_cache_tokens_coerce_to_zero(mock_session: AsyncMock, mo
 # Test 5: Anthropic Cache Not Subtracted
 # ============================================================================
 @pytest.mark.asyncio
-async def test_anthropic_cache_not_subtracted(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_anthropic_cache_not_subtracted(mock_fixed_pricing: None) -> None:
     """Anthropic cache fields should NOT be subtracted from input_tokens."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -149,7 +144,7 @@ async def test_anthropic_cache_not_subtracted(mock_session: AsyncMock, mock_fixe
             "cache_read_input_tokens": 200,  # ← Additive, don't subtract
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     # Anthropic: input_tokens stays as-is
     assert isinstance(result, CostData)
@@ -161,7 +156,7 @@ async def test_anthropic_cache_not_subtracted(mock_session: AsyncMock, mock_fixe
 # Test 6: Only Cache Read, No Regular Input
 # ============================================================================
 @pytest.mark.asyncio
-async def test_only_cache_read_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_only_cache_read_tokens(mock_fixed_pricing: None) -> None:
     """Handle response with only cache read tokens."""
     response = {
         "model": "gpt-4",
@@ -173,7 +168,7 @@ async def test_only_cache_read_tokens(mock_session: AsyncMock, mock_fixed_pricin
             }
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 0  # max(0, 0 - 1000)
@@ -185,7 +180,7 @@ async def test_only_cache_read_tokens(mock_session: AsyncMock, mock_fixed_pricin
 # Test 7: Only Cache Creation
 # ============================================================================
 @pytest.mark.asyncio
-async def test_only_cache_creation_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_only_cache_creation_tokens(mock_fixed_pricing: None) -> None:
     """Handle response with only cache creation tokens (Anthropic)."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -196,7 +191,7 @@ async def test_only_cache_creation_tokens(mock_session: AsyncMock, mock_fixed_pr
             "cache_read_input_tokens": 0,
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 500
@@ -209,7 +204,7 @@ async def test_only_cache_creation_tokens(mock_session: AsyncMock, mock_fixed_pr
 # Test 8: Both Cache Read and Creation
 # ============================================================================
 @pytest.mark.asyncio
-async def test_both_cache_read_and_creation(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_both_cache_read_and_creation(mock_fixed_pricing: None) -> None:
     """Handle response with both cache read and creation."""
     response = {
         "model": "claude-3-5-sonnet",
@@ -220,7 +215,7 @@ async def test_both_cache_read_and_creation(mock_session: AsyncMock, mock_fixed_
             "cache_read_input_tokens": 500,
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 300
@@ -233,7 +228,7 @@ async def test_both_cache_read_and_creation(mock_session: AsyncMock, mock_fixed_
 # Test 9: Token Field Fallback
 # ============================================================================
 @pytest.mark.asyncio
-async def test_token_field_fallback_order(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_token_field_fallback_order(mock_fixed_pricing: None) -> None:
     """Verify fallback order for token extraction."""
     # When prompt_tokens is not present, fall back to input_tokens
     response = {
@@ -243,7 +238,7 @@ async def test_token_field_fallback_order(mock_session: AsyncMock, mock_fixed_pr
             "completion_tokens": 50,
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 250
@@ -254,7 +249,7 @@ async def test_token_field_fallback_order(mock_session: AsyncMock, mock_fixed_pr
 # Test 10: Float Token Values
 # ============================================================================
 @pytest.mark.asyncio
-async def test_float_token_values_coerced_to_int(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_float_token_values_coerced_to_int(mock_fixed_pricing: None) -> None:
     """Handle float token values by converting to int."""
     response = {
         "model": "gpt-4",
@@ -264,7 +259,7 @@ async def test_float_token_values_coerced_to_int(mock_session: AsyncMock, mock_f
             "cache_read_input_tokens": 25.9,  # Float
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.input_tokens == 100  # Floored
@@ -276,7 +271,7 @@ async def test_float_token_values_coerced_to_int(mock_session: AsyncMock, mock_f
 # Test 11: Boolean Cache Tokens
 # ============================================================================
 @pytest.mark.asyncio
-async def test_boolean_cache_tokens_coerced_to_zero(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_boolean_cache_tokens_coerced_to_zero(mock_fixed_pricing: None) -> None:
     """Handle boolean cache token values by coercing to zero."""
     response = {
         "model": "gpt-4",
@@ -286,7 +281,7 @@ async def test_boolean_cache_tokens_coerced_to_zero(mock_session: AsyncMock, moc
             "cache_read_input_tokens": True,  # Boolean
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.cache_read_input_tokens == 0  # Boolean coerced to 0
@@ -297,7 +292,7 @@ async def test_boolean_cache_tokens_coerced_to_zero(mock_session: AsyncMock, moc
 # Test 12: Zero Cache Tokens
 # ============================================================================
 @pytest.mark.asyncio
-async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_zero_cache_tokens(mock_fixed_pricing: None) -> None:
     """Handle explicit zero cache tokens."""
     response = {
         "model": "gpt-4",
@@ -309,7 +304,7 @@ async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: No
             }
         }
     }
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
     assert result.cache_read_input_tokens == 0
@@ -317,13 +312,105 @@ async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: No
 
 
 # ============================================================================
+# DeepSeek Cache Format
+# DeepSeek emits neither OpenAI's prompt_tokens_details nor Anthropic's
+# cache_read_input_tokens — only prompt_cache_hit_tokens and
+# prompt_cache_miss_tokens, with the documented guarantee
+# prompt_tokens = hit + miss. Hits are ~10x cheaper upstream, so billing
+# them as regular input is a large overcharge.
+# ============================================================================
+@pytest.mark.asyncio
+async def test_deepseek_cache_hit_tokens_extracted() -> None:
+    """DeepSeek cache hits are extracted and removed from regular input.
+
+    Payload shape verbatim from the DeepSeek API reference (usage object).
+    """
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 10000,  # = hit + miss
+            "completion_tokens": 500,
+            "total_tokens": 10500,
+            "prompt_cache_hit_tokens": 9000,
+            "prompt_cache_miss_tokens": 1000,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000  # only the cache misses
+    assert result.cache_read_input_tokens == 9000
+    assert result.output_tokens == 500
+
+
+@pytest.mark.asyncio
+async def test_deepseek_all_tokens_cached() -> None:
+    """A fully cached DeepSeek prompt bills zero regular input tokens."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 5000,
+            "completion_tokens": 100,
+            "prompt_cache_hit_tokens": 5000,
+            "prompt_cache_miss_tokens": 0,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 0
+    assert result.cache_read_input_tokens == 5000
+
+
+@pytest.mark.asyncio
+async def test_dialect_precedence_never_double_subtracts() -> None:
+    """If a vendor emits both OpenAI-style and DeepSeek-style cache fields for
+    the same cached tokens, they are counted once, not subtracted twice."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 10000,
+            "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 9000},
+            "prompt_cache_hit_tokens": 9000,
+            "prompt_cache_miss_tokens": 1000,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000  # 10000 - 9000, applied exactly once
+    assert result.cache_read_input_tokens == 9000
+
+
+@pytest.mark.asyncio
+async def test_deepseek_malformed_hit_tokens_coerce_to_zero() -> None:
+    """Malformed DeepSeek cache fields degrade to billing all input at full
+    rate instead of crashing or going negative."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": "garbage",
+            "prompt_cache_miss_tokens": -5,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000
+    assert result.cache_read_input_tokens == 0
+
+
+# ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================
 @pytest.mark.asyncio
-async def test_missing_usage_block(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_missing_usage_block(mock_fixed_pricing: None) -> None:
     """When usage is missing, return MaxCostData with zero tokens."""
     response = {"model": "gpt-4", "choices": [{"message": {"content": "test"}}]}
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, MaxCostData)
     assert result.input_tokens == 0
@@ -335,10 +422,10 @@ async def test_missing_usage_block(mock_session: AsyncMock, mock_fixed_pricing: 
 # Test 14: Null Usage Block
 # ============================================================================
 @pytest.mark.asyncio
-async def test_null_usage_block(mock_session: AsyncMock, mock_fixed_pricing: None) -> None:
+async def test_null_usage_block(mock_fixed_pricing: None) -> None:
     """When usage is null, return MaxCostData with zero tokens."""
     response = {"model": "gpt-4", "usage": None}
-    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+    result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, MaxCostData)
     assert result.input_tokens == 0

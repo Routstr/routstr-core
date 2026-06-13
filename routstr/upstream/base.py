@@ -35,9 +35,11 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    backfill_cache_pricing,
     list_models,
 )
 from ..payment.price import sats_usd_price
+from ..payment.usage import NormalizedUsage, normalize_usage
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
 from .count_tokens import count_tokens_locally
@@ -100,6 +102,17 @@ class BaseUpstreamProvider:
         self.provider_fee = provider_fee
         self._models_cache = []
         self._models_by_id = {}
+
+    def normalize_usage(self, usage_data: object) -> NormalizedUsage | None:
+        """Map this provider's usage dialect onto the canonical shape.
+
+        The default union parser covers the known dialects (OpenAI, Anthropic,
+        DeepSeek), whose field names do not collide. Override in a subclass
+        when a vendor's usage fields would conflict with another dialect or
+        need bespoke interpretation; billing code consumes only the canonical
+        result and holds no vendor knowledge.
+        """
+        return normalize_usage(usage_data)
 
     def get_litellm_provider_prefix(self) -> str:
         """Resolve the litellm provider prefix for this provider instance.
@@ -880,6 +893,9 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                usage=self.normalize_usage(
+                                    adjustment_input.get("usage")
+                                ),
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1018,7 +1034,11 @@ class BaseUpstreamProvider:
                 response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
 
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
+                usage=self.normalize_usage(response_json.get("usage")),
             )
 
             await session.refresh(key)
@@ -1273,6 +1293,9 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                usage=self.normalize_usage(
+                                    adjustment_input.get("usage")
+                                ),
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1436,7 +1459,11 @@ class BaseUpstreamProvider:
                 response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
 
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
+                usage=self.normalize_usage(response_json.get("usage")),
             )
 
             await session.refresh(key)
@@ -1631,7 +1658,11 @@ class BaseUpstreamProvider:
                             "usage": None,
                         }
                         cost_data = await adjust_payment_for_tokens(
-                            fresh_key, fallback, new_session, max_cost_for_model
+                            fresh_key,
+                            fallback,
+                            new_session,
+                            max_cost_for_model,
+                            usage=self.normalize_usage(fallback.get("usage")),
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1783,6 +1814,9 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
+                                    usage=self.normalize_usage(
+                                        combined_data.get("usage")
+                                    ),
                                 )
 
                                 self.inject_cost_metadata(
@@ -1850,7 +1884,11 @@ class BaseUpstreamProvider:
                 response_json["usage"] = {"input_tokens": input_tokens}
 
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
+                usage=self.normalize_usage(response_json.get("usage")),
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -1952,7 +1990,11 @@ class BaseUpstreamProvider:
             response_json["model"] = requested_model
 
         cost_data = await adjust_payment_for_tokens(
-            key, response_json, session, max_cost_for_model
+            key,
+            response_json,
+            session,
+            max_cost_for_model,
+            usage=self.normalize_usage(response_json.get("usage")),
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2094,6 +2136,7 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
+                            usage=self.normalize_usage(fallback.get("usage")),
                         )
                         usage_finalized = True
                         return (
@@ -2167,6 +2210,9 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
+                                    usage=self.normalize_usage(
+                                        combined_data.get("usage")
+                                    ),
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -3025,44 +3071,47 @@ class BaseUpstreamProvider:
             extra={"model": model, "has_usage": "usage" in response_data},
         )
 
-        async with create_session() as session:
-            match await calculate_cost(response_data, max_cost_for_model, session):
-                case MaxCostData() as cost:
-                    logger.debug(
-                        "Using max cost pricing",
-                        extra={"model": model, "max_cost_msats": cost.total_msats},
-                    )
-                    return cost
-                case CostData() as cost:
-                    logger.debug(
-                        "Using token-based pricing",
-                        extra={
-                            "model": model,
-                            "total_cost_msats": cost.total_msats,
-                            "input_msats": cost.input_msats,
-                            "output_msats": cost.output_msats,
-                        },
-                    )
-                    return cost
-                case CostDataError() as error:
-                    logger.error(
-                        "Cost calculation error",
-                        extra={
-                            "model": model,
-                            "error_message": error.message,
-                            "error_code": error.code,
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": {
-                                "message": error.message,
-                                "type": "invalid_request_error",
-                                "code": error.code,
-                            }
-                        },
-                    )
+        match await calculate_cost(
+            response_data,
+            max_cost_for_model,
+            usage=self.normalize_usage(response_data.get("usage")),
+        ):
+            case MaxCostData() as cost:
+                logger.debug(
+                    "Using max cost pricing",
+                    extra={"model": model, "max_cost_msats": cost.total_msats},
+                )
+                return cost
+            case CostData() as cost:
+                logger.debug(
+                    "Using token-based pricing",
+                    extra={
+                        "model": model,
+                        "total_cost_msats": cost.total_msats,
+                        "input_msats": cost.input_msats,
+                        "output_msats": cost.output_msats,
+                    },
+                )
+                return cost
+            case CostDataError() as error:
+                logger.error(
+                    "Cost calculation error",
+                    extra={
+                        "model": model,
+                        "error_message": error.message,
+                        "error_code": error.code,
+                    },
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "message": error.message,
+                            "type": "invalid_request_error",
+                            "code": error.code,
+                        }
+                    },
+                )
         return None
 
     async def send_refund(
@@ -4562,14 +4611,19 @@ class BaseUpstreamProvider:
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.
 
+        Cache rates missing from the upstream pricing feed are backfilled from
+        litellm's cost map first, so they carry the provider fee like every
+        other price component.
+
         Args:
             model: Model object to update
 
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
+        base_pricing = backfill_cache_pricing(model.id, model.pricing)
         adjusted_pricing = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
+            {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
         )
 
         temp_model = Model(
