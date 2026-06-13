@@ -20,7 +20,6 @@ from .payment.cost_calculation import (
     MaxCostData,
     calculate_cost,
 )
-from .payment.usage import NormalizedUsage
 from .wallet import credit_balance, deserialize_token_from_string
 
 logger = get_logger(__name__)
@@ -713,16 +712,14 @@ async def adjust_payment_for_tokens(
     response_data: dict,
     session: AsyncSession,
     deducted_max_cost: int,
-    usage: NormalizedUsage | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
 
-    ``usage`` carries the upstream provider's normalized token usage (its
-    ``normalize_usage`` hook); when omitted, the response's usage object is
-    normalized with the default union parser.
+    The response's usage object is normalized with the default union parser in
+    ``calculate_cost``.
     """
     billing_key = await get_billing_key(key, session)
     model = response_data.get("model", "unknown")
@@ -805,7 +802,7 @@ async def adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    match await calculate_cost(response_data, deducted_max_cost, usage=usage):
+    match await calculate_cost(response_data, deducted_max_cost):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",
