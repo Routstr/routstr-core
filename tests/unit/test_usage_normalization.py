@@ -94,6 +94,45 @@ def patch_sats_usd_price() -> None:  # type: ignore[misc]
             {"prompt_tokens": 100, "completion_tokens": 50},
             NormalizedUsage(input_tokens=100, output_tokens=50),
         ),
+        # OpenRouter: cache writes nested as prompt_tokens_details.cache_write_tokens,
+        # both reads and writes included in prompt_tokens → both subtracted
+        (
+            {
+                "prompt_tokens": 10000,
+                "completion_tokens": 60,
+                "prompt_tokens_details": {
+                    "cached_tokens": 5000,
+                    "cache_write_tokens": 2000,
+                },
+            },
+            NormalizedUsage(
+                input_tokens=3000,
+                output_tokens=60,
+                cache_read_tokens=5000,
+                cache_write_tokens=2000,
+            ),
+        ),
+        # litellm-normalized Anthropic: prompt_tokens is the grand total and the
+        # write field is named cache_creation_tokens; top-level fields mirror it.
+        # prompt_tokens present → both subtracted (NOT additive like native).
+        (
+            {
+                "prompt_tokens": 10000,
+                "completion_tokens": 100,
+                "cache_read_input_tokens": 5000,
+                "cache_creation_input_tokens": 2000,
+                "prompt_tokens_details": {
+                    "cached_tokens": 5000,
+                    "cache_creation_tokens": 2000,
+                },
+            },
+            NormalizedUsage(
+                input_tokens=3000,
+                output_tokens=100,
+                cache_read_tokens=5000,
+                cache_write_tokens=2000,
+            ),
+        ),
     ],
 )
 def test_normalize_usage_dialects(usage: dict, expected: NormalizedUsage) -> None:
