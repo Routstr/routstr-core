@@ -256,13 +256,14 @@ async def test_float_token_values_coerced_to_int(mock_fixed_pricing: None) -> No
         "usage": {
             "prompt_tokens": 100.7,  # Float
             "completion_tokens": 50.3,  # Float
-            "cache_read_input_tokens": 25.9,  # Float
+            "prompt_tokens_details": {"cached_tokens": 25.9},  # Float
         }
     }
     result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
-    assert result.input_tokens == 100  # Floored
+    # cached_tokens are part of prompt_tokens (OpenAI dialect) → subtracted: 100 - 25
+    assert result.input_tokens == 75  # Floored
     assert result.output_tokens == 50  # Floored
     assert result.cache_read_input_tokens == 25  # Floored
 
