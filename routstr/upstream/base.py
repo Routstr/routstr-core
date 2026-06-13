@@ -42,6 +42,10 @@ from ..payment.price import sats_usd_price
 from ..payment.usage import NormalizedUsage, normalize_usage
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
+from .cache_breakpoints import (
+    inject_anthropic_cache_breakpoints,
+    is_explicit_cache_model,
+)
 from .count_tokens import count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
 
@@ -445,6 +449,19 @@ class BaseUpstreamProvider:
 
         return body
 
+    def _upstream_accepts_cache_control(self) -> bool:
+        """True when this upstream accepts explicit ``cache_control`` markers.
+
+        Only OpenRouter (documents Anthropic + Alibaba explicit caching) and the
+        native Anthropic API accept the markers. Stamping them toward an
+        automatic-cache or non-supporting upstream risks a 400, so injection is
+        confined to these. Base URL is also checked so an OpenRouter endpoint
+        configured through the generic provider is still recognised.
+        """
+        if self.provider_type in ("openrouter", "anthropic"):
+            return True
+        return "openrouter.ai" in (self.base_url or "")
+
     def prepare_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
@@ -512,6 +529,27 @@ class BaseUpstreamProvider:
             if merged.get("include_usage") is not True:
                 merged["include_usage"] = True
                 data["stream_options"] = merged
+                changed = True
+
+        # Explicit-cache models (Anthropic Claude, Alibaba Qwen / deepseek-v3.2)
+        # cache nothing without ``cache_control`` markers in the body. Clients
+        # that don't recognise a routstr URL as one of these never send them, so
+        # caching silently never engages over routstr even though it works
+        # against OpenRouter directly. Stamp the standard breakpoints so caching
+        # works by default, deferring to any client-set markers. Gated to
+        # upstreams that accept the markers (OpenRouter / Anthropic) so they
+        # never leak to an automatic-cache provider that would reject them.
+        if (
+            "messages" in data
+            and isinstance(data.get("messages"), list)
+            and self._upstream_accepts_cache_control()
+            and is_explicit_cache_model(
+                model_obj.id,
+                model_obj.forwarded_model_id,
+                model_obj.canonical_slug,
+            )
+        ):
+            if inject_anthropic_cache_breakpoints(data):
                 changed = True
 
         if changed:
