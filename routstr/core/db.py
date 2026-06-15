@@ -33,6 +33,14 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     reserved_balance: int = Field(
         default=0, description="Reserved balance in millisatoshis (msats)"
     )
+    reserved_at: int | None = Field(
+        default=None,
+        description=(
+            "Unix timestamp of the most recent balance reservation. Used to "
+            "detect and release stale reservations (e.g. after client "
+            "disconnects). NULL when no reservation has been made yet."
+        ),
+    )
     refund_address: str | None = Field(
         default=None,
         description="Lightning address to refund remaining balance after key expires",
@@ -87,10 +95,34 @@ class ApiKey(SQLModel, table=True):  # type: ignore
 
 
 async def reset_all_reserved_balances(session: AsyncSession) -> None:
-    stmt = update(ApiKey).values(reserved_balance=0)
+    stmt = update(ApiKey).values(reserved_balance=0, reserved_at=None)
     await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
     logger.info("Reset reserved balances on startup")
+
+
+async def release_stale_reservations(
+    session: AsyncSession, max_age_seconds: int
+) -> int:
+    """Release reservations whose last reserve is older than max_age_seconds.
+    """
+    cutoff = int(time.time()) - max_age_seconds
+    stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.reserved_balance) > 0)
+        .where(col(ApiKey.reserved_at).is_not(None))
+        .where(col(ApiKey.reserved_at) < cutoff)
+        .values(reserved_balance=0, reserved_at=None)
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+    released = int(result.rowcount or 0)
+    if released:
+        logger.warning(
+            "Released stale balance reservations",
+            extra={"released_keys": released, "max_age_seconds": max_age_seconds},
+        )
+    return released
 
 
 class ModelRow(SQLModel, table=True):  # type: ignore

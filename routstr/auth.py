@@ -534,30 +534,18 @@ async def pay_for_request(
     )
 
     # Charge the base cost for the request atomically to avoid race conditions
+    reserved_at_now = int(time.time())
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
         .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
+            reserved_at=reserved_at_now,
             total_requests=col(ApiKey.total_requests) + 1,
         )
     )
     result = await session.exec(stmt)  # type: ignore[call-overload]
-
-    # Also increment total_requests and reserved_balance on the child key if it's different
-    if billing_key.hashed_key != key.hashed_key:
-        child_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .values(
-                total_requests=col(ApiKey.total_requests) + 1,
-                reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
-            )
-        )
-        await session.exec(child_stmt)  # type: ignore[call-overload]
-
-    await session.commit()
 
     if result.rowcount == 0:
         logger.error(
@@ -570,7 +558,6 @@ async def pay_for_request(
             },
         )
 
-        # Another concurrent request spent the balance first
         raise HTTPException(
             status_code=402,
             detail={
@@ -581,6 +568,44 @@ async def pay_for_request(
                 }
             },
         )
+
+    # Also increment total_requests and reserved_balance on the child key if it's different.
+    # The balance_limit guard is enforced atomically here — the Python pre-check above
+    # is a fast-path rejection only and provides no concurrency guarantee.
+    if billing_key.hashed_key != key.hashed_key:
+        child_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .where(
+                (col(ApiKey.balance_limit).is_(None))
+                | (
+                    col(ApiKey.total_spent)
+                    + col(ApiKey.reserved_balance)
+                    + cost_per_request
+                    <= col(ApiKey.balance_limit)
+                )
+            )
+            .values(
+                total_requests=col(ApiKey.total_requests) + 1,
+                reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
+                reserved_at=reserved_at_now,
+            )
+        )
+        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
+
+        if child_result.rowcount == 0:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": {
+                        "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent ({key.reserved_balance} reserved), {cost_per_request} required for this request.",
+                        "type": "insufficient_quota",
+                        "code": "balance_limit_exceeded",
+                    }
+                },
+            )
+
+    await session.commit()
 
     await session.refresh(billing_key)
     if billing_key.hashed_key != key.hashed_key:
@@ -620,12 +645,19 @@ async def revert_pay_for_request(
     False if the reservation was already released (prevents negative reserved_balance)."""
     billing_key = await get_billing_key(key, session)
 
+    # Keep reserved_at while other reservations remain
+    cleared_reserved_at = case(
+        (col(ApiKey.reserved_balance) - cost_per_request > 0, col(ApiKey.reserved_at)),
+        else_=None,
+    )
+
     stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
         .where(col(ApiKey.reserved_balance) >= cost_per_request)
         .values(
             reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
+            reserved_at=cleared_reserved_at,
             total_requests=col(ApiKey.total_requests) - 1,
         )
     )
@@ -641,6 +673,7 @@ async def revert_pay_for_request(
             .values(
                 total_requests=col(ApiKey.total_requests) - 1,
                 reserved_balance=col(ApiKey.reserved_balance) - cost_per_request,
+                reserved_at=cleared_reserved_at,
             )
         )
         await session.exec(child_stmt)  # type: ignore[call-overload]
@@ -1263,3 +1296,24 @@ async def periodic_key_reset() -> None:
             break
         except Exception as e:
             logger.error(f"Error in periodic_key_reset: {e}")
+
+
+STALE_RESERVATION_SWEEP_INTERVAL_SECONDS: int = 60
+
+
+async def periodic_stale_reservation_sweep() -> None:
+    """Background task that releases reservations leaked by client disconnects,
+    crashes or abandoned streams.
+    """
+    from .core.db import create_session, release_stale_reservations
+
+    while True:
+        try:
+            async with create_session() as session:
+                await release_stale_reservations(
+                    session, settings.stale_reservation_timeout_seconds
+                )
+        except Exception:
+            logger.exception("Error in periodic_stale_reservation_sweep")
+
+        await asyncio.sleep(STALE_RESERVATION_SWEEP_INTERVAL_SECONDS)
