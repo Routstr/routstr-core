@@ -364,6 +364,7 @@ async def validate_bearer_key(
         except HTTPException:
             raise
         except Exception as e:
+            await session.rollback()
             logger.error(
                 "Cashu token redemption failed",
                 extra={
