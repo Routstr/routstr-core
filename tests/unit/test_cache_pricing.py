@@ -181,8 +181,10 @@ async def test_deepseek_cache_hits_billed_at_cache_rate(model_pricing: Mock) -> 
         result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
-    # 1000 input @ 1 msat + 9000 cache reads @ 0.1 msat + 500 output @ 2 msat
-    assert result.input_msats == 1000
+    # 1000 input @ 1 msat + 9000 cache reads @ 0.1 msat + 500 output @ 2 msat.
+    # Client-visible input_msats includes cache-read input cost for display,
+    # while cache_read_msats keeps the detailed breakdown.
+    assert result.input_msats == 1900
     assert result.cache_read_msats == 900
     assert result.output_msats == 1000
     assert result.total_msats == 2900

@@ -39,6 +39,7 @@ from ..payment.models import (
     list_models,
 )
 from ..payment.price import sats_usd_price
+from ..payment.usage import normalize_usage
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
 from .cache_breakpoints import (
@@ -157,48 +158,56 @@ class BaseUpstreamProvider:
 
     @staticmethod
     def _fold_cache_into_input_tokens(usage: object) -> None:
-        """Fold cache token counts into ``input_tokens`` / ``prompt_tokens``.
+        """Fold additive cache token counts into Anthropic ``input_tokens``.
 
         Cost calculation has already used the per-bucket counts to bill the
-        request correctly; what the client sees in the visible token total
-        should be a single rolled-up prompt count *including* the cache
-        portion. The standalone ``cache_read_input_tokens`` /
+        request correctly; what the client sees in Anthropic-shaped visible
+        token totals should be a single rolled-up input count *including* the
+        cache portion. OpenAI-compatible ``prompt_tokens`` is already inclusive
+        (DeepSeek, OpenAI, OpenRouter, litellm), so adding cache fields there
+        would double-count.
+
+        The standalone ``cache_read_input_tokens`` /
         ``cache_creation_input_tokens`` fields are left in place for clients
         that want the breakdown.
-
-        For Anthropic-shaped responses (``input_tokens`` present), the cache
-        fields are forced to ``0`` when the upstream omitted them, so the
-        client always sees a consistent shape.
         """
         if not isinstance(usage, dict):
             return
 
-        # Normalise missing cache fields to 0 on Anthropic-shaped usage so
-        # downstream consumers can rely on them being present.
-        if "input_tokens" in usage:
-            usage.setdefault("cache_read_input_tokens", 0)
-            usage.setdefault("cache_creation_input_tokens", 0)
+        # ``prompt_tokens`` is an inclusive OpenAI-compatible grand total.
+        # Fold only native Anthropic-style usage where ``input_tokens`` excludes
+        # cache reads/writes.
+        if "input_tokens" not in usage or "prompt_tokens" in usage:
+            return
+
+        usage.setdefault("cache_read_input_tokens", 0)
+        usage.setdefault("cache_creation_input_tokens", 0)
 
         try:
             cache_read = int(usage.get("cache_read_input_tokens") or 0)
             cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+            input_tokens = int(usage.get("input_tokens") or 0)
         except (TypeError, ValueError):
             return
         extra = cache_read + cache_creation
-        if extra <= 0:
+        if extra > 0:
+            usage["input_tokens"] = input_tokens + extra
+
+    @staticmethod
+    def _add_normalized_usage_fields(response_json: object) -> None:
+        """Preserve raw usage while adding canonical fields for billing/display."""
+        if not isinstance(response_json, dict):
             return
-        if "input_tokens" in usage:
-            try:
-                usage["input_tokens"] = int(usage.get("input_tokens") or 0) + extra
-            except (TypeError, ValueError):
-                pass
-        if "prompt_tokens" in usage:
-            try:
-                usage["prompt_tokens"] = (
-                    int(usage.get("prompt_tokens") or 0) + extra
-                )
-            except (TypeError, ValueError):
-                pass
+        usage = response_json.get("usage")
+        if not isinstance(usage, dict):
+            return
+        normalized = normalize_usage(usage)
+        if normalized is None:
+            return
+        usage.setdefault("input_tokens", normalized.input_tokens)
+        usage.setdefault("output_tokens", normalized.output_tokens)
+        usage.setdefault("cache_read_input_tokens", normalized.cache_read_tokens)
+        usage.setdefault("cache_creation_input_tokens", normalized.cache_write_tokens)
 
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the routstr ``provider`` field onto an upstream response payload.
@@ -858,6 +867,7 @@ class BaseUpstreamProvider:
                                 k: v for k, v in obj.items() if k != "choices"
                             }
                             usage_chunk_data["choices"] = []
+                            self._add_normalized_usage_fields(usage_chunk_data)
                             # Forward the content now, without usage, so token
                             # usage is reported exactly once (in the trailer).
                             forward = {k: v for k, v in obj.items() if k != "usage"}
@@ -869,6 +879,7 @@ class BaseUpstreamProvider:
                             )
                             return
                         usage_chunk_data = obj
+                        self._add_normalized_usage_fields(usage_chunk_data)
                         return
                     yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
                 else:
@@ -906,6 +917,8 @@ class BaseUpstreamProvider:
                     if fresh_key:
                         cost_data: dict
                         try:
+                            if usage_chunk_data is not None:
+                                self._add_normalized_usage_fields(usage_chunk_data)
                             adjustment_input = (
                                 usage_chunk_data
                                 if usage_chunk_data is not None

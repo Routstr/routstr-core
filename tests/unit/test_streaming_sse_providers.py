@@ -20,6 +20,7 @@ comment ever reaches the client. That invariant is exactly what the buggy
 
 import json
 from collections.abc import AsyncGenerator
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -105,6 +106,76 @@ def _assert_clean(out: list[bytes]) -> list[dict]:
         obj = json.loads(stripped)  # raises if the proxy emitted non-JSON data
         objs.append(obj)
     return objs
+
+
+@pytest.mark.asyncio
+async def test_deepseek_usage_chunk_is_normalized_before_billing() -> None:
+    """DeepSeek stream trailers keep raw fields and add canonical billing fields."""
+    usage = {
+        "prompt_tokens": 10000,
+        "completion_tokens": 500,
+        "total_tokens": 10500,
+        "prompt_cache_hit_tokens": 9000,
+        "prompt_cache_miss_tokens": 1000,
+    }
+    chunks = [
+        b'data: {"id":"ds","model":"deepseek-chat","choices":[{"delta":{"content":"ok"}}]}\n\n',
+        b"data: "
+        + json.dumps(
+            {
+                "id": "ds",
+                "model": "deepseek-chat",
+                "choices": [],
+                "usage": usage,
+            }
+        ).encode()
+        + b"\n\n",
+        b"data: [DONE]\n\n",
+    ]
+
+    await _drive(chunks)
+
+    adjust_mock = cast(AsyncMock, base.adjust_payment_for_tokens)
+    adjustment_input = adjust_mock.call_args.args[1]
+    billed_usage = adjustment_input["usage"]
+    assert billed_usage["prompt_tokens"] == 10000
+    assert billed_usage["prompt_cache_hit_tokens"] == 9000
+    assert billed_usage["prompt_cache_miss_tokens"] == 1000
+    assert billed_usage["input_tokens"] == 1000
+    assert billed_usage["output_tokens"] == 500
+    assert billed_usage["cache_read_input_tokens"] == 9000
+    assert billed_usage["cache_creation_input_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fold_cache_tokens_does_not_double_count_inclusive_prompt_tokens() -> None:
+    """Visible usage mutation must not inflate OpenAI-compatible prompt totals."""
+    usage = {
+        "prompt_tokens": 10000,
+        "completion_tokens": 500,
+        "cache_read_input_tokens": 9000,
+        "prompt_cache_hit_tokens": 9000,
+    }
+
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+
+    assert usage["prompt_tokens"] == 10000
+    assert usage["cache_read_input_tokens"] == 9000
+
+
+@pytest.mark.asyncio
+async def test_fold_cache_tokens_still_rolls_up_anthropic_input_tokens() -> None:
+    """Anthropic native input_tokens excludes cache and still needs rollup."""
+    usage = {
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "cache_read_input_tokens": 9000,
+        "cache_creation_input_tokens": 200,
+    }
+
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+
+    assert usage["input_tokens"] == 10200
 
 
 @pytest.mark.asyncio

@@ -418,9 +418,11 @@ def _calculate_from_tokens(
         },
     )
 
+    visible_input_msats = int(calc_input_msats + calc_cache_read_msats)
+
     return CostData(
         base_msats=0,
-        input_msats=int(calc_input_msats),
+        input_msats=visible_input_msats,
         output_msats=int(calc_output_msats),
         total_msats=token_based_cost,
         total_usd=total_usd,
