@@ -51,9 +51,15 @@ async def recieve_token(
     await wallet.load_mint(keyset_id=token_obj.keysets[0])
 
     wallet.verify_proofs_dleq(token_obj.proofs)
+    # Same-mint receive (not swap_to_primary_mint): split() re-mints the incoming
+    # proofs into fresh ones we own so the sender can't double-spend them. With
+    # include_fees=True the mint deducts its NUT-02 per-proof input fee, so we end
+    # up holding only `amount - input_fees`. Credit that, not the face value, or
+    # routstr over-credits the user and its wallet drifts insolvent.
+    input_fees = wallet.get_fees_for_proofs(token_obj.proofs)
     await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
 
-    return token_obj.amount, token_obj.unit, token_obj.mint
+    return token_obj.amount - input_fees, token_obj.unit, token_obj.mint
 
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
