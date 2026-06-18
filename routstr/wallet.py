@@ -35,6 +35,24 @@ async def get_balance(unit: str) -> int:
     return wallet.available_balance.amount
 
 
+async def _redeem_same_mint(
+    wallet: Wallet, token_obj: Token
+) -> tuple[int, str, str]:  # amount, unit, mint_url
+    """Redeem proofs at their own issuing mint (no cross-mint swap).
+
+    split() re-mints the incoming proofs into fresh ones we own so the sender
+    can't double-spend them. With include_fees=True the mint deducts its NUT-02
+    per-proof input fee, so we end up holding only `amount - input_fees`. Credit
+    that, not the face value, or routstr over-credits the user and its wallet
+    drifts insolvent.
+    """
+    await wallet.load_mint(keyset_id=token_obj.keysets[0])
+    wallet.verify_proofs_dleq(token_obj.proofs)
+    input_fees = wallet.get_fees_for_proofs(token_obj.proofs)
+    await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
+    return int(token_obj.amount) - input_fees, token_obj.unit, token_obj.mint
+
+
 async def recieve_token(
     token: str,
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
@@ -48,12 +66,7 @@ async def recieve_token(
     if token_obj.mint not in settings.cashu_mints:
         return await swap_to_primary_mint(token_obj, wallet)
 
-    await wallet.load_mint(keyset_id=token_obj.keysets[0])
-
-    wallet.verify_proofs_dleq(token_obj.proofs)
-    await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
-
-    return token_obj.amount, token_obj.unit, token_obj.mint
+    return await _redeem_same_mint(wallet, token_obj)
 
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
@@ -213,10 +226,9 @@ async def swap_to_primary_mint(
         amount_msat = token_amount
     else:
         raise ValueError("Invalid unit")
-    primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
-
-    # If the token is already from the primary mint, we don't need to swap
-    # and we definitely don't want to calculate or pay fees.
+    # If the token is already from the primary mint, we don't need a cross-mint
+    # swap — redeem it same-mint. There's no melt/Lightning fee, but the mint's
+    # NUT-02 input fee still applies; _redeem_same_mint accounts for it.
     if token_obj.mint == settings.primary_mint:
         logger.info(
             "swap_to_primary_mint: token already on primary mint, skipping swap",
@@ -226,8 +238,9 @@ async def swap_to_primary_mint(
                 "unit": token_obj.unit,
             },
         )
-        await token_wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
-        return token_amount, token_obj.unit, token_obj.mint
+        return await _redeem_same_mint(token_wallet, token_obj)
+
+    primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
 
     minted_amount = await _calculate_swap_amount(
         amount_msat,
