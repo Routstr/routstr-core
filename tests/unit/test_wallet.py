@@ -90,7 +90,7 @@ async def test_recieve_token_trusted_mint_deducts_input_fee() -> None:
 
     mock_wallet = Mock()
     mock_wallet.split = AsyncMock()
-    # 21 proofs @ 100 ppk -> (21*100 + 999) // 1000 = 3 sat input fee
+    # Mock a 3-sat input fee from the Cashu wallet API.
     mock_wallet.get_fees_for_proofs = Mock(return_value=3)
 
     from routstr.core.settings import settings
