@@ -20,6 +20,7 @@ comment ever reaches the client. That invariant is exactly what the buggy
 
 import json
 from collections.abc import AsyncGenerator
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -88,6 +89,15 @@ def _data_payloads(out: list[bytes]) -> list[bytes]:
     return payloads
 
 
+def _last_adjustment_input() -> dict:
+    mock = cast(AsyncMock, base.adjust_payment_for_tokens)
+    await_args = mock.await_args
+    assert await_args is not None
+    adjustment_input = await_args.args[1]
+    assert isinstance(adjustment_input, dict)
+    return adjustment_input
+
+
 def _assert_clean(out: list[bytes]) -> list[dict]:
     """Core invariant: every data line is [DONE] or valid JSON; no comments leak."""
     blob = b"".join(out)
@@ -105,6 +115,103 @@ def _assert_clean(out: list[bytes]) -> list[dict]:
         obj = json.loads(stripped)  # raises if the proxy emitted non-JSON data
         objs.append(obj)
     return objs
+
+
+def test_fold_cache_does_not_inflate_inclusive_prompt_tokens() -> None:
+    """OpenAI/litellm/DeepSeek prompt_tokens already includes cache tokens."""
+    usage = {
+        "prompt_tokens": 10000,
+        "completion_tokens": 100,
+        "cache_read_input_tokens": 5000,
+        "cache_creation_input_tokens": 2000,
+    }
+
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+
+    assert usage["prompt_tokens"] == 10000
+    assert usage["cache_read_input_tokens"] == 5000
+    assert usage["cache_creation_input_tokens"] == 2000
+
+
+def test_fold_cache_adds_only_anthropic_additive_input_tokens() -> None:
+    """Anthropic native input_tokens excludes cache fields and remains folded."""
+    usage = {
+        "input_tokens": 300,
+        "output_tokens": 100,
+        "cache_read_input_tokens": 500,
+        "cache_creation_input_tokens": 2000,
+    }
+
+    BaseUpstreamProvider._fold_cache_into_input_tokens(usage)
+
+    assert usage["input_tokens"] == 2800
+
+
+@pytest.mark.asyncio
+async def test_deepseek_streaming_usage_preserved_for_cost_adjustment() -> None:
+    """Streaming chat usage keeps DeepSeek cache fields for normalize_usage."""
+    usage = {
+        "prompt_tokens": 10000,
+        "completion_tokens": 500,
+        "prompt_cache_hit_tokens": 9000,
+        "prompt_cache_miss_tokens": 1000,
+    }
+    chunks = [
+        b'data: {"id":"x","model":"deepseek-chat","choices":[{"delta":{"content":"ok"}}]}\n\n',
+        b"data: "
+        + json.dumps(
+            {
+                "id": "x",
+                "model": "deepseek-chat",
+                "choices": [],
+                "usage": usage,
+            }
+        ).encode()
+        + b"\n\n",
+        b"data: [DONE]\n\n",
+    ]
+
+    out = await _drive(chunks)
+
+    _assert_clean(out)
+    adjustment_input = _last_adjustment_input()
+    for key, value in usage.items():
+        assert adjustment_input["usage"][key] == value
+
+
+@pytest.mark.asyncio
+async def test_openai_litellm_streaming_usage_preserved_for_cost_adjustment() -> None:
+    """Streaming chat usage keeps nested and top-level cache fields."""
+    usage = {
+        "prompt_tokens": 10000,
+        "completion_tokens": 100,
+        "cache_read_input_tokens": 5000,
+        "cache_creation_input_tokens": 2000,
+        "prompt_tokens_details": {
+            "cached_tokens": 5000,
+            "cache_creation_tokens": 2000,
+        },
+    }
+    chunks = [
+        b"data: "
+        + json.dumps(
+            {
+                "id": "x",
+                "model": "claude-litellm",
+                "choices": [],
+                "usage": usage,
+            }
+        ).encode()
+        + b"\n\n",
+        b"data: [DONE]\n\n",
+    ]
+
+    out = await _drive(chunks)
+
+    _assert_clean(out)
+    adjustment_input = _last_adjustment_input()
+    for key, value in usage.items():
+        assert adjustment_input["usage"][key] == value
 
 
 @pytest.mark.asyncio

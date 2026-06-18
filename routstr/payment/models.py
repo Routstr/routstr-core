@@ -85,45 +85,139 @@ class Model(BaseModel):
         return hash(self.id)
 
 
+def _litellm_entry(*keys: str) -> dict | None:
+    """First litellm cost-map entry matching any of the given exact keys."""
+    import litellm
+
+    for key in keys:
+        candidate = litellm.model_cost.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _family_tokens(lowered_id: str) -> list[str]:
+    """Candidate family tokens derived from an id, most-specific first.
+
+    The provider prefix (``deepseek`` in ``deepseek/x``) and the leading segment
+    of the model name (``deepseek`` in ``deepseek-v4-flash``). Tokens shorter
+    than 4 chars are dropped so short noise like ``gpt`` cannot match unrelated
+    litellm keys.
+    """
+    provider, sep, rest = lowered_id.partition("/")
+    name = rest if sep else provider
+    tokens: list[str] = []
+    if sep and len(provider) >= 4:
+        tokens.append(provider)
+    leading = name.split("-", 1)[0]
+    if len(leading) >= 4 and leading not in tokens:
+        tokens.append(leading)
+    return tokens
+
+
+def _family_reference(lowered_id: str) -> dict | None:
+    """First litellm entry sharing a family token AND carrying a cache-read rate.
+
+    Generic, data-driven fallback for vanity ids that proxies invent
+    (``deepseek-v4-flash``) which match no litellm key directly. Any provider
+    whose litellm snapshots price cache reads (deepseek, anthropic, ...) is
+    matched without a hand-maintained family list. The family token must be the
+    key's root segment (``deepseek/...`` / ``deepseek-...``), not appear anywhere
+    in it — that excludes reseller-prefixed snapshots (``deepinfra/deepseek/...``,
+    ``novita/deepseek/...``) whose cache markup differs from the native provider.
+    Keys are scanned in sorted order so the chosen reference is deterministic.
+    """
+    import litellm
+
+    for token in _family_tokens(lowered_id):
+        for key in sorted(litellm.model_cost):
+            lowered_key = key.lower()
+            if not (
+                lowered_key == token
+                or lowered_key.startswith(token + "/")
+                or lowered_key.startswith(token + "-")
+            ):
+                continue
+            entry = litellm.model_cost.get(key)
+            if not isinstance(entry, dict):
+                continue
+            ref_input = entry.get("input_cost_per_token")
+            ref_read = entry.get("cache_read_input_token_cost")
+            if (
+                isinstance(ref_input, (int, float))
+                and ref_input > 0
+                and isinstance(ref_read, (int, float))
+                and ref_read > 0
+            ):
+                return entry
+    return None
+
+
 def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
     """Fill missing cache rates from litellm's bundled cost map.
 
-    The OpenRouter model feed omits ``input_cache_read``/``input_cache_write``
-    for many models (most DeepSeek entries, openai/gpt-4o, ...). Without a
-    cache rate, billing falls back to the full input rate, which overcharges
-    cache reads (DeepSeek hits are 10x cheaper) and undercharges Anthropic
-    cache writes (1.25x). litellm ships per-model USD rates keyed by the exact
-    OpenRouter id (deepseek/deepseek-chat) or by the bare model name
-    (gpt-4o, claude-sonnet-4-5), so both spellings are tried.
+    The OpenRouter model feed omits ``input_cache_read`` / ``input_cache_write``
+    for many models. Without a cache rate, billing falls back to the full input
+    rate, overcharging cache reads (DeepSeek hits are ~10x cheaper). Two
+    strategies are tried in order:
+
+    1. **Exact match** — litellm ships absolute per-token USD rates keyed by the
+       upstream id (``deepseek/deepseek-chat``) or its bare model name
+       (``gpt-4o``); both spellings are tried and copied directly.
+    2. **Family ratio** — vanity ids proxies invent (``deepseek-v4-flash``) match
+       no litellm key. A reference entry for the same provider/family is found by
+       generic scan (no hand-maintained list) and its ``cache_read/input``
+       *ratio* is scaled by THIS model's own input price — correct even when the
+       vanity model is priced differently from the reference.
 
     Rates already present (e.g. provided by OpenRouter) are authoritative and
-    never overwritten. Unknown models are returned unchanged.
+    never overwritten. Models matching no family are returned unchanged.
     """
     needs_read = (pricing.input_cache_read or 0.0) <= 0.0
     needs_write = (pricing.input_cache_write or 0.0) <= 0.0
     if not (needs_read or needs_write):
         return pricing
 
-    import litellm
-
-    info: dict | None = None
-    for key in (model_id, model_id.split("/", 1)[-1]):
-        candidate = litellm.model_cost.get(key)
-        if isinstance(candidate, dict):
-            info = candidate
-            break
-    if info is None:
-        return pricing
-
     updated = Pricing.parse_obj(pricing.dict())
+
+    # 1. Exact match: absolute per-token USD rates apply directly.
+    info = _litellm_entry(model_id, model_id.split("/", 1)[-1])
+    if info is not None:
+        if needs_read:
+            read_rate = info.get("cache_read_input_token_cost")
+            if isinstance(read_rate, (int, float)) and read_rate > 0:
+                updated.input_cache_read = float(read_rate)
+                needs_read = False
+        if needs_write:
+            write_rate = info.get("cache_creation_input_token_cost")
+            if isinstance(write_rate, (int, float)) and write_rate > 0:
+                updated.input_cache_write = float(write_rate)
+                needs_write = False
+
+    if not (needs_read or needs_write):
+        return updated
+
+    # 2. Family ratio for vanity ids (or fields the exact entry left unpriced).
+    if pricing.prompt <= 0.0:
+        return updated
+    reference = _family_reference(model_id.lower())
+    if reference is None:
+        logger.debug(
+            "No litellm cache-rate reference for model family",
+            extra={"model_id": model_id},
+        )
+        return updated
+    ref_input = reference.get("input_cost_per_token")
+    if not isinstance(ref_input, (int, float)) or ref_input <= 0:
+        return updated
     if needs_read:
-        read_rate = info.get("cache_read_input_token_cost")
-        if isinstance(read_rate, (int, float)) and read_rate > 0:
-            updated.input_cache_read = float(read_rate)
+        ref_read = reference.get("cache_read_input_token_cost")
+        if isinstance(ref_read, (int, float)) and ref_read > 0:
+            updated.input_cache_read = pricing.prompt * (ref_read / ref_input)
     if needs_write:
-        write_rate = info.get("cache_creation_input_token_cost")
-        if isinstance(write_rate, (int, float)) and write_rate > 0:
-            updated.input_cache_write = float(write_rate)
+        ref_write = reference.get("cache_creation_input_token_cost")
+        if isinstance(ref_write, (int, float)) and ref_write > 0:
+            updated.input_cache_write = pricing.prompt * (ref_write / ref_input)
     return updated
 
 

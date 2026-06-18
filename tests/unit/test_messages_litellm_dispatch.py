@@ -649,6 +649,110 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     assert combined["model"] == "openai/gpt-4o-mini"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (
+            {
+                "prompt_tokens": 10_000,
+                "completion_tokens": 500,
+                "prompt_cache_hit_tokens": 9_000,
+                "prompt_cache_miss_tokens": 1_000,
+            },
+            {
+                "input_tokens": 1_000,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 9_000,
+                "cache_creation_input_tokens": 0,
+            },
+        ),
+        (
+            {
+                "prompt_tokens": 10_000,
+                "completion_tokens": 100,
+                "prompt_tokens_details": {
+                    "cached_tokens": 5_000,
+                    "cache_creation_tokens": 2_000,
+                },
+            },
+            {
+                "input_tokens": 3_000,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 5_000,
+                "cache_creation_input_tokens": 2_000,
+            },
+        ),
+    ],
+)
+async def test_streaming_litellm_messages_normalizes_cache_usage_dialects(
+    usage: dict[str, Any], expected: dict[str, int]
+) -> None:
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+    body = _anthropic_request_body(stream=True)
+
+    async def fake_chunks() -> AsyncIterator[dict]:
+        yield {
+            "type": "message_start",
+            "message": {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "openai/gpt-4o-mini",
+                "content": [],
+            },
+        }
+        yield {"type": "message_delta", "delta": {}, "usage": usage}
+        yield {"type": "message_stop"}
+
+    captured: dict[str, Any] = {}
+
+    async def fake_adjust(
+        fresh_key: Any, combined_data: Any, sess: Any, max_cost: int, usage: Any = None
+    ) -> dict:
+        captured["combined_data"] = json.loads(json.dumps(combined_data))
+        return {"total_msats": 999, "total_usd": 0.0001}
+
+    fake_session = MagicMock()
+    fake_session.get = AsyncMock(return_value=key)
+
+    class FakeSessionCtx:
+        async def __aenter__(self) -> Any:
+            return fake_session
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(return_value=fake_chunks()),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(side_effect=fake_adjust),
+        ),
+        patch("routstr.upstream.base.create_session", new=lambda: FakeSessionCtx()),
+    ):
+        result = await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+        assert isinstance(result, StreamingResponse)
+        async for _ in result.body_iterator:
+            pass
+
+    combined = captured["combined_data"]
+    for field, value in expected.items():
+        assert combined["usage"][field] == value
+
+
 # ---------------------------------------------------------------------------
 # x-cashu non-streaming
 # ---------------------------------------------------------------------------

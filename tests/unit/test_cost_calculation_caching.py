@@ -431,3 +431,38 @@ async def test_null_usage_block(mock_fixed_pricing: None) -> None:
     assert isinstance(result, MaxCostData)
     assert result.input_tokens == 0
     assert result.cache_read_input_tokens == 0
+
+
+# ============================================================================
+# USD-path input/output split — weight by rate, not raw token count
+# ============================================================================
+def test_usd_split_weights_by_rate_not_token_count() -> None:
+    """A lump-sum USD cost with no explicit input/output breakdown is split by
+    per-token *rate*. Cheap cache-read tokens (~10x discount) must not inflate
+    the input share the way a raw token-count split does."""
+    from routstr.payment.cost_calculation import _rate_weighted_input_fraction
+
+    # rates: (input, output, cache_read, cache_write); relative scale only.
+    with patch(
+        "routstr.payment.cost_calculation._get_pricing_rates",
+        return_value=(1.0, 4.0, 0.1, 0.1),
+    ):
+        frac = _rate_weighted_input_fraction({"model": "x"}, 100, 900, 0, 100)
+
+    # input weight = 100*1 + 900*0.1 = 190; output = 100*4 = 400; total = 590.
+    assert frac == pytest.approx(190 / 590)
+    # The old raw token-count split gave (100+900)/1100 ≈ 0.909 — wildly skewed.
+    assert frac < 0.5
+
+
+def test_usd_split_falls_back_to_token_count_without_rates() -> None:
+    """When rates are unavailable (fixed pricing / unknown model) the split
+    degrades gracefully to the raw token-count proportion."""
+    from routstr.payment.cost_calculation import _rate_weighted_input_fraction
+
+    with patch(
+        "routstr.payment.cost_calculation._get_pricing_rates", return_value=None
+    ):
+        frac = _rate_weighted_input_fraction({"model": "x"}, 100, 900, 0, 100)
+
+    assert frac == pytest.approx(1000 / 1100)

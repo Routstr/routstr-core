@@ -316,6 +316,44 @@ def _resolve_provider_fee(model_id: str) -> float:
     return float(providers[0].provider_fee)
 
 
+def _rate_weighted_input_fraction(
+    response_data: dict,
+    input_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+    output_tokens: int,
+) -> float:
+    """Fraction of a lump-sum cost attributable to the input side.
+
+    The upstream gave a single total USD figure with no input/output breakdown,
+    so the split has to be reconstructed. A raw token-count split (input + cache
+    vs output) overstates the input share whenever cheap cache-read tokens
+    dominate — a cache read costs ~10x less than a regular input token yet counts
+    the same. Weight each bucket by its per-token rate instead. Fall back to a
+    token-count split when rates are unavailable (fixed pricing / unknown model).
+    """
+    input_weight = float(input_tokens + cache_read_tokens + cache_creation_tokens)
+    output_weight = float(output_tokens)
+
+    try:
+        rates = _get_pricing_rates(response_data)
+    except ValueError:
+        rates = None
+    if rates is not None:
+        input_rate, output_rate, cache_read_rate, cache_creation_rate = rates
+        input_weight = (
+            input_tokens * input_rate
+            + cache_read_tokens * cache_read_rate
+            + cache_creation_tokens * cache_creation_rate
+        )
+        output_weight = output_tokens * output_rate
+
+    total_weight = input_weight + output_weight
+    if total_weight <= 0:
+        return 0.0
+    return input_weight / total_weight
+
+
 def _calculate_from_usd_cost(
     usd_cost: float,
     input_usd: float,
@@ -339,15 +377,16 @@ def _calculate_from_usd_cost(
         input_msats = int((input_usd * sats_per_usd) * 1000)
         output_msats = int((output_usd * sats_per_usd) * 1000)
     else:
-        effective_input_tokens = (
-            input_tokens + cache_read_tokens + cache_creation_tokens
+        # No explicit split: weight by per-token rates so cheap cache reads do
+        # not inflate the input share (a raw token-count split would).
+        input_fraction = _rate_weighted_input_fraction(
+            response_data,
+            input_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            output_tokens,
         )
-        total_tokens = effective_input_tokens + output_tokens
-        input_msats = (
-            int(cost_in_msats * effective_input_tokens / total_tokens)
-            if total_tokens > 0
-            else 0
-        )
+        input_msats = int(cost_in_msats * input_fraction)
         output_msats = cost_in_msats - input_msats
 
     logger.info(

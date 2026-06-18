@@ -39,6 +39,7 @@ from ..payment.models import (
     list_models,
 )
 from ..payment.price import sats_usd_price
+from ..payment.usage import normalize_usage
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
 from .cache_breakpoints import (
@@ -166,6 +167,11 @@ class BaseUpstreamProvider:
         ``cache_creation_input_tokens`` fields are left in place for clients
         that want the breakdown.
 
+        Only Anthropic-shaped responses that lack ``prompt_tokens`` need their
+        additive cache fields folded into ``input_tokens``. OpenAI/litellm/
+        DeepSeek-shaped responses report ``prompt_tokens`` as an inclusive
+        total already, so it must never be inflated by top-level cache fields.
+
         For Anthropic-shaped responses (``input_tokens`` present), the cache
         fields are forced to ``0`` when the upstream omitted them, so the
         client always sees a consistent shape.
@@ -185,18 +191,11 @@ class BaseUpstreamProvider:
         except (TypeError, ValueError):
             return
         extra = cache_read + cache_creation
-        if extra <= 0:
+        if extra <= 0 or "prompt_tokens" in usage:
             return
         if "input_tokens" in usage:
             try:
                 usage["input_tokens"] = int(usage.get("input_tokens") or 0) + extra
-            except (TypeError, ValueError):
-                pass
-        if "prompt_tokens" in usage:
-            try:
-                usage["prompt_tokens"] = (
-                    int(usage.get("prompt_tokens") or 0) + extra
-                )
             except (TypeError, ValueError):
                 pass
 
@@ -1661,6 +1660,26 @@ class BaseUpstreamProvider:
                         total_cost, _coerce_usd(usage_or_root.get(field))
                     )
 
+            def _absorb_usage(usage: object) -> None:
+                nonlocal input_tokens, output_tokens
+                nonlocal cache_read_input_tokens, cache_creation_input_tokens
+                normalized = normalize_usage(usage)
+                if normalized is None:
+                    return
+                input_tokens += normalized.input_tokens
+                output_tokens += normalized.output_tokens
+                # Anthropic message streams can restate the same cumulative
+                # cache snapshot across events; keep the existing max() behavior
+                # while allowing OpenAI/litellm/DeepSeek fields to be normalized.
+                cache_read_input_tokens = max(
+                    cache_read_input_tokens,
+                    normalized.cache_read_tokens,
+                )
+                cache_creation_input_tokens = max(
+                    cache_creation_input_tokens,
+                    normalized.cache_write_tokens,
+                )
+
             async def finalize_without_usage() -> bytes | None:
                 nonlocal usage_finalized
                 if usage_finalized:
@@ -1726,62 +1745,11 @@ class BaseUpstreamProvider:
                                             changed = True
 
                                         if usage := msg.get("usage"):
-                                            input_tokens += usage.get("input_tokens", 0)
-                                            output_tokens += usage.get(
-                                                "output_tokens", 0
-                                            )
-                                            # Anthropic's `message_start.usage`
-                                            # carries the cumulative cache
-                                            # snapshot for the prompt — pick
-                                            # the max() so subsequent
-                                            # `message_delta.usage` events
-                                            # (which only restate the same
-                                            # numbers) don't double-count.
-                                            cache_read_input_tokens = max(
-                                                cache_read_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_read_input_tokens", 0
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            cache_creation_input_tokens = max(
-                                                cache_creation_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_creation_input_tokens",
-                                                        0,
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
+                                            _absorb_usage(usage)
                                             _absorb_usd(usage)
 
                                         if usage := data.get("usage"):
-                                            input_tokens += usage.get("input_tokens", 0)
-                                            output_tokens += usage.get(
-                                                "output_tokens", 0
-                                            )
-                                            cache_read_input_tokens = max(
-                                                cache_read_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_read_input_tokens", 0
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            cache_creation_input_tokens = max(
-                                                cache_creation_input_tokens,
-                                                int(
-                                                    usage.get(
-                                                        "cache_creation_input_tokens",
-                                                        0,
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
+                                            _absorb_usage(usage)
                                             _absorb_usd(usage)
                                         # Some upstreams attach cost fields at
                                         # the event root rather than nested

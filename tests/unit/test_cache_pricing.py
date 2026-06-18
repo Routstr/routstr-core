@@ -117,6 +117,46 @@ def test_backfill_unknown_model_unchanged() -> None:
     assert result.input_cache_write == 0.0
 
 
+def test_backfill_vanity_deepseek_id_uses_generic_family_ratio() -> None:
+    """The reported bug: a proxy exposes ``deepseek-v4-flash`` — a vanity id
+    litellm has never heard of. Without a family fallback its cache reads bill at
+    the full input rate (~10x overcharge on hits). The DeepSeek family's read
+    discount is found by generic litellm scan (no hard-coded list) and its
+    cache/input *ratio* applied to the model's own input price."""
+    pricing = Pricing(prompt=5e-07, completion=1.5e-06)
+
+    result = backfill_cache_pricing("deepseek-v4-flash", pricing)
+
+    ref = litellm.model_cost["deepseek/deepseek-chat"]
+    ratio = ref["cache_read_input_token_cost"] / ref["input_cost_per_token"]
+    assert result.input_cache_read == pytest.approx(pricing.prompt * ratio)
+    assert result.input_cache_read < pricing.prompt  # sanity: it's a discount
+
+
+def test_backfill_vanity_id_scales_to_own_input_price() -> None:
+    """Family fallback uses the *ratio*, not the reference's absolute rate, so a
+    vanity model priced differently from the reference is billed against its own
+    input price — the 10x input gap is preserved in the derived read rate."""
+    cheap = backfill_cache_pricing(
+        "deepseek-mini", Pricing(prompt=1e-07, completion=2e-07)
+    )
+    pricey = backfill_cache_pricing(
+        "deepseek-max", Pricing(prompt=1e-06, completion=2e-06)
+    )
+
+    assert pricey.input_cache_read == pytest.approx(cheap.input_cache_read * 10)
+
+
+def test_backfill_vanity_id_no_family_match_unchanged() -> None:
+    """A vanity id whose family token matches no litellm key stays untouched."""
+    result = backfill_cache_pricing(
+        "mystery-flash-9", Pricing(prompt=1e-06, completion=2e-06)
+    )
+
+    assert result.input_cache_read == 0.0
+    assert result.input_cache_write == 0.0
+
+
 def test_provider_fee_applies_to_backfilled_cache_rates() -> None:
     """Backfill happens before the provider fee, so cache rates carry the
     same markup as every other price component."""

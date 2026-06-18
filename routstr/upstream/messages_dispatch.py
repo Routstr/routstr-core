@@ -30,6 +30,7 @@ import litellm
 from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model
+from ..payment.usage import normalize_usage
 
 logger = get_logger(__name__)
 
@@ -308,10 +309,12 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
     def _accumulate(usage: dict) -> None:
         nonlocal in_tokens, out_tokens, cache_read_tokens, cache_create_tokens
         nonlocal total_cost, input_cost, output_cost
-        in_tokens += int(usage.get("input_tokens") or 0)
-        out_tokens += int(usage.get("output_tokens") or 0)
-        cache_read_tokens += int(usage.get("cache_read_input_tokens") or 0)
-        cache_create_tokens += int(usage.get("cache_creation_input_tokens") or 0)
+        normalized = normalize_usage(usage)
+        if normalized is not None:
+            in_tokens += normalized.input_tokens
+            out_tokens += normalized.output_tokens
+            cache_read_tokens += normalized.cache_read_tokens
+            cache_create_tokens += normalized.cache_write_tokens
         total_cost += _coerce_float(usage.get("total_cost"))
         input_cost += _coerce_float(usage.get("input_cost"))
         output_cost += _coerce_float(usage.get("output_cost"))
