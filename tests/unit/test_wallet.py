@@ -120,6 +120,10 @@ async def test_recieve_token_trusted_mint_deducts_input_fee() -> None:
                 mock_wallet.get_fees_for_proofs.assert_called_once_with(
                     mock_token.proofs
                 )
+                # DLEQ is verified before re-minting the incoming proofs.
+                mock_wallet.verify_proofs_dleq.assert_called_once_with(
+                    mock_token.proofs
+                )
 
 
 @pytest.mark.asyncio
@@ -316,18 +320,30 @@ async def test_recieve_token_untrusted_mint() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_swap_to_primary_mint_already_on_primary() -> None:
+    """Same-mint shortcut: the token is already on the primary mint.
+
+    No cross-mint swap (no melt/mint), but the same-mint split(include_fees=True)
+    still burns the mint's NUT-02 input fee, so the credited amount must be face
+    minus the input fee — not full face value (the over-credit bug). DLEQ is
+    verified too, matching the trusted same-mint receive path.
+    """
     from routstr.core.settings import settings
     from routstr.wallet import swap_to_primary_mint
 
     mock_token = Mock()
     mock_token.mint = settings.primary_mint
+    mock_token.keysets = ["keyset1"]
     mock_token.amount = 1000
     mock_token.unit = "sat"
-    mock_token.proofs = []
+    mock_token.proofs = [{"amount": 1000}]
 
     mock_token_wallet = Mock()
+    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_proofs = AsyncMock()
+    mock_token_wallet.verify_proofs_dleq = Mock()
+    # Mock a 3-sat input fee from the Cashu wallet API.
+    mock_token_wallet.get_fees_for_proofs = Mock(return_value=3)
     mock_token_wallet.split = AsyncMock(return_value=None)
     mock_token_wallet.request_mint = AsyncMock()
     mock_token_wallet.melt_quote = AsyncMock()
@@ -335,9 +351,11 @@ async def test_swap_to_primary_mint_already_on_primary() -> None:
     with patch("routstr.wallet.get_wallet", AsyncMock(return_value=mock_token_wallet)):
         amount, unit, mint = await swap_to_primary_mint(mock_token, mock_token_wallet)
 
-    assert amount == 1000
+    assert amount == 997  # 1000 face - 3 sat input fee
     assert unit == "sat"
     assert mint == settings.primary_mint
+    mock_token_wallet.verify_proofs_dleq.assert_called_once_with(mock_token.proofs)
+    mock_token_wallet.get_fees_for_proofs.assert_called_once_with(mock_token.proofs)
     mock_token_wallet.split.assert_called_once()
     mock_token_wallet.request_mint.assert_not_called()
     mock_token_wallet.melt_quote.assert_not_called()
