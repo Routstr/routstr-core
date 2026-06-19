@@ -580,11 +580,19 @@ async def fetch_all_balances(
             }
             return error_result
 
+    # Build the set of mints to inspect. Received tokens are stored against
+    # ``primary_mint`` (which defaults to a real mint even when ``cashu_mints``
+    # is empty), so include it as a fallback — otherwise a node that accepts
+    # payments would still report empty balances when ``cashu_mints`` is unset.
+    mint_urls: list[str] = list(settings.cashu_mints)
+    if settings.primary_mint and settings.primary_mint not in mint_urls:
+        mint_urls.append(settings.primary_mint)
+
     # Create tasks for all mint/unit combinations
     async with db.create_session() as session:
         tasks = [
             fetch_balance(session, mint_url, unit)
-            for mint_url in settings.cashu_mints
+            for mint_url in mint_urls
             for unit in units
         ]
 
