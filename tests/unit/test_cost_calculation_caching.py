@@ -317,6 +317,131 @@ async def test_zero_cache_tokens(mock_session: AsyncMock, mock_fixed_pricing: No
 
 
 # ============================================================================
+# Test 12b: DeepSeek Cache Hit/Miss Format
+# ============================================================================
+@pytest.mark.asyncio
+async def test_deepseek_cache_hit_subtraction(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
+    """DeepSeek prompt_tokens = hit + miss; the hit is a cache read, subtract it."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 10000,  # ← hit + miss
+            "completion_tokens": 200,
+            "prompt_cache_hit_tokens": 9000,  # ← cache read (0.1x upstream)
+            "prompt_cache_miss_tokens": 1000,  # ← uncached input
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000  # 10000 - 9000
+    assert result.cache_read_input_tokens == 9000
+    assert result.cache_creation_input_tokens == 0  # DeepSeek has no cache write
+    assert result.output_tokens == 200
+
+
+@pytest.mark.asyncio
+async def test_deepseek_no_cache_hit(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
+    """All-miss DeepSeek response leaves input_tokens untouched."""
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 1000,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000
+    assert result.cache_read_input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_fields_take_priority_over_deepseek(
+    mock_session: AsyncMock, mock_fixed_pricing: None
+) -> None:
+    """Explicit cache_read_input_tokens wins; DeepSeek hit must not double-subtract."""
+    response = {
+        "model": "claude-3-5-sonnet",
+        "usage": {
+            "input_tokens": 500,
+            "output_tokens": 100,
+            "cache_read_input_tokens": 200,
+            "prompt_cache_hit_tokens": 9999,  # ← ignored, Anthropic field present
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 500  # not subtracted
+    assert result.cache_read_input_tokens == 200
+
+
+# ============================================================================
+# Test 12c: DeepSeek billed at cache rate, not full input (the actual bug)
+# ============================================================================
+@pytest.mark.asyncio
+async def test_deepseek_cache_hits_billed_at_cache_rate(
+    mock_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """10k prompt at 90% cache hit must bill hits at the cache-read rate.
+
+    Regression for the overcharge bug: cached prompt tokens were billed at the
+    full input rate. With per-token prompt rate P and cache-read rate 0.1*P:
+      honest  = 1000*P  (uncached) + 9000*0.1*P (cache read) = 1900*P
+      buggy   = 10000*P (all at full input rate)
+    """
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+
+    # per-token sats rates; cache read is 0.1x the prompt rate (DeepSeek upstream)
+    prompt_rate = 1.0e-6
+    sats_pricing = SimpleNamespace(
+        prompt=prompt_rate,
+        completion=2.0e-6,
+        input_cache_read=prompt_rate * 0.1,
+        input_cache_write=0.0,
+    )
+    model_obj = SimpleNamespace(sats_pricing=sats_pricing)
+    monkeypatch.setattr(
+        "routstr.proxy.get_model_instance", lambda _id: model_obj
+    )
+
+    response = {
+        "model": "deepseek-chat",
+        "usage": {
+            "prompt_tokens": 10000,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 9000,
+            "prompt_cache_miss_tokens": 1000,
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000, session=mock_session)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 1000
+    assert result.cache_read_input_tokens == 9000
+
+    # input_rate (msats/1k) = prompt_rate * 1e6 ; per-token msats = prompt_rate*1000
+    per_tok_input_msats = prompt_rate * 1000
+    expected_input = round(1000 / 1000 * (prompt_rate * 1e6), 3)
+    expected_cache = round(9000 / 1000 * (prompt_rate * 0.1 * 1e6), 3)
+    assert result.input_msats == int(expected_input)
+    assert result.cache_read_msats == int(expected_cache)
+    # honest total (1900*P) must be far below the buggy all-input charge (10000*P)
+    buggy_total = 10000 * per_tok_input_msats
+    assert result.total_msats < buggy_total * 0.25
+
+
+# ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================
 @pytest.mark.asyncio

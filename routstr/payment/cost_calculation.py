@@ -241,7 +241,21 @@ def _extract_token_pair(
 
 
 def _extract_cache_tokens(usage_data: dict, input_tokens: int) -> tuple[int, int, int]:
-    """Extract cache tokens, handling OpenAI vs Anthropic formats.
+    """Extract cache tokens, normalizing Anthropic, OpenAI, and DeepSeek shapes.
+
+    Each provider reports prompt caching differently; this normalizes them into
+    non-overlapping buckets so cached tokens are never billed at the full input
+    rate (and never double-counted):
+
+    - Anthropic: ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+      are already mutually exclusive with ``input_tokens`` (the three sum to the
+      total prompt), so ``input_tokens`` is left untouched.
+    - OpenAI: ``prompt_tokens_details.cached_tokens`` is a cache READ that is
+      INCLUDED in ``prompt_tokens``, so it is subtracted out of ``input_tokens``.
+    - DeepSeek: ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens`` where
+      ``prompt_tokens = hit + miss``. The hit is a cache READ included in
+      ``prompt_tokens``, so it is subtracted out; DeepSeek has no cache-write
+      charge (``cache_creation`` stays 0).
 
     Returns: (cache_read_tokens, cache_creation_tokens, adjusted_input_tokens)
     """
@@ -250,12 +264,22 @@ def _extract_cache_tokens(usage_data: dict, input_tokens: int) -> tuple[int, int
         usage_data.get("cache_creation_input_tokens", 0)
     )
 
-    # OpenAI: cache is included in input_tokens, subtract it
+    # OpenAI: cache read is included in input_tokens, subtract it
     prompt_details = usage_data.get("prompt_tokens_details")
     if isinstance(prompt_details, dict) and not cache_read:
         openai_cached = parse_token_count(prompt_details.get("cached_tokens", 0))
         if openai_cached:
             cache_read = openai_cached
+            input_tokens = max(0, input_tokens - cache_read)
+
+    # DeepSeek: prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens.
+    # The hit is a cache read included in input_tokens, subtract it.
+    if not cache_read:
+        deepseek_hit = parse_token_count(
+            usage_data.get("prompt_cache_hit_tokens", 0)
+        )
+        if deepseek_hit:
+            cache_read = deepseek_hit
             input_tokens = max(0, input_tokens - cache_read)
 
     return cache_read, cache_creation, input_tokens
