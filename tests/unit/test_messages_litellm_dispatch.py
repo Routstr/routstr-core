@@ -842,6 +842,109 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
 
 
 # ---------------------------------------------------------------------------
+# Prompt-caching marker pass-through (Anthropic / OpenRouter)
+# ---------------------------------------------------------------------------
+#
+# Anthropic prompt caching is activated by `cache_control: {"type": "ephemeral"}`
+# markers embedded INSIDE the request JSON (messages[].content[], system[],
+# tools[]). Anthropic and OpenRouter providers set
+# ``supports_anthropic_messages = True`` and therefore forward the body through
+# ``prepare_request_body`` (raw pass-through) — NOT the litellm translation path
+# that strips ``ANTHROPIC_ONLY_FIELDS``. These tests lock in that the caching
+# markers survive that forwarding for both /v1/messages and /chat/completions.
+
+
+def _body_with_cache_control(*, stream: bool = True) -> bytes:
+    return json.dumps(
+        {
+            "model": "claude-3-5-sonnet",
+            "system": [
+                {
+                    "type": "text",
+                    "text": "big reusable context",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "hello",
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                        }
+                    ],
+                }
+            ],
+            "tools": [
+                {"name": "t", "cache_control": {"type": "ephemeral"}}
+            ],
+            # top-level marker some clients send; must also survive
+            "cache_control": {"type": "ephemeral"},
+            "stream": stream,
+            "max_tokens": 64,
+        }
+    ).encode()
+
+
+def test_prepare_request_body_preserves_nested_cache_control() -> None:
+    """Raw-forward path (Anthropic/OpenRouter) must keep cache_control markers."""
+    provider = _make_provider()
+    model = _make_model(model_id="claude-3-5-sonnet")
+
+    out = provider.prepare_request_body(_body_with_cache_control(stream=True), model)
+    assert out is not None
+    data = json.loads(out)
+
+    # nested markers intact
+    assert data["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert data["messages"][0]["content"][0]["cache_control"] == {
+        "type": "ephemeral",
+        "ttl": "1h",
+    }
+    assert data["tools"][0]["cache_control"] == {"type": "ephemeral"}
+    # top-level marker intact
+    assert data["cache_control"] == {"type": "ephemeral"}
+    # stream_options.include_usage injected without disturbing cache markers
+    assert data["stream_options"]["include_usage"] is True
+
+
+def test_prepare_request_body_preserves_cache_control_when_no_other_changes() -> None:
+    """Non-streaming request with no model rewrite still preserves markers.
+
+    Even when ``prepare_request_body`` makes no changes it must return a body
+    that still carries the cache_control markers (here: returns original bytes).
+    """
+    provider = _make_provider()
+    model = _make_model(model_id="claude-3-5-sonnet")
+
+    out = provider.prepare_request_body(_body_with_cache_control(stream=False), model)
+    assert out is not None
+    data = json.loads(out)
+    assert data["messages"][0]["content"][0]["cache_control"] == {
+        "type": "ephemeral",
+        "ttl": "1h",
+    }
+    assert data["cache_control"] == {"type": "ephemeral"}
+
+
+def test_native_messages_providers_skip_anthropic_field_stripping() -> None:
+    """Anthropic & OpenRouter forward natively, so they never reach the
+    litellm ANTHROPIC_ONLY_FIELDS strip that would drop cache_control."""
+    from routstr.upstream.anthropic import AnthropicUpstreamProvider
+    from routstr.upstream.openrouter import OpenRouterUpstreamProvider
+
+    assert AnthropicUpstreamProvider.supports_anthropic_messages is True
+    assert OpenRouterUpstreamProvider.supports_anthropic_messages is True
+    # `cache_control` IS in the strip list — proving it only matters on the
+    # non-native litellm path, which these providers bypass.
+    from routstr.upstream.messages_dispatch import ANTHROPIC_ONLY_FIELDS
+
+    assert "cache_control" in ANTHROPIC_ONLY_FIELDS
+
+
+# ---------------------------------------------------------------------------
 # forward_request gating
 # ---------------------------------------------------------------------------
 
