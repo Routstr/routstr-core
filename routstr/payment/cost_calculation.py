@@ -3,9 +3,17 @@ import math
 from pydantic.v1 import BaseModel
 
 from ..core import get_logger
-from ..core.db import AsyncSession
 from ..core.settings import settings
 from .price import sats_usd_price
+from .usage import normalize_usage, parse_token_count
+
+__all__ = [
+    "CostData",
+    "CostDataError",
+    "MaxCostData",
+    "calculate_cost",
+    "parse_token_count",
+]
 
 logger = get_logger(__name__)
 
@@ -34,7 +42,8 @@ class CostDataError(BaseModel):
 
 
 async def calculate_cost(
-    response_data: dict, max_cost: int, session: AsyncSession
+    response_data: dict,
+    max_cost: int,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
 
@@ -44,6 +53,9 @@ async def calculate_cost(
 
     Returns:
         Cost data or error information
+
+    The response's usage object is normalized with the default union parser;
+    this function holds no vendor-dialect knowledge of its own.
     """
     logger.debug(
         "Starting cost calculation",
@@ -54,8 +66,9 @@ async def calculate_cost(
         },
     )
 
-    # Check for usage data
-    if "usage" not in response_data or response_data["usage"] is None:
+    usage = normalize_usage(response_data.get("usage"))
+
+    if usage is None:
         logger.warning(
             "No usage data in response — billing at MaxCostData with zero "
             "tokens. Dashboard will show this request as `(0+0)`. Most "
@@ -84,16 +97,14 @@ async def calculate_cost(
             cache_creation_msats=0,
         )
 
-    usage_data = response_data["usage"]
+    usage_data = response_data.get("usage") or {}
+    if not isinstance(usage_data, dict):
+        usage_data = {}
 
-    # Extract token counts
-    input_tokens = _extract_token_pair(usage_data, "prompt_tokens", "input_tokens")
-    output_tokens = _extract_token_pair(usage_data, "completion_tokens", "output_tokens")
-
-    # Extract cache tokens (handles OpenAI vs Anthropic formats)
-    cache_read_tokens, cache_creation_tokens, input_tokens = _extract_cache_tokens(
-        usage_data, input_tokens
-    )
+    input_tokens = usage.input_tokens
+    output_tokens = usage.output_tokens
+    cache_read_tokens = usage.cache_read_tokens
+    cache_creation_tokens = usage.cache_write_tokens
 
     # Try USD cost first
     usd_cost = _resolve_usd_cost(usage_data, response_data)
@@ -202,22 +213,6 @@ async def calculate_cost(
 # ============================================================================
 
 
-def parse_token_count(value: object) -> int:
-    """Parse a token count from various formats (int, float, str, bool)."""
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return max(0, value)
-    if isinstance(value, float):
-        return max(0, int(value))
-    if isinstance(value, str):
-        try:
-            return max(0, int(float(value)))
-        except ValueError:
-            return 0
-    return 0
-
-
 def _coerce_usd(value: object) -> float:
     """Coerce a value to USD float, handling various formats safely."""
     if value is None or isinstance(value, bool):
@@ -228,37 +223,6 @@ def _coerce_usd(value: object) -> float:
         return max(0.0, float(value))
     except (TypeError, ValueError):
         return 0.0
-
-
-def _extract_token_pair(
-    usage_data: dict, standard_field: str, alt_field: str
-) -> int:
-    """Extract token count trying two field names in order."""
-    value = parse_token_count(usage_data.get(standard_field, 0))
-    if value > 0:
-        return value
-    return parse_token_count(usage_data.get(alt_field, 0))
-
-
-def _extract_cache_tokens(usage_data: dict, input_tokens: int) -> tuple[int, int, int]:
-    """Extract cache tokens, handling OpenAI vs Anthropic formats.
-
-    Returns: (cache_read_tokens, cache_creation_tokens, adjusted_input_tokens)
-    """
-    cache_read = parse_token_count(usage_data.get("cache_read_input_tokens", 0))
-    cache_creation = parse_token_count(
-        usage_data.get("cache_creation_input_tokens", 0)
-    )
-
-    # OpenAI: cache is included in input_tokens, subtract it
-    prompt_details = usage_data.get("prompt_tokens_details")
-    if isinstance(prompt_details, dict) and not cache_read:
-        openai_cached = parse_token_count(prompt_details.get("cached_tokens", 0))
-        if openai_cached:
-            cache_read = openai_cached
-            input_tokens = max(0, input_tokens - cache_read)
-
-    return cache_read, cache_creation, input_tokens
 
 
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:

@@ -35,11 +35,16 @@ from ..payment.models import (
     Pricing,
     _calculate_usd_max_costs,
     _update_model_sats_pricing,
+    backfill_cache_pricing,
     list_models,
 )
 from ..payment.price import sats_usd_price
 from ..wallet import recieve_token, send_token
 from . import messages_dispatch
+from .cache_breakpoints import (
+    inject_anthropic_cache_breakpoints,
+    is_explicit_cache_model,
+)
 from .count_tokens import count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
 
@@ -432,6 +437,19 @@ class BaseUpstreamProvider:
 
         return body
 
+    def _upstream_accepts_cache_control(self) -> bool:
+        """True when this upstream accepts explicit ``cache_control`` markers.
+
+        Only OpenRouter (documents Anthropic + Alibaba explicit caching) and the
+        native Anthropic API accept the markers. Stamping them toward an
+        automatic-cache or non-supporting upstream risks a 400, so injection is
+        confined to these. Base URL is also checked so an OpenRouter endpoint
+        configured through the generic provider is still recognised.
+        """
+        if self.provider_type in ("openrouter", "anthropic"):
+            return True
+        return "openrouter.ai" in (self.base_url or "")
+
     def prepare_request_body(
         self, body: bytes | None, model_obj: Model
     ) -> bytes | None:
@@ -499,6 +517,27 @@ class BaseUpstreamProvider:
             if merged.get("include_usage") is not True:
                 merged["include_usage"] = True
                 data["stream_options"] = merged
+                changed = True
+
+        # Explicit-cache models (Anthropic Claude, Alibaba Qwen / deepseek-v3.2)
+        # cache nothing without ``cache_control`` markers in the body. Clients
+        # that don't recognise a routstr URL as one of these never send them, so
+        # caching silently never engages over routstr even though it works
+        # against OpenRouter directly. Stamp the standard breakpoints so caching
+        # works by default, deferring to any client-set markers. Gated to
+        # upstreams that accept the markers (OpenRouter / Anthropic) so they
+        # never leak to an automatic-cache provider that would reject them.
+        if (
+            "messages" in data
+            and isinstance(data.get("messages"), list)
+            and self._upstream_accepts_cache_control()
+            and is_explicit_cache_model(
+                model_obj.id,
+                model_obj.forwarded_model_id,
+                model_obj.canonical_slug,
+            )
+        ):
+            if inject_anthropic_cache_breakpoints(data):
                 changed = True
 
         if changed:
@@ -1018,7 +1057,10 @@ class BaseUpstreamProvider:
                 response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
 
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
             )
 
             await session.refresh(key)
@@ -1436,7 +1478,10 @@ class BaseUpstreamProvider:
                 response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
 
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
             )
 
             await session.refresh(key)
@@ -1631,7 +1676,10 @@ class BaseUpstreamProvider:
                             "usage": None,
                         }
                         cost_data = await adjust_payment_for_tokens(
-                            fresh_key, fallback, new_session, max_cost_for_model
+                            fresh_key,
+                            fallback,
+                            new_session,
+                            max_cost_for_model,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1850,7 +1898,10 @@ class BaseUpstreamProvider:
                 response_json["usage"] = {"input_tokens": input_tokens}
 
             cost_data = await adjust_payment_for_tokens(
-                key, response_json, session, deducted_max_cost
+                key,
+                response_json,
+                session,
+                deducted_max_cost,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -1952,7 +2003,10 @@ class BaseUpstreamProvider:
             response_json["model"] = requested_model
 
         cost_data = await adjust_payment_for_tokens(
-            key, response_json, session, max_cost_for_model
+            key,
+            response_json,
+            session,
+            max_cost_for_model,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -3025,44 +3079,46 @@ class BaseUpstreamProvider:
             extra={"model": model, "has_usage": "usage" in response_data},
         )
 
-        async with create_session() as session:
-            match await calculate_cost(response_data, max_cost_for_model, session):
-                case MaxCostData() as cost:
-                    logger.debug(
-                        "Using max cost pricing",
-                        extra={"model": model, "max_cost_msats": cost.total_msats},
-                    )
-                    return cost
-                case CostData() as cost:
-                    logger.debug(
-                        "Using token-based pricing",
-                        extra={
-                            "model": model,
-                            "total_cost_msats": cost.total_msats,
-                            "input_msats": cost.input_msats,
-                            "output_msats": cost.output_msats,
-                        },
-                    )
-                    return cost
-                case CostDataError() as error:
-                    logger.error(
-                        "Cost calculation error",
-                        extra={
-                            "model": model,
-                            "error_message": error.message,
-                            "error_code": error.code,
-                        },
-                    )
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": {
-                                "message": error.message,
-                                "type": "invalid_request_error",
-                                "code": error.code,
-                            }
-                        },
-                    )
+        match await calculate_cost(
+            response_data,
+            max_cost_for_model,
+        ):
+            case MaxCostData() as cost:
+                logger.debug(
+                    "Using max cost pricing",
+                    extra={"model": model, "max_cost_msats": cost.total_msats},
+                )
+                return cost
+            case CostData() as cost:
+                logger.debug(
+                    "Using token-based pricing",
+                    extra={
+                        "model": model,
+                        "total_cost_msats": cost.total_msats,
+                        "input_msats": cost.input_msats,
+                        "output_msats": cost.output_msats,
+                    },
+                )
+                return cost
+            case CostDataError() as error:
+                logger.error(
+                    "Cost calculation error",
+                    extra={
+                        "model": model,
+                        "error_message": error.message,
+                        "error_code": error.code,
+                    },
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "message": error.message,
+                            "type": "invalid_request_error",
+                            "code": error.code,
+                        }
+                    },
+                )
         return None
 
     async def send_refund(
@@ -4562,14 +4618,19 @@ class BaseUpstreamProvider:
     def _apply_provider_fee_to_model(self, model: Model) -> Model:
         """Apply provider fee to model's USD pricing and calculate max costs.
 
+        Cache rates missing from the upstream pricing feed are backfilled from
+        litellm's cost map first, so they carry the provider fee like every
+        other price component.
+
         Args:
             model: Model object to update
 
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
+        base_pricing = backfill_cache_pricing(model.id, model.pricing)
         adjusted_pricing = Pricing.parse_obj(
-            {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
+            {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
         )
 
         temp_model = Model(

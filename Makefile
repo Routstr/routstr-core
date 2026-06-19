@@ -98,7 +98,7 @@ docker-down:
 lint:
 	@echo "🔍 Running linting checks..."
 	$(RUFF) check .
-	$(MYPY) routstr/ --ignore-missing-imports
+	$(MYPY) .
 
 format:
 	@echo "✨ Formatting code..."
@@ -107,7 +107,7 @@ format:
 
 type-check:
 	@echo "🔎 Running type checks..."
-	$(MYPY) routstr/ --ignore-missing-imports
+	$(MYPY) .
 
 # Development setup
 dev-setup:
@@ -234,7 +234,7 @@ ci-test:
 ci-lint:
 	@echo "🤖 Running CI linting..."
 	$(RUFF) check . --exit-non-zero-on-fix
-	$(MYPY) routstr/ --ignore-missing-imports --no-error-summary
+	$(MYPY) . --no-error-summary
 
 # Debug helpers
 test-debug:

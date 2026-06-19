@@ -85,6 +85,48 @@ class Model(BaseModel):
         return hash(self.id)
 
 
+def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
+    """Fill missing cache rates from litellm's bundled cost map.
+
+    The OpenRouter model feed omits ``input_cache_read``/``input_cache_write``
+    for many models (most DeepSeek entries, openai/gpt-4o, ...). Without a
+    cache rate, billing falls back to the full input rate, which overcharges
+    cache reads (DeepSeek hits are 10x cheaper) and undercharges Anthropic
+    cache writes (1.25x). litellm ships per-model USD rates keyed by the exact
+    OpenRouter id (deepseek/deepseek-chat) or by the bare model name
+    (gpt-4o, claude-sonnet-4-5), so both spellings are tried.
+
+    Rates already present (e.g. provided by OpenRouter) are authoritative and
+    never overwritten. Unknown models are returned unchanged.
+    """
+    needs_read = (pricing.input_cache_read or 0.0) <= 0.0
+    needs_write = (pricing.input_cache_write or 0.0) <= 0.0
+    if not (needs_read or needs_write):
+        return pricing
+
+    import litellm
+
+    info: dict | None = None
+    for key in (model_id, model_id.split("/", 1)[-1]):
+        candidate = litellm.model_cost.get(key)
+        if isinstance(candidate, dict):
+            info = candidate
+            break
+    if info is None:
+        return pricing
+
+    updated = Pricing.parse_obj(pricing.dict())
+    if needs_read:
+        read_rate = info.get("cache_read_input_token_cost")
+        if isinstance(read_rate, (int, float)) and read_rate > 0:
+            updated.input_cache_read = float(read_rate)
+    if needs_write:
+        write_rate = info.get("cache_creation_input_token_cost")
+        if isinstance(write_rate, (int, float)) and write_rate > 0:
+            updated.input_cache_write = float(write_rate)
+    return updated
+
+
 def _has_valid_pricing(model: dict) -> bool:
     """Check if model has valid pricing (not free, no negative values)."""
     pricing = model.get("pricing", {})
