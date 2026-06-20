@@ -51,6 +51,8 @@ from pythonjsonlogger import jsonlogger
 from rich.console import Console
 from rich.logging import RichHandler
 
+from .redaction import redact_obj, redact_org_ids
+
 # Only use RichHandler when stdout is a real TTY. In non-TTY contexts
 # (docker logs, pipes, CI) Rich pads every line to width and wraps long
 # records, producing visually-empty trailing whitespace and split records.
@@ -180,6 +182,37 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+# Standard ``LogRecord`` attributes that are never user-supplied ``extra``
+# fields; skipped when redacting structured extras (``msg``/``message`` are
+# handled separately above).
+_NON_EXTRA_RECORD_ATTRS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "taskName",
+        "message",
+    }
+)
+
+
 class SecurityFilter(logging.Filter):
     """Filter to remove sensitive information from logs."""
 
@@ -203,6 +236,7 @@ class SecurityFilter(logging.Filter):
         """Filter out sensitive information from log records."""
         try:
             message = record.getMessage()
+            message = redact_org_ids(message)
             standalone_patterns = [
                 r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
                 r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
@@ -223,6 +257,16 @@ class SecurityFilter(logging.Filter):
                         )
             record.msg = message
             record.args = ()
+
+            # Structured `extra={...}` fields are emitted by the JSON formatter
+            # straight from the record dict and never pass through the message
+            # formatting above. Redact organization IDs from any string-valued
+            # extra so they cannot leak via structured logs.
+            for attr, value in list(record.__dict__.items()):
+                if attr in _NON_EXTRA_RECORD_ATTRS:
+                    continue
+                if isinstance(value, (str, dict, list, tuple)):
+                    record.__dict__[attr] = redact_obj(value)
 
         except Exception:
             pass

@@ -7,11 +7,26 @@ logger = get_logger(__name__)
 
 
 class UpstreamError(Exception):
-    """Exception raised when an upstream provider fails."""
+    """Exception raised when an upstream provider fails.
 
-    def __init__(self, message: str, status_code: int = 502):
+    ``code`` carries a stable, machine-readable classification (e.g.
+    ``UPSTREAM_RATE_LIMIT``) so callers can distinguish failure kinds without
+    string-matching the message. ``details`` holds optional structured,
+    redaction-safe context. Both default to ``None`` for backwards
+    compatibility.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        code: str | None = None,
+        details: dict[str, object] | None = None,
+    ):
         self.message = message
         self.status_code = status_code
+        self.code = code
+        self.details = details
         super().__init__(message)
 
 

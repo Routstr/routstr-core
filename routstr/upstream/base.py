@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import traceback
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
@@ -23,6 +24,7 @@ from ..core.db import (
     store_cashu_transaction,
 )
 from ..core.exceptions import UpstreamError
+from ..core.redaction import redact_org_ids
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -47,6 +49,7 @@ from .cache_breakpoints import (
 )
 from .count_tokens import count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
+from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 
 logger = get_logger(__name__)
 
@@ -582,7 +585,7 @@ class BaseUpstreamProvider:
             preview = body_bytes.decode("utf-8", errors="ignore").strip()
             if preview:
                 message = preview[:500]
-        return message, upstream_code
+        return redact_org_ids(message), upstream_code
 
     async def on_upstream_error_redirect(
         self, status_code: int, error_message: str
@@ -625,9 +628,22 @@ class BaseUpstreamProvider:
             body_bytes = b""
             body_read_error = f"{type(exc).__name__}: {exc}"
 
+        # ``message`` is already redacted by ``_extract_upstream_error_message``;
+        # the raw body preview is redacted here before it reaches logs or the
+        # forwarded envelope so provider account identifiers never leak.
         message, upstream_code = self._extract_upstream_error_message(body_bytes)
-        body_preview = body_bytes.decode("utf-8", errors="ignore").strip()[:500]
+        body_preview = redact_org_ids(
+            body_bytes.decode("utf-8", errors="ignore").strip()[:500]
+        )
         is_json_body = _is_json_content_type(content_type)
+
+        # Classify upstream rate-limit failures into a stable, structured error.
+        rate_limit = classify_rate_limit(status_code, message, headers)
+        error_code: str | int = upstream_code or status_code
+        error_details: dict[str, object] | None = None
+        if rate_limit is not None:
+            error_code = UPSTREAM_RATE_LIMIT
+            error_details = rate_limit.as_details()
 
         logger.warning(
             "Upstream %s returned %s for model=%s path=%s: %s",
@@ -642,6 +658,7 @@ class BaseUpstreamProvider:
                 "model": model_id or "unknown",
                 "upstream_status": status_code,
                 "upstream_code": upstream_code,
+                "error_code": error_code,
                 "upstream_content_type": content_type,
                 "upstream_request_id": upstream_request_id,
                 "message_preview": message[:200],
@@ -676,13 +693,41 @@ class BaseUpstreamProvider:
         ):
             headers.pop(header_name, None)
 
+        # Propagate a usable retry hint to the caller when the upstream supplied
+        # one but did not echo a ``Retry-After`` header. RFC 7231 delta-seconds
+        # is an integer, so round sub-second hints up to a usable ``1``.
+        if (
+            rate_limit is not None
+            and rate_limit.retry_after_seconds is not None
+            and "retry-after" not in {k.lower() for k in headers}
+        ):
+            headers["Retry-After"] = str(max(1, math.ceil(rate_limit.retry_after_seconds)))
+
         if is_json_body:
             if not content_type:
                 headers.pop("content-type", None)
                 headers.pop("Content-Type", None)
             media_type = content_type or None
+            # Re-serialise the body with organization IDs stripped. The narrow
+            # ``org-*`` regex preserves the surrounding JSON structure.
+            redacted_text = redact_org_ids(body_bytes.decode("utf-8", errors="ignore"))
+            redacted_body = redacted_text.encode()
+            # Surface the stable rate-limit classification on the forwarded
+            # body so callers can switch on ``error.code`` without parsing the
+            # provider-specific message. Fall back to the redacted bytes if the
+            # body is not a JSON object with an ``error`` mapping.
+            if rate_limit is not None:
+                try:
+                    parsed = json.loads(redacted_text)
+                    err = parsed.get("error") if isinstance(parsed, dict) else None
+                    if isinstance(err, dict):
+                        err["code"] = UPSTREAM_RATE_LIMIT
+                        err["details"] = error_details
+                        redacted_body = json.dumps(parsed).encode()
+                except (ValueError, AttributeError):
+                    pass
             return Response(
-                content=body_bytes,
+                content=redacted_body,
                 status_code=status_code,
                 headers=headers,
                 media_type=media_type,
@@ -693,15 +738,18 @@ class BaseUpstreamProvider:
         for header_name in ("content-type", "Content-Type"):
             headers.pop(header_name, None)
 
+        error_obj: dict[str, object] = {
+            "message": message or "Upstream returned a non-JSON error response",
+            "type": "upstream_error",
+            "code": error_code,
+            "upstream_status": status_code,
+            "upstream_content_type": content_type or None,
+            "upstream_body_preview": body_preview or None,
+        }
+        if error_details is not None:
+            error_obj["details"] = error_details
         envelope = {
-            "error": {
-                "message": message or "Upstream returned a non-JSON error response",
-                "type": "upstream_error",
-                "code": upstream_code or status_code,
-                "upstream_status": status_code,
-                "upstream_content_type": content_type or None,
-                "upstream_body_preview": body_preview or None,
-            },
+            "error": error_obj,
             "request_id": getattr(request.state, "request_id", None),
         }
 
@@ -2494,9 +2542,16 @@ class BaseUpstreamProvider:
                         body_bytes = await response.aread()
                     except Exception:
                         body_bytes = b""
-                    body_preview = body_bytes.decode(
-                        "utf-8", errors="ignore"
-                    ).strip()[:500]
+                    # Redact provider account identifiers before the body text
+                    # reaches logs or the raised error.
+                    body_preview = redact_org_ids(
+                        body_bytes.decode("utf-8", errors="ignore").strip()[:500]
+                    )
+                    rate_limit = classify_rate_limit(
+                        response.status_code,
+                        body_preview,
+                        dict(response.headers),
+                    )
                     logger.error(
                         "Upstream %s returned %s for model=%s path=%s: %s",
                         self.provider_type,
@@ -2508,6 +2563,7 @@ class BaseUpstreamProvider:
                             "provider": self.provider_type,
                             "model": original_model_id or "unknown",
                             "status_code": response.status_code,
+                            "error_code": rate_limit.code if rate_limit else None,
                             "reason_phrase": response.reason_phrase,
                             "path": path,
                             "body_preview": body_preview,
@@ -2520,6 +2576,8 @@ class BaseUpstreamProvider:
                         f"for model {original_model_id or 'unknown'}: "
                         f"{body_preview[:200] or '<empty>'}",
                         status_code=response.status_code,
+                        code=rate_limit.code if rate_limit else None,
+                        details=rate_limit.as_details() if rate_limit else None,
                     )
 
                 try:
@@ -2816,9 +2874,16 @@ class BaseUpstreamProvider:
                         body_bytes = await response.aread()
                     except Exception:
                         body_bytes = b""
-                    body_preview = body_bytes.decode(
-                        "utf-8", errors="ignore"
-                    ).strip()[:500]
+                    # Redact provider account identifiers before the body text
+                    # reaches logs or the raised error.
+                    body_preview = redact_org_ids(
+                        body_bytes.decode("utf-8", errors="ignore").strip()[:500]
+                    )
+                    rate_limit = classify_rate_limit(
+                        response.status_code,
+                        body_preview,
+                        dict(response.headers),
+                    )
                     logger.error(
                         "Upstream %s returned %s for model=%s path=%s: %s",
                         self.provider_type,
@@ -2830,6 +2895,7 @@ class BaseUpstreamProvider:
                             "provider": self.provider_type,
                             "model": original_model_id or "unknown",
                             "status_code": response.status_code,
+                            "error_code": rate_limit.code if rate_limit else None,
                             "path": path,
                             "body_preview": body_preview,
                         },
@@ -2841,6 +2907,8 @@ class BaseUpstreamProvider:
                         f"for model {original_model_id or 'unknown'}: "
                         f"{body_preview[:200] or '<empty>'}",
                         status_code=response.status_code,
+                        code=rate_limit.code if rate_limit else None,
+                        details=rate_limit.as_details() if rate_limit else None,
                     )
 
                 try:
