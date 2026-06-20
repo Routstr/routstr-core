@@ -8,6 +8,7 @@ from pydantic.v1 import BaseModel, Field
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing, async_fetch_openrouter_models
 from .base import BaseUpstreamProvider, TopupData
+from .ehbp import EHBPForwardingTarget
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -39,6 +40,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
     IGNORED_MODEL_IDS: list[str] = ["auto"]
+    supports_ehbp = True
 
     def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(
@@ -69,6 +71,20 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id
+
+    def get_ehbp_forwarding_target(
+        self, path: str, model_obj: Model
+    ) -> EHBPForwardingTarget:
+        """Return the PPQ.AI private enclave target for EHBP requests.
+
+        PPQ.AI exposes EHBP-aware inference under /private/v1/... separate
+        from the public /v1/... endpoint. The encrypted body remains opaque to
+        Routstr, so PPQ.AI also needs X-Private-Model for routing/billing.
+        """
+        return EHBPForwardingTarget(
+            url=f"{self.base_url.rstrip('/')}/private/{path.lstrip('/')}",
+            headers={"X-Private-Model": model_obj.forwarded_model_id or model_obj.id},
+        )
 
     @classmethod
     async def create_account_static(cls) -> dict[str, object]:

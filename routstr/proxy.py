@@ -28,6 +28,7 @@ from .payment.helpers import (
 )
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
+from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.request_correction import correct_request, extract_error_message
 
@@ -183,7 +184,29 @@ async def proxy(
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
-    request_body_dict = parse_request_body_json(request_body, path)
+
+    # EHBP (Encrypted HTTP Body Protocol) requests carry an Ehbp-Encapsulated-Key
+    # header and a binary HPKE-sealed body. The proxy cannot parse the body to
+    # extract the model id, so the SDK sends it in X-Routstr-Model. Forward the
+    # raw encrypted body to the upstream's /private/ endpoint and stream the
+    # encrypted response back untouched — the SDK's SecureClient decrypts it.
+    is_ehbp = "ehbp-encapsulated-key" in headers
+    if is_ehbp:
+        request_body_dict = {}
+        model_id = headers.get("x-routstr-model", "")
+        if not model_id:
+            return create_error_response(
+                "invalid_request",
+                "EHBP request missing X-Routstr-Model header",
+                400,
+                request=request,
+            )
+    else:
+        request_body_dict = parse_request_body_json(request_body, path)
+        if is_responses_api:
+            model_id = extract_model_from_responses_request(request_body_dict)
+        else:
+            model_id = request_body_dict.get("model", "unknown")
 
     # /tee/* GET requests (e.g. attestation) don't map to models — just
     # forward to all enabled upstreams without model/cost/auth lookups.
@@ -219,11 +242,6 @@ async def proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
-    if is_responses_api:
-        model_id = extract_model_from_responses_request(request_body_dict)
-    else:
-        model_id = request_body_dict.get("model", "unknown")
-
     model_obj = get_model_instance(model_id)
 
     if not model_obj:
@@ -239,6 +257,16 @@ async def proxy(
             400,
             request=request,
         )
+
+    if is_ehbp:
+        upstreams = [upstream for upstream in upstreams if upstream.supports_ehbp]
+        if not upstreams:
+            return create_error_response(
+                "unsupported_request",
+                f"No EHBP-capable provider found for model '{model_id}'",
+                400,
+                request=request,
+            )
 
     # todo figure out cost calculation since fallback provider is usually not the same price
     # Use first provider for initial checks/cost calculation
@@ -259,7 +287,23 @@ async def proxy(
         last_error = None
         for i, upstream in enumerate(upstreams):
             try:
-                if is_responses_api:
+                if is_ehbp:
+                    if not upstream.supports_ehbp:
+                        logger.warning(
+                            "Upstream %s does not support EHBP for model=%s",
+                            upstream.provider_type,
+                            model_id,
+                        )
+                        continue
+                    return await forward_ehbp_x_cashu_request(
+                        request=request,
+                        x_cashu_token=x_cashu,
+                        path=path,
+                        max_cost_for_model=max_cost_for_model,
+                        model_obj=model_obj,
+                        upstream=upstream,
+                    )
+                elif is_responses_api:
                     return await upstream.handle_x_cashu_responses(
                         request, x_cashu, path, max_cost_for_model, model_obj
                     )
@@ -351,7 +395,7 @@ async def proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
-    if request_body_dict:
+    if is_ehbp or request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
     # Tracks request params already removed in response to upstream rejections,
@@ -365,7 +409,29 @@ async def proxy(
         try:
             while True:
                 try:
-                    if is_responses_api:
+                    if is_ehbp:
+                        if not upstream.supports_ehbp:
+                            logger.warning(
+                                "Upstream %s does not support EHBP for model=%s",
+                                upstream.provider_type,
+                                model_id,
+                            )
+                            raise UpstreamError(
+                                f"Provider {upstream.provider_type} does not support EHBP",
+                                status_code=400,
+                            )
+                        response = await forward_ehbp_request(
+                            request=request,
+                            path=path,
+                            headers=headers,
+                            request_body=request_body,
+                            upstream=upstream,
+                            key=key,
+                            max_cost_for_model=max_cost_for_model,
+                            session=session,
+                            model_obj=model_obj,
+                        )
+                    elif is_responses_api:
                         response = await upstream.forward_responses_request(
                             request,
                             path,
@@ -410,7 +476,7 @@ async def proxy(
                 # When the upstream 400s naming such a param, strip it from the
                 # body and retry the SAME upstream. ``already_stripped`` bounds
                 # this to one retry per distinct param so it always terminates.
-                if response.status_code == 400:
+                if response.status_code == 400 and not is_ehbp:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),
