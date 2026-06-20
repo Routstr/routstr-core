@@ -39,6 +39,8 @@ async def test_recieve_token_valid() -> None:
 
     mock_wallet = Mock()
     mock_wallet.split = AsyncMock()
+    # Fee-free trusted mint (e.g. Minibits): nothing deducted.
+    mock_wallet.get_fees_for_proofs = Mock(return_value=0)
 
     from routstr.core.settings import settings
 
@@ -59,6 +61,69 @@ async def test_recieve_token_valid() -> None:
                 assert amount == 1000
                 assert unit == "sat"
                 assert mint == "http://mint:3338"
+
+
+@pytest.mark.asyncio
+async def test_recieve_token_trusted_mint_deducts_input_fee() -> None:
+    """A trusted mint that charges NUT-02 input fees.
+
+    The same-mint receive (`wallet.split(..., include_fees=True)`, a NUT-03 swap
+    at the same mint — not swap_to_primary_mint) pays the mint's per-proof fee,
+    so routstr only ends up with `face - input_fee` in fresh proofs. The credited
+    amount must reflect that, otherwise routstr over-credits the user and its own
+    wallet drifts toward insolvency.
+    """
+    token_data = {
+        "token": [
+            {
+                "mint": "http://mint:3338",
+                "proofs": [
+                    {"amount": 1000, "id": "test", "secret": "secret", "C": "curve"}
+                ],
+            }
+        ],
+        "unit": "sat",
+    }
+    token_json = json.dumps(token_data)
+    token_b64 = base64.urlsafe_b64encode(token_json.encode()).decode()
+    token_str = f"cashuA{token_b64}"
+
+    mock_wallet = Mock()
+    mock_wallet.split = AsyncMock()
+    # Mock a 3-sat input fee from the Cashu wallet API.
+    mock_wallet.get_fees_for_proofs = Mock(return_value=3)
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
+        with patch("routstr.wallet.deserialize_token_from_string") as mock_deserialize:
+            mock_token = Mock()
+            mock_token.keysets = ["keyset1"]
+            mock_token.mint = "http://mint:3338"
+            mock_token.unit = "sat"
+            mock_token.amount = 1000
+            mock_token.proofs = [{"amount": 1000}]
+            mock_deserialize.return_value = mock_token
+
+            mock_wallet.load_mint = AsyncMock()
+            mock_wallet.load_proofs = AsyncMock()
+            # Patch get_wallet directly so the module-level `_wallets` cache
+            # (keyed by mint URL) can't hand back a wallet from another test.
+            with patch(
+                "routstr.wallet.get_wallet",
+                AsyncMock(return_value=mock_wallet),
+            ):
+                amount, unit, mint = await recieve_token(token_str)
+                assert amount == 997  # 1000 face - 3 sat input fee paid on swap
+                assert unit == "sat"
+                assert mint == "http://mint:3338"
+                mock_wallet.get_fees_for_proofs.assert_called_once_with(
+                    mock_token.proofs
+                )
+                # DLEQ is verified before re-minting the incoming proofs.
+                mock_wallet.verify_proofs_dleq.assert_called_once_with(
+                    mock_token.proofs
+                )
 
 
 @pytest.mark.asyncio
@@ -255,18 +320,30 @@ async def test_recieve_token_untrusted_mint() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_swap_to_primary_mint_already_on_primary() -> None:
+    """Same-mint shortcut: the token is already on the primary mint.
+
+    No cross-mint swap (no melt/mint), but the same-mint split(include_fees=True)
+    still burns the mint's NUT-02 input fee, so the credited amount must be face
+    minus the input fee — not full face value (the over-credit bug). DLEQ is
+    verified too, matching the trusted same-mint receive path.
+    """
     from routstr.core.settings import settings
     from routstr.wallet import swap_to_primary_mint
 
     mock_token = Mock()
     mock_token.mint = settings.primary_mint
+    mock_token.keysets = ["keyset1"]
     mock_token.amount = 1000
     mock_token.unit = "sat"
-    mock_token.proofs = []
+    mock_token.proofs = [{"amount": 1000}]
 
     mock_token_wallet = Mock()
+    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_proofs = AsyncMock()
+    mock_token_wallet.verify_proofs_dleq = Mock()
+    # Mock a 3-sat input fee from the Cashu wallet API.
+    mock_token_wallet.get_fees_for_proofs = Mock(return_value=3)
     mock_token_wallet.split = AsyncMock(return_value=None)
     mock_token_wallet.request_mint = AsyncMock()
     mock_token_wallet.melt_quote = AsyncMock()
@@ -274,9 +351,11 @@ async def test_swap_to_primary_mint_already_on_primary() -> None:
     with patch("routstr.wallet.get_wallet", AsyncMock(return_value=mock_token_wallet)):
         amount, unit, mint = await swap_to_primary_mint(mock_token, mock_token_wallet)
 
-    assert amount == 1000
+    assert amount == 997  # 1000 face - 3 sat input fee
     assert unit == "sat"
     assert mint == settings.primary_mint
+    mock_token_wallet.verify_proofs_dleq.assert_called_once_with(mock_token.proofs)
+    mock_token_wallet.get_fees_for_proofs.assert_called_once_with(mock_token.proofs)
     mock_token_wallet.split.assert_called_once()
     mock_token_wallet.request_mint.assert_not_called()
     mock_token_wallet.melt_quote.assert_not_called()

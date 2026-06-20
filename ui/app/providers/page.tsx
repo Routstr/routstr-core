@@ -297,16 +297,13 @@ export default function ProvidersPage() {
   };
 
   const toggleProviderExpansion = (providerId: number) => {
-    const newExpanded = new Set(expandedProviders);
-    if (newExpanded.has(providerId)) {
-      newExpanded.delete(providerId);
-    } else {
-      newExpanded.add(providerId);
-    }
-    setExpandedProviders(newExpanded);
-    if (!newExpanded.has(providerId)) {
+    if (expandedProviders.has(providerId)) {
+      setExpandedProviders(new Set());
       setViewingModels(null);
     } else {
+      // Accordion: only one provider open at a time so switching to another
+      // provider's models auto-collapses the previously expanded one.
+      setExpandedProviders(new Set([providerId]));
       setViewingModels(providerId);
     }
   };
