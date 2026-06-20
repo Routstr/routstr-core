@@ -337,3 +337,75 @@ async def test_multiline_non_json_data_each_line_prefixed() -> None:
             continue
         assert line.startswith(b"data: "), f"bare line leaked to client: {line!r}"
     assert b"data: line one" in blob and b"data: line two" in blob
+
+
+@pytest.mark.asyncio
+async def test_crlf_delimiter_split_across_chunk_boundary() -> None:
+    """CRLF event delimiter straddling two TCP reads must not merge events.
+
+    Regression: a per-chunk ``replace(b"\\r\\n", b"\\n")`` left a stray ``\\r``
+    when a ``\\r\\n`` of the ``\\r\\n\\r\\n`` delimiter landed at the very end of
+    one ``aiter_bytes`` chunk and the matching ``\\n`` opened the next. The
+    ``\\n\\n`` split then missed the boundary, glued two events into one frame
+    with two ``data:`` lines, and the client's ``JSON.parse`` threw on the
+    concatenated payload (the "unexpected token"/"Extra data" crash).
+    """
+    e1 = b'data: {"id":"x","choices":[{"delta":{"content":"a"}}]}'
+    e2 = b'data: {"id":"x","choices":[{"delta":{"content":"b"}}]}'
+    chunks = [
+        e1 + b"\r\n\r",  # delimiter cut mid-CRLF
+        b"\n" + e2 + b"\r\n\r\n",
+        b"data: [DONE]\r\n\r\n",
+    ]
+    out = await _drive(chunks)
+
+    # Client-accurate check: a real SSE client concatenates all ``data:`` lines
+    # *within one event* (events are ``\n\n``-delimited) before parsing. A
+    # merged frame would surface here as two objects glued into one payload,
+    # which ``_assert_clean`` (per-line) would miss.
+    blob = b"".join(out)
+    contents: list[str] = []
+    for event in blob.split(b"\n\n"):
+        datas = [
+            ln[len(b"data: ") :]
+            for ln in event.split(b"\n")
+            if ln.startswith(b"data: ")
+        ]
+        if not datas:
+            continue
+        payload = b"".join(datas)
+        if payload.strip() == b"[DONE]":
+            continue
+        obj = json.loads(payload)  # raises if two events were merged into one
+        for c in obj.get("choices", []):
+            if "delta" in c:
+                contents.append(c["delta"]["content"])
+    assert contents == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_truncated_json_tail_on_connection_close() -> None:
+    """A stream that drops mid-event must not emit the partial JSON downstream.
+
+    Regression: the end-of-stream flush ran ``_process_event`` on the leftover
+    buffer unconditionally. When the upstream connection closed mid-event the
+    leftover was incomplete JSON, which fell through to the raw-forward path and
+    handed the client a ``data: {partial`` frame -> ``Unterminated string`` parse
+    error. The truncated tail must be dropped instead.
+    """
+    chunks = [
+        b'data: {"id":"x","choices":[{"delta":{"content":"ok"}}]}\n\n',
+        b'data: {"id":"x","choices":[{"delta":{"con',  # connection dies here
+    ]
+    out = await _drive(chunks)
+    objs = _assert_clean(out)  # raises if the partial tail leaked as a data frame
+    contents = [
+        c["delta"]["content"]
+        for o in objs
+        for c in o.get("choices", [])
+        if "delta" in c
+    ]
+    # The one complete chunk is delivered; the truncated fragment is dropped
+    # entirely (no second delta), and _assert_clean above guarantees nothing
+    # non-JSON ever reached the client.
+    assert contents == ["ok"]

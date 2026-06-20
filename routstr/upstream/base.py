@@ -766,7 +766,9 @@ class BaseUpstreamProvider:
                     except Exception:
                         pass
 
-            def _process_event(raw_event: bytes) -> Iterator[bytes]:
+            def _process_event(
+                raw_event: bytes, final: bool = False
+            ) -> Iterator[bytes]:
                 """Process one complete SSE event block (lines up to a blank line).
 
                 Handles arbitrary upstream framing across every supported
@@ -872,6 +874,12 @@ class BaseUpstreamProvider:
                         return
                     yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
                 else:
+                    if final:
+                        # Final flush of a truncated tail: the upstream closed
+                        # mid-event, so ``data`` is incomplete JSON. Emitting it
+                        # as a ``data:`` frame would hand the client invalid
+                        # JSON (the "unexpected token" parse error). Drop it.
+                        return
                     # Non-JSON data payload (partial fragment already reassembled
                     # by buffering, or a provider control string). Re-prefix each
                     # line so multi-line ``data`` stays valid SSE framing - a bare
@@ -890,7 +898,13 @@ class BaseUpstreamProvider:
                 # boundary-independent for every provider.
                 buffer = b""
                 async for chunk in response.aiter_bytes():
-                    buffer += chunk.replace(b"\r\n", b"\n")
+                    # Normalize the *joined* buffer, not each chunk in
+                    # isolation: a CRLF event delimiter can straddle two
+                    # ``aiter_bytes`` chunks (``...\r`` then ``\n...``). A
+                    # per-chunk replace would leave a stray ``\r`` and the
+                    # ``\n\n`` split would miss the delimiter, merging two
+                    # events into one frame and breaking SSE clients.
+                    buffer = (buffer + chunk).replace(b"\r\n", b"\n")
                     while b"\n\n" in buffer:
                         raw_event, buffer = buffer.split(b"\n\n", 1)
                         for out in _process_event(raw_event):
@@ -898,7 +912,7 @@ class BaseUpstreamProvider:
 
                 # Flush any trailing event that lacked a final blank line.
                 if buffer.strip():
-                    for out in _process_event(buffer):
+                    for out in _process_event(buffer, final=True):
                         yield out
 
                 async with create_session() as session:
@@ -1204,7 +1218,9 @@ class BaseUpstreamProvider:
                     except Exception:
                         pass
 
-            def _process_event(raw_event: bytes) -> Iterator[bytes]:
+            def _process_event(
+                raw_event: bytes, final: bool = False
+            ) -> Iterator[bytes]:
                 """Process one complete SSE event block for the Responses API.
 
                 Buffers full events (delimited by a blank line) so parsing is
@@ -1274,6 +1290,11 @@ class BaseUpstreamProvider:
 
                     yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
                 else:
+                    if final:
+                        # Final flush of a truncated tail: upstream closed
+                        # mid-event, so ``data`` is incomplete JSON. Dropping it
+                        # avoids handing the client an invalid ``data:`` frame.
+                        return
                     # Re-prefix each line so multi-line ``data`` stays valid SSE
                     # framing for the client.
                     body = b"".join(
@@ -1286,14 +1307,20 @@ class BaseUpstreamProvider:
                 # delimiter so parsing is independent of byte boundaries.
                 buffer = b""
                 async for chunk in response.aiter_bytes():
-                    buffer += chunk.replace(b"\r\n", b"\n")
+                    # Normalize the *joined* buffer, not each chunk in
+                    # isolation: a CRLF event delimiter can straddle two
+                    # ``aiter_bytes`` chunks (``...\r`` then ``\n...``). A
+                    # per-chunk replace would leave a stray ``\r`` and the
+                    # ``\n\n`` split would miss the delimiter, merging two
+                    # events into one frame and breaking SSE clients.
+                    buffer = (buffer + chunk).replace(b"\r\n", b"\n")
                     while b"\n\n" in buffer:
                         raw_event, buffer = buffer.split(b"\n\n", 1)
                         for out in _process_event(raw_event):
                             yield out
 
                 if buffer.strip():
-                    for out in _process_event(buffer):
+                    for out in _process_event(buffer, final=True):
                         yield out
 
                 # Always emit a cost-bearing data chunk
