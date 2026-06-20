@@ -8,7 +8,7 @@ from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
 from pydantic_core import PydanticUndefined
-from sqlmodel import col, select, update
+from sqlmodel import select
 
 from .core import db, get_logger
 from .core.db import store_cashu_transaction
@@ -435,13 +435,11 @@ async def credit_balance(
             extra={"old_balance": key.balance, "credit_amount": amount},
         )
 
-        # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
-        stmt = (
-            update(db.ApiKey)
-            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-            .values(balance=(db.ApiKey.balance) + amount)
-        )
-        await session.exec(stmt)  # type: ignore[call-overload]
+        # Use atomic SQL UPDATE to prevent race conditions during concurrent
+        # topups. credit_key_balance also bumps balance_version in the same
+        # statement, which invalidates any prior refund token for this key
+        # (core #412) — regardless of worker or auth context.
+        await db.credit_key_balance(session, key.hashed_key, amount)
         await session.commit()
         await session.refresh(key)
 
