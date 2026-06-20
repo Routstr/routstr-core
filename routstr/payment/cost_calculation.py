@@ -109,6 +109,39 @@ async def calculate_cost(
     # Try USD cost first
     usd_cost = _resolve_usd_cost(usage_data, response_data)
     if usd_cost > 0:
+        truly_empty = (
+            input_tokens == 0
+            and output_tokens == 0
+            and cache_read_tokens == 0
+            and cache_creation_tokens == 0
+        )
+        if truly_empty:
+            logger.warning(
+                "Upstream reported a USD cost but the response carries no "
+                "tokens at all (input, output, cache-read and cache-creation "
+                "are all zero) — refunding in full rather than billing the "
+                "USD-derived cost for an empty response.",
+                extra={
+                    "model": response_data.get("model", "unknown"),
+                    "usd_cost": usd_cost,
+                    "usage_keys": sorted(usage_data.keys())
+                    if isinstance(usage_data, dict)
+                    else None,
+                },
+            )
+            return CostData(
+                base_msats=0,
+                input_msats=0,
+                output_msats=0,
+                total_msats=0,
+                total_usd=0.0,
+                input_tokens=0,
+                output_tokens=0,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_msats=0,
+                cache_creation_msats=0,
+            )
         if input_tokens == 0 and output_tokens == 0:
             logger.warning(
                 "Upstream reported a USD cost but no token counts — "
