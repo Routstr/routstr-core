@@ -29,7 +29,9 @@ import litellm
 
 from ..core import get_logger
 from ..core.exceptions import UpstreamError
+from ..core.redaction import redact_org_ids
 from ..payment.models import Model
+from .rate_limit import classify_rate_limit
 
 logger = get_logger(__name__)
 
@@ -505,23 +507,33 @@ async def dispatch_anthropic_messages(
     try:
         result = await litellm.anthropic.messages.acreate(**kwargs)
     except Exception as exc:
-        exc_message = getattr(exc, "message", None) or str(exc) or repr(exc)
+        raw_message = getattr(exc, "message", None) or str(exc) or repr(exc)
+        # Redact provider account identifiers before the message reaches logs
+        # or the surfaced error.
+        exc_message = redact_org_ids(raw_message)
         exc_status = getattr(exc, "status_code", None)
         exc_response = getattr(exc, "response", None)
         response_text = None
         if exc_response is not None:
             try:
-                response_text = getattr(exc_response, "text", str(exc_response))
+                response_text = redact_org_ids(
+                    getattr(exc_response, "text", str(exc_response))
+                )
             except Exception:
                 response_text = "<unreadable>"
+        status_for_classify = exc_status if isinstance(exc_status, int) else 502
+        rate_limit = classify_rate_limit(
+            status_for_classify, exc_message, getattr(exc, "headers", None)
+        )
         logger.error(
             "litellm dispatch failed",
             extra={
                 "error": exc_message,
                 "error_type": type(exc).__name__,
                 "status_code": exc_status,
+                "error_code": rate_limit.code if rate_limit else None,
                 "llm_provider": getattr(exc, "llm_provider", None),
-                "body": getattr(exc, "body", None),
+                "body": redact_org_ids(str(getattr(exc, "body", "") or "")) or None,
                 "response_text": response_text,
                 "model": litellm_model,
                 "api_base": base_url,
@@ -529,7 +541,9 @@ async def dispatch_anthropic_messages(
         )
         raise UpstreamError(
             f"Upstream error via litellm: {exc_message}",
-            status_code=exc_status if isinstance(exc_status, int) else 502,
+            status_code=status_for_classify,
+            code=rate_limit.code if rate_limit else None,
+            details=rate_limit.as_details() if rate_limit else None,
         ) from exc
 
     if not client_stream and hasattr(result, "__aiter__"):
