@@ -14,6 +14,7 @@ from .core.db import (
     ApiKey,
     AsyncSession,
     CashuTransaction,
+    RefundToken,
     get_session,
     store_cashu_transaction,
 )
@@ -192,6 +193,29 @@ def _cache_key_for_authorization(authorization: str) -> str:
     return hashlib.sha256(authorization.strip().encode()).hexdigest()
 
 
+async def _stored_refund_for_version(
+    session: AsyncSession, hashed_key: str, balance_version: int
+) -> RefundToken | None:
+    """Return the stored, UNREDEEMED refund token for this key at this exact
+    balance_version, or None. Durable, worker-agnostic replacement for the
+    in-process refund cache (core #412).
+
+    A row exists only for the version at which it was minted; any credit bumps
+    balance_version, so a token minted at version k is structurally unreachable
+    once a topup moves the key to k+1. Within the same version, a token whose
+    ``redeemed_at`` is set is never re-served.
+    """
+    row = await session.get(RefundToken, (hashed_key, balance_version))
+    # Defensive isinstance guard: some unit tests inject a MagicMock session
+    # whose ``get`` returns an ApiKey regardless of the model queried. Only an
+    # actual RefundToken row counts as an idempotency hit.
+    if not isinstance(row, RefundToken):
+        return None
+    if row.redeemed_at is not None:
+        return None
+    return row
+
+
 async def _refund_cache_get(authorization: str) -> dict[str, str] | None:
     key = _cache_key_for_authorization(authorization)
     async with _refund_cache_lock:
@@ -302,9 +326,31 @@ async def refund_wallet_endpoint(
             detail="Key not found. Deposit first via /v1/wallet/create before requesting a refund.",
         )
 
-    if key.total_balance <= 0:
-        if cached := await _refund_cache_get(bearer_value):
-            return cached
+    # Durable, balance-versioned idempotency (core #412). Capture the version
+    # the refund is being computed against. A stored refund token is only
+    # re-served at the SAME balance_version and only if still unredeemed:
+    #   * in-flight retry (no intervening credit) -> same version -> same token
+    #     (true idempotency, balance debited exactly once);
+    #   * after ANY topup (cashu OR Lightning OR new-key credit) the version was
+    #     bumped, so the prior token is unreachable and never re-served.
+    current_balance_version: int = key.balance_version
+    stored = await _stored_refund_for_version(
+        session, key.hashed_key, current_balance_version
+    )
+    if stored is not None:
+        result: dict[str, str] = {"token": stored.token}
+        if stored.unit == "sat":
+            result["sats"] = str(stored.amount)
+        else:
+            result["msats"] = str(stored.amount)
+        logger.info(
+            "refund_wallet_endpoint: re-serving stored refund (idempotent)",
+            extra={
+                "hashed_key": key.hashed_key,
+                "balance_version": current_balance_version,
+            },
+        )
+        return result
 
     if key.parent_key_hash:
         raise HTTPException(
@@ -450,7 +496,36 @@ async def refund_wallet_endpoint(
         else:
             raise HTTPException(status_code=500, detail=f"Refund failed: {error_msg}")
 
-    await _refund_cache_set(bearer_value, result)
+    # Durably record the issued refund token keyed on (hashed_key,
+    # balance_version) so an in-flight retry at the SAME version re-serves this
+    # exact token instead of minting a second one (core #412). Only cashu-token
+    # refunds are re-servable; LNURL refunds ("recipient") have no token to
+    # re-serve. The PK (hashed_key, balance_version) makes a concurrent
+    # duplicate insert at the same version fail loudly rather than double-mint.
+    if "token" in result:
+        try:
+            session.add(
+                RefundToken(
+                    api_key_hash=key.hashed_key,
+                    balance_version=current_balance_version,
+                    token=result["token"],
+                    amount=remaining_balance,
+                    unit=key.refund_currency or "sat",
+                )
+            )
+            await session.commit()
+        except Exception:
+            # A row already exists for this version (concurrent in-flight
+            # refund won the race) — roll back our duplicate; the stored token
+            # is authoritative and will be re-served on the client's retry.
+            await session.rollback()
+            logger.warning(
+                "refund_wallet_endpoint: refund token already stored for version",
+                extra={
+                    "hashed_key": key.hashed_key,
+                    "balance_version": current_balance_version,
+                },
+            )
 
     if "token" in result:
         try:

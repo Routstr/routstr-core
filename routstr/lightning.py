@@ -8,7 +8,13 @@ from pydantic import BaseModel, Field
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from .core.db import ApiKey, LightningInvoice, create_session, get_session
+from .core.db import (
+    ApiKey,
+    LightningInvoice,
+    create_session,
+    credit_key_balance,
+    get_session,
+)
 from .core.logging import get_logger
 from .core.settings import settings
 from .wallet import get_wallet
@@ -293,7 +299,17 @@ async def topup_api_key_from_invoice(
     if not api_key:
         raise ValueError("Associated API key not found")
 
-    api_key.balance += invoice.amount_sats * 1000  # Convert to msats
+    # Atomically credit AND bump balance_version in the same DB txn. This is the
+    # load-bearing fix for core #412 on the Lightning path: this credit runs in
+    # the background invoice watcher with NO bearer/authorization in scope, so a
+    # header-keyed refund-cache invalidation cannot fire here. Bumping
+    # balance_version is data-driven and worker-agnostic, so the next refund
+    # recomputes against the new version and never re-serves the stale token.
+    updated = await credit_key_balance(
+        session, api_key.hashed_key, invoice.amount_sats * 1000
+    )
+    if updated == 0:
+        raise ValueError("Associated API key not found")
     await session.flush()
 
 

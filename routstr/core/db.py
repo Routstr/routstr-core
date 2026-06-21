@@ -88,10 +88,73 @@ class ApiKey(SQLModel, table=True):  # type: ignore
         default=None,
         description="Unix timestamp after which the key is no longer valid",
     )
+    balance_version: int = Field(
+        default=0,
+        nullable=False,
+        description=(
+            "Monotonic counter bumped atomically on EVERY credit to this key "
+            "(cashu topup, Lightning topup, new-key credit). Refund idempotency "
+            "is keyed on (hashed_key, balance_version): a refund minted at "
+            "version k is invalidated by any later credit, which moves the key "
+            "to k+1. See core #412."
+        ),
+    )
 
     @property
     def total_balance(self) -> int:
         return self.balance - self.reserved_balance
+
+
+class RefundToken(SQLModel, table=True):  # type: ignore
+    """Durable, balance-versioned record of issued refund tokens (core #412).
+
+    One row per (api_key_hash, balance_version). A refund issued while the key
+    is at balance_version=k is stored here; an in-flight retry at the same
+    version re-serves the exact same token (true idempotency). Any credit bumps
+    balance_version, so the row at k can never be re-served after a topup.
+    Once the gateway/client confirms redemption, ``redeemed_at`` is set so even
+    within the same version a redeemed token is never re-served.
+    """
+
+    __tablename__ = "refund_tokens"
+
+    api_key_hash: str = Field(primary_key=True, foreign_key="api_keys.hashed_key")
+    balance_version: int = Field(primary_key=True)
+    token: str = Field(description="Serialized refund token re-served on retry")
+    amount: int = Field(default=0, description="Refunded amount in the key's unit")
+    unit: str = Field(default="sat", description="Refund unit (sat or msat)")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    redeemed_at: int | None = Field(
+        default=None,
+        description="Set once the refund token's proofs are observed spent / acked",
+    )
+
+
+async def credit_key_balance(
+    session: AsyncSession, hashed_key: str, amount_msats: int
+) -> int:
+    """Atomically credit ``amount_msats`` to a key AND bump its balance_version.
+
+    This is the single choke point that invalidates all prior refund tokens for
+    the key, regardless of how the credit arrived (cashu topup, Lightning topup,
+    new-key credit) or which worker handles it (state lives in the shared DB).
+    See core #412.
+
+    Does NOT commit — the caller owns the transaction so the credit and any
+    surrounding work (e.g. marking a Lightning invoice paid) are atomic.
+
+    Returns the number of rows updated (1 on success, 0 if the key vanished).
+    """
+    stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == hashed_key)
+        .values(
+            balance=col(ApiKey.balance) + amount_msats,
+            balance_version=col(ApiKey.balance_version) + 1,
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    return int(result.rowcount or 0)
 
 
 async def reset_all_reserved_balances(session: AsyncSession) -> None:
