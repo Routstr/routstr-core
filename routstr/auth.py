@@ -1021,19 +1021,25 @@ async def adjust_payment_for_tokens(
             # actual cost exceeded discounted reservation (due to tolerance_percentage)
             if cost_difference > 0:
                 # Always release the reservation and charge min(actual_cost, balance).
-                # Using a CASE expression makes this a single atomic UPDATE — no
-                # multi-level fallback needed and balance can never go negative.
+                # CASE expressions keep this atomic and safe even when the
+                # stale-reservation sweeper has already released the reservation.
                 chargeable = case(
                     (col(ApiKey.balance) >= total_cost_msats, total_cost_msats),
                     else_=col(ApiKey.balance),
+                )
+                overrun_safe_reserved = case(
+                    (
+                        col(ApiKey.reserved_balance) >= deducted_max_cost,
+                        col(ApiKey.reserved_balance) - deducted_max_cost,
+                    ),
+                    else_=0,
                 )
 
                 finalize_stmt = (
                     update(ApiKey)
                     .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                    .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
                     .values(
-                        reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
+                        reserved_balance=overrun_safe_reserved,
                         balance=col(ApiKey.balance) - chargeable,
                         total_spent=col(ApiKey.total_spent) + chargeable,
                     )
@@ -1044,9 +1050,8 @@ async def adjust_payment_for_tokens(
                     child_stmt = (
                         update(ApiKey)
                         .where(col(ApiKey.hashed_key) == key.hashed_key)
-                        .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
                         .values(
-                            reserved_balance=col(ApiKey.reserved_balance) - deducted_max_cost,
+                            reserved_balance=overrun_safe_reserved,
                             total_spent=col(ApiKey.total_spent) + min(billing_key.balance, total_cost_msats),
                         )
                     )
