@@ -166,6 +166,8 @@ _API_PATH_PREFIXES = (
     "moderations",
     "providers",
     "tee/",
+    "attestation",
+    ".well-known/",
 )
 
 
@@ -208,9 +210,12 @@ async def proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
-    # /tee/* GET requests (e.g. attestation) don't map to models — just
-    # forward to all enabled upstreams without model/cost/auth lookups.
-    if request.method == "GET" and path.startswith("tee/"):
+    # /tee/* and /attestation GET requests (e.g. Tinfoil attestation bundle)
+    # don't map to models — just forward to all enabled upstreams without
+    # model/cost/auth lookups.
+    if request.method == "GET" and (
+        path.startswith("tee/") or path.startswith("attestation")
+    ):
         all_upstreams = _upstreams
         last_error_response = None
         for i, upstream in enumerate(all_upstreams):

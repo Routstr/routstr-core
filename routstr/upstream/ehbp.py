@@ -13,7 +13,12 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import case
 from sqlmodel import col, update
 
-from ..auth import ROUTSTR_FEE_PERCENT, get_billing_key, payments_logger
+from ..auth import (
+    ROUTSTR_FEE_PERCENT,
+    adjust_payment_for_tokens,
+    get_billing_key,
+    payments_logger,
+)
 from ..core import get_logger
 from ..core.db import (
     ApiKey,
@@ -22,11 +27,138 @@ from ..core.db import (
     store_cashu_transaction,
 )
 from ..core.exceptions import UpstreamError
+from ..core.settings import settings
+from ..payment.cost_calculation import (
+    CostData,
+    MaxCostData,
+    calculate_cost,
+)
 from ..payment.helpers import create_error_response
 from ..payment.models import Model
 from ..wallet import recieve_token, send_token
 
 logger = get_logger(__name__)
+
+# Headers that the Tinfoil SDK sends to tell the proxy where to forward the
+# encrypted request, and the request/response usage-metrics pair.
+_ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
+_REQUEST_USAGE_HEADER = "X-Tinfoil-Request-Usage-Metrics"
+_RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
+
+# Headers that must not be forwarded to the upstream enclave.
+_PROXY_ONLY_HEADERS = {
+    "x-routstr-model",
+    "x-tinfoil-enclave-url",
+    "x-tinfoil-request-usage-metrics",
+}
+
+
+def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
+    """Parse ``X-Tinfoil-Usage-Metrics`` into an OpenAI-style usage dict.
+
+    The header format is ``prompt=<n>,completion=<n>,total=<n>``. Returns a dict
+    like ``{"prompt_tokens": n, "completion_tokens": n}`` suitable for
+    :func:`calculate_cost`, or ``None`` when the header is absent or malformed.
+    """
+    if not header_value:
+        return None
+    parts: dict[str, int] = {}
+    for item in header_value.split(","):
+        key, sep, value = item.partition("=")
+        if not sep:
+            continue
+        try:
+            parts[key.strip()] = int(value.strip())
+        except (ValueError, TypeError):
+            continue
+    prompt = parts.get("prompt")
+    completion = parts.get("completion")
+    if prompt is not None and completion is not None:
+        result: dict[str, int] = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+        }
+        if "total" in parts:
+            result["total_tokens"] = parts["total"]
+        return result
+    return None
+
+
+def _resolve_ehbp_target_url(
+    target_url: str, path: str, headers: Mapping[str, str]
+) -> str:
+    """Override the forwarding URL with ``X-Tinfoil-Enclave-Url`` if present.
+
+    When the Tinfoil SDK is configured with a proxy ``baseURL``, it sends the
+    actual enclave URL in ``X-Tinfoil-Enclave-Url``. The proxy must forward to
+    that URL, not to its own default, so the encrypted payload reaches the same
+    enclave the client verified.
+    """
+    enclave_url = (
+        headers.get(_ENCLAVE_URL_HEADER)
+        or headers.get(_ENCLAVE_URL_HEADER.lower())
+        or headers.get(_ENCLAVE_URL_HEADER.upper())
+    )
+    if enclave_url:
+        return f"{enclave_url.rstrip('/')}/{path.lstrip('/')}"
+    return target_url
+
+
+def _strip_proxy_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Remove proxy-routing headers that must not reach the upstream enclave."""
+    clean = {}
+    for key, value in headers.items():
+        if key.lower() not in _PROXY_ONLY_HEADERS:
+            clean[key] = value
+    return clean
+
+
+async def _compute_ehbp_actual_cost(
+    usage_header: str | None,
+    model_obj: Model,
+    max_cost_for_model: int,
+) -> int:
+    """Compute the actual cost in msats from Tinfoil usage metrics.
+
+    Falls back to ``max_cost_for_model`` when usage is absent (streaming) or
+    cannot be priced. The result is clamped to ``[min_request_msat,
+    max_cost_for_model]`` so the refund never exceeds the reservation and is
+    never zero.
+    """
+    usage_dict = parse_tinfoil_usage_metrics(usage_header)
+    if usage_dict is None:
+        return max_cost_for_model
+
+    try:
+        cost = await calculate_cost(
+            {"model": model_obj.id, "usage": usage_dict},
+            max_cost_for_model,
+        )
+    except Exception as e:
+        logger.warning(
+            "EHBP usage cost calculation failed, falling back to max cost",
+            extra={
+                "model": model_obj.id,
+                "error": str(e),
+                "usage": usage_dict,
+            },
+        )
+        return max_cost_for_model
+
+    if isinstance(cost, MaxCostData):
+        return max_cost_for_model
+    if isinstance(cost, CostData):
+        actual = max(int(cost.total_msats), int(settings.min_request_msat))
+        return min(actual, max_cost_for_model)
+    # CostDataError
+    logger.warning(
+        "EHBP usage cost calculation error, falling back to max cost",
+        extra={
+            "model": model_obj.id,
+            "error": getattr(cost, "message", str(cost)),
+        },
+    )
+    return max_cost_for_model
 
 
 @dataclass(frozen=True)
@@ -193,17 +325,24 @@ async def forward_ehbp_request(
     session: AsyncSession,
     model_obj: Model,
 ) -> Response | StreamingResponse:
-    """Forward an EHBP bearer-auth request and finalize max-cost billing."""
+    """Forward an EHBP bearer-auth request and finalize billing.
+
+    Sends ``X-Tinfoil-Request-Usage-Metrics: true`` so the enclave returns token
+    counts in the ``X-Tinfoil-Usage-Metrics`` response header (non-streaming) or
+    trailer (streaming). When usage is available in the response header,
+    billing is finalized to the actual token cost via
+    :func:`adjust_payment_for_tokens`. When usage is not available (streaming
+    or unsupported upstream), billing falls back to max-cost.
+    """
     target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
-    upstream_headers = {**headers, **dict(target.headers)}
-    upstream_headers.pop("x-routstr-model", None)
-    upstream_headers.pop("X-Routstr-Model", None)
+    target_url = _resolve_ehbp_target_url(target.url, path, headers)
+    upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
 
     provider_type = getattr(upstream, "provider_type", "unknown")
     logger.debug(
         "Forwarding EHBP request to upstream",
         extra={
-            "url": target.url,
+            "url": target_url,
             "method": request.method,
             "path": path,
             "model": model_obj.id,
@@ -221,7 +360,7 @@ async def forward_ehbp_request(
         response = await client.send(
             client.build_request(
                 request.method,
-                target.url,
+                target_url,
                 headers=upstream_headers,
                 content=request_body,
                 params=upstream.prepare_params(path, request.query_params),  # type: ignore[attr-defined]
@@ -255,9 +394,32 @@ async def forward_ehbp_request(
                 status_code=response.status_code,
             )
 
-        await finalize_ehbp_max_cost_payment(
-            key, session, max_cost_for_model, model_obj.id
-        )
+        # Check for usage metrics in the response header (non-streaming case).
+        # For streaming requests, usage is delivered as an HTTP trailer after
+        # the body completes and is not available here — fall back to max-cost.
+        usage_header = response.headers.get(_RESPONSE_USAGE_HEADER)
+        usage_dict = parse_tinfoil_usage_metrics(usage_header)
+
+        if usage_dict is not None:
+            logger.info(
+                "EHBP usage metrics received, finalizing with actual token cost",
+                extra={
+                    "model": model_obj.id,
+                    "provider": provider_type,
+                    "usage": usage_dict,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
+            await adjust_payment_for_tokens(
+                key,
+                {"model": model_obj.id, "usage": usage_dict},
+                session,
+                max_cost_for_model,
+            )
+        else:
+            await finalize_ehbp_max_cost_payment(
+                key, session, max_cost_for_model, model_obj.id
+            )
 
         background_tasks = BackgroundTasks()
         background_tasks.add_task(response.aclose)
@@ -306,9 +468,11 @@ async def forward_ehbp_x_cashu_request(
 ) -> Response | StreamingResponse:
     """Redeem X-Cashu, forward EHBP opaquely, and refund unspent value.
 
-    Since the response is encrypted, usage cannot be inspected. Successful EHBP
-    X-Cashu requests are charged at max_cost_for_model and any excess token
-    value is refunded.
+    When the upstream returns ``X-Tinfoil-Usage-Metrics`` in the response
+    header (non-streaming), the refund is computed from the actual token cost
+    instead of max_cost_for_model. For streaming requests, usage is only
+    available as an HTTP trailer after the body completes and the refund
+    falls back to max_cost_for_model.
     """
     request_id = getattr(request.state, "request_id", None)
     amount = 0
@@ -334,9 +498,8 @@ async def forward_ehbp_x_cashu_request(
 
         headers = upstream.prepare_headers(dict(request.headers))  # type: ignore[attr-defined]
         target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
-        upstream_headers = {**headers, **dict(target.headers)}
-        upstream_headers.pop("x-routstr-model", None)
-        upstream_headers.pop("X-Routstr-Model", None)
+        target_url = _resolve_ehbp_target_url(target.url, path, headers)
+        upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
         request_body = await request.body()
 
         client = httpx.AsyncClient(
@@ -348,7 +511,7 @@ async def forward_ehbp_x_cashu_request(
             response = await client.send(
                 client.build_request(
                     request.method,
-                    target.url,
+                    target_url,
                     headers=upstream_headers,
                     content=request_body,
                     params=upstream.prepare_params(path, request.query_params),  # type: ignore[attr-defined]
@@ -377,8 +540,14 @@ async def forward_ehbp_x_cashu_request(
                 error_response.headers["X-Cashu"] = refund_token
                 return error_response
 
-            refund_amount = amount - _msats_to_unit_amount(max_cost_for_model, unit)
-            response_headers = dict(response.headers)
+            # Compute refund from actual usage when available (non-streaming),
+            # otherwise fall back to max_cost_for_model.
+            usage_header = response.headers.get(_RESPONSE_USAGE_HEADER)
+            actual_cost_msats = await _compute_ehbp_actual_cost(
+                usage_header, model_obj, max_cost_for_model
+            )
+            refund_amount = amount - _msats_to_unit_amount(actual_cost_msats, unit)
+            response_headers = _strip_proxy_headers(dict(response.headers))
             if refund_amount > 0:
                 response_headers["X-Cashu"] = await send_cashu_refund(
                     refund_amount, unit, mint, request_id

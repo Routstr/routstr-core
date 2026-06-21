@@ -128,6 +128,20 @@ Three parties see three different model IDs:
 | PPQ.AI billing | `X-Private-Model` header | `private/kimi-k2-6` | Proxy sends `forwarded_model_id` |
 | Tinfoil enclave | `body.model` (encrypted) | `kimi-k2-6` | SDK strips `tinfoil-` prefix before encryption |
 
+## Implementation status
+
+A dedicated `TinfoilUpstreamProvider` (`routstr/upstream/tinfoil.py`) now
+implements the direct blind-upstream pattern described above. The shared EHBP
+helpers in `routstr/upstream/ehbp.py` were extended to:
+
+- Request usage metrics via `X-Tinfoil-Request-Usage-Metrics: true`.
+- Parse `X-Tinfoil-Usage-Metrics` from the response header (non-streaming).
+- Override the forwarding URL with `X-Tinfoil-Enclave-Url` when the SDK sends it.
+- Finalize bearer billing with actual token cost via `adjust_payment_for_tokens`.
+- Compute X-Cashu refunds from actual cost instead of max cost.
+
+See `docs/tinfoil-direct-integration.md` for the full implementation notes.
+
 ## Not yet tested
 
 These changes were written without integration testing due to the complexity

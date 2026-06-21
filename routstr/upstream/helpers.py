@@ -264,6 +264,7 @@ async def _seed_providers_from_settings(
         ("PERPLEXITY_API_KEY", "perplexity", None, None),
         ("FIREWORKS_API_KEY", "fireworks", None, None),
         ("XAI_API_KEY", "xai", None, None),
+        ("TINFOIL_API_KEY", "tinfoil", None, None),
     ]
 
     for env_key, provider_type, _, _ in env_mappings:
