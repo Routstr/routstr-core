@@ -96,8 +96,10 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
 
         * ``/attestation`` (or ``/tee/attestation``): proxy to the Tinfoil ATC
           (attestation bundle proxy) at ``https://atc.tinfoil.sh/attestation``.
-        * Other GETs: forward to the enclave URL from ``X-Tinfoil-Enclave-Url``
-          when present, otherwise to the provider base URL.
+        * Other GETs: forward to the provider base URL
+          (``https://inference.tinfoil.sh``). ``X-Tinfoil-Enclave-Url`` is an
+          EHBP-only header used for encrypted POST requests and is not honored
+          for unencrypted GET requests.
         """
         clean_path = path.removeprefix("tee/")
         if clean_path == "attestation":
