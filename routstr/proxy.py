@@ -104,6 +104,29 @@ def get_unique_models() -> list[Model]:
     return list(_unique_models.values())
 
 
+def _is_tinfoil_attestation_path(path: str) -> bool:
+    """Return True for Tinfoil attestation-bundle proxy paths."""
+    return path in {"attestation", "tee/attestation"}
+
+
+def _select_unauthenticated_get_upstreams(
+    path: str, upstreams: list[BaseUpstreamProvider]
+) -> list[BaseUpstreamProvider]:
+    """Select upstream candidates for unauthenticated GET bypass paths.
+
+    Tinfoil attestation endpoints are provider-specific. Trying every enabled
+    upstream can return an unrelated provider's 404 before Tinfoil is reached,
+    so route those paths only to Tinfoil providers.
+    """
+    if _is_tinfoil_attestation_path(path):
+        return [
+            upstream
+            for upstream in upstreams
+            if getattr(upstream, "provider_type", None) == "tinfoil"
+        ]
+    return upstreams
+
+
 async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
@@ -211,20 +234,29 @@ async def proxy(
             model_id = request_body_dict.get("model", "unknown")
 
     # /tee/* and /attestation GET requests (e.g. Tinfoil attestation bundle)
-    # don't map to models — just forward to all enabled upstreams without
-    # model/cost/auth lookups.
+    # don't map to models — forward without model/cost/auth lookups. Tinfoil
+    # attestation paths are routed only to Tinfoil providers so an unrelated
+    # upstream's 404 cannot short-circuit before the attestation proxy is tried.
     if request.method == "GET" and (
         path.startswith("tee/") or path.startswith("attestation")
     ):
-        all_upstreams = _upstreams
+        selected_upstreams = _select_unauthenticated_get_upstreams(path, _upstreams)
+        if not selected_upstreams:
+            return create_error_response(
+                "upstream_error",
+                "No upstream available for unauthenticated GET path",
+                502,
+                request=request,
+            )
+
         last_error_response = None
-        for i, upstream in enumerate(all_upstreams):
+        for i, upstream in enumerate(selected_upstreams):
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
-                if response.status_code in [502, 429] and i < len(all_upstreams) - 1:
+                if response.status_code in [502, 429] and i < len(selected_upstreams) - 1:
                     logger.warning(
-                        "Upstream %s returned %s for tee GET %s, trying next",
+                        "Upstream %s returned %s for unauthenticated GET %s, trying next",
                         upstream.provider_type,
                         response.status_code,
                         path,
@@ -233,12 +265,12 @@ async def proxy(
                 return response
             except UpstreamError as e:
                 logger.warning(
-                    "Upstream %s failed for tee GET %s: %s",
+                    "Upstream %s failed for unauthenticated GET %s: %s",
                     upstream.provider_type,
                     path,
                     e,
                 )
-                if i == len(all_upstreams) - 1:
+                if i == len(selected_upstreams) - 1:
                     last_error_response = create_error_response(
                         "upstream_error", str(e), 502, request=request
                     )
