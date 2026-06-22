@@ -14,6 +14,7 @@ import pytest
 from routstr.upstream.ehbp import (
     _PROXY_ONLY_HEADERS,
     _compute_ehbp_actual_cost,
+    _prepare_ehbp_upstream_headers,
     _resolve_ehbp_target_url,
     _strip_proxy_headers,
     parse_tinfoil_usage_metrics,
@@ -91,6 +92,26 @@ class TestStripProxyHeaders:
             "x-tinfoil-enclave-url",
             "x-tinfoil-request-usage-metrics",
         }
+
+
+class TestPrepareEHBPUpstreamHeaders:
+    def test_strips_client_proxy_headers_before_merging_target_headers(self):
+        headers = {
+            "x-routstr-model": "tinfoil-llama3-3-70b",
+            "X-Tinfoil-Enclave-Url": "https://enclave.tinfoil.sh",
+            "X-Tinfoil-Request-Usage-Metrics": "false",
+            "Authorization": "Bearer upstream-key",
+            "Ehbp-Encapsulated-Key": "abc123",
+        }
+        target_headers = {"X-Tinfoil-Request-Usage-Metrics": "true"}
+
+        clean = _prepare_ehbp_upstream_headers(headers, target_headers)
+
+        assert "x-routstr-model" not in clean
+        assert "X-Tinfoil-Enclave-Url" not in clean
+        assert clean["Authorization"] == "Bearer upstream-key"
+        assert clean["Ehbp-Encapsulated-Key"] == "abc123"
+        assert clean["X-Tinfoil-Request-Usage-Metrics"] == "true"
 
 
 # ---------------------------------------------------------------------------

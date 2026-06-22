@@ -182,6 +182,20 @@ def _strip_proxy_headers(headers: dict[str, str]) -> dict[str, str]:
     return clean
 
 
+def _prepare_ehbp_upstream_headers(
+    headers: dict[str, str], target_headers: Mapping[str, str]
+) -> dict[str, str]:
+    """Merge safe request headers with provider-controlled EHBP target headers.
+
+    Client-supplied proxy control headers must be stripped, but provider-added
+    target headers such as ``X-Tinfoil-Request-Usage-Metrics: true`` must still
+    reach the upstream enclave. Strip first, then merge target headers so
+    callers cannot spoof proxy controls while providers can opt into protocol
+    features.
+    """
+    return {**_strip_proxy_headers(headers), **dict(target_headers)}
+
+
 async def _compute_ehbp_actual_cost(
     usage_header: str | None,
     model_obj: Model,
@@ -407,7 +421,7 @@ async def forward_ehbp_request(
 
     provider_type = getattr(upstream, "provider_type", "unknown")
     target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
-    upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
+    upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers)
 
     logger.debug(
         "Forwarding EHBP request to upstream",
@@ -570,7 +584,7 @@ async def forward_ehbp_x_cashu_request(
         target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
         provider_type = getattr(upstream, "provider_type", "unknown")
         target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
-        upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
+        upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers)
         request_body = await request.body()
 
         client = httpx.AsyncClient(
