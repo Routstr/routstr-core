@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import traceback
+import typing
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import Any, Mapping, cast
@@ -47,6 +48,9 @@ from .cache_breakpoints import (
 )
 from .count_tokens import count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
+
+if typing.TYPE_CHECKING:
+    from .ehbp import EHBPForwardingTarget
 
 logger = get_logger(__name__)
 
