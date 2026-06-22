@@ -20,8 +20,8 @@ logger = get_logger(__name__)
 
 
 class TinfoilModelPricing(BaseModel):
-    inputTokenPricePer1M: float = Field(0.0)
-    outputTokenPricePer1M: float = Field(0.0)
+    inputTokenPricePer1M: float = 0.0
+    outputTokenPricePer1M: float = 0.0
     requestPrice: float = 0.0
 
 

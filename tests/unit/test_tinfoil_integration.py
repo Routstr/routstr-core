@@ -30,7 +30,7 @@ from routstr.upstream.tinfoil import (
 
 
 class TestParseTinfoilUsageMetrics:
-    def test_full_header(self):
+    def test_full_header(self) -> None:
         result = parse_tinfoil_usage_metrics("prompt=67,completion=42,total=109")
         assert result == {
             "prompt_tokens": 67,
@@ -38,23 +38,23 @@ class TestParseTinfoilUsageMetrics:
             "total_tokens": 109,
         }
 
-    def test_without_total(self):
+    def test_without_total(self) -> None:
         result = parse_tinfoil_usage_metrics("prompt=10,completion=5")
         assert result == {"prompt_tokens": 10, "completion_tokens": 5}
 
-    def test_none(self):
+    def test_none(self) -> None:
         assert parse_tinfoil_usage_metrics(None) is None
 
-    def test_empty(self):
+    def test_empty(self) -> None:
         assert parse_tinfoil_usage_metrics("") is None
 
-    def test_malformed(self):
+    def test_malformed(self) -> None:
         assert parse_tinfoil_usage_metrics("garbage") is None
 
-    def test_missing_completion(self):
+    def test_missing_completion(self) -> None:
         assert parse_tinfoil_usage_metrics("prompt=10") is None
 
-    def test_extra_whitespace(self):
+    def test_extra_whitespace(self) -> None:
         result = parse_tinfoil_usage_metrics(
             "prompt = 100 , completion = 200 , total = 300"
         )
@@ -71,7 +71,7 @@ class TestParseTinfoilUsageMetrics:
 
 
 class TestStripProxyHeaders:
-    def test_strips_all_proxy_only(self):
+    def test_strips_all_proxy_only(self) -> None:
         headers = {
             "x-routstr-model": "tinfoil-llama3-3-70b",
             "X-Tinfoil-Enclave-Url": "https://inference.tinfoil.sh",
@@ -86,7 +86,7 @@ class TestStripProxyHeaders:
         assert clean["Authorization"] == "Bearer secret"
         assert clean["Ehbp-Encapsulated-Key"] == "abc123"
 
-    def test_all_proxy_only_headers_covered(self):
+    def test_all_proxy_only_headers_covered(self) -> None:
         assert _PROXY_ONLY_HEADERS == {
             "x-routstr-model",
             "x-tinfoil-enclave-url",
@@ -95,7 +95,7 @@ class TestStripProxyHeaders:
 
 
 class TestPrepareEHBPUpstreamHeaders:
-    def test_strips_client_proxy_headers_before_merging_target_headers(self):
+    def test_strips_client_proxy_headers_before_merging_target_headers(self) -> None:
         headers = {
             "x-routstr-model": "tinfoil-llama3-3-70b",
             "X-Tinfoil-Enclave-Url": "https://enclave.tinfoil.sh",
@@ -120,7 +120,7 @@ class TestPrepareEHBPUpstreamHeaders:
 
 
 class TestResolveEhbpTargetUrl:
-    def test_override_with_enclave_url_for_tinfoil(self):
+    def test_override_with_enclave_url_for_tinfoil(self) -> None:
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
             "v1/chat/completions",
@@ -129,7 +129,7 @@ class TestResolveEhbpTargetUrl:
         )
         assert result == "https://enclave.tinfoil.sh/v1/chat/completions"
 
-    def test_override_lowercase_header_for_tinfoil(self):
+    def test_override_lowercase_header_for_tinfoil(self) -> None:
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
             "v1/chat/completions",
@@ -138,7 +138,7 @@ class TestResolveEhbpTargetUrl:
         )
         assert result == "https://enclave.tinfoil.sh/v1/chat/completions"
 
-    def test_no_override(self):
+    def test_no_override(self) -> None:
         default = "https://inference.tinfoil.sh/v1/chat/completions"
         result = _resolve_ehbp_target_url(
             default,
@@ -148,7 +148,7 @@ class TestResolveEhbpTargetUrl:
         )
         assert result == default
 
-    def test_non_tinfoil_provider_ignores_enclave_url(self):
+    def test_non_tinfoil_provider_ignores_enclave_url(self) -> None:
         default = "https://api.ppq.ai/private/v1/chat/completions"
         result = _resolve_ehbp_target_url(
             default,
@@ -169,7 +169,7 @@ class TestResolveEhbpTargetUrl:
             "https://user:pass@enclave.tinfoil.sh",
         ],
     )
-    def test_tinfoil_rejects_unsafe_enclave_url(self, bad_url):
+    def test_tinfoil_rejects_unsafe_enclave_url(self, bad_url: str) -> None:
         from routstr.core.exceptions import UpstreamError
 
         with pytest.raises(UpstreamError):
@@ -188,14 +188,14 @@ class TestResolveEhbpTargetUrl:
 
 class TestComputeEhbpActualCost:
     @pytest.mark.asyncio
-    async def test_no_usage_falls_back_to_max_cost(self):
+    async def test_no_usage_falls_back_to_max_cost(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
         result = await _compute_ehbp_actual_cost(None, model_obj, 100_000)
         assert result == 100_000
 
     @pytest.mark.asyncio
-    async def test_usage_parsed_and_clamped(self):
+    async def test_usage_parsed_and_clamped(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
         # The actual cost from calculate_cost will be small; we just verify
@@ -224,7 +224,7 @@ class TestComputeEhbpActualCost:
             assert result <= 100_000
 
     @pytest.mark.asyncio
-    async def test_max_cost_data_falls_back(self):
+    async def test_max_cost_data_falls_back(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
         with patch(
@@ -256,7 +256,7 @@ class TestComputeEhbpActualCost:
 
 
 class TestTinfoilUpstreamProvider:
-    def test_provider_type_and_defaults(self):
+    def test_provider_type_and_defaults(self) -> None:
         assert TinfoilUpstreamProvider.provider_type == "tinfoil"
         assert (
             TinfoilUpstreamProvider.default_base_url
@@ -264,12 +264,12 @@ class TestTinfoilUpstreamProvider:
         )
         assert TinfoilUpstreamProvider.supports_ehbp is True
 
-    def test_transform_model_name(self):
+    def test_transform_model_name(self) -> None:
         provider = TinfoilUpstreamProvider(api_key="test")
         assert provider.transform_model_name("tinfoil/llama3-3-70b") == "llama3-3-70b"
         assert provider.transform_model_name("llama3-3-70b") == "llama3-3-70b"
 
-    def test_get_ehbp_forwarding_target_includes_usage_header(self):
+    def test_get_ehbp_forwarding_target_includes_usage_header(self) -> None:
         provider = TinfoilUpstreamProvider(api_key="test")
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
@@ -280,13 +280,13 @@ class TestTinfoilUpstreamProvider:
         )
         assert "v1/chat/completions" in target.url
 
-    def test_get_provider_metadata(self):
+    def test_get_provider_metadata(self) -> None:
         meta = TinfoilUpstreamProvider.get_provider_metadata()
         assert meta["id"] == "tinfoil"
         assert meta["name"] == "Tinfoil"
         assert meta["fixed_base_url"] is True
 
-    def test_tinfoil_model_pricing_parses(self):
+    def test_tinfoil_model_pricing_parses(self) -> None:
         data = {
             "id": "llama3-3-70b",
             "context_window": 128000,
@@ -305,7 +305,7 @@ class TestTinfoilUpstreamProvider:
         assert tf.pricing.outputTokenPricePer1M == 2.75
 
     @pytest.mark.asyncio
-    async def test_fetch_models_parses_response(self):
+    async def test_fetch_models_parses_response(self) -> None:
         provider = TinfoilUpstreamProvider(api_key="test")
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -344,7 +344,7 @@ class TestTinfoilUpstreamProvider:
         assert models[0].context_length == 128000
 
     @pytest.mark.asyncio
-    async def test_fetch_models_handles_error(self):
+    async def test_fetch_models_handles_error(self) -> None:
         provider = TinfoilUpstreamProvider(api_key="test")
         with patch("routstr.upstream.tinfoil.httpx.AsyncClient") as mock_client_cls:
             mock_client = MagicMock()

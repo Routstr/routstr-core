@@ -38,7 +38,7 @@ async def test_attestation_get_routes_directly_to_tinfoil_provider(
     monkeypatch.setattr(proxy_module, "_upstreams", [non_tinfoil, tinfoil])
 
     async with AsyncClient(
-        transport=ASGITransport(app=proxy_app), base_url="http://test"
+        transport=ASGITransport(app=proxy_app), base_url="http://test"  # type: ignore[arg-type]
     ) as client:
         response = await client.get("/attestation")
 
@@ -69,7 +69,7 @@ async def test_tee_attestation_get_routes_directly_to_tinfoil_provider(
     monkeypatch.setattr(proxy_module, "_upstreams", [non_tinfoil, tinfoil])
 
     async with AsyncClient(
-        transport=ASGITransport(app=proxy_app), base_url="http://test"
+        transport=ASGITransport(app=proxy_app), base_url="http://test"  # type: ignore[arg-type]
     ) as client:
         response = await client.get("/tee/attestation")
 
