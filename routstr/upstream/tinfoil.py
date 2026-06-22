@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic.v1 import BaseModel, Field
+from pydantic.v1 import BaseModel
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
