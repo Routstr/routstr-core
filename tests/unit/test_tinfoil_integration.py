@@ -99,19 +99,21 @@ class TestStripProxyHeaders:
 
 
 class TestResolveEhbpTargetUrl:
-    def test_override_with_enclave_url(self):
+    def test_override_with_enclave_url_for_tinfoil(self):
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
             "v1/chat/completions",
             {"X-Tinfoil-Enclave-Url": "https://enclave.tinfoil.sh"},
+            "tinfoil",
         )
         assert result == "https://enclave.tinfoil.sh/v1/chat/completions"
 
-    def test_override_lowercase_header(self):
+    def test_override_lowercase_header_for_tinfoil(self):
         result = _resolve_ehbp_target_url(
             "https://default.example.com/v1/chat/completions",
             "v1/chat/completions",
             {"x-tinfoil-enclave-url": "https://enclave.tinfoil.sh"},
+            "tinfoil",
         )
         assert result == "https://enclave.tinfoil.sh/v1/chat/completions"
 
@@ -121,8 +123,41 @@ class TestResolveEhbpTargetUrl:
             default,
             "v1/chat/completions",
             {},
+            "tinfoil",
         )
         assert result == default
+
+    def test_non_tinfoil_provider_ignores_enclave_url(self):
+        default = "https://api.ppq.ai/private/v1/chat/completions"
+        result = _resolve_ehbp_target_url(
+            default,
+            "v1/chat/completions",
+            {"X-Tinfoil-Enclave-Url": "https://enclave.tinfoil.sh"},
+            "ppqai",
+        )
+        assert result == default
+
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "http://enclave.tinfoil.sh",
+            "https://attacker.example",
+            "https://tinfoil.sh.attacker.example",
+            "https://127.0.0.1",
+            "https://enclave.tinfoil.sh:8443",
+            "https://user:pass@enclave.tinfoil.sh",
+        ],
+    )
+    def test_tinfoil_rejects_unsafe_enclave_url(self, bad_url):
+        from routstr.core.exceptions import UpstreamError
+
+        with pytest.raises(UpstreamError):
+            _resolve_ehbp_target_url(
+                "https://default.example.com/v1/chat/completions",
+                "v1/chat/completions",
+                {"X-Tinfoil-Enclave-Url": bad_url},
+                "tinfoil",
+            )
 
 
 # ---------------------------------------------------------------------------

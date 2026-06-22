@@ -6,6 +6,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Mapping
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import BackgroundTasks, Request
@@ -44,6 +45,9 @@ logger = get_logger(__name__)
 _ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 _REQUEST_USAGE_HEADER = "X-Tinfoil-Request-Usage-Metrics"
 _RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
+_TINFOIL_PROVIDER_TYPE = "tinfoil"
+_TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
+_TINFOIL_ALLOWED_ENCLAVE_HOSTS = {"tinfoil.sh"}
 
 # Headers that must not be forwarded to the upstream enclave.
 _PROXY_ONLY_HEADERS = {
@@ -84,24 +88,89 @@ def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
     return None
 
 
+def _get_header_case_insensitive(
+    headers: Mapping[str, str], header_name: str
+) -> str | None:
+    header_name_lower = header_name.lower()
+    for key, value in headers.items():
+        if key.lower() == header_name_lower:
+            return value
+    return None
+
+
+def _validated_tinfoil_enclave_base_url(enclave_url: str) -> str | None:
+    """Validate and normalize a Tinfoil enclave base URL.
+
+    ``X-Tinfoil-Enclave-Url`` is client supplied. Treating it as an arbitrary
+    forwarding destination would let callers turn Routstr into an SSRF proxy and
+    exfiltrate upstream Authorization headers. Only HTTPS URLs on Tinfoil-owned
+    hostnames are accepted.
+    """
+    try:
+        parsed = urlsplit(enclave_url.strip())
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None
+
+    hostname = parsed.hostname
+    if not hostname:
+        return None
+
+    host = hostname.rstrip(".").lower()
+    if parsed.scheme.lower() != "https":
+        return None
+    if parsed.username or parsed.password:
+        return None
+    if port not in (None, 443):
+        return None
+    if host not in _TINFOIL_ALLOWED_ENCLAVE_HOSTS and not host.endswith(
+        _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX
+    ):
+        return None
+
+    # Preserve an optional base path but discard query/fragment. The request
+    # query string is forwarded separately via ``prepare_params``.
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit(("https", netloc, parsed.path.rstrip("/"), "", ""))
+
+
 def _resolve_ehbp_target_url(
-    target_url: str, path: str, headers: Mapping[str, str]
+    target_url: str,
+    path: str,
+    headers: Mapping[str, str],
+    provider_type: str | None = None,
 ) -> str:
-    """Override the forwarding URL with ``X-Tinfoil-Enclave-Url`` if present.
+    """Override Tinfoil forwarding URL with a validated enclave URL.
 
     When the Tinfoil SDK is configured with a proxy ``baseURL``, it sends the
-    actual enclave URL in ``X-Tinfoil-Enclave-Url``. The proxy must forward to
-    that URL, not to its own default, so the encrypted payload reaches the same
-    enclave the client verified.
+    actual enclave URL in ``X-Tinfoil-Enclave-Url``. The override is honored
+    only for the Tinfoil provider and only when the URL is an HTTPS Tinfoil
+    hostname, so the header cannot redirect other EHBP providers or leak
+    upstream API keys to arbitrary origins.
     """
-    enclave_url = (
-        headers.get(_ENCLAVE_URL_HEADER)
-        or headers.get(_ENCLAVE_URL_HEADER.lower())
-        or headers.get(_ENCLAVE_URL_HEADER.upper())
-    )
-    if enclave_url:
-        return f"{enclave_url.rstrip('/')}/{path.lstrip('/')}"
-    return target_url
+    enclave_url = _get_header_case_insensitive(headers, _ENCLAVE_URL_HEADER)
+    if not enclave_url:
+        return target_url
+
+    if provider_type != _TINFOIL_PROVIDER_TYPE:
+        logger.warning(
+            "Ignoring X-Tinfoil-Enclave-Url for non-Tinfoil EHBP provider",
+            extra={"provider": provider_type or "unknown"},
+        )
+        return target_url
+
+    validated_base_url = _validated_tinfoil_enclave_base_url(enclave_url)
+    if validated_base_url is None:
+        logger.warning(
+            "Rejected invalid X-Tinfoil-Enclave-Url",
+            extra={"provider": provider_type or "unknown"},
+        )
+        raise UpstreamError(
+            "Invalid X-Tinfoil-Enclave-Url: expected an HTTPS tinfoil.sh URL",
+            status_code=400,
+        )
+
+    return f"{validated_base_url}/{path.lstrip('/')}"
 
 
 def _strip_proxy_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -335,10 +404,11 @@ async def forward_ehbp_request(
     or unsupported upstream), billing falls back to max-cost.
     """
     target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
-    target_url = _resolve_ehbp_target_url(target.url, path, headers)
-    upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
 
     provider_type = getattr(upstream, "provider_type", "unknown")
+    target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
+    upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
+
     logger.debug(
         "Forwarding EHBP request to upstream",
         extra={
@@ -498,7 +568,8 @@ async def forward_ehbp_x_cashu_request(
 
         headers = upstream.prepare_headers(dict(request.headers))  # type: ignore[attr-defined]
         target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
-        target_url = _resolve_ehbp_target_url(target.url, path, headers)
+        provider_type = getattr(upstream, "provider_type", "unknown")
+        target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
         upstream_headers = _strip_proxy_headers({**headers, **dict(target.headers)})
         request_body = await request.body()
 
