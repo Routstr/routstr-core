@@ -127,10 +127,12 @@ _MAX_SWAP_ATTEMPTS = 3
 _MINT_ERROR_CODE_RE = re.compile(r"\(Code: (\d+)\)")
 _MELT_SHORTFALL_RE = re.compile(r"Provided: (\d+), needed: (\d+)")
 
-# Insufficient melt inputs across implementations: 11005 is the registered
-# "Transaction is not balanced" code (used by cdk); 11000 is nutshell's
-# generic TransactionError, which is unregistered but what nutshell sends.
-_RETRYABLE_MELT_CODES = frozenset({"11000", "11005"})
+# Insufficient-melt-inputs failures differ across mint implementations. 11005 is
+# the registered "Transaction is not balanced" code (cdk), specific enough to
+# trust on the code alone. 11000 is nutshell's generic, unregistered
+# TransactionError covering many unrelated failures, so it only counts as a fee
+# shortfall alongside the "not enough inputs" detail text. With no code suffix at
+# all, that same text is the only signal.
 
 
 def _net_minted_amount(amount_msat: int, token_unit: str, fees: int) -> int:
@@ -160,11 +162,19 @@ def _melt_insufficient_shortfall(error: Exception) -> int | None:
     """
     message = str(error)
     code_match = _MINT_ERROR_CODE_RE.search(message)
-    if code_match is not None:
-        if code_match.group(1) not in _RETRYABLE_MELT_CODES:
+    code = code_match.group(1) if code_match is not None else None
+    has_shortfall_text = "not enough inputs" in message.lower()
+
+    match code:
+        case "11005":  # registered TransactionUnbalanced: trust the code
+            pass
+        case "11000" if has_shortfall_text:  # generic nutshell error: needs the text
+            pass
+        case None if has_shortfall_text:  # no code suffix: text is the only signal
+            pass
+        case _:  # other codes, a bare 11000, or no signal: must not retry
             return None
-    elif "not enough inputs" not in message.lower():
-        return None
+
     amounts = _MELT_SHORTFALL_RE.search(message)
     if amounts is not None:
         provided, needed = int(amounts.group(1)), int(amounts.group(2))

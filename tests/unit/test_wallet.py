@@ -573,6 +573,10 @@ async def test_net_minted_amount_unit_conversions(
             "Provided: 180, needed: 179 (Code: 11000)",
             1,
         ),
+        # a generic 11000 without the shortfall text is not a fee shortfall:
+        # 11000 is nutshell's catch-all TransactionError, so retrying (shrinking
+        # the invoice) would never help and only masks the real error
+        ("Mint Error: Duplicate inputs provided. (Code: 11000)", None),
         # spent proofs must never be retried: the funds are gone
         ("Mint Error: Token already spent. (Code: 11001)", None),
         # Lightning failures must never be retried: a smaller invoice won't help
