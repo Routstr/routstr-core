@@ -241,7 +241,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["x-routstr-request-id", "x-cashu"],
+    expose_headers=[
+        "x-routstr-request-id",
+        "x-cashu",
+        "x-routstr-cost-msats",
+        "x-routstr-cost-usd",
+        "x-routstr-input-cost-msats",
+        "x-routstr-output-cost-msats",
+    ],
 )
 
 # Add logging middleware

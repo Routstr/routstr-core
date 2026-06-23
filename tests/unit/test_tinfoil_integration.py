@@ -192,7 +192,9 @@ class TestComputeEhbpActualCost:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
         result = await _compute_ehbp_actual_cost(None, model_obj, 100_000)
-        assert result == 100_000
+        assert result["total_msats"] == 100_000
+        assert result["input_tokens"] == 0
+        assert result["output_tokens"] == 0
 
     @pytest.mark.asyncio
     async def test_usage_parsed_and_clamped(self) -> None:
@@ -220,8 +222,13 @@ class TestComputeEhbpActualCost:
                 model_obj,
                 100_000,
             )
-            assert result == 30
-            assert result <= 100_000
+            assert result["total_msats"] == 30
+            assert result["total_msats"] <= 100_000
+            assert result["input_tokens"] == 67
+            assert result["output_tokens"] == 42
+            assert result["total_tokens"] == 109
+            assert result["input_msats"] == 10
+            assert result["output_msats"] == 20
 
     @pytest.mark.asyncio
     async def test_max_cost_data_falls_back(self) -> None:
@@ -247,7 +254,9 @@ class TestComputeEhbpActualCost:
                 model_obj,
                 50_000,
             )
-            assert result == 50_000
+            assert result["total_msats"] == 50_000
+            assert result["input_tokens"] == 0
+            assert result["output_tokens"] == 0
 
 
 # ---------------------------------------------------------------------------

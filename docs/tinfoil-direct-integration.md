@@ -418,9 +418,27 @@ and `routstr/upstream/ehbp.py`.
 | Request shape | Usage source | Billing |
 |---|---|---|
 | Bearer, non-streaming | `X-Tinfoil-Usage-Metrics` response header | Exact token cost via `adjust_payment_for_tokens` |
-| Bearer, streaming | HTTP trailer (not available before body) | Max-cost fallback |
+| Bearer, streaming | `X-Tinfoil-Usage-Metrics` HTTP trailer | Exact token cost (h11 captures trailers) |
+| Bearer, no usage header/trailer | N/A | Max-cost fallback |
 | X-Cashu, non-streaming | `X-Tinfoil-Usage-Metrics` response header | Refund = `redeemed - actual_cost` |
-| X-Cashu, streaming | HTTP trailer | Refund = `redeemed - max_cost` |
+| X-Cashu, streaming | `X-Tinfoil-Usage-Metrics` HTTP trailer | Refund = `redeemed - actual_cost` (h11 captures trailers) |
+| X-Cashu, no usage header/trailer | N/A | Refund = `redeemed - max_cost` |
+
+### Cost response headers
+
+Since EHBP response bodies are opaque encrypted blobs, per-request cost cannot
+be injected into the JSON body (as done in the normal proxy flow). Instead,
+Routstr returns cost info as response headers:
+
+| Header | Auth | Description |
+|---|---|---|
+| `X-Routstr-Cost-Msats` | Bearer, X-Cashu | Total msats charged for this request |
+| `X-Routstr-Cost-Usd` | Bearer | USD equivalent of the charge |
+| `X-Routstr-Input-Cost-Msats` | Bearer, X-Cashu | msats attributed to input tokens |
+| `X-Routstr-Output-Cost-Msats` | Bearer, X-Cashu | msats attributed to output tokens |
+
+The client/Tinfoil SDK can read these headers from the HTTP response without
+needing to decrypt the body.
 
 ### Setup
 

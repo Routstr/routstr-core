@@ -203,21 +203,56 @@ def _prepare_ehbp_upstream_headers(
     return {**_strip_proxy_headers(headers), **dict(target_headers)}
 
 
+def _build_cost_info(
+    total_msats: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    input_msats: int = 0,
+    output_msats: int = 0,
+) -> dict:
+    """Build a cost-info dict with token counts and per-token-type costs."""
+    return {
+        "total_msats": total_msats,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "input_msats": input_msats,
+        "output_msats": output_msats,
+    }
+
+
+def _inject_cost_response_headers(
+    headers: dict[str, str], cost_info: dict
+) -> None:
+    """Add per-request cost headers to an EHBP response.
+
+    Since EHBP response bodies are opaque encrypted blobs, cost cannot be
+    injected into the JSON body. Instead, it goes into response headers that
+    the client/Tinfoil SDK can read without decrypting.
+    """
+    headers["X-Routstr-Cost-Msats"] = str(cost_info["total_msats"])
+    headers["X-Routstr-Input-Cost-Msats"] = str(cost_info["input_msats"])
+    headers["X-Routstr-Output-Cost-Msats"] = str(cost_info["output_msats"])
+
+
 async def _compute_ehbp_actual_cost(
     usage_header: str | None,
     model_obj: Model,
     max_cost_for_model: int,
-) -> int:
+) -> dict:
     """Compute the actual cost in msats from Tinfoil usage metrics.
 
     Falls back to ``max_cost_for_model`` when usage is absent (streaming) or
     cannot be priced. The result is clamped to ``[min_request_msat,
     max_cost_for_model]`` so the refund never exceeds the reservation and is
     never zero.
+
+    Returns a dict with ``total_msats``, ``input_tokens``, ``output_tokens``,
+    ``total_tokens``, ``input_msats``, and ``output_msats``.
     """
     usage_dict = parse_tinfoil_usage_metrics(usage_header)
     if usage_dict is None:
-        return max_cost_for_model
+        return _build_cost_info(max_cost_for_model)
 
     try:
         cost = await calculate_cost(
@@ -233,7 +268,7 @@ async def _compute_ehbp_actual_cost(
                 "usage": usage_dict,
             },
         )
-        return max_cost_for_model
+        return _build_cost_info(max_cost_for_model)
 
     if isinstance(cost, MaxCostData):
         logger.warning(
@@ -246,7 +281,7 @@ async def _compute_ehbp_actual_cost(
                 "cost_total_msats": cost.total_msats,
             },
         )
-        return max_cost_for_model
+        return _build_cost_info(max_cost_for_model)
     if isinstance(cost, CostData):
         actual = max(int(cost.total_msats), int(settings.min_request_msat))
         clamped = min(actual, max_cost_for_model)
@@ -260,7 +295,13 @@ async def _compute_ehbp_actual_cost(
                 "max_cost_for_model": max_cost_for_model,
             },
         )
-        return clamped
+        return _build_cost_info(
+            total_msats=clamped,
+            input_tokens=cost.input_tokens,
+            output_tokens=cost.output_tokens,
+            input_msats=cost.input_msats,
+            output_msats=cost.output_msats,
+        )
     # CostDataError
     logger.warning(
         "EHBP usage cost calculation error, falling back to max cost",
@@ -269,7 +310,7 @@ async def _compute_ehbp_actual_cost(
             "error": getattr(cost, "message", str(cost)),
         },
     )
-    return max_cost_for_model
+    return _build_cost_info(max_cost_for_model)
 
 
 def _extract_usage_from_response(
@@ -561,7 +602,7 @@ async def forward_ehbp_request(
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            await adjust_payment_for_tokens(
+            cost_data = await adjust_payment_for_tokens(
                 key,
                 {"model": model_obj.id, "usage": usage_dict},
                 session,
@@ -580,6 +621,25 @@ async def forward_ehbp_request(
             await finalize_ehbp_max_cost_payment(
                 key, session, max_cost_for_model, model_obj.id
             )
+            cost_data = {
+                "total_msats": max_cost_for_model,
+                "total_usd": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            }
+
+        # Build the cost_info dict from what adjust_payment_for_tokens returned
+        # or from the max-cost fallback. Fields match CostData/MaxCostData.dict().
+        cost_info = {
+            "total_msats": cost_data.get("total_msats", max_cost_for_model),
+            "input_tokens": cost_data.get("input_tokens", 0),
+            "output_tokens": cost_data.get("output_tokens", 0),
+            "total_tokens": cost_data.get("input_tokens", 0)
+            + cost_data.get("output_tokens", 0),
+            "input_msats": cost_data.get("input_msats", 0),
+            "output_msats": cost_data.get("output_msats", 0),
+        }
+        cost_usd = cost_data.get("total_usd", 0.0)
 
         # Build response headers, filtering out hop-by-hop headers
         response_headers: dict[str, str] = {}
@@ -593,6 +653,11 @@ async def forward_ehbp_request(
         for k, v in resp.headers:
             if k.lower() not in hop_by_hop:
                 response_headers[k] = v
+
+        # Surface per-request cost to the client. Since EHBP bodies are
+        # opaque, cost info can only go into response headers.
+        _inject_cost_response_headers(response_headers, cost_info)
+        response_headers["X-Routstr-Cost-Usd"] = str(cost_usd)
 
         async def _stream_body() -> AsyncIterator[bytes]:
             yield resp.body
@@ -727,9 +792,10 @@ async def forward_ehbp_x_cashu_request(
                 },
             )
 
-            actual_cost_msats = await _compute_ehbp_actual_cost(
+            cost_info = await _compute_ehbp_actual_cost(
                 usage_header, model_obj, max_cost_for_model
             )
+            actual_cost_msats = cost_info["total_msats"]
             refund_amount = amount - _msats_to_unit_amount(actual_cost_msats, unit)
             logger.info(
                 "EHBP X-Cashu refund computed",
@@ -755,6 +821,10 @@ async def forward_ehbp_x_cashu_request(
             for k, v in resp.headers:
                 if k.lower() not in hop_by_hop:
                     response_headers[k] = v
+
+            # Surface per-request cost to the client. Since EHBP bodies are
+            # opaque encrypted blobs, cost can only go into response headers.
+            _inject_cost_response_headers(response_headers, cost_info)
 
             if refund_amount > 0:
                 response_headers["X-Cashu"] = await send_cashu_refund(
