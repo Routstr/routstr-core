@@ -38,3 +38,4 @@ proof_backups
 
 *.todo
 ui_out
+.worktrees

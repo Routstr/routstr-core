@@ -8,9 +8,8 @@ from dataclasses import dataclass, field
 from typing import Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
-from fastapi import BackgroundTasks, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi import Request
+from fastapi.responses import Response
 from sqlalchemy import case
 from sqlmodel import col, update
 
@@ -37,6 +36,7 @@ from ..payment.cost_calculation import (
 from ..payment.helpers import create_error_response
 from ..payment.models import Model
 from ..wallet import recieve_token, send_token
+from .tinfoil_trailer import forward_with_trailer
 
 logger = get_logger(__name__)
 
@@ -85,6 +85,13 @@ def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
         if "total" in parts:
             result["total_tokens"] = parts["total"]
         return result
+    logger.warning(
+        "Failed to parse X-Tinfoil-Usage-Metrics header",
+        extra={
+            "header_value": header_value,
+            "parsed_parts": parts,
+        },
+    )
     return None
 
 
@@ -229,10 +236,31 @@ async def _compute_ehbp_actual_cost(
         return max_cost_for_model
 
     if isinstance(cost, MaxCostData):
+        logger.warning(
+            "EHBP calculate_cost returned MaxCostData (no model pricing), "
+            "falling back to max cost",
+            extra={
+                "model": model_obj.id,
+                "max_cost_for_model": max_cost_for_model,
+                "usage": usage_dict,
+                "cost_total_msats": cost.total_msats,
+            },
+        )
         return max_cost_for_model
     if isinstance(cost, CostData):
         actual = max(int(cost.total_msats), int(settings.min_request_msat))
-        return min(actual, max_cost_for_model)
+        clamped = min(actual, max_cost_for_model)
+        logger.info(
+            "EHBP actual cost computed from usage metrics",
+            extra={
+                "model": model_obj.id,
+                "usage": usage_dict,
+                "cost_total_msats": cost.total_msats,
+                "clamped_msats": clamped,
+                "max_cost_for_model": max_cost_for_model,
+            },
+        )
+        return clamped
     # CostDataError
     logger.warning(
         "EHBP usage cost calculation error, falling back to max cost",
@@ -242,6 +270,28 @@ async def _compute_ehbp_actual_cost(
         },
     )
     return max_cost_for_model
+
+
+def _extract_usage_from_response(
+    resp_headers: list[tuple[str, str]],
+    trailers: list[tuple[str, str]],
+) -> str | None:
+    """Find X-Tinfoil-Usage-Metrics in response headers or trailers.
+
+    Non-streaming responses put usage in the response header. Streaming
+    responses put it in an HTTP trailer (declared via the ``Trailer:`` header).
+    httpx/httpcore silently discard trailers, so we use h11 directly when
+    forwarding EHBP requests.
+    """
+    # Check response headers first (non-streaming case)
+    for k, v in resp_headers:
+        if k.lower() == _RESPONSE_USAGE_HEADER.lower():
+            return v
+    # Check trailers (streaming case)
+    for k, v in trailers:
+        if k.lower() == _RESPONSE_USAGE_HEADER.lower():
+            return v
+    return None
 
 
 @dataclass(frozen=True)
@@ -269,7 +319,10 @@ async def finalize_ehbp_max_cost_payment(
     now = int(time.time())
 
     cleared_reserved_at = case(
-        (col(ApiKey.reserved_balance) - max_cost_for_model > 0, col(ApiKey.reserved_at)),
+        (
+            col(ApiKey.reserved_balance) - max_cost_for_model > 0,
+            col(ApiKey.reserved_at),
+        ),
         else_=None,
     )
     safe_reserved = case(
@@ -407,21 +460,27 @@ async def forward_ehbp_request(
     max_cost_for_model: int,
     session: AsyncSession,
     model_obj: Model,
-) -> Response | StreamingResponse:
+) -> Response:
     """Forward an EHBP bearer-auth request and finalize billing.
 
     Sends ``X-Tinfoil-Request-Usage-Metrics: true`` so the enclave returns token
     counts in the ``X-Tinfoil-Usage-Metrics`` response header (non-streaming) or
-    trailer (streaming). When usage is available in the response header,
-    billing is finalized to the actual token cost via
-    :func:`adjust_payment_for_tokens`. When usage is not available (streaming
-    or unsupported upstream), billing falls back to max-cost.
+    trailer (streaming). Usage is captured from both response headers and HTTP
+    trailers via an h11-based client (httpx silently discards trailers).
     """
     target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
 
     provider_type = getattr(upstream, "provider_type", "unknown")
     target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
     upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers)
+
+    # Merge query params into the target URL since forward_with_trailer
+    # doesn't have a separate params argument.
+    query_params = upstream.prepare_params(path, request.query_params)  # type: ignore[attr-defined]
+    if query_params:
+        from urllib.parse import urlencode
+
+        target_url = f"{target_url}?{urlencode(query_params)}"
 
     logger.debug(
         "Forwarding EHBP request to upstream",
@@ -435,54 +494,61 @@ async def forward_ehbp_request(
         },
     )
 
-    client = httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(retries=1),
-        timeout=None,
-    )
-
     try:
-        response = await client.send(
-            client.build_request(
-                request.method,
-                target_url,
-                headers=upstream_headers,
-                content=request_body,
-                params=upstream.prepare_params(path, request.query_params),  # type: ignore[attr-defined]
-            ),
-            stream=True,
+        resp = await forward_with_trailer(
+            method=request.method,
+            url=target_url,
+            headers=upstream_headers,
+            body=request_body or b"",
         )
 
-        if response.status_code != 200:
-            body_bytes = await response.aread()
-            body_preview = body_bytes.decode("utf-8", errors="ignore").strip()[:500]
+        if resp.status_code != 200:
+            body_preview = resp.body.decode("utf-8", errors="ignore").strip()[:500]
             logger.error(
                 "EHBP upstream %s returned %s for model=%s path=%s: %s",
                 provider_type,
-                response.status_code,
+                resp.status_code,
                 model_obj.id,
                 path,
                 body_preview or "<empty>",
                 extra={
                     "provider": provider_type,
                     "model": model_obj.id,
-                    "status_code": response.status_code,
+                    "status_code": resp.status_code,
                     "path": path,
                     "body_preview": body_preview,
                 },
             )
-            await response.aclose()
-            await client.aclose()
             raise UpstreamError(
-                f"EHBP upstream {provider_type} returned {response.status_code} "
+                f"EHBP upstream {provider_type} returned {resp.status_code} "
                 f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
-                status_code=response.status_code,
+                status_code=resp.status_code,
             )
 
-        # Check for usage metrics in the response header (non-streaming case).
-        # For streaming requests, usage is delivered as an HTTP trailer after
-        # the body completes and is not available here — fall back to max-cost.
-        usage_header = response.headers.get(_RESPONSE_USAGE_HEADER)
+        # Check for usage metrics in response headers (non-streaming) or
+        # trailers (streaming). h11 captures both.
+        usage_header = _extract_usage_from_response(resp.headers, resp.trailers)
         usage_dict = parse_tinfoil_usage_metrics(usage_header)
+        usage_source = (
+            "header"
+            if any(k.lower() == _RESPONSE_USAGE_HEADER.lower() for k, _ in resp.headers)
+            else ("trailer" if resp.trailers else "none")
+        )
+
+        logger.info(
+            "EHBP upstream response received",
+            extra={
+                "model": model_obj.id,
+                "provider": provider_type,
+                "target_url": target_url,
+                "status_code": resp.status_code,
+                "usage_header_raw": usage_header,
+                "usage_source": usage_source,
+                "has_trailers": bool(resp.trailers),
+                "body_length": len(resp.body),
+                "key_hash": key.hashed_key[:8] + "...",
+            },
+        )
 
         if usage_dict is not None:
             logger.info(
@@ -491,6 +557,7 @@ async def forward_ehbp_request(
                     "model": model_obj.id,
                     "provider": provider_type,
                     "usage": usage_dict,
+                    "usage_source": usage_source,
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
@@ -501,29 +568,39 @@ async def forward_ehbp_request(
                 max_cost_for_model,
             )
         else:
+            logger.warning(
+                "EHBP usage metrics not found in headers or trailers, "
+                "falling back to max-cost billing",
+                extra={
+                    "model": model_obj.id,
+                    "provider": provider_type,
+                    "key_hash": key.hashed_key[:8] + "...",
+                },
+            )
             await finalize_ehbp_max_cost_payment(
                 key, session, max_cost_for_model, model_obj.id
             )
 
-        background_tasks = BackgroundTasks()
-        background_tasks.add_task(response.aclose)
-        background_tasks.add_task(client.aclose)
+        # Build response headers, filtering out hop-by-hop headers
+        response_headers: dict[str, str] = {}
+        hop_by_hop = {
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "trailer",
+            "content-length",
+        }
+        for k, v in resp.headers:
+            if k.lower() not in hop_by_hop:
+                response_headers[k] = v
 
-        return StreamingResponse(
-            response.aiter_bytes(),
-            status_code=response.status_code,
-            headers=dict(response.headers),
-            background=background_tasks,
+        return Response(
+            content=resp.body,
+            status_code=resp.status_code,
+            headers=response_headers,
         )
     except UpstreamError:
-        await client.aclose()
         raise
-    except httpx.RequestError as exc:
-        await client.aclose()
-        raise UpstreamError(
-            f"Error connecting to EHBP upstream: {type(exc).__name__}",
-            status_code=502,
-        ) from exc
     except Exception as exc:
         tb = traceback.format_exc()
         logger.error(
@@ -532,12 +609,11 @@ async def forward_ehbp_request(
                 "error": str(exc),
                 "error_type": type(exc).__name__,
                 "method": request.method,
-                "url": target.url,
+                "url": target_url,
                 "path": path,
                 "traceback": tb,
             },
         )
-        await client.aclose()
         raise UpstreamError("An unexpected server error occurred", status_code=500)
 
 
@@ -549,14 +625,13 @@ async def forward_ehbp_x_cashu_request(
     max_cost_for_model: int,
     model_obj: Model,
     upstream: object,
-) -> Response | StreamingResponse:
+) -> Response:
     """Redeem X-Cashu, forward EHBP opaquely, and refund unspent value.
 
     When the upstream returns ``X-Tinfoil-Usage-Metrics`` in the response
-    header (non-streaming), the refund is computed from the actual token cost
-    instead of max_cost_for_model. For streaming requests, usage is only
-    available as an HTTP trailer after the body completes and the refund
-    falls back to max_cost_for_model.
+    header (non-streaming) or as an HTTP trailer (streaming), the refund is
+    computed from the actual token cost. Trailers are captured via an h11-based
+    client because httpx silently discards them.
     """
     request_id = getattr(request.state, "request_id", None)
     amount = 0
@@ -587,26 +662,22 @@ async def forward_ehbp_x_cashu_request(
         upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers)
         request_body = await request.body()
 
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
+        # Merge query params into the target URL
+        query_params = upstream.prepare_params(path, request.query_params)  # type: ignore[attr-defined]
+        if query_params:
+            from urllib.parse import urlencode
+
+            target_url = f"{target_url}?{urlencode(query_params)}"
 
         try:
-            response = await client.send(
-                client.build_request(
-                    request.method,
-                    target_url,
-                    headers=upstream_headers,
-                    content=request_body,
-                    params=upstream.prepare_params(path, request.query_params),  # type: ignore[attr-defined]
-                ),
-                stream=True,
+            resp = await forward_with_trailer(
+                method=request.method,
+                url=target_url,
+                headers=upstream_headers,
+                body=request_body,
             )
 
-            if response.status_code != 200:
-                await response.aclose()
-                await client.aclose()
+            if resp.status_code != 200:
                 refund_token = await send_cashu_refund(amount, unit, mint, request_id)
                 error_response = Response(
                     content=json.dumps(
@@ -614,42 +685,85 @@ async def forward_ehbp_x_cashu_request(
                             "error": {
                                 "message": "Error forwarding EHBP request to upstream",
                                 "type": "upstream_error",
-                                "code": response.status_code,
+                                "code": resp.status_code,
                                 "refund_token": refund_token,
                             }
                         }
                     ),
-                    status_code=response.status_code,
+                    status_code=resp.status_code,
                     media_type="application/json",
                 )
                 error_response.headers["X-Cashu"] = refund_token
                 return error_response
 
-            # Compute refund from actual usage when available (non-streaming),
-            # otherwise fall back to max_cost_for_model.
-            usage_header = response.headers.get(_RESPONSE_USAGE_HEADER)
+            # Compute refund from actual usage when available — check both
+            # response headers (non-streaming) and trailers (streaming).
+            usage_header = _extract_usage_from_response(resp.headers, resp.trailers)
+            usage_source = (
+                "header"
+                if any(
+                    k.lower() == _RESPONSE_USAGE_HEADER.lower() for k, _ in resp.headers
+                )
+                else ("trailer" if resp.trailers else "none")
+            )
+
+            logger.info(
+                "EHBP X-Cashu upstream response received",
+                extra={
+                    "model": model_obj.id,
+                    "provider": provider_type,
+                    "target_url": target_url,
+                    "status_code": resp.status_code,
+                    "usage_header_raw": usage_header,
+                    "usage_source": usage_source,
+                    "has_trailers": bool(resp.trailers),
+                    "body_length": len(resp.body),
+                    "redeemed_amount": amount,
+                    "unit": unit,
+                    "max_cost_for_model": max_cost_for_model,
+                },
+            )
+
             actual_cost_msats = await _compute_ehbp_actual_cost(
                 usage_header, model_obj, max_cost_for_model
             )
             refund_amount = amount - _msats_to_unit_amount(actual_cost_msats, unit)
-            response_headers = _strip_proxy_headers(dict(response.headers))
+            logger.info(
+                "EHBP X-Cashu refund computed",
+                extra={
+                    "model": model_obj.id,
+                    "redeemed_amount": amount,
+                    "actual_cost_msats": actual_cost_msats,
+                    "refund_amount": refund_amount,
+                    "unit": unit,
+                    "usage_source": usage_source,
+                },
+            )
+
+            # Build response headers, filtering out hop-by-hop headers
+            response_headers: dict[str, str] = {}
+            hop_by_hop = {
+                "connection",
+                "keep-alive",
+                "transfer-encoding",
+                "trailer",
+                "content-length",
+            }
+            for k, v in resp.headers:
+                if k.lower() not in hop_by_hop:
+                    response_headers[k] = v
+
             if refund_amount > 0:
                 response_headers["X-Cashu"] = await send_cashu_refund(
                     refund_amount, unit, mint, request_id
                 )
 
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
-
-            return StreamingResponse(
-                response.aiter_bytes(),
-                status_code=response.status_code,
+            return Response(
+                content=resp.body,
+                status_code=resp.status_code,
                 headers=response_headers,
-                background=background_tasks,
             )
         except Exception:
-            await client.aclose()
             raise
 
     except Exception as e:
