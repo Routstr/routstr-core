@@ -5,11 +5,11 @@ import math
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import AsyncIterator, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import case
 from sqlmodel import col, update
 
@@ -460,7 +460,7 @@ async def forward_ehbp_request(
     max_cost_for_model: int,
     session: AsyncSession,
     model_obj: Model,
-) -> Response:
+) -> Response | StreamingResponse:
     """Forward an EHBP bearer-auth request and finalize billing.
 
     Sends ``X-Tinfoil-Request-Usage-Metrics: true`` so the enclave returns token
@@ -594,8 +594,11 @@ async def forward_ehbp_request(
             if k.lower() not in hop_by_hop:
                 response_headers[k] = v
 
-        return Response(
-            content=resp.body,
+        async def _stream_body() -> AsyncIterator[bytes]:
+            yield resp.body
+
+        return StreamingResponse(
+            _stream_body(),
             status_code=resp.status_code,
             headers=response_headers,
         )
@@ -625,7 +628,7 @@ async def forward_ehbp_x_cashu_request(
     max_cost_for_model: int,
     model_obj: Model,
     upstream: object,
-) -> Response:
+) -> Response | StreamingResponse:
     """Redeem X-Cashu, forward EHBP opaquely, and refund unspent value.
 
     When the upstream returns ``X-Tinfoil-Usage-Metrics`` in the response
@@ -758,8 +761,11 @@ async def forward_ehbp_x_cashu_request(
                     refund_amount, unit, mint, request_id
                 )
 
-            return Response(
-                content=resp.body,
+            async def _stream_body_xcashu() -> AsyncIterator[bytes]:
+                yield resp.body
+
+            return StreamingResponse(
+                _stream_body_xcashu(),
                 status_code=resp.status_code,
                 headers=response_headers,
             )
