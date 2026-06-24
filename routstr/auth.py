@@ -1044,7 +1044,7 @@ async def adjust_payment_for_tokens(
                         total_spent=col(ApiKey.total_spent) + chargeable,
                     )
                 )
-                result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
+                await session.exec(finalize_stmt)  # type: ignore[call-overload]
 
                 if billing_key.hashed_key != key.hashed_key:
                     child_stmt = (
@@ -1059,51 +1059,38 @@ async def adjust_payment_for_tokens(
 
                 await session.commit()
 
-                if result.rowcount:
-                    await session.refresh(billing_key)
-                    if billing_key.hashed_key != key.hashed_key:
-                        await session.refresh(key)
-                    cost.total_msats = total_cost_msats
-                    logger.info(
-                        "Finalized payment with additional charge",
-                        extra={
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "charged_amount": total_cost_msats,
-                            "new_balance": billing_key.balance,
-                            "model": model,
-                        },
-                    )
-                    await _accumulate_fee(total_cost_msats)
-                    payments_logger.info(
-                        "FINALIZE",
-                        extra={
-                            "event": "finalize",
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "model": model,
-                            "cost_reserved": deducted_max_cost,
-                            "cost_charged": total_cost_msats,
-                            "input_tokens": cost.input_tokens,
-                            "output_tokens": cost.output_tokens,
-                            "balance": billing_key.balance,
-                            "reserved_balance": billing_key.reserved_balance,
-                            "total_spent": billing_key.total_spent,
-                            "finalize_type": "overrun",
-                        },
-                    )
-                else:
-                    # Guard fired: reservation was already released by a concurrent
-                    # finalization for this key. Nothing left to do.
-                    logger.warning(
-                        "Finalization skipped - reservation already released",
-                        extra={
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "attempted_charge": total_cost_msats,
-                            "model": model,
-                        },
-                    )
+                await session.refresh(billing_key)
+                if billing_key.hashed_key != key.hashed_key:
+                    await session.refresh(key)
+                cost.total_msats = total_cost_msats
+                logger.info(
+                    "Finalized payment with additional charge",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                        "charged_amount": total_cost_msats,
+                        "new_balance": billing_key.balance,
+                        "model": model,
+                    },
+                )
+                await _accumulate_fee(total_cost_msats)
+                payments_logger.info(
+                    "FINALIZE",
+                    extra={
+                        "event": "finalize",
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                        "model": model,
+                        "cost_reserved": deducted_max_cost,
+                        "cost_charged": total_cost_msats,
+                        "input_tokens": cost.input_tokens,
+                        "output_tokens": cost.output_tokens,
+                        "balance": billing_key.balance,
+                        "reserved_balance": billing_key.reserved_balance,
+                        "total_spent": billing_key.total_spent,
+                        "finalize_type": "overrun",
+                    },
+                )
             else:
                 # Refund some of the base cost
                 refund = abs(cost_difference)
