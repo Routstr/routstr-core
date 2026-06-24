@@ -262,3 +262,22 @@ async def test_transaction_audit_trail_preserved(patched_db_engine: None) -> Non
         assert surviving is not None, "Financial audit row must survive key deletion"
         assert surviving.api_key_hashed_key is None, "Link must be nulled, not dangling"
         assert surviving.amount == 21
+
+
+@pytest.mark.asyncio
+async def test_periodic_prune_disabled_returns_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-positive intervals disable the janitor."""
+    from unittest.mock import AsyncMock
+
+    from routstr import auth
+    from routstr.core.settings import settings
+
+    monkeypatch.setattr(settings, "dead_key_prune_interval_seconds", 0)
+    sleep_mock = AsyncMock()
+    monkeypatch.setattr(auth.asyncio, "sleep", sleep_mock)
+
+    await auth.periodic_dead_key_prune()
+
+    sleep_mock.assert_not_called()

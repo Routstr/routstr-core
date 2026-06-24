@@ -150,6 +150,7 @@ async def test_credit_balance() -> None:
     mock_key.balance = 5000000
     mock_key.hashed_key = "test_hash"
     mock_session = AsyncMock()
+    mock_session.exec.return_value.rowcount = 1
 
     # Mock session.refresh to update the balance (simulates DB reload)
     async def mock_refresh(key: ApiKey) -> None:
@@ -203,6 +204,38 @@ async def test_credit_balance_rejects_zero_amount() -> None:
     # Critically: no balance UPDATE and no commit happened, so the caller's
     # uncommitted key row rolls back instead of persisting as an orphan.
     assert not mock_session.exec.called
+    assert not mock_session.commit.called
+
+
+@pytest.mark.asyncio
+async def test_credit_balance_rejects_missing_key() -> None:
+    """A top-up must fail if the key was pruned after redemption."""
+    token_data = {
+        "token": [{"mint": "http://mint:3338", "proofs": [{"amount": 1000}]}],
+        "unit": "sat",
+    }
+    token_json = json.dumps(token_data)
+    token_b64 = base64.urlsafe_b64encode(token_json.encode()).decode()
+    token_str = f"cashuA{token_b64}"
+
+    mock_key = Mock()
+    mock_key.balance = 0
+    mock_key.hashed_key = "test_hash"
+    mock_session = AsyncMock()
+    mock_session.exec.return_value.rowcount = 0
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
+        with patch(
+            "routstr.wallet.recieve_token",
+            return_value=(1000, "sat", "http://mint:3338"),
+        ):
+            with pytest.raises(ValueError, match="disappeared"):
+                await credit_balance(token_str, mock_key, mock_session)
+
+    # UPDATE matched nothing; committing would hide the failed credit.
+    assert mock_session.exec.called
     assert not mock_session.commit.called
 
 
