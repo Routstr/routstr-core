@@ -369,7 +369,10 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
 
 else:
     logger.warning(
-        f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
+        "UI dist directory not found at %s; serving API only. Run `make ui-build` "
+        "to build the static UI served from here, or `make ui-dev` for the Next.js "
+        "dev server with hot reload on :3000 (it targets this backend on :8000).",
+        UI_DIST_PATH,
     )
 
     @app.get("/", include_in_schema=False)
