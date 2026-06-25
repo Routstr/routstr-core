@@ -549,7 +549,11 @@ async def credit_balance(
             .where(col(db.ApiKey.hashed_key) == key.hashed_key)
             .values(balance=(db.ApiKey.balance) + amount)
         )
-        await session.exec(stmt)  # type: ignore[call-overload]
+        result = await session.exec(stmt)  # type: ignore[call-overload]
+        # If pruning removed this key after redemption, do not commit a no-op
+        # balance update and pretend the top-up succeeded.
+        if (getattr(result, "rowcount", 0) or 0) == 0:
+            raise ValueError("API key disappeared before credit could be recorded")
         await session.commit()
         await session.refresh(key)
 

@@ -9,9 +9,10 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import UniqueConstraint, delete
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
+from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -123,6 +124,63 @@ async def release_stale_reservations(
             extra={"released_keys": released, "max_age_seconds": max_age_seconds},
         )
     return released
+
+
+async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> int:
+    """Delete dead parentless API keys; return the count removed.
+
+    Dead = 0 balance/reservation/spend/requests, older than the grace period,
+    no parent, no children, no pending invoice. Cashu rows are unlinked (not
+    deleted) first to keep the audit trail.
+    """
+    cutoff = int(time.time()) - min_age_seconds
+
+    child = aliased(ApiKey)
+    has_children = (
+        select(child.hashed_key).where(
+            col(child.parent_key_hash) == col(ApiKey.hashed_key)
+        )
+    ).exists()
+    pending_invoice = (
+        select(LightningInvoice.id)
+        .where(col(LightningInvoice.api_key_hash) == col(ApiKey.hashed_key))
+        .where(col(LightningInvoice.status) == "pending")
+    ).exists()
+
+    eligible_hashes = (
+        select(ApiKey.hashed_key)
+        .where(col(ApiKey.balance) == 0)
+        .where(col(ApiKey.reserved_balance) == 0)
+        .where(col(ApiKey.total_spent) == 0)
+        .where(col(ApiKey.total_requests) == 0)
+        .where(col(ApiKey.parent_key_hash).is_(None))
+        .where(
+            (col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff)
+        )
+        .where(~pending_invoice)
+        .where(~has_children)
+    )
+
+    # Unlink transactions rather than cascade-deleting them, so the financial
+    # audit trail survives. The eligibility predicate is re-evaluated inside both
+    # statements so a key that gained balance mid-run is left untouched.
+    await session.exec(  # type: ignore[call-overload]
+        update(CashuTransaction)
+        .where(col(CashuTransaction.api_key_hashed_key).in_(eligible_hashes))
+        .values(api_key_hashed_key=None)
+    )
+
+    result = await session.exec(  # type: ignore[call-overload]
+        delete(ApiKey).where(col(ApiKey.hashed_key).in_(eligible_hashes))
+    )
+    await session.commit()
+
+    pruned = int(result.rowcount or 0)
+    logger.info(
+        "Pruned dead API keys",
+        extra={"pruned_keys": pruned, "min_age_seconds": min_age_seconds},
+    )
+    return pruned
 
 
 class ModelRow(SQLModel, table=True):  # type: ignore

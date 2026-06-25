@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     stale_reservation_timeout_seconds: int = Field(
         default=300, env="STALE_RESERVATION_TIMEOUT_SECONDS"
     )
+    # Background prune of dead (zero balance, never used) API keys.
+    # Interval 0 disables it; min-age is a grace period (default 1 week).
+    dead_key_prune_interval_seconds: int = Field(
+        default=3600, env="DEAD_KEY_PRUNE_INTERVAL_SECONDS"
+    )
+    dead_key_min_age_seconds: int = Field(
+        default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
+    )
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")

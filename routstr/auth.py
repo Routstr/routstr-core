@@ -1297,6 +1297,35 @@ async def periodic_key_reset() -> None:
             logger.error(f"Error in periodic_key_reset: {e}")
 
 
+async def periodic_dead_key_prune() -> None:
+    """Periodically prune dead API keys. Interval <= 0 disables it.
+
+    See ``prune_dead_api_keys`` for eligibility.
+    """
+    from .core.db import create_session, prune_dead_api_keys
+
+    interval = settings.dead_key_prune_interval_seconds
+    if interval <= 0:
+        logger.info("Dead-key pruning disabled (interval <= 0)")
+        return
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+
+        try:
+            async with create_session() as session:
+                await prune_dead_api_keys(
+                    session, settings.dead_key_min_age_seconds
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in periodic_dead_key_prune: {e}")
+
+
 STALE_RESERVATION_SWEEP_INTERVAL_SECONDS: int = 60
 
 
