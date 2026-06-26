@@ -116,9 +116,24 @@ export function AdminSettings() {
       setSaving(true);
       setError('');
 
-      const updatedData = await AdminService.updateSettings(settings);
-      setSettings(updatedData as SettingsData);
-      setInitialSettings(updatedData as SettingsData);
+      // The nsec is a secret with its own endpoint (the general settings PATCH
+      // strips it); only send it when the operator actually changed it, so an
+      // untouched redacted value is never written back. The npub is derived
+      // server-side from the new nsec — fold it into the settings payload so the
+      // persisted blob stays consistent with the stored key.
+      let settingsPayload = settings;
+      if (hasFieldChanged('nsec')) {
+        const result = await AdminService.updateNsec(
+          (settings.nsec as string) || ''
+        );
+        settingsPayload = { ...settings, npub: result.npub };
+      }
+
+      const updatedData = (await AdminService.updateSettings(
+        settingsPayload
+      )) as SettingsData;
+      setSettings(updatedData);
+      setInitialSettings(updatedData);
       toast.success('Settings saved successfully');
     } catch (err) {
       const message =
@@ -140,8 +155,8 @@ export function AdminSettings() {
         return;
       }
 
-      if (passwordData.new_password.length < 6) {
-        setPasswordError('New password must be at least 6 characters');
+      if (passwordData.new_password.length < 8) {
+        setPasswordError('New password must be at least 8 characters');
         return;
       }
 
@@ -944,7 +959,7 @@ export function AdminSettings() {
                     new_password: e.target.value,
                   }))
                 }
-                placeholder='Enter new password (min 6 characters)'
+                placeholder='Enter new password (min 8 characters)'
               />
             </div>
 
