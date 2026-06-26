@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,7 +28,6 @@ class Settings(BaseSettings):
     # Core
     upstream_base_url: str = Field(default="", env="UPSTREAM_BASE_URL")
     upstream_api_key: str = Field(default="", env="UPSTREAM_API_KEY")
-    admin_password: str = Field(default="", env="ADMIN_PASSWORD")
 
     # Node info
     name: str = Field(default="ARoutstrNode", env="NAME")
@@ -132,8 +133,65 @@ def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+# Secrets are credentials, not config: they live in the encrypted/hashed Secret
+# store (and decrypted in-memory for runtime use), never in the persisted
+# settings blob. ``admin_password`` is gone from the model entirely;
+# ``nsec``/``upstream_api_key`` remain live fields but are stripped from every
+# blob write so they are never written back to plaintext. See
+# ``bootstrap_secrets`` and ``routstr.core.vault``.
+SECRET_FIELDS = frozenset({"admin_password", "nsec", "upstream_api_key"})
+
+
+def _strip_secret_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``data`` without any secret fields (for persistence)."""
+    return {k: v for k, v in data.items() if k not in SECRET_FIELDS}
+
+
+def _apply_to_live_settings(data: dict[str, Any]) -> None:
+    """Apply ``data`` onto the live ``settings`` for all in-process importers.
+
+    Secrets are owned by ``bootstrap_secrets`` (which decrypts the nsec into
+    memory before this runs) — they are never persisted to the blob, so ``data``
+    re-derived from the secret-free blob carries empty secret values. Skip those
+    empty overwrites so a live secret is never clobbered; a non-empty value
+    (legacy env, or a not-yet-stripped blob mid-migration) is still applied.
+    """
+    live = settings.dict()
+    for k, v in data.items():
+        if k in SECRET_FIELDS and not v and live.get(k):
+            continue
+        setattr(settings, k, v)
+
+
 def _compute_primary_mint(cashu_mints: list[str]) -> str:
     return cashu_mints[0] if cashu_mints else "https://mint.minibits.cash/Bitcoin"
+
+
+def derive_npub_from_nsec(nsec: str) -> str | None:
+    """Derive the npub (bech32) from an nsec or 64-char hex private key, or None.
+
+    Parsing is delegated to :func:`routstr.nostr.listing.nsec_to_keypair`, the
+    single place that knows the nsec/hex formats (and already returns ``None`` on
+    any unusable input); this only bech32-encodes the resulting public key. The
+    contract stays "return None on unusable input", so a bad key never crashes
+    boot.
+    """
+    try:
+        from nostr.key import PublicKey  # type: ignore
+
+        from ..nostr.listing import nsec_to_keypair
+    except ImportError:
+        return None
+
+    keypair = nsec_to_keypair(nsec)
+    if keypair is None:
+        return None
+    _privkey_hex, pubkey_hex = keypair
+
+    try:
+        return PublicKey(bytes.fromhex(pubkey_hex)).bech32()
+    except (ValueError, AttributeError):
+        return None
 
 
 def resolve_bootstrap() -> Settings:
@@ -190,23 +248,9 @@ def resolve_bootstrap() -> Settings:
             pass
     # Derive NPUB from NSEC if not provided
     if not base.npub and base.nsec:
-        try:
-            from nostr.key import PrivateKey  # type: ignore
-
-            if base.nsec.startswith("nsec"):
-                pk = PrivateKey.from_nsec(base.nsec)
-            elif len(base.nsec) == 64:
-                pk = PrivateKey(bytes.fromhex(base.nsec))
-            else:
-                pk = None
-            if pk is not None:
-                try:
-                    base.npub = pk.public_key.bech32()
-                except Exception:
-                    # Fallback to hex if bech32 not available
-                    base.npub = pk.public_key.hex()
-        except Exception:
-            pass
+        npub = derive_npub_from_nsec(base.nsec)
+        if npub:
+            base.npub = npub
     if not base.cors_origins:
         base.cors_origins = ["*"]
     if not base.primary_mint:
@@ -256,15 +300,14 @@ class SettingsService:
                     text(
                         "INSERT INTO settings (id, data, updated_at) VALUES (1, :data, :updated_at)"
                     ).bindparams(
-                        data=json.dumps(env_resolved.dict()),
+                        data=json.dumps(_strip_secret_fields(env_resolved.dict())),
                         updated_at=datetime.now(timezone.utc),
                     )
                 )
                 await db_session.commit()
                 cls._current = settings
                 # Update the existing instance in-place for all live importers
-                for k, v in env_resolved.dict().items():
-                    setattr(settings, k, v)
+                _apply_to_live_settings(env_resolved.dict())
                 return cls._current
 
             db_id, db_data, _updated_at = row
@@ -291,20 +334,24 @@ class SettingsService:
                     merged_dict.get("cashu_mints", [])
                 )
 
-            if db_json_raw != merged_dict:
+            # Persist without secrets; compare against the stripped target so a
+            # legacy blob that still carries plaintext secrets gets rewritten
+            # (and thereby sunset) even when its non-secret values are unchanged.
+            persisted = _strip_secret_fields(merged_dict)
+            if db_json_raw != persisted:
                 await db_session.exec(  # type: ignore
                     text(
                         "UPDATE settings SET data = :data, updated_at = :updated_at WHERE id = 1"
                     ).bindparams(
-                        data=json.dumps(merged_dict),
+                        data=json.dumps(persisted),
                         updated_at=datetime.now(timezone.utc),
                     )
                 )
                 await db_session.commit()
 
             # Update the existing instance in-place for all live importers
-            for k, v in merged_dict.items():
-                setattr(settings, k, v)
+            # (keeps the decrypted nsec/upstream_api_key live in memory).
+            _apply_to_live_settings(merged_dict)
             cls._current = settings
             return cls._current
 
@@ -326,7 +373,7 @@ class SettingsService:
                 text(
                     "UPDATE settings SET data = :data, updated_at = :updated_at WHERE id = 1"
                 ).bindparams(
-                    data=json.dumps(candidate.dict()),
+                    data=json.dumps(_strip_secret_fields(candidate.dict())),
                     updated_at=datetime.now(timezone.utc),
                 )
             )
@@ -355,3 +402,110 @@ class SettingsService:
                     setattr(settings, k, v)
             cls._current = settings
             return settings
+
+
+async def _read_raw_settings_blob(db_session: AsyncSession) -> dict[str, Any]:
+    """Best-effort read of the raw persisted settings JSON (may not exist yet)."""
+    from sqlmodel import text
+
+    try:
+        result = await db_session.exec(  # type: ignore
+            text("SELECT data FROM settings WHERE id = 1")
+        )
+        row = result.first()
+    except Exception:
+        return {}
+    if row is None:
+        return {}
+    (data_str,) = row
+    try:
+        data = json.loads(data_str) if isinstance(data_str, str) else dict(data_str)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _legacy_plaintext(
+    raw_blob: dict[str, Any], env_name: str, blob_key: str
+) -> str | None:
+    """Legacy plaintext for a secret: env first, then the old settings blob."""
+    env_value = os.environ.get(env_name)
+    if env_value:
+        return env_value
+    blob_value = raw_blob.get(blob_key)
+    if isinstance(blob_value, str) and blob_value:
+        return blob_value
+    return None
+
+
+async def bootstrap_secrets(db_session: AsyncSession) -> None:
+    """Move node secrets into the encrypted/hashed Secret store at startup.
+
+    Per secret:
+      * column already set -> use it (the nsec is decrypted into the in-memory
+        ``settings``; a wrong ROUTSTR_SECRET_KEY surfaces as a clear fail-fast).
+      * column empty but legacy plaintext exists (env, or the old settings
+        blob) -> transform it (hash the password / encrypt the nsec) into the
+        column.
+      * nothing (admin password only) -> generate a strong random password,
+        hash it, and log it once with the /admin URL.
+    """
+    from cryptography.fernet import InvalidToken
+
+    from . import vault
+    from .db import get_secret
+    from .logging import get_logger
+
+    logger = get_logger(__name__)
+
+    raw_blob = await _read_raw_settings_blob(db_session)
+    secret = await get_secret(db_session)
+    changed = False
+
+    # Admin password — one-way scrypt hash.
+    if secret.admin_password_hash is None:
+        legacy_password = _legacy_plaintext(
+            raw_blob, "ADMIN_PASSWORD", "admin_password"
+        )
+        if legacy_password:
+            secret.admin_password_hash = vault.hash_password(legacy_password)
+        else:
+            generated = secrets.token_urlsafe(24)
+            secret.admin_password_hash = vault.hash_password(generated)
+            admin_url = (settings.http_url or "http://localhost:8000").rstrip("/")
+            logger.warning(
+                "No admin password set; generated a temporary one (shown only "
+                "now): %s\nLog in at %s/admin and change it from the dashboard "
+                "settings.",
+                generated,
+                admin_url,
+            )
+        changed = True
+
+    # Nostr nsec — reversible Fernet encryption.
+    if secret.encrypted_nsec is not None:
+        try:
+            settings.nsec = vault.decrypt(secret.encrypted_nsec)
+        except InvalidToken as exc:
+            raise RuntimeError(
+                "Stored nsec cannot be decrypted with the current "
+                "ROUTSTR_SECRET_KEY. The key changed, or this database came from "
+                "another node. Restore the original ROUTSTR_SECRET_KEY to recover."
+            ) from exc
+    else:
+        legacy_nsec = _legacy_plaintext(raw_blob, "NSEC", "nsec")
+        if legacy_nsec:
+            secret.encrypted_nsec = vault.encrypt(legacy_nsec)
+            settings.nsec = legacy_nsec
+            changed = True
+
+    # Derive npub from whatever nsec we now hold, if not already known.
+    if settings.nsec and not settings.npub:
+        npub = derive_npub_from_nsec(settings.nsec)
+        if npub:
+            settings.npub = npub
+
+    if changed:
+        secret.updated_at = int(time.time())
+        db_session.add(secret)
+        await db_session.commit()
