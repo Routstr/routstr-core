@@ -138,7 +138,8 @@ def test_settings_model_drops_admin_password_field() -> None:
     # admin_password now lives only as a one-way hash in the Secret store; it is
     # no longer a settings field at all.
     assert "admin_password" not in Settings.__fields__
-    # nsec and upstream_api_key remain runtime values held in memory.
+    # nsec remains a runtime value held in memory; upstream_api_key is ordinary
+    # config that still lives in the persisted blob.
     assert "nsec" in Settings.__fields__
     assert "upstream_api_key" in Settings.__fields__
 
@@ -148,26 +149,51 @@ async def test_secret_fields_kept_in_memory_but_not_persisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NSEC", NSEC_HEX)
-    monkeypatch.setenv("UPSTREAM_API_KEY", "sk-upstream")
     # Reset the live globals so monkeypatch reverts them after the test.
     monkeypatch.setattr(settings, "nsec", "")
-    monkeypatch.setattr(settings, "upstream_api_key", "")
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with AsyncSession(engine, expire_on_commit=False) as session:
         s = await SettingsService.initialize(session)
 
-        # Runtime consumers still see the live secret values.
+        # Runtime consumers still see the live secret value.
         assert s.nsec == NSEC_HEX
-        assert s.upstream_api_key == "sk-upstream"
 
-        # ...but they are never written to the settings blob.
+        # ...but it is never written to the settings blob.
         blob = await _read_settings_blob(session)
         assert "nsec" not in blob
-        assert "upstream_api_key" not in blob
         assert "admin_password" not in blob
         # Non-secret derived/public values are still persisted.
         assert blob["npub"] == s.npub
+
+
+@pytest.mark.asyncio
+async def test_upstream_api_key_survives_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # upstream_api_key is provider-scoped config, not a vault secret: it has no
+    # encrypted home yet, so it must stay in the settings blob. Stripping it
+    # would load it once, rewrite the blob without it, and lose it on the next
+    # restart. Guard the on-disk survival path: blob-only value, no env.
+    monkeypatch.delenv("UPSTREAM_API_KEY", raising=False)
+    monkeypatch.setattr(settings, "upstream_api_key", "")
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await SettingsService.initialize(session)
+        await session.exec(  # type: ignore
+            text("UPDATE settings SET data = :d WHERE id = 1").bindparams(
+                d=json.dumps({"name": "LegacyNode", "upstream_api_key": "sk-only-in-db"})
+            )
+        )
+        await session.commit()
+
+        # A reload must not drop the key from the blob...
+        await SettingsService.initialize(session)
+        blob = await _read_settings_blob(session)
+        assert blob["upstream_api_key"] == "sk-only-in-db"
+        # ...and it stays live for the proxy hot path.
+        assert settings.upstream_api_key == "sk-only-in-db"
 
 
 @pytest.mark.asyncio
@@ -202,9 +228,10 @@ async def test_existing_blob_secrets_are_stripped_on_initialize(
         blob = await _read_settings_blob(session)
         assert "admin_password" not in blob
         assert "nsec" not in blob
-        assert "upstream_api_key" not in blob
-        # Non-secret values survive the migration.
+        # Non-secret values survive the migration, including upstream_api_key,
+        # which is not vaulted yet and so must stay in the blob.
         assert blob["name"] == "LegacyNode"
+        assert blob["upstream_api_key"] == "sk-legacy"
 
 
 @pytest.mark.asyncio
@@ -212,9 +239,7 @@ async def test_update_does_not_persist_secret_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NSEC", NSEC_HEX)
-    monkeypatch.setenv("UPSTREAM_API_KEY", "sk-upstream")
     monkeypatch.setattr(settings, "nsec", "")
-    monkeypatch.setattr(settings, "upstream_api_key", "")
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -224,5 +249,4 @@ async def test_update_does_not_persist_secret_fields(
         blob = await _read_settings_blob(session)
         assert blob["name"] == "Updated"
         assert "nsec" not in blob
-        assert "upstream_api_key" not in blob
         assert "admin_password" not in blob
