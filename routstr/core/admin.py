@@ -337,11 +337,14 @@ async def admin_login(
 ) -> dict[str, object]:
     async with create_session() as session:
         secret = await get_secret(session)
+        # Read the hash while the session is open; the ORM object is detached
+        # once the context exits and its attributes can no longer be loaded.
+        password_hash = secret.admin_password_hash
 
-    if not secret.admin_password_hash:
+    if not password_hash:
         raise HTTPException(status_code=500, detail="Admin password not configured")
 
-    if not vault.verify_password(payload.password, secret.admin_password_hash):
+    if not vault.verify_password(payload.password, password_hash):
         raise HTTPException(status_code=401, detail="Invalid password")
 
     token = secrets.token_urlsafe(32)
@@ -502,7 +505,6 @@ class ModelCreate(BaseModel):
 async def upsert_provider_model(
     provider_id: int, payload: ModelCreate
 ) -> dict[str, object]:
-    print(payload)
     logger.info(
         f"UPSERT_PROVIDER_MODEL called: provider_id={provider_id}, model_id={payload.id}"
     )

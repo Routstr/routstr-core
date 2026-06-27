@@ -467,9 +467,6 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
 
     from . import vault
     from .db import get_secret
-    from .logging import get_logger
-
-    logger = get_logger(__name__)
 
     raw_blob = await _read_raw_settings_blob(db_session)
     secret = await get_secret(db_session)
@@ -486,12 +483,14 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
             generated = secrets.token_urlsafe(24)
             secret.admin_password_hash = vault.hash_password(generated)
             admin_url = (settings.http_url or "http://localhost:8000").rstrip("/")
-            logger.warning(
+            # Print to stdout rather than the logger: the operator must see this
+            # once (e.g. `docker compose logs`), but it must not be persisted
+            # into the on-disk log files the logger also writes to.
+            print(
                 "No admin password set; generated a temporary one (shown only "
-                "now): %s\nLog in at %s/admin and change it from the dashboard "
-                "settings.",
-                generated,
-                admin_url,
+                f"now): {generated}\nLog in at {admin_url}/admin and change it "
+                "from the dashboard settings.",
+                flush=True,
             )
         changed = True
 
