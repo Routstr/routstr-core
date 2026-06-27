@@ -135,11 +135,14 @@ def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
 
 # Secrets are credentials, not config: they live in the encrypted/hashed Secret
 # store (and decrypted in-memory for runtime use), never in the persisted
-# settings blob. ``admin_password`` is gone from the model entirely;
-# ``nsec``/``upstream_api_key`` remain live fields but are stripped from every
-# blob write so they are never written back to plaintext. See
-# ``bootstrap_secrets`` and ``routstr.core.vault``.
-SECRET_FIELDS = frozenset({"admin_password", "nsec", "upstream_api_key"})
+# settings blob. ``admin_password`` is gone from the model entirely; ``nsec``
+# remains a live field but is stripped from every blob write so it is never
+# written back to plaintext. ``upstream_api_key`` is intentionally *not* here:
+# it has no encrypted home yet (it is node-scoped today but really belongs on a
+# provider), so stripping it would lose it on the next restart. It stays in the
+# blob as before; encrypting it is follow-up work. See ``bootstrap_secrets`` and
+# ``routstr.core.vault``.
+SECRET_FIELDS = frozenset({"admin_password", "nsec"})
 
 
 def _strip_secret_fields(data: dict[str, Any]) -> dict[str, Any]:
@@ -350,7 +353,7 @@ class SettingsService:
                 await db_session.commit()
 
             # Update the existing instance in-place for all live importers
-            # (keeps the decrypted nsec/upstream_api_key live in memory).
+            # (keeps the decrypted nsec live in memory).
             _apply_to_live_settings(merged_dict)
             cls._current = settings
             return cls._current

@@ -2,9 +2,9 @@
 
 ``admin_password`` is no longer a settings field (it lives only as a one-way
 hash in the Secret store), so it must never appear in the GET/PATCH payloads.
-``nsec`` and ``upstream_api_key`` remain live in-memory runtime values but are
-redacted on read and ignored on write — they cannot be set through the general
-settings endpoint, only through their dedicated rotation paths.
+``nsec`` (in-memory at runtime) and ``upstream_api_key`` (still in the settings
+blob) are both redacted on read and ignored on write — they cannot be set
+through the general settings endpoint, only through their dedicated paths.
 """
 
 from __future__ import annotations
