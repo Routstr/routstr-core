@@ -163,6 +163,27 @@ async def test_fail_fast_when_nsec_encrypted_with_different_key(
         await bootstrap_secrets(integration_session)
 
 
+# --- encryption is mandatory: a node with an nsec needs ROUTSTR_SECRET_KEY -----
+
+
+@pytest.mark.asyncio
+async def test_legacy_nsec_without_secret_key_fails_fast(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A node with a Nostr identity must not boot without a key to encrypt it:
+    # encryption at rest is mandatory, not opt-in. The failure names the missing
+    # key and hands over the generation command rather than crashing opaquely or
+    # silently persisting the nsec in plaintext. No env/blob copy is dropped — the
+    # node refuses until the operator sets the key.
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    monkeypatch.setenv("NSEC", NSEC_HEX)
+
+    with pytest.raises(RuntimeError, match="ROUTSTR_SECRET_KEY"):
+        await bootstrap_secrets(integration_session)
+
+
 # --- boot ordering: rescue legacy blob secrets before they are stripped ----
 
 

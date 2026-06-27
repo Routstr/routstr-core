@@ -498,6 +498,17 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
     else:
         legacy_nsec = _legacy_plaintext(raw_blob, "NSEC", "nsec")
         if legacy_nsec:
+            # The node has a Nostr identity to protect. Encryption at rest is
+            # mandatory: without a key we fail fast (clear, actionable boot
+            # error) rather than silently persisting the nsec in plaintext.
+            if not os.environ.get("ROUTSTR_SECRET_KEY"):
+                raise RuntimeError(
+                    "An nsec is configured but ROUTSTR_SECRET_KEY is not set. "
+                    "The key is required to encrypt the Nostr identity at rest. "
+                    "Generate one and set it in the environment:\n"
+                    '    python -c "from cryptography.fernet import Fernet; '
+                    'print(Fernet.generate_key().decode())"'
+                )
             secret.encrypted_nsec = vault.encrypt(legacy_nsec)
             settings.nsec = legacy_nsec
             changed = True
