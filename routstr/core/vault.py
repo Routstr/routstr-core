@@ -116,14 +116,20 @@ def verify_password(password: str, stored: str) -> bool:
         scheme, n, r, p, salt_b64, hash_b64 = stored.split(":")
         if scheme != "scrypt":
             return False
+        n_int, r_int, p_int = int(n), int(r), int(p)
+        # Cap the work factor at the parameters this module emits. scrypt's
+        # memory cost grows with N*r, so an oversized N/r in a tampered or
+        # corrupt stored hash could turn a single login into an OOM/DoS.
+        if n_int > _SCRYPT_N or r_int > _SCRYPT_R or p_int > _SCRYPT_P:
+            return False
         salt = base64.b64decode(salt_b64)
         expected = base64.b64decode(hash_b64)
         derived = hashlib.scrypt(
             password.encode(),
             salt=salt,
-            n=int(n),
-            r=int(r),
-            p=int(p),
+            n=n_int,
+            r=r_int,
+            p=p_int,
             dklen=len(expected),
         )
     except (ValueError, TypeError):
