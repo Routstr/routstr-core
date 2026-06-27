@@ -81,6 +81,21 @@ def test_backfill_strips_vendor_prefix_for_litellm_lookup() -> None:
     assert result.input_cache_read == expected
 
 
+def test_backfill_case_insensitive_lookup() -> None:
+    """A generic upstream may report a mixed-case id
+    (deepseek-ai/DeepSeek-V4-Flash); litellm keys are lowercase. The
+    case-insensitive fallback still resolves the cache rate."""
+    pricing = Pricing(prompt=1.4e-07, completion=2.8e-07)
+
+    result = backfill_cache_pricing("deepseek-ai/DeepSeek-V4-Flash", pricing)
+
+    expected = litellm.model_cost["deepseek-v4-flash"][
+        "cache_read_input_token_cost"
+    ]
+    assert result.input_cache_read == expected
+    assert result.input_cache_read < pricing.prompt  # sanity: it's a discount
+
+
 def test_backfill_fills_cache_write_rate() -> None:
     """Anthropic cache writes cost more than input (1.25x); billing them at
     the input rate undercharges. litellm carries the write rate."""
@@ -134,6 +149,51 @@ def test_provider_fee_applies_to_backfilled_cache_rates() -> None:
     ]
     assert adjusted.pricing.input_cache_read == pytest.approx(litellm_read * 2.0)
     assert adjusted.pricing.prompt == pytest.approx(2.8e-07 * 2.0)
+
+
+def test_row_to_model_backfills_cache_rate() -> None:
+    """The DB-override path (admin-configured providers, e.g. a generic
+    upstream) stores pricing without cache rates. ``_row_to_model`` must
+    backfill them from litellm just like ``_apply_provider_fee_to_model``,
+    otherwise cache reads bill at the full input rate."""
+    import json
+
+    from routstr.core.db import ModelRow
+    from routstr.payment.models import _row_to_model
+
+    row = ModelRow(
+        id="deepseek-v4-flash",
+        name="deepseek-v4-flash",
+        created=0,
+        description="",
+        context_length=1000000,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        # Stored pricing omits input_cache_read (generic provider never sets it).
+        pricing=json.dumps({"prompt": 1.4e-07, "completion": 2.8e-07}),
+        enabled=True,
+        upstream_provider_id=1,
+    )
+
+    with patch(
+        "routstr.payment.models.sats_usd_price", return_value=5.0e-5
+    ):
+        model = _row_to_model(row, apply_provider_fee=True, provider_fee=1.0)
+
+    litellm_read = litellm.model_cost["deepseek-v4-flash"][
+        "cache_read_input_token_cost"
+    ]
+    assert model.pricing.input_cache_read == pytest.approx(litellm_read)
+    assert model.pricing.input_cache_read < model.pricing.prompt  # a discount
+    assert model.sats_pricing is not None
+    assert model.sats_pricing.input_cache_read > 0
 
 
 # ============================================================================
