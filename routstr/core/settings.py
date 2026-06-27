@@ -337,6 +337,16 @@ class SettingsService:
                     merged_dict.get("cashu_mints", [])
                 )
 
+            # Keep npub consistent with the live nsec. bootstrap_secrets may hold
+            # the decrypted nsec (from the encrypted store) even when neither env
+            # nor the blob carries an nsec/npub; derive from that live value so
+            # initialize never wipes a known public key back to empty, leaving a
+            # private key with no matching npub.
+            if not merged_dict.get("npub") and settings.nsec:
+                derived_npub = derive_npub_from_nsec(settings.nsec)
+                if derived_npub:
+                    merged_dict["npub"] = derived_npub
+
             # Persist without secrets; compare against the stripped target so a
             # legacy blob that still carries plaintext secrets gets rewritten
             # (and thereby sunset) even when its non-secret values are unchanged.

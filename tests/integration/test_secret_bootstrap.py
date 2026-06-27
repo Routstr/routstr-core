@@ -244,6 +244,39 @@ async def test_initialize_does_not_clobber_store_only_nsec(
 
 
 @pytest.mark.asyncio
+async def test_initialize_keeps_npub_matching_store_only_nsec(
+    clean_secret_env: None, integration_session: AsyncSession
+) -> None:
+    # Steady state with mandatory encryption: the nsec lives ONLY in the
+    # encrypted Secret store (env carries no NSEC) and the blob has no npub.
+    # bootstrap decrypts the nsec and derives the npub into memory; initialize
+    # then re-derives settings from the npub-less blob and must NOT wipe the npub
+    # back to empty, or the node holds a private key with no matching public key
+    # and silently stops announcing a usable Nostr identity.
+    expected_npub = derive_npub_from_nsec(NSEC_HEX)
+    assert expected_npub  # guard: the test key must yield a real npub
+
+    await _create_settings_blob(integration_session, {"name": "LegacyNode"})
+    secret = await get_secret(integration_session)
+    secret.encrypted_nsec = vault.encrypt(NSEC_HEX)
+    integration_session.add(secret)
+    await integration_session.commit()
+
+    await bootstrap_secrets(integration_session)
+    assert settings.npub == expected_npub  # bootstrap derived it
+
+    await SettingsService.initialize(integration_session)
+    # The npub still matches the live nsec...
+    assert settings.nsec == NSEC_HEX
+    assert settings.npub == expected_npub
+    # ...and is persisted to the blob (it is public, not a stripped secret).
+    row = await integration_session.exec(  # type: ignore
+        text("SELECT data FROM settings WHERE id = 1")
+    )
+    assert json.loads(row.first()[0])["npub"] == expected_npub
+
+
+@pytest.mark.asyncio
 async def test_startup_runs_bootstrap_before_settings_initialize(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
