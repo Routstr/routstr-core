@@ -230,6 +230,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
 
+        # Flush and stop the background SentryStr logging worker (no-op when
+        # SentryStr logging is disabled). Run off the event loop: the drain is
+        # blocking (though bounded) and must not stall the loop during shutdown.
+        from .logging import shutdown_sentrystr_logging
+
+        await asyncio.to_thread(shutdown_sentrystr_logging)
+
 
 class _ImmutableStaticFiles(StaticFiles):
     """Static files with long Cache-Control for content-hashed Next.js assets.

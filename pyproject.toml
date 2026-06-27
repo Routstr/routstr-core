@@ -23,6 +23,11 @@ dependencies = [
     "litellm>=1.55.0",
 ]
 
+[project.optional-dependencies]
+# Decentralized log mirroring to Nostr relays. Enable at runtime with
+# ENABLE_SENTRYSTR=true (see routstr/core/logging.py).
+sentrystr = ["sentrystr>=0.2.0"]
+
 [dependency-groups]
 dev = [
     "mypy>=1.15.0",

@@ -16,7 +16,12 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str) -> Any:  # type: ignore[override]
-            if field_name in {"cashu_mints", "cors_origins", "relays"}:
+            if field_name in {
+                "cashu_mints",
+                "cors_origins",
+                "relays",
+                "sentrystr_relays",
+            }:
                 v = str(raw_value).strip()
                 if v == "":
                     return []
@@ -102,6 +107,21 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     enable_console_logging: bool = Field(default=True, env="ENABLE_CONSOLE_LOGGING")
+
+    # SentryStr (decentralized logging to Nostr relays). When enabled, routstr
+    # application logs at `sentrystr_log_level` and above are mirrored to Nostr
+    # relays on a background worker thread (see routstr/core/logging.py).
+    enable_sentrystr: bool = Field(default=False, env="ENABLE_SENTRYSTR")
+    # Minimum level forwarded to relays. Empty -> defaults to ERROR. Should be
+    # at or above `log_level`, since the routstr loggers gate lower records.
+    sentrystr_log_level: str = Field(default="", env="SENTRYSTR_LOG_LEVEL")
+    # Relays to announce to. Empty -> fall back to the discovery `relays`.
+    sentrystr_relays: list[str] = Field(default_factory=list, env="SENTRYSTR_RELAYS")
+    # Secret key (nsec or hex) used to sign log events. Empty -> fall back to
+    # `nsec`; if that is also empty an ephemeral key is generated per process.
+    sentrystr_nsec: str = Field(default="", env="SENTRYSTR_NSEC")
+    # Optional recipient npub. When set, log events are NIP-44 encrypted to it.
+    sentrystr_recipient_npub: str = Field(default="", env="SENTRYSTR_RECIPIENT_NPUB")
 
     # Other
     chat_completions_api_version: str = Field(

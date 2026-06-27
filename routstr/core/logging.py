@@ -232,31 +232,46 @@ class SecurityFilter(logging.Filter):
         "refund_address",
     }
 
+    def _scrub(self, message: str) -> str:
+        """Redact secrets from a single string."""
+        standalone_patterns = [
+            r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
+            r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
+            r"nsec[a-z0-9]+",  # Nostr Public / Private Key
+        ]
+        for pattern in standalone_patterns:
+            message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
+
+        for key in self.SENSITIVE_KEYS:
+            if key in message.lower():
+                key_patterns = [
+                    rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
+                    rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
+                ]
+                for pattern in key_patterns:
+                    message = re.sub(
+                        pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
+                    )
+        return message
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter out sensitive information from log records."""
         try:
-            message = record.getMessage()
-            message = redact_org_ids(message)
-            standalone_patterns = [
-                r"Bearer\s+([a-zA-Z0-9_\-\.]{10,})",  # Bearer token (must be 10 characters or more to reduce false-positives)
-                r"cashu[A-Z]+([a-zA-Z0-9_\-\.=/+]+)",  # Cashu tokens
-                r"nsec[a-z0-9]+",  # Nostr Public / Private Key
-            ]
-            for pattern in standalone_patterns:
-                message = re.sub(pattern, "[REDACTED]", message, flags=re.IGNORECASE)
-
-            for key in self.SENSITIVE_KEYS:
-                if key in message.lower():
-                    key_patterns = [
-                        rf"{key}\s*[:=]\s*([a-zA-Z0-9_\-\.=/+]+)",  # key:value or key=value (including any variant with spaces)
-                        rf'{key}\s*[:=]\s*["\']([^"\']+)["\']',  # key:"value" or key='value' (including any variant with spaces)
-                    ]
-                    for pattern in key_patterns:
-                        message = re.sub(
-                            pattern, f"{key}: [REDACTED]", message, flags=re.IGNORECASE
-                        )
-            record.msg = message
+            message = redact_org_ids(record.getMessage())
+            record.msg = self._scrub(message)
             record.args = ()
+
+            # The exception traceback is appended by the *formatter* (e.g. when a
+            # QueueHandler flattens the record before it is announced to the
+            # public, permanent SentryStr relays), so the message scrub above
+            # never sees it. Pre-render and redact it here and cache the result
+            # in `exc_text` so every formatter reuses the scrubbed version.
+            if record.exc_info and record.exc_info[0] is not None and not record.exc_text:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = self._scrub(redact_org_ids(record.exc_text))
+            if record.stack_info:
+                record.stack_info = self._scrub(redact_org_ids(record.stack_info))
 
             # Structured `extra={...}` fields are emitted by the JSON formatter
             # straight from the record dict and never pass through the message
@@ -451,6 +466,120 @@ def setup_logging() -> None:
     os.makedirs("logs", exist_ok=True)
 
     logging.config.dictConfig(LOGGING_CONFIG)
+
+    _install_sentrystr_logging(LOGGING_CONFIG)
+
+
+# Handle for the background SentryStr logging worker (None when disabled).
+_sentrystr_handle: Any = None
+
+# Bound on the in-memory queue feeding the background SentryStr worker. Records
+# beyond this are dropped rather than blocking the caller or growing memory
+# without limit when a relay is slow or unreachable.
+_SENTRYSTR_QUEUE_SIZE = 10_000
+
+# Max seconds to wait for the queued backlog to flush on shutdown before
+# abandoning it, so shutdown cannot hang on a slow or unreachable relay.
+_SENTRYSTR_SHUTDOWN_TIMEOUT = 10.0
+
+
+def _install_sentrystr_logging(logging_config: dict[str, Any]) -> None:
+    """Mirror routstr application logs to Nostr relays via SentryStr.
+
+    Announcing to relays blocks, so SentryStr's installer runs the publish on a
+    dedicated background worker thread fed by an in-memory queue; the request /
+    event-loop threads only pay the cost of enqueueing a record. Disabled unless
+    `ENABLE_SENTRYSTR` is set. Any failure here is swallowed so optional logging
+    can never take down startup.
+    """
+    global _sentrystr_handle
+
+    if _sentrystr_handle is not None:
+        return
+
+    try:
+        from .settings import settings
+    except Exception:
+        return
+
+    if not getattr(settings, "enable_sentrystr", False):
+        return
+
+    routstr_logger = logging.getLogger("routstr")
+
+    relays = list(settings.sentrystr_relays or settings.relays or [])
+    if not relays:
+        routstr_logger.warning(
+            "SentryStr logging is enabled but no relays are configured; set "
+            "SENTRYSTR_RELAYS or RELAYS. Skipping SentryStr logging."
+        )
+        return
+
+    try:
+        from sentrystr import install_sentrystr_logging
+    except Exception:
+        routstr_logger.warning(
+            "SentryStr logging is enabled but the `sentrystr` package is not "
+            "installed. Install it with `pip install sentrystr`. Skipping "
+            "SentryStr logging."
+        )
+        return
+
+    # Default to ERROR: these events are announced to public, permanent relays,
+    # so only genuine problems should be mirrored unless the operator opts into
+    # something more verbose via SENTRYSTR_LOG_LEVEL. (Keep this at or above
+    # LOG_LEVEL; a lower value is gated out by the routstr loggers' own level.)
+    level = (settings.sentrystr_log_level or "ERROR").upper()
+
+    # routstr application loggers set propagate=False, so the handler must be
+    # attached to each of them rather than relying on propagation to the root.
+    routstr_loggers = [
+        name
+        for name in logging_config.get("loggers", {})
+        if name == "routstr" or name.startswith("routstr.")
+    ] or ["routstr"]
+
+    try:
+        _sentrystr_handle = install_sentrystr_logging(
+            relays=relays,
+            private_key=(settings.sentrystr_nsec or settings.nsec or None),
+            level=level,
+            loggers=routstr_loggers,
+            recipient_pubkey=(settings.sentrystr_recipient_npub or None),
+            platform="routstr",
+            formatter=logging.Formatter("%(message)s"),
+            # Run the same scrubbing/enrichment filters used by the other
+            # handlers, on the calling thread, before records are handed to the
+            # background worker. RequestIdFilter must run here because it reads a
+            # ContextVar that is only set on the request thread; SecurityFilter
+            # must run here so secrets are redacted before anything is announced
+            # to the (public, permanent) relays. Passing them to the installer
+            # attaches them before the handler goes live, so no record can slip
+            # through unfiltered during startup.
+            filters=[RequestIdFilter(), SecurityFilter()],
+            # Bound the queue so a slow/unreachable relay can't grow memory.
+            queue_size=_SENTRYSTR_QUEUE_SIZE,
+        )
+    except Exception as exc:
+        routstr_logger.warning("Failed to initialize SentryStr logging: %s", exc)
+        return
+
+    routstr_logger.info(
+        "SentryStr logging enabled",
+        extra={"sentrystr_level": level, "sentrystr_relay_count": len(relays)},
+    )
+
+
+def shutdown_sentrystr_logging() -> None:
+    """Flush and stop the background SentryStr logging worker, if running."""
+    global _sentrystr_handle
+    handle = _sentrystr_handle
+    _sentrystr_handle = None
+    if handle is not None:
+        try:
+            handle.close(timeout=_SENTRYSTR_SHUTDOWN_TIMEOUT)
+        except Exception:
+            pass
 
 
 def get_logger(name: str) -> logging.Logger:
