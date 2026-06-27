@@ -243,7 +243,13 @@ def _row_to_model(
     # without this, ``_row_to_model`` bills cache reads at the full input rate —
     # the ``_apply_provider_fee_to_model`` path backfills, but the override path
     # used for admin-configured providers did not.
-    parsed_pricing = backfill_cache_pricing(row.id, parsed_pricing)
+    #
+    # Key on ``forwarded_model_id`` (the actual upstream model name litellm
+    # prices) when set: an alias row (id="local-alias",
+    # forwarded_model_id="deepseek-v4-flash") would otherwise look up the alias
+    # and miss the cache rate.
+    pricing_model_id = getattr(row, "forwarded_model_id", None) or row.id
+    parsed_pricing = backfill_cache_pricing(pricing_model_id, parsed_pricing)
 
     if apply_provider_fee:
         parsed_pricing = Pricing.parse_obj(

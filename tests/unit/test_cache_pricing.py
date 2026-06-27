@@ -196,6 +196,48 @@ def test_row_to_model_backfills_cache_rate() -> None:
     assert model.sats_pricing.input_cache_read > 0
 
 
+def test_row_to_model_backfills_via_forwarded_model_id() -> None:
+    """An alias row (id != forwarded_model_id) must backfill cache rates from
+    the *forwarded* model name — the real upstream model litellm prices —
+    not the alias id, which litellm doesn't know."""
+    import json
+
+    from routstr.core.db import ModelRow
+    from routstr.payment.models import _row_to_model
+
+    row = ModelRow(
+        id="local-alias",  # litellm has no such key
+        name="local-alias",
+        created=0,
+        description="",
+        context_length=1000000,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 1.4e-07, "completion": 2.8e-07}),
+        enabled=True,
+        upstream_provider_id=1,
+        forwarded_model_id="deepseek-v4-flash",
+    )
+
+    with patch(
+        "routstr.payment.models.sats_usd_price", return_value=5.0e-5
+    ):
+        model = _row_to_model(row, apply_provider_fee=True, provider_fee=1.0)
+
+    litellm_read = litellm.model_cost["deepseek-v4-flash"][
+        "cache_read_input_token_cost"
+    ]
+    assert model.pricing.input_cache_read == pytest.approx(litellm_read)
+    assert model.pricing.input_cache_read < model.pricing.prompt
+
+
 # ============================================================================
 # calculate_cost — cached tokens billed at cache rates
 # ============================================================================
