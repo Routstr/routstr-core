@@ -1,0 +1,9 @@
+# Security overrides forcing transitive dependencies to patched versions.
+# Each key constrains only the vulnerable range, capped within the current
+# major to avoid breaking-change upgrades. Clears Dependabot advisories
+# #181/#182 (axios), #203 (form-data), #202 (js-yaml), #201 (@babel/core).
+overrides:
+  axios@>=1.0.0 <1.16.0: '>=1.16.0'
+  form-data@>=4.0.0 <4.0.6: '>=4.0.6'
+  js-yaml@<4.2.0: '>=4.2.0 <5'
+  '@babel/core@<7.29.6': '>=7.29.6 <8'
