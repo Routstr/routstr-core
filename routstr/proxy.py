@@ -24,6 +24,7 @@ from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
     create_error_response,
+    create_upstream_error_response,
     get_max_cost_for_model,
 )
 from .payment.models import Model
@@ -271,9 +272,7 @@ async def proxy(
                     e,
                 )
                 if i == len(selected_upstreams) - 1:
-                    last_error_response = create_error_response(
-                        "upstream_error", str(e), 502, request=request
-                    )
+                    last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
             "upstream_error", "All upstreams failed", 502, request=request
@@ -364,11 +363,10 @@ async def proxy(
                     last_error = e
                 continue
 
+        if last_error is not None:
+            return create_upstream_error_response(last_error, request)
         return create_error_response(
-            "upstream_error",
-            str(last_error) if last_error else "All upstreams failed",
-            502,
-            request=request,
+            "upstream_error", "All upstreams failed", 502, request=request
         )
 
     elif auth := headers.get("authorization", None):
@@ -424,9 +422,7 @@ async def proxy(
             except UpstreamError as e:
                 logger.warning(f"Upstream {upstream.provider_type} failed (GET): {e}")
                 if i == len(upstreams) - 1:
-                    last_error_response = create_error_response(
-                        "upstream_error", str(e), 502, request=request
-                    )
+                    last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
             "upstream_error", "All upstreams failed", 502, request=request
@@ -628,9 +624,7 @@ async def proxy(
             # If this was the last provider
             if i == len(upstreams) - 1:
                 await revert_pay_for_request(key, session, max_cost_for_model)
-                return create_error_response(
-                    "upstream_error", str(e), 502, request=request
-                )
+                return create_upstream_error_response(e, request)
 
             # Otherwise loop continues to next provider
             continue

@@ -11,7 +11,11 @@ from starlette.exceptions import HTTPException
 from starlette.responses import Response as StarletteResponse
 from starlette.types import Scope
 
-from ..auth import periodic_key_reset, periodic_stale_reservation_sweep
+from ..auth import (
+    periodic_dead_key_prune,
+    periodic_key_reset,
+    periodic_stale_reservation_sweep,
+)
 from ..balance import balance_router, deprecated_wallet_router
 from ..lightning import lightning_router, periodic_invoice_watcher
 from ..nostr import (
@@ -24,6 +28,7 @@ from ..payment.models import models_router, update_sats_pricing
 from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..upstream.auto_topup import periodic_auto_topup
+from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
@@ -55,6 +60,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     model_maps_refresh_task = None
     key_reset_task = None
     stale_reservation_task = None
+    dead_key_prune_task = None
     auto_topup_task = None
     refund_sweep_task = None
     routstr_fee_task = None
@@ -64,6 +70,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()
+
+        # TEMPORARY: backfill DeepSeek V4 pricing missing from litellm's cost
+        # map (BerriAI/litellm#30430). Remove this call and
+        # deepseek_v4_pricing_shim.py once litellm ships these models.
+        register_deepseek_v4_pricing()
 
         # Run database migrations on startup
         run_migrations()
@@ -126,6 +137,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         stale_reservation_task = asyncio.create_task(
             periodic_stale_reservation_sweep()
         )
+        dead_key_prune_task = asyncio.create_task(periodic_dead_key_prune())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
@@ -165,6 +177,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             key_reset_task.cancel()
         if stale_reservation_task is not None:
             stale_reservation_task.cancel()
+        if dead_key_prune_task is not None:
+            dead_key_prune_task.cancel()
         if auto_topup_task is not None:
             auto_topup_task.cancel()
         if refund_sweep_task is not None:
@@ -196,6 +210,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(key_reset_task)
             if stale_reservation_task is not None:
                 tasks_to_wait.append(stale_reservation_task)
+            if dead_key_prune_task is not None:
+                tasks_to_wait.append(dead_key_prune_task)
             if auto_topup_task is not None:
                 tasks_to_wait.append(auto_topup_task)
             if refund_sweep_task is not None:
@@ -370,7 +386,10 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
 
 else:
     logger.warning(
-        f"UI dist directory not found at {UI_DIST_PATH}, skipping static file serving"
+        "UI dist directory not found at %s; serving API only. Run `make ui-build` "
+        "to build the static UI served from here, or `make ui-dev` for the Next.js "
+        "dev server with hot reload on :3000 (it targets this backend on :8000).",
+        UI_DIST_PATH,
     )
 
     @app.get("/", include_in_schema=False)

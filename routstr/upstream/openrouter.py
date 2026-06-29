@@ -1,3 +1,4 @@
+import json
 from typing import TYPE_CHECKING
 
 import httpx
@@ -17,6 +18,38 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     platform_url = "https://openrouter.ai/settings/keys"
     supports_anthropic_messages = True
     litellm_provider_prefix = "openrouter/"
+
+    def prepare_request_body(
+        self, body: bytes | None, model_obj: Model
+    ) -> bytes | None:
+        """Set provider.require_parameters on tool-use requests.
+
+        Without it OpenRouter can route a tool call to an endpoint that doesn't
+        support function calling and 404 with "No endpoints found that support
+        tool use". We leave a client-supplied value untouched.
+        """
+        body = super().prepare_request_body(body, model_obj)
+        if not body:
+            return body
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+
+        if not isinstance(data, dict) or not data.get("tools"):
+            return body
+
+        provider = data.get("provider")
+        if not isinstance(provider, dict):
+            provider = {}
+
+        if "require_parameters" in provider:
+            return body
+
+        provider["require_parameters"] = True
+        data["provider"] = provider
+        return json.dumps(data).encode()
 
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the ``provider`` field for OpenRouter responses.

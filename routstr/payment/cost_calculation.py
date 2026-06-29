@@ -418,10 +418,21 @@ def _calculate_from_tokens(
         },
     )
 
+    # Fold the cache-read/write cost into the visible ``input_msats`` so a
+    # dashboard that renders I / O / T sees ``input + output == total``
+    # exactly. This mirrors ``_fold_cache_into_input_tokens`` (which rolls the
+    # cache token counts into the visible prompt total). The standalone
+    # ``cache_read_msats`` / ``cache_creation_msats`` fields stay populated for
+    # clients that want the breakdown; nothing sums the components to derive
+    # ``total_msats`` (it is computed independently above), so this is
+    # display-only and does not change what is billed.
+    visible_output_msats = int(calc_output_msats)
+    visible_input_msats = token_based_cost - visible_output_msats
+
     return CostData(
         base_msats=0,
-        input_msats=int(calc_input_msats),
-        output_msats=int(calc_output_msats),
+        input_msats=visible_input_msats,
+        output_msats=visible_output_msats,
         total_msats=token_based_cost,
         total_usd=total_usd,
         input_tokens=input_tokens,

@@ -11,6 +11,8 @@ from PIL import Image
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
+from ..core.exceptions import UpstreamError
+from ..core.redaction import redact_org_ids
 from ..core.settings import settings
 from ..wallet import deserialize_token_from_string
 
@@ -418,20 +420,48 @@ def create_error_response(
     status_code: int,
     request: Request,
     token: str | None = None,
+    code: str | int | None = None,
+    details: dict[str, object] | None = None,
 ) -> Response:
-    """Create a standardized error response."""
+    """Create a standardized error response.
+
+    ``code`` is a stable, machine-readable classification (e.g.
+    ``UPSTREAM_RATE_LIMIT``); when omitted it defaults to the HTTP status code
+    for backwards compatibility. ``details`` carries optional structured,
+    redaction-safe context.
+    """
+    error_obj: dict[str, object] = {
+        "message": redact_org_ids(message),
+        "type": error_type,
+        "code": code if code is not None else status_code,
+    }
+    if details is not None:
+        error_obj["details"] = details
     return Response(
         content=json.dumps(
             {
-                "error": {
-                    "message": message,
-                    "type": error_type,
-                    "code": status_code,
-                },
+                "error": error_obj,
                 "request_id": getattr(request.state, "request_id", "unknown"),
             }
         ),
         status_code=status_code,
         media_type="application/json",
         headers={"X-Cashu": token} if token else {},
+    )
+
+
+def create_upstream_error_response(
+    error: UpstreamError,
+    request: Request,
+    fallback_status: int = 502,
+) -> Response:
+    """Build an error response from an :class:`UpstreamError`, preserving its
+    structured ``code``, ``details``, and original ``status_code``."""
+    return create_error_response(
+        "upstream_error",
+        str(error),
+        error.status_code or fallback_status,
+        request=request,
+        code=getattr(error, "code", None),
+        details=getattr(error, "details", None),
     )
