@@ -92,3 +92,27 @@ def test_attestation_upstream_selection_is_tinfoil_only() -> None:
     assert proxy_module._select_unauthenticated_get_upstreams(
         "tee/other", [non_tinfoil, tinfoil]
     ) == [non_tinfoil, tinfoil]
+
+
+@pytest.mark.asyncio
+async def test_well_known_get_bypasses_model_lookup(
+    monkeypatch: pytest.MonkeyPatch, proxy_app: FastAPI
+) -> None:
+    upstream = MagicMock()
+    upstream.provider_type = "openai"
+    upstream.prepare_headers = MagicMock(return_value={})
+    upstream.forward_get_request = AsyncMock(
+        return_value=Response(status_code=200, content=b"lnurl metadata")
+    )
+
+    monkeypatch.setattr(proxy_module, "_upstreams", [upstream])
+    monkeypatch.setattr(proxy_module, "get_model_instance", MagicMock(side_effect=AssertionError))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=proxy_app), base_url="http://test"  # type: ignore[arg-type]
+    ) as client:
+        response = await client.get("/.well-known/lnurlp/alice")
+
+    assert response.status_code == 200
+    assert response.content == b"lnurl metadata"
+    upstream.forward_get_request.assert_awaited_once()

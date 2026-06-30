@@ -234,12 +234,14 @@ async def proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
-    # /tee/* and /attestation GET requests (e.g. Tinfoil attestation bundle)
-    # don't map to models — forward without model/cost/auth lookups. Tinfoil
-    # attestation paths are routed only to Tinfoil providers so an unrelated
-    # upstream's 404 cannot short-circuit before the attestation proxy is tried.
+    # /tee/*, /attestation and /.well-known/* GET requests don't map to models
+    # — forward without model/cost/auth lookups. Tinfoil attestation paths are
+    # routed only to Tinfoil providers so an unrelated upstream's 404 cannot
+    # short-circuit before the attestation proxy is tried.
     if request.method == "GET" and (
-        path.startswith("tee/") or path.startswith("attestation")
+        path.startswith("tee/")
+        or path.startswith("attestation")
+        or path.startswith(".well-known/")
     ):
         selected_upstreams = _select_unauthenticated_get_upstreams(path, _upstreams)
         if not selected_upstreams:

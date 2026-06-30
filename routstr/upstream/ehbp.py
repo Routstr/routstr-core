@@ -15,7 +15,6 @@ from sqlmodel import col, update
 
 from ..auth import (
     ROUTSTR_FEE_PERCENT,
-    adjust_payment_for_tokens,
     get_billing_key,
     payments_logger,
 )
@@ -40,21 +39,25 @@ from .tinfoil_trailer import forward_with_trailer
 
 logger = get_logger(__name__)
 
-# Headers that the Tinfoil SDK sends to tell the proxy where to forward the
-# encrypted request, and the request/response usage-metrics pair.
+# Provider-neutral confidential-inference defaults.  Tinfoil is the first
+# EHBP implementation, but provider-specific routing, usage extraction and
+# header policy belong in a profile so future TEE providers do not inherit
+# Tinfoil-only assumptions.
 _ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 _REQUEST_USAGE_HEADER = "X-Tinfoil-Request-Usage-Metrics"
 _RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
 _TINFOIL_PROVIDER_TYPE = "tinfoil"
 _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
-_TINFOIL_ALLOWED_ENCLAVE_HOSTS = {"tinfoil.sh"}
+_TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
 
 # Headers that must not be forwarded to the upstream enclave.
-_PROXY_ONLY_HEADERS = {
-    "x-routstr-model",
-    "x-tinfoil-enclave-url",
-    "x-tinfoil-request-usage-metrics",
-}
+_PROXY_ONLY_HEADERS = frozenset(
+    {
+        "x-routstr-model",
+        "x-tinfoil-enclave-url",
+        "x-tinfoil-request-usage-metrics",
+    }
+)
 
 
 def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
@@ -146,51 +149,78 @@ def _resolve_ehbp_target_url(
     path: str,
     headers: Mapping[str, str],
     provider_type: str | None = None,
+    profile: "ConfidentialInferenceProfile | None" = None,
 ) -> str:
-    """Override Tinfoil forwarding URL with a validated enclave URL.
+    """Resolve the provider-approved destination for an EHBP request.
 
-    When the Tinfoil SDK is configured with a proxy ``baseURL``, it sends the
-    actual enclave URL in ``X-Tinfoil-Enclave-Url``. The override is honored
-    only for the Tinfoil provider and only when the URL is an HTTPS Tinfoil
-    hostname, so the header cannot redirect other EHBP providers or leak
-    upstream API keys to arbitrary origins.
+    Tinfoil can send the actual enclave URL in ``X-Tinfoil-Enclave-Url`` when
+    the SDK is pointed at a Routstr proxy.  A provider profile must explicitly
+    opt in to client-supplied target overrides and constrain the destination;
+    otherwise the header is ignored so callers cannot redirect other providers
+    or leak upstream API keys.
     """
-    enclave_url = _get_header_case_insensitive(headers, _ENCLAVE_URL_HEADER)
+    override_header = profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
+    if not override_header:
+        return target_url
+    enclave_url = _get_header_case_insensitive(headers, override_header)
     if not enclave_url:
         return target_url
 
-    if provider_type != _TINFOIL_PROVIDER_TYPE:
+    if profile is None:
+        if provider_type != _TINFOIL_PROVIDER_TYPE:
+            logger.warning(
+                "Ignoring EHBP target override for provider without profile",
+                extra={"provider": provider_type or "unknown"},
+            )
+            return target_url
+        validated_base_url = _validated_tinfoil_enclave_base_url(enclave_url)
+    elif not profile.allow_client_target_override:
         logger.warning(
-            "Ignoring X-Tinfoil-Enclave-Url for non-Tinfoil EHBP provider",
+            "Ignoring EHBP target override for provider profile",
             extra={"provider": provider_type or "unknown"},
         )
         return target_url
+    else:
+        validated_base_url = _validated_confidential_target_url(enclave_url, profile)
 
-    validated_base_url = _validated_tinfoil_enclave_base_url(enclave_url)
     if validated_base_url is None:
         logger.warning(
-            "Rejected invalid X-Tinfoil-Enclave-Url",
+            "Rejected invalid EHBP target override",
             extra={"provider": provider_type or "unknown"},
         )
         raise UpstreamError(
-            "Invalid X-Tinfoil-Enclave-Url: expected an HTTPS tinfoil.sh URL",
+            f"Invalid {override_header}: target is not allowed for this provider",
             status_code=400,
         )
 
     return f"{validated_base_url}/{path.lstrip('/')}"
 
 
-def _strip_proxy_headers(headers: dict[str, str]) -> dict[str, str]:
+def _validated_confidential_target_url(
+    enclave_url: str, profile: "ConfidentialInferenceProfile"
+) -> str | None:
+    if profile.client_target_url_header == _ENCLAVE_URL_HEADER:
+        return _validated_tinfoil_enclave_base_url(enclave_url)
+    return None
+
+
+def _strip_proxy_headers(
+    headers: dict[str, str],
+    profile: "ConfidentialInferenceProfile | None" = None,
+) -> dict[str, str]:
     """Remove proxy-routing headers that must not reach the upstream enclave."""
+    proxy_only_headers = profile.proxy_only_headers if profile else _PROXY_ONLY_HEADERS
     clean = {}
     for key, value in headers.items():
-        if key.lower() not in _PROXY_ONLY_HEADERS:
+        if key.lower() not in proxy_only_headers:
             clean[key] = value
     return clean
 
 
 def _prepare_ehbp_upstream_headers(
-    headers: dict[str, str], target_headers: Mapping[str, str]
+    headers: dict[str, str],
+    target_headers: Mapping[str, str],
+    profile: "ConfidentialInferenceProfile | None" = None,
 ) -> dict[str, str]:
     """Merge safe request headers with provider-controlled EHBP target headers.
 
@@ -200,7 +230,7 @@ def _prepare_ehbp_upstream_headers(
     callers cannot spoof proxy controls while providers can opt into protocol
     features.
     """
-    return {**_strip_proxy_headers(headers), **dict(target_headers)}
+    return {**_strip_proxy_headers(headers, profile), **dict(target_headers)}
 
 
 def _build_cost_info(
@@ -316,23 +346,37 @@ async def _compute_ehbp_actual_cost(
 def _extract_usage_from_response(
     resp_headers: list[tuple[str, str]],
     trailers: list[tuple[str, str]],
+    usage_header_name: str | None = _RESPONSE_USAGE_HEADER,
 ) -> str | None:
-    """Find X-Tinfoil-Usage-Metrics in response headers or trailers.
+    """Find provider usage metrics in response headers or trailers.
 
-    Non-streaming responses put usage in the response header. Streaming
-    responses put it in an HTTP trailer (declared via the ``Trailer:`` header).
-    httpx/httpcore silently discard trailers, so we use h11 directly when
-    forwarding EHBP requests.
+    Non-streaming responses put usage in a response header. Streaming responses
+    put it in an HTTP trailer. httpx/httpcore silently discard trailers, so we
+    use h11 directly when forwarding EHBP requests.
     """
-    # Check response headers first (non-streaming case)
+    if not usage_header_name:
+        return None
+    usage_header_name_lower = usage_header_name.lower()
     for k, v in resp_headers:
-        if k.lower() == _RESPONSE_USAGE_HEADER.lower():
+        if k.lower() == usage_header_name_lower:
             return v
-    # Check trailers (streaming case)
     for k, v in trailers:
-        if k.lower() == _RESPONSE_USAGE_HEADER.lower():
+        if k.lower() == usage_header_name_lower:
             return v
     return None
+
+
+@dataclass(frozen=True)
+class ConfidentialInferenceProfile:
+    """Provider-neutral policy for encrypted/confidential inference forwarding."""
+
+    protocol: str = "EHBP"
+    usage_response_header: str | None = None
+    client_target_url_header: str | None = None
+    allow_client_target_override: bool = False
+    trusted_model_binding_header: str | None = None
+    missing_usage_billing_policy: str = "max_cost"
+    proxy_only_headers: frozenset[str] = _PROXY_ONLY_HEADERS
 
 
 @dataclass(frozen=True)
@@ -341,6 +385,110 @@ class EHBPForwardingTarget:
 
     url: str
     headers: Mapping[str, str] = field(default_factory=dict)
+    profile: ConfidentialInferenceProfile | None = None
+
+
+async def finalize_ehbp_actual_cost_payment(
+    key: ApiKey,
+    session: AsyncSession,
+    reserved_cost_for_model: int,
+    model_id: str,
+    cost_info: dict,
+) -> None:
+    """Finalize an EHBP bearer request using clamped provider usage metrics."""
+    billing_key = await get_billing_key(key, session)
+    total_cost_msats = max(0, int(cost_info.get("total_msats", reserved_cost_for_model)))
+    now = int(time.time())
+
+    safe_reserved = case(
+        (
+            col(ApiKey.reserved_balance) >= reserved_cost_for_model,
+            col(ApiKey.reserved_balance) - reserved_cost_for_model,
+        ),
+        else_=0,
+    )
+    cleared_reserved_at = case(
+        (
+            col(ApiKey.reserved_balance) - reserved_cost_for_model > 0,
+            col(ApiKey.reserved_at),
+        ),
+        else_=None,
+    )
+
+    stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+        .values(
+            reserved_balance=safe_reserved,
+            reserved_at=cleared_reserved_at,
+            balance=col(ApiKey.balance) - total_cost_msats,
+            total_spent=col(ApiKey.total_spent) + total_cost_msats,
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+
+    child_result = None
+    if billing_key.hashed_key != key.hashed_key:
+        child_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .values(
+                reserved_balance=safe_reserved,
+                reserved_at=cleared_reserved_at,
+                total_spent=col(ApiKey.total_spent) + total_cost_msats,
+            )
+        )
+        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
+
+    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
+        await session.rollback()
+        logger.error(
+            "Failed to finalize EHBP usage-based payment",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                "model": model_id,
+                "reserved_cost_for_model": reserved_cost_for_model,
+                "total_cost_msats": total_cost_msats,
+                "parent_rowcount": result.rowcount,
+                "child_rowcount": getattr(child_result, "rowcount", None),
+            },
+        )
+        return
+
+    await session.commit()
+    await session.refresh(billing_key)
+    if billing_key.hashed_key != key.hashed_key:
+        await session.refresh(key)
+
+    if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
+        fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
+        try:
+            await accumulate_routstr_fee(session, fee_msats)
+        except Exception as e:
+            logger.warning(
+                "Failed to accumulate Routstr fee for EHBP request",
+                extra={"error": str(e), "fee_msats": fee_msats},
+            )
+
+    payments_logger.info(
+        "FINALIZE",
+        extra={
+            "event": "finalize",
+            "key_hash": key.hashed_key[:8] + "...",
+            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "model": model_id,
+            "cost_reserved": reserved_cost_for_model,
+            "cost_charged": total_cost_msats,
+            "input_tokens": cost_info.get("input_tokens", 0),
+            "output_tokens": cost_info.get("output_tokens", 0),
+            "balance": billing_key.balance,
+            "reserved_balance": billing_key.reserved_balance,
+            "total_spent": billing_key.total_spent,
+            "finalize_type": "ehbp_usage",
+            "finalized_at": now,
+        },
+    )
 
 
 async def finalize_ehbp_max_cost_payment(
@@ -410,11 +558,12 @@ async def finalize_ehbp_max_cost_payment(
                 total_spent=col(ApiKey.total_spent) + total_cost_msats,
             )
         )
-        await session.exec(child_stmt)  # type: ignore[call-overload]
+        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
+    else:
+        child_result = None
 
-    await session.commit()
-
-    if result.rowcount == 0:
+    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
+        await session.rollback()
         logger.error(
             "Failed to finalize EHBP max-cost payment",
             extra={
@@ -422,9 +571,13 @@ async def finalize_ehbp_max_cost_payment(
                 "billing_key_hash": billing_key.hashed_key[:8] + "...",
                 "model": model_id,
                 "max_cost_for_model": max_cost_for_model,
+                "parent_rowcount": result.rowcount,
+                "child_rowcount": getattr(child_result, "rowcount", None),
             },
         )
         return
+
+    await session.commit()
 
     await session.refresh(billing_key)
     if billing_key.hashed_key != key.hashed_key:
@@ -512,8 +665,11 @@ async def forward_ehbp_request(
     target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
 
     provider_type = getattr(upstream, "provider_type", "unknown")
-    target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
-    upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers)
+    profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
+    target_url = _resolve_ehbp_target_url(
+        target.url, path, headers, provider_type, profile
+    )
+    upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
 
     # Merge query params into the target URL since forward_with_trailer
     # doesn't have a separate params argument.
@@ -568,12 +724,18 @@ async def forward_ehbp_request(
 
         # Check for usage metrics in response headers (non-streaming) or
         # trailers (streaming). h11 captures both.
-        usage_header = _extract_usage_from_response(resp.headers, resp.trailers)
+        usage_header_name = (
+            profile.usage_response_header if profile else _RESPONSE_USAGE_HEADER
+        )
+        usage_header = _extract_usage_from_response(
+            resp.headers, resp.trailers, usage_header_name
+        )
         usage_dict = parse_tinfoil_usage_metrics(usage_header)
         usage_source = (
             "header"
-            if any(k.lower() == _RESPONSE_USAGE_HEADER.lower() for k, _ in resp.headers)
-            else ("trailer" if resp.trailers else "none")
+            if usage_header_name
+            and any(k.lower() == usage_header_name.lower() for k, _ in resp.headers)
+            else ("trailer" if usage_header else "none")
         )
 
         logger.info(
@@ -602,12 +764,13 @@ async def forward_ehbp_request(
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            cost_data = await adjust_payment_for_tokens(
-                key,
-                {"model": model_obj.id, "usage": usage_dict},
-                session,
-                max_cost_for_model,
+            cost_info = await _compute_ehbp_actual_cost(
+                usage_header, model_obj, max_cost_for_model
             )
+            await finalize_ehbp_actual_cost_payment(
+                key, session, max_cost_for_model, model_obj.id, cost_info
+            )
+            cost_data = {**cost_info, "total_usd": 0.0}
         else:
             logger.warning(
                 "EHBP usage metrics not found in headers or trailers, "
@@ -726,8 +889,11 @@ async def forward_ehbp_x_cashu_request(
         headers = upstream.prepare_headers(dict(request.headers))  # type: ignore[attr-defined]
         target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]
         provider_type = getattr(upstream, "provider_type", "unknown")
-        target_url = _resolve_ehbp_target_url(target.url, path, headers, provider_type)
-        upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers)
+        profile = target.profile or upstream.get_confidential_inference_profile()  # type: ignore[attr-defined]
+        target_url = _resolve_ehbp_target_url(
+            target.url, path, headers, provider_type, profile
+        )
+        upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
         request_body = await request.body()
 
         # Merge query params into the target URL
@@ -766,13 +932,19 @@ async def forward_ehbp_x_cashu_request(
 
             # Compute refund from actual usage when available — check both
             # response headers (non-streaming) and trailers (streaming).
-            usage_header = _extract_usage_from_response(resp.headers, resp.trailers)
+            usage_header_name = (
+                profile.usage_response_header if profile else _RESPONSE_USAGE_HEADER
+            )
+            usage_header = _extract_usage_from_response(
+                resp.headers, resp.trailers, usage_header_name
+            )
             usage_source = (
                 "header"
-                if any(
-                    k.lower() == _RESPONSE_USAGE_HEADER.lower() for k, _ in resp.headers
+                if usage_header_name
+                and any(
+                    k.lower() == usage_header_name.lower() for k, _ in resp.headers
                 )
-                else ("trailer" if resp.trailers else "none")
+                else ("trailer" if usage_header else "none")
             )
 
             logger.info(

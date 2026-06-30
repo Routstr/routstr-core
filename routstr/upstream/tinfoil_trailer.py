@@ -24,6 +24,9 @@ from ..core import get_logger
 logger = get_logger(__name__)
 
 _READ_BUFSIZE = 65536
+_DEFAULT_TIMEOUT_SECONDS = 30.0
+_DEFAULT_CLOSE_TIMEOUT_SECONDS = 1.0
+_DEFAULT_MAX_RESPONSE_BYTES = 25 * 1024 * 1024
 
 
 @dataclass
@@ -50,6 +53,9 @@ async def forward_with_trailer(
     url: str,
     headers: dict[str, str],
     body: bytes,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
+    close_timeout_seconds: float = _DEFAULT_CLOSE_TIMEOUT_SECONDS,
 ) -> TrailerResponse:
     """Send an HTTP/1.1 request via h11 and capture HTTP trailers.
 
@@ -66,7 +72,10 @@ async def forward_with_trailer(
         path = f"{path}?{parsed.query}"
 
     ssl_ctx = ssl.create_default_context()
-    reader, writer = await asyncio.open_connection(host, port, ssl=ssl_ctx)
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port, ssl=ssl_ctx),
+        timeout=timeout_seconds,
+    )
 
     try:
         # Build HTTP/1.1 request
@@ -89,20 +98,24 @@ async def forward_with_trailer(
             request_data += body
 
         writer.write(request_data)
-        await writer.drain()
+        await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
 
         # Parse response with h11
         conn = h11.Connection(h11.CLIENT)
         status_code = 0
         resp_headers: list[tuple[str, str]] = []
         body_chunks: list[bytes] = []
+        body_size = 0
         trailers: list[tuple[str, str]] = []
 
         while True:
             event = conn.next_event()
 
             if event is h11.NEED_DATA:
-                data = await reader.read(_READ_BUFSIZE)
+                data = await asyncio.wait_for(
+                    reader.read(_READ_BUFSIZE),
+                    timeout=timeout_seconds,
+                )
                 conn.receive_data(data if data else b"")
                 continue
 
@@ -111,6 +124,11 @@ async def forward_with_trailer(
                 resp_headers = [(k.decode(), v.decode()) for k, v in event.headers]
 
             elif isinstance(event, h11.Data):
+                body_size += len(event.data)
+                if body_size > max_response_bytes:
+                    raise ValueError(
+                        f"EHBP response exceeded {max_response_bytes} bytes"
+                    )
                 body_chunks.append(event.data)
 
             elif isinstance(event, h11.EndOfMessage):
@@ -133,8 +151,11 @@ async def forward_with_trailer(
             trailers=trailers,
         )
     finally:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
+        writer.close()
+        if close_timeout_seconds > 0:
+            try:
+                await asyncio.wait_for(
+                    writer.wait_closed(), timeout=close_timeout_seconds
+                )
+            except Exception:
+                pass
