@@ -28,7 +28,7 @@ def provider_slug_base(provider_type: str) -> str:
     return base
 
 
-def _slug_candidate(base: str, suffix_number: int) -> str:
+def provider_slug_candidate(base: str, suffix_number: int) -> str:
     if suffix_number == 1:
         return base
 
@@ -52,7 +52,7 @@ async def allocate_unique_provider_slug(
     reserved = {slug.lower() for slug in reserved_slugs}
 
     for suffix_number in count(1):
-        candidate = _slug_candidate(base, suffix_number)
+        candidate = provider_slug_candidate(base, suffix_number)
         if candidate in reserved:
             continue
 
