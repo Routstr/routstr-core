@@ -6,13 +6,12 @@ import math
 import traceback
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
-from typing import Any, Mapping, cast
+from typing import Any, Mapping, Self, cast
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
-from sqlmodel import select
 
 from ..auth import adjust_payment_for_tokens
 from ..core import get_logger
@@ -92,6 +91,11 @@ class BaseUpstreamProvider:
     base_url: str
     api_key: str
     provider_fee: float = 1.05
+    # Primary key of the ``upstream_providers`` row this instance was built
+    # from. Set by ``from_db_row`` so a live provider can re-find its own row by
+    # stable identity instead of its rotatable ``api_key``. ``None`` for
+    # instances not sourced from a row.
+    db_id: int | None = None
     _models_cache: list[Model] = []
     _models_by_id: dict[str, Model] = {}
 
@@ -106,6 +110,7 @@ class BaseUpstreamProvider:
         self.base_url = base_url
         self.api_key = api_key
         self.provider_fee = provider_fee
+        self.db_id = None
         self._models_cache = []
         self._models_by_id = {}
 
@@ -123,16 +128,32 @@ class BaseUpstreamProvider:
         return detect_litellm_prefix(self.base_url)
 
     @classmethod
-    def from_db_row(
-        cls, provider_row: "UpstreamProviderRow"
-    ) -> "BaseUpstreamProvider | None":
-        """Factory method to instantiate provider from database row.
+    def from_db_row(cls, provider_row: "UpstreamProviderRow") -> "Self | None":
+        """Instantiate a provider from a database row, carrying its identity.
+
+        Construction itself is delegated to the ``_build_from_row`` hook (which
+        subclasses override to match their constructor); this wrapper stamps the
+        row's primary key onto the instance as ``db_id`` so the provider can
+        later re-find its own row by identity rather than by its ``api_key``.
 
         Args:
             provider_row: Database row containing provider configuration
 
         Returns:
             Instantiated provider or None if instantiation fails
+        """
+        provider = cls._build_from_row(provider_row)
+        if provider is not None:
+            provider.db_id = provider_row.id
+        return provider
+
+    @classmethod
+    def _build_from_row(cls, provider_row: "UpstreamProviderRow") -> "Self | None":
+        """Construct the provider instance from a row (no identity stamping).
+
+        Overridden by subclasses whose constructors differ from the base
+        ``(base_url, api_key, provider_fee)`` shape. Callers should use
+        ``from_db_row`` instead, which also attaches ``db_id``.
         """
         return cls(
             base_url=provider_row.base_url,
@@ -4878,14 +4899,11 @@ class BaseUpstreamProvider:
         """Refresh the in-memory models cache from upstream API."""
         try:
             async with create_session() as session:
-                stmt = select(UpstreamProviderRow).where(
-                    UpstreamProviderRow.base_url == self.base_url,
-                    UpstreamProviderRow.api_key == self.api_key,
+                provider = (
+                    await session.get(UpstreamProviderRow, self.db_id)
+                    if self.db_id is not None
+                    else None
                 )
-                result = await session.exec(stmt)
-
-                # .first() returns the object or None if not found
-                provider = result.first()
                 if not provider or not provider.id:
                     raise HTTPException(status_code=404, detail="Provider not found")
 

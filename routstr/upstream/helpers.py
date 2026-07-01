@@ -216,9 +216,6 @@ async def init_upstreams() -> list[BaseUpstreamProvider]:
 
             provider = _instantiate_provider(provider_row)
             if provider:
-                # Keep provider DB id on runtime instance so model mapping can
-                # bind DB overrides to the correct upstream.
-                setattr(provider, "db_id", provider_row.id)
                 await provider.refresh_models_cache()
                 logger.debug(
                     f"Initialized {provider_row.provider_type} provider",
@@ -413,9 +410,7 @@ def _instantiate_provider(
             return provider
 
         if provider_row.provider_type == "custom":
-            return BaseUpstreamProvider(
-                provider_row.base_url, provider_row.api_key, provider_row.provider_fee
-            )
+            return BaseUpstreamProvider.from_db_row(provider_row)
 
         logger.error(
             f"Unknown provider type: {provider_row.provider_type}",

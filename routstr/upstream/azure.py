@@ -38,7 +38,7 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
         self.api_version = api_version
 
     @classmethod
-    def from_db_row(
+    def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "AzureUpstreamProvider | None":
         if not provider_row.api_version:
