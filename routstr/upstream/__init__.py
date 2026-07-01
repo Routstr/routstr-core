@@ -11,6 +11,7 @@ from .openrouter import OpenRouterUpstreamProvider
 from .perplexity import PerplexityUpstreamProvider
 from .ppqai import PPQAIUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
+from .tinfoil import TinfoilUpstreamProvider
 from .xai import XAIUpstreamProvider
 
 upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
@@ -26,6 +27,7 @@ upstream_provider_classes: list[type[BaseUpstreamProvider]] = [
     PerplexityUpstreamProvider,
     PPQAIUpstreamProvider,
     RoutstrUpstreamProvider,
+    TinfoilUpstreamProvider,
     XAIUpstreamProvider,
 ]
 """List of all upstream classes"""

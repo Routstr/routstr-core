@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 import traceback
+import typing
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from typing import Any, Mapping, cast
@@ -50,6 +51,9 @@ from .cache_breakpoints import (
 from .count_tokens import count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
+
+if typing.TYPE_CHECKING:
+    from .ehbp import EHBPForwardingTarget
 
 logger = get_logger(__name__)
 
@@ -2818,6 +2822,22 @@ class BaseUpstreamProvider:
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
             raise UpstreamError("An unexpected server error occurred", status_code=500)
+
+    supports_ehbp: bool = False
+
+    def get_ehbp_forwarding_target(
+        self, path: str, model_obj: Model
+    ) -> "EHBPForwardingTarget":
+        """Return the EHBP forwarding target for this provider.
+
+        Providers must explicitly opt in by setting ``supports_ehbp = True``
+        and overriding this method. Most upstreams do not accept EHBP-encrypted
+        request bodies, so the base provider intentionally does not provide a
+        default endpoint.
+        """
+        raise NotImplementedError(
+            f"Provider {self.provider_type} does not support EHBP forwarding"
+        )
 
     async def forward_responses_request(
         self,

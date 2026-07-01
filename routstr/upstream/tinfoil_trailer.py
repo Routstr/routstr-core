@@ -1,0 +1,140 @@
+"""h11-based HTTP client for EHBP requests that captures HTTP trailers.
+
+httpx/httpcore silently discard HTTP trailers during chunked transfer
+decoding. Tinfoil returns ``X-Tinfoil-Usage-Metrics`` as a trailer on
+streaming responses, so we need a lower-level HTTP client that preserves
+trailers from the h11 ``EndOfMessage`` event.
+
+Because EHBP response bodies are opaque encrypted blobs, buffering the full
+response is acceptable — the client decrypts the complete body regardless of
+whether it arrived streamed or buffered.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import ssl
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+
+import h11
+
+from ..core import get_logger
+
+logger = get_logger(__name__)
+
+_READ_BUFSIZE = 65536
+
+
+@dataclass
+class TrailerResponse:
+    """Buffered HTTP response with optional trailer headers."""
+
+    status_code: int
+    headers: list[tuple[str, str]]
+    body: bytes
+    trailers: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _get_header(headers: list[tuple[str, str]], name: str) -> str | None:
+    name_lower = name.lower()
+    for k, v in headers:
+        if k.lower() == name_lower:
+            return v
+    return None
+
+
+async def forward_with_trailer(
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+) -> TrailerResponse:
+    """Send an HTTP/1.1 request via h11 and capture HTTP trailers.
+
+    Returns a :class:`TrailerResponse` with the full buffered body and any
+    trailer headers from the ``EndOfMessage`` event.
+    """
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"Invalid URL (no hostname): {url}")
+    port = parsed.port or 443
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    ssl_ctx = ssl.create_default_context()
+    reader, writer = await asyncio.open_connection(host, port, ssl=ssl_ctx)
+
+    try:
+        # Build HTTP/1.1 request
+        header_lines = [f"{method} {path} HTTP/1.1"]
+        has_host = any(k.lower() == "host" for k in headers)
+        if not has_host:
+            header_lines.append(f"Host: {host}")
+        header_lines.append("Connection: close")
+
+        for key, value in headers.items():
+            if key.lower() in ("host", "connection"):
+                continue
+            header_lines.append(f"{key}: {value}")
+
+        if body and not any(k.lower() == "content-length" for k in headers):
+            header_lines.append(f"Content-Length: {len(body)}")
+
+        request_data = "\r\n".join(header_lines).encode() + b"\r\n\r\n"
+        if body:
+            request_data += body
+
+        writer.write(request_data)
+        await writer.drain()
+
+        # Parse response with h11
+        conn = h11.Connection(h11.CLIENT)
+        status_code = 0
+        resp_headers: list[tuple[str, str]] = []
+        body_chunks: list[bytes] = []
+        trailers: list[tuple[str, str]] = []
+
+        while True:
+            event = conn.next_event()
+
+            if event is h11.NEED_DATA:
+                data = await reader.read(_READ_BUFSIZE)
+                conn.receive_data(data if data else b"")
+                continue
+
+            if isinstance(event, h11.Response):
+                status_code = event.status_code
+                resp_headers = [(k.decode(), v.decode()) for k, v in event.headers]
+
+            elif isinstance(event, h11.Data):
+                body_chunks.append(event.data)
+
+            elif isinstance(event, h11.EndOfMessage):
+                for k, v in event.headers:
+                    trailers.append((k.decode(), v.decode()))
+                break
+
+            elif isinstance(event, h11.PAUSED):
+                # Shouldn't happen for simple request/response, but break safely
+                logger.warning("h11 PAUSED event during EHBP response parsing")
+                break
+
+            elif isinstance(event, h11.ConnectionClosed):
+                break
+
+        return TrailerResponse(
+            status_code=status_code,
+            headers=resp_headers,
+            body=b"".join(body_chunks),
+            trailers=trailers,
+        )
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
