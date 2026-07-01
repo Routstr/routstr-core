@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.core.admin import _get_upstream_provider_by_ref
 from routstr.core.db import UpstreamProviderRow
 from routstr.core.provider_slugs import (
     allocate_unique_provider_slug,
@@ -44,6 +45,32 @@ def test_provider_slug_base_sanitizes_provider_type() -> None:
     assert provider_slug_base("!!!") == "provider"
     assert provider_slug_base("AI") == "ai-provider"
     assert provider_slug_base("123") == "provider-123"
+
+
+@pytest.mark.asyncio
+async def test_provider_ref_lookup_accepts_existing_numeric_ids_and_slugs() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    async with AsyncSession(engine) as session:
+        provider = UpstreamProviderRow(
+            slug="openai",
+            provider_type="openai",
+            base_url="https://api.openai.com/v1",
+            api_key="key-1",
+        )
+        session.add(provider)
+        await session.commit()
+        await session.refresh(provider)
+
+        by_id = await _get_upstream_provider_by_ref(session, str(provider.id))
+        by_slug = await _get_upstream_provider_by_ref(session, "openai")
+
+    assert by_id.id == provider.id
+    assert by_slug.id == provider.id
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
