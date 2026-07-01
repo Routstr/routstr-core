@@ -1,6 +1,6 @@
 import hashlib
 from types import SimpleNamespace
-from typing import AsyncGenerator
+from typing import AsyncGenerator, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -121,7 +121,8 @@ async def test_redemption_failure_returns_sanitized_error(
             await validate_bearer_key(token, session)
 
     assert exc_info.value.status_code == expected_status
-    error_detail = exc_info.value.detail["error"]
+    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    error_detail = detail["error"]
     assert error_detail["code"] == "token_redemption_failed"
     assert error_detail["message"] == expected_message
     assert str(error) not in error_detail["message"]
@@ -152,7 +153,8 @@ async def test_unexpected_redemption_error_returns_internal_error(
             await validate_bearer_key(token, session)
 
     assert exc_info.value.status_code == 500
-    error_detail = exc_info.value.detail["error"]
+    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    error_detail = detail["error"]
     assert error_detail["code"] == "internal_error"
     assert "/var/lib/secret" not in error_detail["message"]
     assert await session.get(ApiKey, hashed_key) is None
