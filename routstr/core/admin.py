@@ -31,6 +31,7 @@ from .db import (
 )
 from .log_manager import log_manager
 from .logging import get_logger
+from .provider_slugs import allocate_unique_provider_slug
 from .settings import SettingsService, settings
 
 logger = get_logger(__name__)
@@ -726,11 +727,6 @@ def _validate_slug(value: str) -> str:
     return candidate
 
 
-def _generate_slug(provider_type: str) -> str:
-    base = re.sub(r"[^a-z0-9]+", "-", provider_type.lower()).strip("-") or "provider"
-    return f"{base}-{secrets.token_hex(3)}"
-
-
 async def _ensure_unique_slug(
     session: AsyncSession, slug: str, exclude_id: int | None = None
 ) -> None:
@@ -883,20 +879,7 @@ async def create_upstream_provider(
             slug = _validate_slug(payload.slug)
             await _ensure_unique_slug(session, slug)
         else:
-            for _ in range(8):
-                slug = _generate_slug(payload.provider_type)
-                existing = await session.exec(
-                    select(UpstreamProviderRow).where(
-                        UpstreamProviderRow.slug == slug
-                    )
-                )
-                if existing.first() is None:
-                    break
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Could not generate a unique slug",
-                )
+            slug = await allocate_unique_provider_slug(session, payload.provider_type)
 
         provider = UpstreamProviderRow(
             slug=slug,
