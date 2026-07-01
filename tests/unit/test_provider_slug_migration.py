@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-import importlib
+import importlib.util
+from pathlib import Path
 
 import sqlalchemy as sa
 
-migration = importlib.import_module(
-    "migrations.versions.c6d7e8f9a0b1_add_slug_to_upstream_providers"
+_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "migrations"
+    / "versions"
+    / "c6d7e8f9a0b1_add_slug_to_upstream_providers.py"
 )
+_spec = importlib.util.spec_from_file_location("provider_slug_migration", _MIGRATION_PATH)
+assert _spec is not None and _spec.loader is not None
+migration = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(migration)
 
 
 def test_slug_migration_backfill_uses_api_safe_deterministic_slugs() -> None:
