@@ -57,3 +57,102 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             await validate_bearer_key(token, session)
 
     assert await session.get(ApiKey, hashed_key) is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_message"),
+    [
+        (
+            ValueError("Mint Error: Token already spent. (Code: 11001)"),
+            400,
+            "Cashu token already spent",
+        ),
+        (
+            ValueError(
+                "Token amount (5 sat) is insufficient to cover melt fees. "
+                "Needed: 7 sat (amount: 5 + fee: 1 + input_fees: 1)"
+            ),
+            400,
+            "Token value is too small to cover swap fees",
+        ),
+        (
+            ValueError(
+                "Failed to melt token from foreign mint http://foreign:3338: boom"
+            ),
+            400,
+            "Failed to swap token from foreign mint",
+        ),
+        (
+            ValueError("could not decode token"),
+            401,
+            "Invalid Cashu token",
+        ),
+        (
+            ValueError("some unexpected wallet condition"),
+            400,
+            "Failed to redeem Cashu token",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_redemption_failure_returns_sanitized_error(
+    session: AsyncSession,
+    error: Exception,
+    expected_status: int,
+    expected_message: str,
+) -> None:
+    """Redemption failures share one error code, expose stable sanitized
+    messages (no raw exception text), and leave no orphan ApiKey row."""
+    token = "cashuAredemption_fails_with_specific_error"
+    hashed_key = hashlib.sha256(token.encode()).hexdigest()
+    token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch(
+            "routstr.auth.credit_balance",
+            new=AsyncMock(side_effect=error),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await validate_bearer_key(token, session)
+
+    assert exc_info.value.status_code == expected_status
+    error_detail = exc_info.value.detail["error"]
+    assert error_detail["code"] == "token_redemption_failed"
+    assert error_detail["message"] == expected_message
+    assert str(error) not in error_detail["message"]
+    assert await session.get(ApiKey, hashed_key) is None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_redemption_error_returns_internal_error(
+    session: AsyncSession,
+) -> None:
+    """Unexpected (non-wallet) failures surface as generic 500s without
+    leaking internal details, instead of masquerading as token errors."""
+    token = "cashuAredemption_fails_with_internal_error"
+    hashed_key = hashlib.sha256(token.encode()).hexdigest()
+    token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch(
+            "routstr.auth.credit_balance",
+            new=AsyncMock(side_effect=RuntimeError("db exploded at /var/lib/secret")),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await validate_bearer_key(token, session)
+
+    assert exc_info.value.status_code == 500
+    error_detail = exc_info.value.detail["error"]
+    assert error_detail["code"] == "internal_error"
+    assert "/var/lib/secret" not in error_detail["message"]
+    assert await session.get(ApiKey, hashed_key) is None
