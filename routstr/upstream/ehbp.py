@@ -199,6 +199,9 @@ def _resolve_ehbp_target_url(
 def _validated_confidential_target_url(
     enclave_url: str, profile: "ConfidentialInferenceProfile"
 ) -> str | None:
+    # Client target overrides are Tinfoil-only for now. Future confidential
+    # inference providers must add their own constrained validator here before
+    # opting into ``allow_client_target_override``.
     if profile.client_target_url_header == _ENCLAVE_URL_HEADER:
         return _validated_tinfoil_enclave_base_url(enclave_url)
     return None
@@ -370,12 +373,9 @@ def _extract_usage_from_response(
 class ConfidentialInferenceProfile:
     """Provider-neutral policy for encrypted/confidential inference forwarding."""
 
-    protocol: str = "EHBP"
     usage_response_header: str | None = None
     client_target_url_header: str | None = None
     allow_client_target_override: bool = False
-    trusted_model_binding_header: str | None = None
-    missing_usage_billing_policy: str = "max_cost"
     proxy_only_headers: frozenset[str] = _PROXY_ONLY_HEADERS
 
 
@@ -397,6 +397,8 @@ async def finalize_ehbp_actual_cost_payment(
 ) -> None:
     """Finalize an EHBP bearer request using clamped provider usage metrics."""
     billing_key = await get_billing_key(key, session)
+    key_hash = key.hashed_key
+    billing_key_hash = billing_key.hashed_key
     total_cost_msats = max(0, int(cost_info.get("total_msats", reserved_cost_for_model)))
     now = int(time.time())
 
@@ -445,8 +447,8 @@ async def finalize_ehbp_actual_cost_payment(
         logger.error(
             "Failed to finalize EHBP usage-based payment",
             extra={
-                "key_hash": key.hashed_key[:8] + "...",
-                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                "key_hash": key_hash[:8] + "...",
+                "billing_key_hash": billing_key_hash[:8] + "...",
                 "model": model_id,
                 "reserved_cost_for_model": reserved_cost_for_model,
                 "total_cost_msats": total_cost_msats,
@@ -504,6 +506,8 @@ async def finalize_ehbp_max_cost_payment(
     cost and releases the reservation.
     """
     billing_key = await get_billing_key(key, session)
+    key_hash = key.hashed_key
+    billing_key_hash = billing_key.hashed_key
     total_cost_msats = max(0, int(max_cost_for_model))
     now = int(time.time())
 
@@ -567,8 +571,8 @@ async def finalize_ehbp_max_cost_payment(
         logger.error(
             "Failed to finalize EHBP max-cost payment",
             extra={
-                "key_hash": key.hashed_key[:8] + "...",
-                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                "key_hash": key_hash[:8] + "...",
+                "billing_key_hash": billing_key_hash[:8] + "...",
                 "model": model_id,
                 "max_cost_for_model": max_cost_for_model,
                 "parent_rowcount": result.rowcount,

@@ -60,12 +60,9 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
     platform_url = "https://docs.tinfoil.sh"
     supports_ehbp = True
     confidential_inference_profile = ConfidentialInferenceProfile(
-        protocol="EHBP",
         usage_response_header=_RESPONSE_USAGE_HEADER,
         client_target_url_header=_ENCLAVE_URL_HEADER,
         allow_client_target_override=True,
-        trusted_model_binding_header=None,
-        missing_usage_billing_policy="max_cost",
         proxy_only_headers=_PROXY_ONLY_HEADERS,
     )
 
