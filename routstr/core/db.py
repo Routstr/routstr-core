@@ -319,6 +319,12 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         ),
     )
     id: int | None = Field(default=None, primary_key=True)
+    slug: str | None = Field(
+        default=None,
+        unique=True,
+        index=True,
+        description="Stable external slug used for updates via API key.",
+    )
     provider_type: str = Field(
         description="Provider type: custom, openai, anthropic, azure, openrouter, etc."
     )

@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from ..core import get_logger
 from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
+from ..core.provider_slugs import allocate_unique_provider_slug
 from ..payment.models import Model
 from .base import BaseUpstreamProvider
 
@@ -250,6 +251,7 @@ async def _seed_providers_from_settings(
 
     providers_to_add: list[UpstreamProviderRow] = []
     seeded_provider_keys: set[tuple[str, str]] = set()
+    reserved_slugs: set[str] = set()
 
     provider_classes_by_type = {
         cls.provider_type: cls
@@ -279,8 +281,13 @@ async def _seed_providers_from_settings(
                     )
                 )
                 if not result.first():
+                    slug = await allocate_unique_provider_slug(
+                        session, provider_type, reserved_slugs
+                    )
+                    reserved_slugs.add(slug)
                     providers_to_add.append(
                         UpstreamProviderRow(
+                            slug=slug,
                             provider_type=provider_type,
                             base_url=base_url,
                             api_key=api_key,
@@ -299,8 +306,13 @@ async def _seed_providers_from_settings(
             )
         )
         if not result.first():
+            slug = await allocate_unique_provider_slug(
+                session, "ollama", reserved_slugs
+            )
+            reserved_slugs.add(slug)
             providers_to_add.append(
                 UpstreamProviderRow(
+                    slug=slug,
                     provider_type="ollama",
                     base_url=ollama_base_url,
                     api_key=ollama_api_key,
@@ -320,8 +332,13 @@ async def _seed_providers_from_settings(
                 )
             )
             if not result.first():
+                slug = await allocate_unique_provider_slug(
+                    session, "azure", reserved_slugs
+                )
+                reserved_slugs.add(slug)
                 providers_to_add.append(
                     UpstreamProviderRow(
+                        slug=slug,
                         provider_type="azure",
                         base_url=base_url,
                         api_key=api_key,
@@ -342,8 +359,13 @@ async def _seed_providers_from_settings(
                 )
             )
             if not result.first():
+                slug = await allocate_unique_provider_slug(
+                    session, "custom", reserved_slugs
+                )
+                reserved_slugs.add(slug)
                 providers_to_add.append(
                     UpstreamProviderRow(
+                        slug=slug,
                         provider_type="custom",
                         base_url=base_url,
                         api_key=api_key,
@@ -356,7 +378,7 @@ async def _seed_providers_from_settings(
         session.add(provider)
         logger.info(
             f"Seeding {provider.provider_type} provider",  # type: ignore[str-format]
-            extra={"base_url": provider.base_url},
+            extra={"base_url": provider.base_url, "slug": provider.slug},
         )
 
 
