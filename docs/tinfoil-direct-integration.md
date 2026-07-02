@@ -410,8 +410,8 @@ and `routstr/upstream/ehbp.py`.
   - `forward_ehbp_x_cashu_request()`: if usage is available, computes the
     refund from actual cost instead of max cost.
 
-- `routstr/proxy.py`: `/attestation` and `/.well-known/` paths are forwarded
-  to all enabled upstreams without model/cost/auth lookups.
+- `routstr/proxy.py`: `/attestation` and `/tee/attestation` paths are forwarded
+  to Tinfoil upstreams without model/cost/auth lookups.
 
 ### Billing behavior
 
