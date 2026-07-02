@@ -11,7 +11,7 @@ from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, delete
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio.engine import create_async_engine
+from sqlalchemy.ext.asyncio.engine import AsyncEngine, create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -22,8 +22,25 @@ logger = get_logger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
+# How long a writer waits for SQLite's single write lock before giving up with
+# SQLITE_BUSY (which surfaces as a 500). Python's sqlite3 driver defaults to 5s;
+# on the financial hot path, tiny writes serialise in milliseconds, so a longer
+# wait absorbs bursts of write contention without masking a genuinely stuck
+# writer. Shared with the test engines so lock contention behaves identically in
+# tests as in production.
+SQLITE_BUSY_TIMEOUT_SECONDS = 10
 
-engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
+
+def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
+    """Build the async SQLite engine with the shared busy timeout applied."""
+    return create_async_engine(
+        database_url,
+        echo=False,  # echo=True for debugging SQL
+        connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS},
+    )
+
+
+engine = create_db_engine()
 
 
 class ApiKey(SQLModel, table=True):  # type: ignore

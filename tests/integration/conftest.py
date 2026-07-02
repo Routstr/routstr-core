@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.core.db import SQLITE_BUSY_TIMEOUT_SECONDS
 from routstr.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -359,6 +360,9 @@ async def integration_engine(test_database_url: str) -> AsyncGenerator[Any, None
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=10,
+        # Match production's busy timeout so write-lock contention (e.g. the
+        # concurrent reservation tests) behaves the same here as in production.
+        connect_args={"timeout": SQLITE_BUSY_TIMEOUT_SECONDS},
     )
 
     # Initialize database schema
