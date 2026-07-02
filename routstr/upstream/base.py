@@ -53,7 +53,7 @@ from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 
 if typing.TYPE_CHECKING:
-    from .ehbp import EHBPForwardingTarget
+    from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
 
@@ -2824,6 +2824,10 @@ class BaseUpstreamProvider:
             raise UpstreamError("An unexpected server error occurred", status_code=500)
 
     supports_ehbp: bool = False
+
+    def get_confidential_inference_profile(self) -> "ConfidentialInferenceProfile | None":
+        """Return provider policy for encrypted/confidential inference forwarding."""
+        return None
 
     def get_ehbp_forwarding_target(
         self, path: str, model_obj: Model

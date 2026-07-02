@@ -11,7 +11,13 @@ from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
 from ..payment.models import Architecture, Model, Pricing
 from .base import BaseUpstreamProvider
-from .ehbp import EHBPForwardingTarget
+from .ehbp import (
+    _ENCLAVE_URL_HEADER,
+    _PROXY_ONLY_HEADERS,
+    _RESPONSE_USAGE_HEADER,
+    ConfidentialInferenceProfile,
+    EHBPForwardingTarget,
+)
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -53,6 +59,12 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
     default_base_url = "https://inference.tinfoil.sh"
     platform_url = "https://docs.tinfoil.sh"
     supports_ehbp = True
+    confidential_inference_profile = ConfidentialInferenceProfile(
+        usage_response_header=_RESPONSE_USAGE_HEADER,
+        client_target_url_header=_ENCLAVE_URL_HEADER,
+        allow_client_target_override=True,
+        proxy_only_headers=_PROXY_ONLY_HEADERS,
+    )
 
     def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(
@@ -85,6 +97,9 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
 
     def transform_model_name(self, model_id: str) -> str:
         return model_id.removeprefix("tinfoil/")
+
+    def get_confidential_inference_profile(self) -> ConfidentialInferenceProfile:
+        return self.confidential_inference_profile
 
     async def forward_get_request(
         self,
@@ -146,6 +161,7 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
         return EHBPForwardingTarget(
             url=f"{self.base_url.rstrip('/')}/{path.lstrip('/')}",
             headers={"X-Tinfoil-Request-Usage-Metrics": "true"},
+            profile=self.confidential_inference_profile,
         )
 
     async def fetch_models(self) -> list[Model]:

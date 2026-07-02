@@ -40,7 +40,10 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     default_base_url = "https://api.ppq.ai"
     platform_url = "https://ppq.ai/api-docs"
     IGNORED_MODEL_IDS: list[str] = ["auto"]
-    supports_ehbp = True
+    # PPQ.AI has a private encrypted endpoint, but this proxy currently has no
+    # provider-attested usage extractor/model binding for it. Keep EHBP disabled
+    # until a ConfidentialInferenceProfile can bill it without max-cost fallback.
+    supports_ehbp = False
 
     def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(
