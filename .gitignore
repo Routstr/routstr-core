@@ -38,8 +38,3 @@ proof_backups
 
 *.todo
 ui_out
-
-# local cashu wallet state (never commit)
-.wallet/
-*.sqlite3-shm
-*.sqlite3-wal

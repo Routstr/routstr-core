@@ -41,6 +41,28 @@ class CostDataError(BaseModel):
     code: str
 
 
+def _empty_cost(cls: type[CostData] = CostData) -> CostData:
+    """Build an all-zero cost object — a full refund for an empty response.
+
+    Shared by the two paths that must not bill: an upstream response with no
+    usage data at all, and one that reports a USD cost but carries zero tokens
+    in every bucket.
+    """
+    return cls(
+        base_msats=0,
+        input_msats=0,
+        output_msats=0,
+        total_msats=0,
+        total_usd=0.0,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        cache_read_msats=0,
+        cache_creation_msats=0,
+    )
+
+
 async def calculate_cost(
     response_data: dict,
     max_cost: int,
@@ -83,19 +105,7 @@ async def calculate_cost(
                 else None,
             },
         )
-        return MaxCostData(
-            base_msats=0,
-            input_msats=0,
-            output_msats=0,
-            total_msats=0,
-            total_usd=0.0,
-            input_tokens=0,
-            output_tokens=0,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=0,
-            cache_read_msats=0,
-            cache_creation_msats=0,
-        )
+        return _empty_cost(MaxCostData)
 
     usage_data = response_data.get("usage") or {}
     if not isinstance(usage_data, dict):
@@ -129,19 +139,7 @@ async def calculate_cost(
                     else None,
                 },
             )
-            return CostData(
-                base_msats=0,
-                input_msats=0,
-                output_msats=0,
-                total_msats=0,
-                total_usd=0.0,
-                input_tokens=0,
-                output_tokens=0,
-                cache_read_input_tokens=0,
-                cache_creation_input_tokens=0,
-                cache_read_msats=0,
-                cache_creation_msats=0,
-            )
+            return _empty_cost()
         if input_tokens == 0 and output_tokens == 0:
             logger.warning(
                 "Upstream reported a USD cost but no token counts — "
