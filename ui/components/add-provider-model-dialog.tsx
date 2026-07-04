@@ -68,6 +68,8 @@ const FormSchema = z.object({
   upstream_provider_id: z.string().default(''),
   input_cost: z.coerce.number().min(0).default(0),
   output_cost: z.coerce.number().min(0).default(0),
+  cache_read_cost: z.coerce.number().min(0).default(0),
+  cache_write_cost: z.coerce.number().min(0).default(0),
   request_cost: z.coerce.number().min(0).default(0),
   image_cost: z.coerce.number().min(0).default(0),
   web_search_cost: z.coerce.number().min(0).default(0),
@@ -125,6 +127,8 @@ export function AddProviderModelDialog({
       upstream_provider_id: '',
       input_cost: 0,
       output_cost: 0,
+      cache_read_cost: 0,
+      cache_write_cost: 0,
       request_cost: 0,
       image_cost: 0,
       web_search_cost: 0,
@@ -190,6 +194,8 @@ export function AddProviderModelDialog({
             : initialData.upstream_provider_id?.toString() || '',
         input_cost: pricing?.prompt ?? 0,
         output_cost: pricing?.completion ?? 0,
+        cache_read_cost: pricing?.input_cache_read ?? 0,
+        cache_write_cost: pricing?.input_cache_write ?? 0,
         request_cost: pricing?.request ?? 0,
         image_cost: pricing?.image ?? 0,
         web_search_cost: pricing?.web_search ?? 0,
@@ -231,6 +237,8 @@ export function AddProviderModelDialog({
         upstream_provider_id: '',
         input_cost: 0,
         output_cost: 0,
+        cache_read_cost: 0,
+        cache_write_cost: 0,
         request_cost: 0,
         image_cost: 0,
         web_search_cost: 0,
@@ -294,6 +302,8 @@ export function AddProviderModelDialog({
     );
     form.setValue('input_cost', pricing?.prompt ?? 0);
     form.setValue('output_cost', pricing?.completion ?? 0);
+    form.setValue('cache_read_cost', pricing?.input_cache_read ?? 0);
+    form.setValue('cache_write_cost', pricing?.input_cache_write ?? 0);
     form.setValue('request_cost', pricing?.request ?? 0);
     form.setValue('image_cost', pricing?.image ?? 0);
     form.setValue('web_search_cost', pricing?.web_search ?? 0);
@@ -365,6 +375,8 @@ export function AddProviderModelDialog({
         pricing: {
           prompt: data.input_cost,
           completion: data.output_cost,
+          input_cache_read: data.cache_read_cost,
+          input_cache_write: data.cache_write_cost,
           request: data.request_cost,
           image: data.image_cost,
           web_search: data.web_search_cost,
@@ -806,6 +818,38 @@ export function AddProviderModelDialog({
                       <FormControl>
                         <Input type='number' step='0.01' {...field} />
                       </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name='cache_read_cost'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Cache Read Cost</FormLabel>
+                      <FormControl>
+                        <Input type='number' step='0.000001' {...field} />
+                      </FormControl>
+                      <FormDescription>
+                        Discounted cached-input read price per 1M tokens.
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name='cache_write_cost'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Cache Write Cost</FormLabel>
+                      <FormControl>
+                        <Input type='number' step='0.000001' {...field} />
+                      </FormControl>
+                      <FormDescription>
+                        Cached-input creation price per 1M tokens.
+                      </FormDescription>
                       <FormMessage />
                     </FormItem>
                   )}
