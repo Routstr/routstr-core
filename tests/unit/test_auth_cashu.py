@@ -77,6 +77,13 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
         ),
         (
             ValueError(
+                "Failed to estimate fees: Fees (7 sat) exceed token amount (5 sat)"
+            ),
+            400,
+            "Token value is too small to cover swap fees",
+        ),
+        (
+            ValueError(
                 "Failed to melt token from foreign mint http://foreign:3338: boom"
             ),
             400,
@@ -157,4 +164,38 @@ async def test_unexpected_redemption_error_returns_internal_error(
     error_detail = detail["error"]
     assert error_detail["code"] == "internal_error"
     assert "/var/lib/secret" not in error_detail["message"]
+    assert await session.get(ApiKey, hashed_key) is None
+
+
+@pytest.mark.asyncio
+async def test_internal_error_with_invalid_keyword_does_not_masquerade(
+    session: AsyncSession,
+) -> None:
+    """A non-wallet fault whose text merely contains "invalid" (but not
+    "token") must fall through to a generic 500, not a 401 token error.
+
+    Guards the anchored `"invalid"/"decode"` + `"token"` gate against stdlib/
+    driver strings like "Invalid isoformat string" leaking as token errors."""
+    token = "cashuAinternal_fault_mentions_invalid"
+    hashed_key = hashlib.sha256(token.encode()).hexdigest()
+    token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch(
+            "routstr.auth.credit_balance",
+            new=AsyncMock(
+                side_effect=RuntimeError("Invalid isoformat string: '2020-13-99'")
+            ),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await validate_bearer_key(token, session)
+
+    assert exc_info.value.status_code == 500
+    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    assert detail["error"]["code"] == "internal_error"
     assert await session.get(ApiKey, hashed_key) is None

@@ -4049,7 +4049,7 @@ class BaseUpstreamProvider:
             if "mint error" in error_message.lower():
                 return create_error_response(
                     "mint_error",
-                    f"CASHU mint error: {error_message}",
+                    "CASHU mint error while processing token",
                     422,
                     request=request,
                     token=x_cashu_token,
@@ -4057,7 +4057,7 @@ class BaseUpstreamProvider:
 
             return create_error_response(
                 "cashu_error",
-                f"CASHU token processing failed: {error_message}",
+                "CASHU token processing failed",
                 400,
                 request=request,
                 token=x_cashu_token,
@@ -4717,7 +4717,7 @@ class BaseUpstreamProvider:
             if "mint error" in error_message.lower():
                 return create_error_response(
                     "mint_error",
-                    f"CASHU mint error: {error_message}",
+                    "CASHU mint error while processing token",
                     422,
                     request=request,
                     token=x_cashu_token,
@@ -4725,7 +4725,7 @@ class BaseUpstreamProvider:
 
             return create_error_response(
                 "cashu_error",
-                f"CASHU token processing failed: {error_message}",
+                "CASHU token processing failed",
                 400,
                 request=request,
                 token=x_cashu_token,

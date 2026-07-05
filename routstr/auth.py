@@ -91,11 +91,20 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
     status_code = 400
     if "already spent" in lowered:
         message = "Cashu token already spent"
-    elif "insufficient" in lowered or "melt fee" in lowered:
+    elif (
+        "insufficient" in lowered
+        or "melt fee" in lowered
+        or "exceed token amount" in lowered
+        or "estimate fees" in lowered
+    ):
         message = "Token value is too small to cover swap fees"
     elif "failed to melt" in lowered:
         message = "Failed to swap token from foreign mint"
-    elif "invalid" in lowered or "decode" in lowered:
+    elif ("invalid" in lowered or "decode" in lowered) and "token" in lowered:
+        # Anchor the broad buckets to "token" so internal faults whose text
+        # merely contains "invalid"/"decode" (e.g. "invalid literal",
+        # SQLAlchemy "Invalid …") fall through to the generic 500 below
+        # instead of masquerading as a 401 token error.
         message = "Invalid Cashu token"
         status_code = 401
     elif isinstance(error, ValueError):
