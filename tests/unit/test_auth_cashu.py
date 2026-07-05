@@ -60,11 +60,12 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_message"),
+    ("error", "expected_status", "expected_type", "expected_message"),
     [
         (
             ValueError("Mint Error: Token already spent. (Code: 11001)"),
             400,
+            "token_already_spent",
             "Cashu token already spent",
         ),
         (
@@ -72,31 +73,36 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
                 "Token amount (5 sat) is insufficient to cover melt fees. "
                 "Needed: 7 sat (amount: 5 + fee: 1 + input_fees: 1)"
             ),
-            400,
+            422,
+            "mint_error",
             "Token value is too small to cover swap fees",
         ),
         (
             ValueError(
                 "Failed to estimate fees: Fees (7 sat) exceed token amount (5 sat)"
             ),
-            400,
+            422,
+            "mint_error",
             "Token value is too small to cover swap fees",
         ),
         (
             ValueError(
                 "Failed to melt token from foreign mint http://foreign:3338: boom"
             ),
-            400,
+            422,
+            "mint_error",
             "Failed to swap token from foreign mint",
         ),
         (
             ValueError("could not decode token"),
-            401,
+            400,
+            "invalid_token",
             "Invalid Cashu token",
         ),
         (
             ValueError("some unexpected wallet condition"),
             400,
+            "cashu_error",
             "Failed to redeem Cashu token",
         ),
     ],
@@ -106,10 +112,12 @@ async def test_redemption_failure_returns_sanitized_error(
     session: AsyncSession,
     error: Exception,
     expected_status: int,
+    expected_type: str,
     expected_message: str,
 ) -> None:
-    """Redemption failures share one error code, expose stable sanitized
-    messages (no raw exception text), and leave no orphan ApiKey row."""
+    """Redemption failures reuse the shared X-Cashu taxonomy (carried in
+    ``type``), expose stable sanitized messages (no raw exception text), and
+    leave no orphan ApiKey row."""
     token = "cashuAredemption_fails_with_specific_error"
     hashed_key = hashlib.sha256(token.encode()).hexdigest()
     token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
@@ -128,11 +136,12 @@ async def test_redemption_failure_returns_sanitized_error(
             await validate_bearer_key(token, session)
 
     assert exc_info.value.status_code == expected_status
-    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    detail = cast(dict[str, dict[str, object]], exc_info.value.detail)
     error_detail = detail["error"]
-    assert error_detail["code"] == "token_redemption_failed"
+    assert error_detail["type"] == expected_type
+    assert error_detail["code"] == expected_status
     assert error_detail["message"] == expected_message
-    assert str(error) not in error_detail["message"]
+    assert str(error) not in cast(str, error_detail["message"])
     assert await session.get(ApiKey, hashed_key) is None
 
 

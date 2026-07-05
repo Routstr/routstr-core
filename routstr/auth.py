@@ -81,34 +81,55 @@ async def check_and_reset_limit(key: ApiKey, session: AsyncSession) -> bool:
 def redemption_error_to_http_exception(error: Exception) -> HTTPException:
     """Map a Cashu token redemption failure to a sanitized client-facing error.
 
-    Known redemption failure patterns (from the wallet or the mint) and expected
-    wallet errors (ValueError) map to 400/401 with a stable message under a
-    single "token_redemption_failed" code. Anything else is an internal fault
-    and maps to a generic 500. Raw error text never reaches the client — it
-    stays in server logs.
+    Uses the same failure taxonomy as the X-Cashu redemption path
+    (``token_already_spent``/``invalid_token``/``mint_error``/``cashu_error``,
+    see ``create_error_response`` in ``payment/helpers.py``) so both paths that
+    redeem a token agree on the classification (carried in ``type``) and status.
+    Expected wallet errors (``ValueError``) and known mint failures map to a
+    4xx with a stable message; anything else is an internal fault and maps to a
+    generic 500. Raw error text never reaches the client — it stays in logs.
     """
     lowered = str(error).lower()
-    status_code = 400
+    # (type, status, message) — type mirrors the X-Cashu taxonomy strings.
     if "already spent" in lowered:
-        message = "Cashu token already spent"
+        error_type, status_code, message = (
+            "token_already_spent",
+            400,
+            "Cashu token already spent",
+        )
     elif (
         "insufficient" in lowered
         or "melt fee" in lowered
         or "exceed token amount" in lowered
         or "estimate fees" in lowered
     ):
-        message = "Token value is too small to cover swap fees"
+        error_type, status_code, message = (
+            "mint_error",
+            422,
+            "Token value is too small to cover swap fees",
+        )
     elif "failed to melt" in lowered:
-        message = "Failed to swap token from foreign mint"
+        error_type, status_code, message = (
+            "mint_error",
+            422,
+            "Failed to swap token from foreign mint",
+        )
     elif ("invalid" in lowered or "decode" in lowered) and "token" in lowered:
         # Anchor the broad buckets to "token" so internal faults whose text
         # merely contains "invalid"/"decode" (e.g. "invalid literal",
         # SQLAlchemy "Invalid …") fall through to the generic 500 below
-        # instead of masquerading as a 401 token error.
-        message = "Invalid Cashu token"
-        status_code = 401
+        # instead of masquerading as a token error.
+        error_type, status_code, message = (
+            "invalid_token",
+            400,
+            "Invalid Cashu token",
+        )
     elif isinstance(error, ValueError):
-        message = "Failed to redeem Cashu token"
+        error_type, status_code, message = (
+            "cashu_error",
+            400,
+            "Failed to redeem Cashu token",
+        )
     else:
         return HTTPException(
             status_code=500,
@@ -125,8 +146,8 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
         detail={
             "error": {
                 "message": message,
-                "type": "invalid_request_error",
-                "code": "token_redemption_failed",
+                "type": error_type,
+                "code": status_code,
             }
         },
     )
@@ -396,9 +417,12 @@ async def validate_bearer_key(
                     "Token redemption returned zero or negative amount",
                     extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
                 )
-                # Defense-in-depth: credit_balance now refuses to commit on a
-                # zero/negative redemption, but if a row was nonetheless
-                # persisted, drop it so we never leave an orphan zero-balance key.
+                # Defense-in-depth: credit_balance already raises
+                # ValueError("Redeemed token amount must be positive…") before
+                # returning (wallet.py), so this branch is only reachable if a
+                # zero/negative row was somehow persisted; drop it so we never
+                # leave an orphan zero-balance key. Reuse the shared taxonomy
+                # (cashu_error) so the envelope matches the mapper above.
                 await session.delete(new_key)
                 await session.commit()
                 raise HTTPException(
@@ -406,8 +430,8 @@ async def validate_bearer_key(
                     detail={
                         "error": {
                             "message": "Failed to redeem Cashu token: token yielded no value",
-                            "type": "invalid_request_error",
-                            "code": "token_redemption_failed",
+                            "type": "cashu_error",
+                            "code": 400,
                         }
                     },
                 )
