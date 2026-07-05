@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     models_refresh_interval_seconds: int = Field(
         default=360, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
+    model_paths_refresh_interval_seconds: int = Field(
+        default=600, env="MODEL_PATHS_REFRESH_INTERVAL_SECONDS"
+    )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")

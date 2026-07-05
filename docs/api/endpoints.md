@@ -327,6 +327,58 @@ GET /v1/models
 }
 ```
 
+### List Model Paths
+
+Get the upstream provider paths each advertised model can be reached through.
+This is discovery data only; routing still chooses the provider per request.
+
+```http
+GET /v1/models/paths
+```
+
+**Response:**
+
+```json
+{
+  "data": [
+    {
+      "id": "claude-sonnet-4",
+      "paths": [
+        {"path": "anthropic"},
+        {"path": "openrouter:Anthropic"}
+      ]
+    }
+  ]
+}
+```
+
+### List Paths for One Model
+
+Use a query parameter so model IDs containing `/` are handled safely. Lookup is
+by the public, unqualified model ID: `glm-5v-turbo` resolves
+`z-ai/glm-5v-turbo`, and `deepseek-v4-pro` and `deepseek/deepseek-v4-pro`
+return the same merged path set.
+
+```http
+GET /v1/models/paths/model?model_id=anthropic/claude-sonnet-4
+```
+
+**Response:**
+
+```json
+{
+  "data": [
+    {"path": "anthropic"},
+    {"path": "openrouter:Anthropic"}
+  ]
+}
+```
+
+Model IDs in responses are unqualified display IDs: provider prefixes such as
+`z-ai/` or `openai/` are stripped. Path values match the provider string stamped
+on chat-completion responses, such as `anthropic`, `generic:my-upstream`, or
+`openrouter:Anthropic`.
+
 ## Wallet Management
 
 ### Create Wallet (Coming Soon)

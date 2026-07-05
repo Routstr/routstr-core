@@ -100,6 +100,7 @@ All errors follow a consistent format:
 Standard OpenAI-compatible endpoints:
 
 - **Models**: `/v1/models`
+- **Model paths**: `/v1/models/paths`, `/v1/models/paths/model?model_id=...`
 - **Responses**: `/v1/responses`
 - **Chat Completions**: `/v1/chat/completions`
 - **Embeddings**: `/v1/embeddings`
@@ -302,7 +303,7 @@ Get node metadata:
 GET /v1/info
 ```
 
-Supported models and pricing are available at `/v1/models`.
+Supported models and pricing are available at `/v1/models`. Upstream provider path discovery is available at `/v1/models/paths` and `/v1/models/paths/model?model_id=...`.
 
 ## Next Steps
 
