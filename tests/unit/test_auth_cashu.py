@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import AsyncGenerator, cast
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -12,6 +13,19 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import validate_bearer_key
 from routstr.core.db import ApiKey
+from routstr.wallet import MintConnectionError
+
+
+def _value_error_wrapping_transport() -> ValueError:
+    """A ValueError re-raised ``from`` a real httpx transport error, mirroring
+    ``wallet.py`` wrapping a connection failure. The sanitized classifier must
+    still see the mint-unreachable signal through the ``__cause__`` chain."""
+    try:
+        raise httpx.ConnectError("All connection attempts failed")
+    except httpx.ConnectError as exc:
+        err = ValueError("Failed to estimate fees: connection failed")
+        err.__cause__ = exc
+        return err
 
 
 def _make_engine() -> AsyncEngine:
@@ -60,13 +74,46 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
 
 
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_type", "expected_message"),
+    ("error", "expected_status", "expected_type", "expected_message", "expected_code"),
     [
         (
             ValueError("Mint Error: Token already spent. (Code: 11001)"),
             400,
             "token_already_spent",
             "Cashu token already spent",
+            "cashu_token_already_spent",
+        ),
+        (
+            # Raw httpx transport error propagated unwrapped from cashu.
+            httpx.ConnectError("All connection attempts failed"),
+            503,
+            "mint_unreachable",
+            "Cashu mint is unreachable",
+            "cashu_mint_unreachable",
+        ),
+        (
+            # Typed error raised by wallet.py at a wrap site.
+            MintConnectionError("connect to http://mint:3338 refused"),
+            503,
+            "mint_unreachable",
+            "Cashu mint is unreachable",
+            "cashu_mint_unreachable",
+        ),
+        (
+            # ValueError wrapping the httpx error in its __cause__ chain.
+            _value_error_wrapping_transport(),
+            503,
+            "mint_unreachable",
+            "Cashu mint is unreachable",
+            "cashu_mint_unreachable",
+        ),
+        (
+            # asyncio.TimeoutError is builtin TimeoutError on 3.11+.
+            TimeoutError("Timed out connecting to Cashu mint http://mint:3338"),
+            503,
+            "mint_unreachable",
+            "Cashu mint is unreachable",
+            "cashu_mint_unreachable",
         ),
         (
             ValueError(
@@ -76,6 +123,7 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             422,
             "mint_error",
             "Token value is too small to cover swap fees",
+            "cashu_token_swap_fees_exceed_amount",
         ),
         (
             ValueError(
@@ -84,6 +132,7 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             422,
             "mint_error",
             "Token value is too small to cover swap fees",
+            "cashu_token_swap_fees_exceed_amount",
         ),
         (
             ValueError(
@@ -92,18 +141,28 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             422,
             "mint_error",
             "Failed to swap token from foreign mint",
+            "cashu_foreign_mint_swap_failed",
         ),
         (
             ValueError("could not decode token"),
             400,
             "invalid_token",
             "Invalid Cashu token",
+            "invalid_cashu_token",
         ),
         (
             ValueError("some unexpected wallet condition"),
             400,
             "cashu_error",
             "Failed to redeem Cashu token",
+            "cashu_token_redemption_failed",
+        ),
+        (
+            ValueError("Redeemed token amount must be positive, got 0 msats"),
+            400,
+            "cashu_error",
+            "Failed to redeem Cashu token: token yielded no value",
+            "cashu_token_zero_value",
         ),
     ],
 )
@@ -114,10 +173,11 @@ async def test_redemption_failure_returns_sanitized_error(
     expected_status: int,
     expected_type: str,
     expected_message: str,
+    expected_code: str,
 ) -> None:
     """Redemption failures reuse the shared X-Cashu taxonomy (carried in
-    ``type``), expose stable sanitized messages (no raw exception text), and
-    leave no orphan ApiKey row."""
+    ``type``), expose stable sanitized messages and granular machine-readable
+    ``code`` values, and leave no orphan ApiKey row."""
     token = "cashuAredemption_fails_with_specific_error"
     hashed_key = hashlib.sha256(token.encode()).hexdigest()
     token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
@@ -139,7 +199,7 @@ async def test_redemption_failure_returns_sanitized_error(
     detail = cast(dict[str, dict[str, object]], exc_info.value.detail)
     error_detail = detail["error"]
     assert error_detail["type"] == expected_type
-    assert error_detail["code"] == expected_status
+    assert error_detail["code"] == expected_code
     assert error_detail["message"] == expected_message
     assert str(error) not in cast(str, error_detail["message"])
     assert await session.get(ApiKey, hashed_key) is None
@@ -208,3 +268,26 @@ async def test_internal_error_with_invalid_keyword_does_not_masquerade(
     detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
     assert detail["error"]["code"] == "internal_error"
     assert await session.get(ApiKey, hashed_key) is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_cashu_token_returns_400_invalid_token(
+    session: AsyncSession,
+) -> None:
+    """A malformed 'cashu...' token that fails to decode maps to 400
+    invalid_cashu_token (shared taxonomy), not the generic 401 invalid_api_key."""
+    token = "cashuAthis_is_not_a_valid_token"
+
+    with patch(
+        "routstr.auth.deserialize_token_from_string",
+        side_effect=ValueError("unable to decode token: bad base64"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await validate_bearer_key(token, session)
+
+    assert exc_info.value.status_code == 400
+    detail = cast(dict[str, dict[str, str]], exc_info.value.detail)
+    assert detail["error"]["type"] == "invalid_token"
+    assert detail["error"]["code"] == "invalid_cashu_token"
+    # Raw decoder text must not leak to the client.
+    assert "base64" not in detail["error"]["message"]

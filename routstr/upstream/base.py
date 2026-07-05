@@ -40,7 +40,12 @@ from ..payment.models import (
     list_models,
 )
 from ..payment.price import sats_usd_price
-from ..wallet import recieve_token, send_token
+from ..wallet import (
+    SPENT_TOKEN_CODES,
+    classify_redemption_error,
+    recieve_token,
+    send_token,
+)
 from . import messages_dispatch
 from .cache_breakpoints import (
     inject_anthropic_cache_breakpoints,
@@ -3981,9 +3986,19 @@ class BaseUpstreamProvider:
             },
         )
 
+        redeemed = False
         try:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
+            # Reject a zero/negative redemption (empty/dust token, or a value
+            # fully consumed by fees) before marking the token redeemed, so it
+            # classifies as cashu_token_zero_value like the bearer/top-up paths
+            # rather than being forwarded as a free request.
+            if amount <= 0:
+                raise ValueError(
+                    f"Redeemed token amount must be positive, got {amount} {unit}"
+                )
+            redeemed = True
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
@@ -4027,40 +4042,37 @@ class BaseUpstreamProvider:
                 },
             )
 
-            # Use same error handling as regular X-Cashu
-            if "already spent" in error_message.lower():
+            # Post-redemption the token is spent; a forwarding failure must not
+            # be reported as a retryable redemption error (see handle_x_cashu).
+            if redeemed:
                 return create_error_response(
-                    "token_already_spent",
-                    "The provided CASHU token has already been spent",
-                    400,
+                    "upstream_error",
+                    "Payment succeeded but the upstream request failed",
+                    502,
                     request=request,
-                    token=x_cashu_token,
+                    code="upstream_request_failed",
                 )
 
-            if "invalid token" in error_message.lower():
+            classified = classify_redemption_error(e)
+            if classified is None:
                 return create_error_response(
-                    "invalid_token",
-                    "The provided CASHU token is invalid",
-                    400,
+                    "api_error",
+                    "Internal error during token redemption",
+                    500,
                     request=request,
-                    token=x_cashu_token,
+                    code="internal_error",
                 )
-
-            if "mint error" in error_message.lower():
-                return create_error_response(
-                    "mint_error",
-                    "CASHU mint error while processing token",
-                    422,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
+            error_type, status_code, message, error_code = classified
+            # Echo the token back only when it is still spendable, so clients
+            # can recover it; a spent/consumed token is never re-offered.
+            echo_token = None if error_code in SPENT_TOKEN_CODES else x_cashu_token
             return create_error_response(
-                "cashu_error",
-                "CASHU token processing failed",
-                400,
+                error_type,
+                message,
+                status_code,
                 request=request,
-                token=x_cashu_token,
+                token=echo_token,
+                code=error_code,
             )
 
     async def forward_x_cashu_responses_request(
@@ -4650,9 +4662,19 @@ class BaseUpstreamProvider:
             },
         )
 
+        redeemed = False
         try:
             headers = dict(request.headers)
             amount, unit, mint = await recieve_token(x_cashu_token)
+            # Reject a zero/negative redemption (empty/dust token, or a value
+            # fully consumed by fees) before marking the token redeemed, so it
+            # classifies as cashu_token_zero_value like the bearer/top-up paths
+            # rather than being forwarded as a free request.
+            if amount <= 0:
+                raise ValueError(
+                    f"Redeemed token amount must be positive, got {amount} {unit}"
+                )
+            redeemed = True
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
@@ -4696,39 +4718,38 @@ class BaseUpstreamProvider:
                 },
             )
 
-            if "already spent" in error_message.lower():
+            # Once redeemed the token is spent, so a later forwarding failure
+            # must not surface as a retryable mint_unreachable (spent-token retry
+            # bait). Redemption classification only applies while not redeemed.
+            if redeemed:
                 return create_error_response(
-                    "token_already_spent",
-                    "The provided CASHU token has already been spent",
-                    400,
+                    "upstream_error",
+                    "Payment succeeded but the upstream request failed",
+                    502,
                     request=request,
-                    token=x_cashu_token,
+                    code="upstream_request_failed",
                 )
 
-            if "invalid token" in error_message.lower():
+            classified = classify_redemption_error(e)
+            if classified is None:
                 return create_error_response(
-                    "invalid_token",
-                    "The provided CASHU token is invalid",
-                    400,
+                    "api_error",
+                    "Internal error during token redemption",
+                    500,
                     request=request,
-                    token=x_cashu_token,
+                    code="internal_error",
                 )
-
-            if "mint error" in error_message.lower():
-                return create_error_response(
-                    "mint_error",
-                    "CASHU mint error while processing token",
-                    422,
-                    request=request,
-                    token=x_cashu_token,
-                )
-
+            error_type, status_code, message, error_code = classified
+            # Echo the token back only when it is still spendable, so clients
+            # can recover it; a spent/consumed token is never re-offered.
+            echo_token = None if error_code in SPENT_TOKEN_CODES else x_cashu_token
             return create_error_response(
-                "cashu_error",
-                "CASHU token processing failed",
-                400,
+                error_type,
+                message,
+                status_code,
                 request=request,
-                token=x_cashu_token,
+                token=echo_token,
+                code=error_code,
             )
 
     def _apply_provider_fee_to_model(self, model: Model) -> Model:

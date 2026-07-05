@@ -20,7 +20,11 @@ from .payment.cost_calculation import (
     MaxCostData,
     calculate_cost,
 )
-from .wallet import credit_balance, deserialize_token_from_string
+from .wallet import (
+    classify_redemption_error,
+    credit_balance,
+    deserialize_token_from_string,
+)
 
 logger = get_logger(__name__)
 payments_logger = get_logger("routstr.payments")
@@ -81,56 +85,11 @@ async def check_and_reset_limit(key: ApiKey, session: AsyncSession) -> bool:
 def redemption_error_to_http_exception(error: Exception) -> HTTPException:
     """Map a Cashu token redemption failure to a sanitized client-facing error.
 
-    Uses the same failure taxonomy as the X-Cashu redemption path
-    (``token_already_spent``/``invalid_token``/``mint_error``/``cashu_error``,
-    see ``create_error_response`` in ``payment/helpers.py``) so both paths that
-    redeem a token agree on the classification (carried in ``type``) and status.
-    Expected wallet errors (``ValueError``) and known mint failures map to a
-    4xx with a stable message; anything else is an internal fault and maps to a
-    generic 500. Raw error text never reaches the client — it stays in logs.
+    Thin wrapper over the shared :func:`classify_redemption_error` so the bearer
+    path stays identical to the X-Cashu and top-up paths.
     """
-    lowered = str(error).lower()
-    # (type, status, message) — type mirrors the X-Cashu taxonomy strings.
-    if "already spent" in lowered:
-        error_type, status_code, message = (
-            "token_already_spent",
-            400,
-            "Cashu token already spent",
-        )
-    elif (
-        "insufficient" in lowered
-        or "melt fee" in lowered
-        or "exceed token amount" in lowered
-        or "estimate fees" in lowered
-    ):
-        error_type, status_code, message = (
-            "mint_error",
-            422,
-            "Token value is too small to cover swap fees",
-        )
-    elif "failed to melt" in lowered:
-        error_type, status_code, message = (
-            "mint_error",
-            422,
-            "Failed to swap token from foreign mint",
-        )
-    elif ("invalid" in lowered or "decode" in lowered) and "token" in lowered:
-        # Anchor the broad buckets to "token" so internal faults whose text
-        # merely contains "invalid"/"decode" (e.g. "invalid literal",
-        # SQLAlchemy "Invalid …") fall through to the generic 500 below
-        # instead of masquerading as a token error.
-        error_type, status_code, message = (
-            "invalid_token",
-            400,
-            "Invalid Cashu token",
-        )
-    elif isinstance(error, ValueError):
-        error_type, status_code, message = (
-            "cashu_error",
-            400,
-            "Failed to redeem Cashu token",
-        )
-    else:
+    classified = classify_redemption_error(error)
+    if classified is None:
         return HTTPException(
             status_code=500,
             detail={
@@ -141,13 +100,14 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
                 }
             },
         )
+    error_type, status_code, message, error_code = classified
     return HTTPException(
         status_code=status_code,
         detail={
             "error": {
                 "message": message,
                 "type": error_type,
-                "code": status_code,
+                "code": error_code,
             }
         },
     )
@@ -291,7 +251,17 @@ async def validate_bearer_key(
 
         try:
             hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
-            token_obj = deserialize_token_from_string(bearer_key)
+            try:
+                token_obj = deserialize_token_from_string(bearer_key)
+            except Exception as decode_error:
+                # A malformed token is a bad token (400 invalid_cashu_token via
+                # the shared taxonomy), not an auth failure (401) — otherwise it
+                # would fall through to the generic "Invalid API key" handler.
+                raise redemption_error_to_http_exception(
+                    ValueError(
+                        f"Invalid Cashu token: could not decode token ({decode_error})"
+                    )
+                ) from decode_error
             logger.debug(
                 "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
             )
@@ -431,7 +401,7 @@ async def validate_bearer_key(
                         "error": {
                             "message": "Failed to redeem Cashu token: token yielded no value",
                             "type": "cashu_error",
-                            "code": 400,
+                            "code": "cashu_token_zero_value",
                         }
                     },
                 )
