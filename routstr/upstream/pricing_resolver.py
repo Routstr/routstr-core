@@ -103,7 +103,11 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
     return ResolvedPricing(
         prompt=float(prompt),
         completion=float(completion),
-        context_length=_as_int(info.get("max_input_tokens") or info.get("max_tokens")),
+        # max_input_tokens is the context window; max_tokens is litellm's
+        # completion cap (it tracks max_output_tokens for ~94% of models), so
+        # it is never a context source. A missing window falls to the id-based
+        # estimate downstream rather than borrowing the output cap.
+        context_length=_as_int(info.get("max_input_tokens")),
         source="litellm",
         max_completion_tokens=_as_int(info.get("max_output_tokens")),
         input_cache_read=float(info.get("cache_read_input_token_cost") or 0.0),

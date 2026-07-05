@@ -184,6 +184,40 @@ async def test_litellm_zero_price_entry_fails_closed(
     )
 
 
+@pytest.mark.asyncio
+async def test_litellm_output_cap_not_used_as_context() -> None:
+    """litellm's ``max_tokens`` is the completion cap, not the context window
+    (it tracks ``max_output_tokens`` for ~94% of models). When a model reports
+    no ``max_input_tokens``, the resolver must not smuggle the output cap in as
+    the context window; it falls back to the id-based estimate instead, while
+    ``max_tokens`` still feeds the completion limit."""
+    payload = {
+        "data": [
+            {
+                "id": "gemini/gemini-gemma-2-9b-it",
+                "object": "model",
+                "owned_by": "google",
+            },
+        ]
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[])
+        with patch(
+            "routstr.payment.models.async_fetch_openrouter_models", or_feed
+        ):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "gemini/gemini-gemma-2-9b-it")
+    assert model.enabled is True
+    # litellm gives this model max_input_tokens=None, max_tokens=8192 (an output
+    # cap). Context must come from the estimate (4096), never the 8192 cap.
+    assert model.context_length == 4096
+    # The 8192 output cap still lands where it belongs: the completion limit.
+    assert model.top_provider is not None
+    assert model.top_provider.max_completion_tokens == 8192
+
+
 # ---------------------------------------------------------------------------
 # OpenRouter fallback — litellm misses, OR carries a full payload
 # ---------------------------------------------------------------------------
