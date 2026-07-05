@@ -147,10 +147,13 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     else:
                         enabled = True
 
-                    modality = (
-                        "text->text"
-                        if "image" in resolved.input_modalities
-                        else "text"
+                    # Prefer the source's own modality string (OpenRouter ships
+                    # one, e.g. "text+image->text"); otherwise derive it from the
+                    # captured input/output modalities in the same "in->out" shape
+                    # rather than flattening vision models to "text->text".
+                    modality = resolved.modality or (
+                        f"{'+'.join(resolved.input_modalities)}"
+                        f"->{'+'.join(resolved.output_modalities)}"
                     )
 
                     # A source can carry a price but no context (e.g. a litellm

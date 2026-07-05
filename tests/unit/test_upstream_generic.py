@@ -104,6 +104,9 @@ async def test_native_model_spec_resolves_and_captures_metadata() -> None:
     assert model.pricing.completion == pytest.approx(1.5 / 1_000_000)
     assert model.context_length == 65536
     assert "image" in model.architecture.input_modalities
+    # Vision capability must be reflected in the combined modality string, not
+    # flattened to "text->text".
+    assert model.architecture.modality == "text+image->text"
     # A native price never needs the OpenRouter feed.
     or_feed.assert_not_awaited()
 
@@ -237,8 +240,8 @@ async def test_unknown_to_litellm_resolves_via_openrouter() -> None:
         "name": "Exotic 9000",
         "context_length": 65536,
         "architecture": {
-            "modality": "text->text",
-            "input_modalities": ["text"],
+            "modality": "text+image->text",
+            "input_modalities": ["text", "image"],
             "output_modalities": ["text"],
             "tokenizer": "Other",
             "instruct_type": None,
@@ -263,6 +266,8 @@ async def test_unknown_to_litellm_resolves_via_openrouter() -> None:
     assert model.pricing.prompt == pytest.approx(5e-06)
     assert model.pricing.completion == pytest.approx(1e-05)
     assert model.context_length == 65536
+    # The feed's own modality string is carried through verbatim, not recomputed.
+    assert model.architecture.modality == "text+image->text"
     or_feed.assert_awaited()
 
 

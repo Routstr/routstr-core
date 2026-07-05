@@ -31,6 +31,7 @@ class ResolvedPricing:
     completion: float
     context_length: int | None
     source: str
+    modality: str | None = None
     max_completion_tokens: int | None = None
     input_cache_read: float = 0.0
     input_cache_write: float = 0.0
@@ -159,6 +160,7 @@ def _from_openrouter(model_id: str, feed: list[dict]) -> ResolvedPricing | None:
         completion=completion,
         context_length=_as_int(entry.get("context_length")),
         source="openrouter",
+        modality=architecture.get("modality"),
         max_completion_tokens=_as_int(top_provider.get("max_completion_tokens")),
         input_cache_read=_as_float(pricing.get("input_cache_read")) or 0.0,
         input_cache_write=_as_float(pricing.get("input_cache_write")) or 0.0,
