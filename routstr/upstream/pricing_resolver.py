@@ -121,14 +121,22 @@ def _match_openrouter(model_id: str, feed: list[dict]) -> dict | None:
 
     Bare-tail matching (``deepseek-chat`` ↔ ``deepseek/deepseek-chat``) is a
     looser, lower-trust match — OpenRouter fans a model out across resellers —
-    so an exact id match always wins first.
+    so an exact id match always wins first. When several entries share the bare
+    tail, the highest-priced one wins: the choice must be deterministic (not
+    feed-order-dependent) and money-safe, since undercharging is the hazard.
+    The live feed has no such collisions today; this only governs the latent
+    case.
     """
     bare = model_id.split("/", 1)[-1]
     exact = next((m for m in feed if m.get("id") == model_id), None)
     if exact is not None:
         return exact
-    return next(
-        (m for m in feed if m.get("id", "").split("/", 1)[-1] == bare), None
+    matches = [m for m in feed if m.get("id", "").split("/", 1)[-1] == bare]
+    if not matches:
+        return None
+    return max(
+        matches,
+        key=lambda m: _as_float(m.get("pricing", {}).get("prompt")) or 0.0,
     )
 
 

@@ -267,6 +267,44 @@ async def test_unknown_to_litellm_resolves_via_openrouter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openrouter_bare_tail_collision_picks_highest_price() -> None:
+    """When a bare model id matches several OpenRouter entries by tail
+    (``model`` ↔ ``a/model``, ``b/model``), the match must be deterministic and
+    money-safe: pick the highest-priced candidate regardless of feed order, so
+    ordering can never leave the node charging below true cost. (The live feed
+    has zero such collisions today; this guards the latent case.)"""
+    payload = {
+        "data": [
+            {"id": "zzz-phantom-model", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    # Same bare tail, different resellers; the pricier one is listed *second*
+    # so a first-wins match would pick the cheaper (undercharging) entry.
+    or_feed = AsyncMock(
+        return_value=[
+            {
+                "id": "cheapco/zzz-phantom-model",
+                "context_length": 8192,
+                "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+            },
+            {
+                "id": "premiumco/zzz-phantom-model",
+                "context_length": 8192,
+                "pricing": {"prompt": "0.000009", "completion": "0.000010"},
+            },
+        ]
+    )
+
+    with _patch_models_endpoint(payload):
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "zzz-phantom-model")
+    assert model.pricing.prompt == pytest.approx(9e-06)
+    assert model.pricing.completion == pytest.approx(1e-05)
+
+
+@pytest.mark.asyncio
 async def test_openrouter_feed_fetched_once_per_discovery() -> None:
     """Two models both missing litellm must share a single OpenRouter fetch —
     the feed is not re-downloaded per model."""
