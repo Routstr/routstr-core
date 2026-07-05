@@ -145,6 +145,45 @@ async def test_bare_deepseek_resolves_via_litellm() -> None:
     or_feed.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_litellm_zero_price_entry_fails_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A litellm entry that lists a model but prices it at 0/0 (free-tier
+    moderation/rerank models do this) is not a real price — treating it as one
+    would silently serve the model for free. The resolver must reject a both-zero
+    litellm hit and fall through, so the model imports disabled, not at $0."""
+    payload = {
+        "data": [
+            {"id": "omni-moderation-latest", "object": "model", "owned_by": "openai"},
+        ]
+    }
+
+    gen_logger = logging.getLogger("routstr.upstream.generic")
+    gen_logger.addHandler(caplog.handler)
+    try:
+        with _patch_models_endpoint(payload):
+            or_feed = AsyncMock(return_value=[])
+            with patch(
+                "routstr.payment.models.async_fetch_openrouter_models", or_feed
+            ):
+                models = await GenericUpstreamProvider(
+                    base_url="http://x"
+                ).fetch_models()
+    finally:
+        gen_logger.removeHandler(caplog.handler)
+
+    model = _model_by_id(models, "omni-moderation-latest")
+    assert model.enabled is False
+    assert model.pricing.prompt == 0.0
+    assert model.pricing.completion == 0.0
+    assert any(
+        "omni-moderation-latest" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    )
+
+
 # ---------------------------------------------------------------------------
 # OpenRouter fallback — litellm misses, OR carries a full payload
 # ---------------------------------------------------------------------------

@@ -89,6 +89,12 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
     completion = info.get("output_cost_per_token")
     if not isinstance(prompt, (int, float)) or not isinstance(completion, (int, float)):
         return None
+    # A both-zero entry is litellm listing a model without a real price (free
+    # moderation/rerank tiers do this) — treating 0/0 as resolved would serve
+    # the model for free. Reject it (and any negative) so the caller falls
+    # through, mirroring async_fetch_openrouter_models' _has_valid_pricing.
+    if prompt < 0 or completion < 0 or (prompt == 0 and completion == 0):
+        return None
 
     input_modalities = ["text"]
     if info.get("supports_vision"):
