@@ -123,10 +123,12 @@ def _match_openrouter(model_id: str, feed: list[dict]) -> dict | None:
     Bare-tail matching (``deepseek-chat`` ↔ ``deepseek/deepseek-chat``) is a
     looser, lower-trust match — OpenRouter fans a model out across resellers —
     so an exact id match always wins first. When several entries share the bare
-    tail, the highest-priced one wins: the choice must be deterministic (not
-    feed-order-dependent) and money-safe, since undercharging is the hazard.
-    The live feed has no such collisions today; this only governs the latent
-    case.
+    tail, the one with the highest *combined* (prompt + completion) per-token
+    cost wins: the choice must be deterministic (not feed-order-dependent) and
+    money-safe whichever way traffic leans, since undercharging is the hazard.
+    Ranking on prompt alone could pick an entry that is cheap on input but dear
+    on output. The live feed has no such collisions today; this only governs
+    the latent case.
     """
     bare = model_id.split("/", 1)[-1]
     exact = next((m for m in feed if m.get("id") == model_id), None)
@@ -135,10 +137,14 @@ def _match_openrouter(model_id: str, feed: list[dict]) -> dict | None:
     matches = [m for m in feed if m.get("id", "").split("/", 1)[-1] == bare]
     if not matches:
         return None
-    return max(
-        matches,
-        key=lambda m: _as_float(m.get("pricing", {}).get("prompt")) or 0.0,
-    )
+
+    def _combined_cost(m: dict) -> float:
+        pricing = m.get("pricing", {})
+        return (_as_float(pricing.get("prompt")) or 0.0) + (
+            _as_float(pricing.get("completion")) or 0.0
+        )
+
+    return max(matches, key=_combined_cost)
 
 
 def _from_openrouter(model_id: str, feed: list[dict]) -> ResolvedPricing | None:

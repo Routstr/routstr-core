@@ -405,6 +405,44 @@ async def test_openrouter_bare_tail_collision_picks_highest_price() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openrouter_bare_tail_tie_breaks_on_combined_cost() -> None:
+    """The bare-tail tie-break must weigh *both* rates, not prompt alone.
+    Given two colliding entries where one is cheaper on prompt but far dearer
+    on completion, ranking by prompt would pick the entry that undercharges
+    output-heavy traffic. Pick the highest *combined* per-token cost so the
+    money-safe choice holds whichever way the traffic leans."""
+    payload = {
+        "data": [
+            {"id": "yyy-phantom-model", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    # dear-overall is listed first with the *lower* prompt, so a prompt-only max
+    # would wrongly pick the second (cheaper-overall) entry.
+    or_feed = AsyncMock(
+        return_value=[
+            {
+                "id": "dearco/yyy-phantom-model",
+                "context_length": 8192,
+                "pricing": {"prompt": "0.000001", "completion": "0.000100"},
+            },
+            {
+                "id": "cheapco/yyy-phantom-model",
+                "context_length": 8192,
+                "pricing": {"prompt": "0.000009", "completion": "0.000002"},
+            },
+        ]
+    )
+
+    with _patch_models_endpoint(payload):
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "yyy-phantom-model")
+    assert model.pricing.prompt == pytest.approx(1e-06)
+    assert model.pricing.completion == pytest.approx(1e-04)
+
+
+@pytest.mark.asyncio
 async def test_openrouter_feed_fetched_once_per_discovery() -> None:
     """Two models both missing litellm must share a single OpenRouter fetch —
     the feed is not re-downloaded per model."""
