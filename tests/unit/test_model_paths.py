@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 
-from routstr.core.db import UpstreamProviderRow  # noqa: E402
+from routstr.core.db import ModelRow, UpstreamProviderRow  # noqa: E402
 from routstr.payment.models import models_router  # noqa: E402
 from routstr.upstream import model_paths as mp  # noqa: E402
 
@@ -39,6 +40,37 @@ def _model(
         forwarded_model_id=forwarded_model_id,
         canonical_slug=canonical_slug,
         enabled=enabled,
+    )
+
+
+def _model_row(
+    id: str,
+    *,
+    upstream_provider_id: int = 1,
+    forwarded_model_id: str | None = None,
+    canonical_slug: str | None = None,
+    enabled: bool = True,
+) -> ModelRow:
+    return ModelRow(
+        id=id,
+        upstream_provider_id=upstream_provider_id,
+        name=id,
+        created=0,
+        description="test model",
+        context_length=8192,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "test",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 0.000001, "completion": 0.000002}),
+        enabled=enabled,
+        forwarded_model_id=forwarded_model_id,
+        canonical_slug=canonical_slug,
     )
 
 
@@ -361,6 +393,70 @@ async def test_refresh_replaces_stale_rows(
 
 
 @pytest.mark.asyncio
+async def test_refresh_model_paths_excludes_db_disabled_override(
+    patched_session: AsyncEngine,
+) -> None:
+    async with AsyncSession(patched_session) as session:
+        session.add(_model_row("disabled-by-db", enabled=False))
+        await session.commit()
+
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        models=[_model("disabled-by-db")],
+        db_id=1,
+    )
+
+    await mp.refresh_model_paths([provider])  # type: ignore[list-item]
+
+    assert await mp.get_all_model_paths() == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_model_paths_uses_db_forwarded_alias(
+    patched_session: AsyncEngine,
+) -> None:
+    async with AsyncSession(patched_session) as session:
+        session.add(_model_row("internal-id", forwarded_model_id="public-alias"))
+        await session.commit()
+
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        models=[_model("internal-id")],
+        db_id=1,
+    )
+
+    await mp.refresh_model_paths([provider])  # type: ignore[list-item]
+
+    assert await mp.get_all_model_paths() == [
+        {"id": "public-alias", "paths": [{"path": "anthropic"}]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_model_paths_includes_enabled_db_override_missing_from_cache(
+    patched_session: AsyncEngine,
+) -> None:
+    async with AsyncSession(patched_session) as session:
+        session.add(_model_row("deployment-id", forwarded_model_id="public-deployment"))
+        await session.commit()
+
+    provider = _FakeProvider(
+        provider_type="generic",
+        base_url="https://custom-provider/v1",
+        models=[],
+        db_id=1,
+    )
+
+    await mp.refresh_model_paths([provider])  # type: ignore[list-item]
+
+    assert await mp.get_all_model_paths() == [
+        {"id": "public-deployment", "paths": [{"path": "generic"}]}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_refresh_model_paths_prunes_inactive_provider_rows(
     patched_session: AsyncEngine,
 ) -> None:
@@ -379,6 +475,29 @@ async def test_refresh_model_paths_prunes_inactive_provider_rows(
     assert active_only == [{"id": "m1", "paths": [{"path": "anthropic"}]}]
 
     await mp.refresh_model_paths([])
+    assert await mp.get_all_model_paths() == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_model_paths_skips_disabled_db_provider(
+    patched_session: AsyncEngine,
+) -> None:
+    await mp._persist_provider_paths(1, [("stale-model", "anthropic")])
+    async with AsyncSession(patched_session) as session:
+        provider_row = await session.get(UpstreamProviderRow, 1)
+        assert provider_row is not None
+        provider_row.enabled = False
+        await session.commit()
+
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        models=[_model("fresh-model")],
+        db_id=1,
+    )
+
+    await mp.refresh_model_paths([provider])  # type: ignore[list-item]
+
     assert await mp.get_all_model_paths() == []
 
 
@@ -515,10 +634,12 @@ async def test_refresh_model_paths_isolates_provider_failure(
 
     original = mp._collect_provider_paths
 
-    async def _maybe_fail(upstream: Any) -> list[tuple[str, str]]:
+    async def _maybe_fail(
+        upstream: Any, *args: Any, **kwargs: Any
+    ) -> list[tuple[str, str]]:
         if upstream is bad:
             raise RuntimeError("boom")
-        return await original(upstream)  # type: ignore[arg-type]
+        return await original(upstream, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(mp, "_collect_provider_paths", _maybe_fail)
 

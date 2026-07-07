@@ -19,14 +19,18 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import httpx
+from sqlalchemy.orm import selectinload
 from sqlmodel import col, delete, select
 
-from ..core.db import ModelPathRow, create_session
+from ..core.db import ModelPathRow, ModelRow, UpstreamProviderRow, create_session
 from ..core.logging import get_logger
 from .base import BaseUpstreamProvider
+
+if TYPE_CHECKING:
+    from ..payment.models import Model
 
 logger = get_logger(__name__)
 
@@ -138,8 +142,117 @@ async def _fetch_openrouter_endpoint_paths(
     return list(dict.fromkeys(paths))
 
 
+async def _load_model_visibility() -> tuple[
+    dict[str, tuple[ModelRow, float]], set[str], set[int]
+]:
+    """Load the same DB model visibility inputs used by routing.
+
+    ``refresh_model_maps`` builds routing from enabled providers, enabled DB
+    override rows, and disabled model ids. Model-path discovery uses the same
+    view so the discovery API does not advertise models routing would hide and
+    reports forwarded aliases from DB overrides consistently with ``/v1/models``.
+    """
+    async with create_session() as session:
+        query = select(UpstreamProviderRow).options(
+            selectinload(UpstreamProviderRow.models)  # type: ignore[arg-type]
+        )
+        provider_rows = (await session.exec(query)).all()
+
+    overrides_by_id: dict[str, tuple[ModelRow, float]] = {}
+    disabled_model_ids: set[str] = set()
+    enabled_provider_ids: set[int] = set()
+
+    for provider in provider_rows:
+        if not provider.enabled:
+            continue
+        if provider.id is not None:
+            enabled_provider_ids.add(provider.id)
+        for model in provider.models:
+            if model.enabled:
+                overrides_by_id[model.id] = (model, provider.provider_fee)
+            else:
+                disabled_model_ids.add(model.id)
+
+    return overrides_by_id, disabled_model_ids, enabled_provider_ids
+
+
+def _row_to_visible_model(
+    model_id: str,
+    row: ModelRow,
+    provider_fee: float,
+) -> Model | None:
+    """Convert an enabled DB override row into a routed model object."""
+    from ..payment.models import _row_to_model
+
+    try:
+        return _row_to_model(row, apply_provider_fee=True, provider_fee=provider_fee)
+    except Exception as exc:  # noqa: BLE001 - skip invalid override row
+        logger.warning(
+            "Skipping invalid model override while collecting model paths",
+            extra={
+                "model_id": model_id,
+                "upstream_provider_id": getattr(row, "upstream_provider_id", None),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+        return None
+
+
+def _apply_model_visibility(
+    upstream: BaseUpstreamProvider,
+    overrides_by_id: dict[str, tuple[ModelRow, float]] | None,
+    disabled_model_ids: set[str] | None,
+) -> list[object]:
+    """Return provider models after DB disabled/override state is applied."""
+    overrides_by_id = overrides_by_id or {}
+    disabled_model_ids = disabled_model_ids or set()
+    visible_models: list[object] = []
+    seen_model_ids: set[str] = set()
+
+    for model in upstream.get_cached_models():
+        model_id = getattr(model, "id", "")
+        if not getattr(model, "enabled", True) or model_id in disabled_model_ids:
+            continue
+
+        if model_id in overrides_by_id:
+            override_row, provider_fee = overrides_by_id[model_id]
+            visible_model = _row_to_visible_model(model_id, override_row, provider_fee)
+            if visible_model is None:
+                continue
+            model = visible_model
+
+        if not getattr(model, "enabled", True):
+            continue
+        visible_models.append(model)
+        seen_model_ids.add(model_id.lower())
+
+    upstream_provider_id = getattr(upstream, "db_id", None)
+    if isinstance(upstream_provider_id, int):
+        for model_id, (override_row, provider_fee) in overrides_by_id.items():
+            if model_id in disabled_model_ids:
+                continue
+            if (
+                getattr(override_row, "upstream_provider_id", None)
+                != upstream_provider_id
+            ):
+                continue
+            if model_id.lower() in seen_model_ids:
+                continue
+            override_model = _row_to_visible_model(model_id, override_row, provider_fee)
+            if override_model is None:
+                continue
+            if getattr(override_model, "enabled", True):
+                visible_models.append(override_model)
+                seen_model_ids.add(model_id.lower())
+
+    return visible_models
+
+
 async def _collect_provider_paths(
     upstream: BaseUpstreamProvider,
+    overrides_by_id: dict[str, tuple[ModelRow, float]] | None = None,
+    disabled_model_ids: set[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Collect ``(model_id, path)`` pairs for one provider instance.
 
@@ -148,7 +261,7 @@ async def _collect_provider_paths(
     endpoint, prefixed the same way response stamping prefixes it.
     """
     provider_type = (upstream.provider_type or "").strip()
-    models = [m for m in upstream.get_cached_models() if getattr(m, "enabled", True)]
+    models = _apply_model_visibility(upstream, overrides_by_id, disabled_model_ids)
     is_openrouter = is_openrouter_base_url(upstream.base_url)
 
     pairs: list[tuple[str, str]] = []
@@ -240,16 +353,27 @@ async def refresh_model_paths(
 
     One provider's failure is logged and isolated; it must not break the rest.
     """
+    (
+        overrides_by_id,
+        disabled_model_ids,
+        enabled_provider_ids,
+    ) = await _load_model_visibility()
     active_provider_ids = {
-        upstream.db_id for upstream in upstreams if upstream.db_id is not None
+        upstream.db_id
+        for upstream in upstreams
+        if upstream.db_id is not None and upstream.db_id in enabled_provider_ids
     }
     await _prune_inactive_provider_paths(active_provider_ids)
 
     for upstream in upstreams:
-        if upstream.db_id is None:
+        if upstream.db_id is None or upstream.db_id not in enabled_provider_ids:
             continue
         try:
-            pairs = await _collect_provider_paths(upstream)
+            pairs = await _collect_provider_paths(
+                upstream,
+                overrides_by_id=overrides_by_id,
+                disabled_model_ids=disabled_model_ids,
+            )
             await _persist_provider_paths(upstream.db_id, pairs)
         except Exception as e:  # noqa: BLE001 - isolate per-provider failures
             logger.error(
