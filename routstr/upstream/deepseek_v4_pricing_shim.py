@@ -3,10 +3,15 @@
 litellm's bundled cost map does not yet ship ``deepseek-v4-flash`` /
 ``deepseek-v4-pro``. Without an entry, ``backfill_cache_pricing`` cannot find a
 ``cache_read_input_token_cost`` and cache reads fall back to the full input
-rate — a ~60% overcharge on cache hits (DeepSeek hits are ~0.2x input).
+rate — a large overcharge on cache hits (DeepSeek V4 hits are ~0.008-0.02x
+input, i.e. cached tokens cost 50-120x less than regular input).
 
 This module injects the missing entries into ``litellm.model_cost`` at startup
-so the existing backfill path resolves them. Rates mirror the open upstream PR
+so the existing backfill path resolves them. Rates mirror the canonical
+``deepseek`` provider entries now in litellm's ``model_prices`` map
+(``input_cost_per_token`` is the cache-*miss* rate;
+``cache_read_input_token_cost`` is the cache-*hit* rate), sourced from
+https://api-docs.deepseek.com/quick_start/pricing via
 https://github.com/BerriAI/litellm/pull/26380 (issue
 https://github.com/BerriAI/litellm/issues/30430).
 
@@ -22,21 +27,23 @@ from ..core import get_logger
 
 logger = get_logger(__name__)
 
-# USD per token. Source: BerriAI/litellm PR #26380.
+# USD per token. Mirrors the canonical ``deepseek`` provider entries in
+# litellm's model_prices map (source: DeepSeek API pricing docs). Keep these in
+# sync with ``litellm.model_cost["deepseek/deepseek-v4-*"]``.
 _DEEPSEEK_V4_RATES: dict[str, dict[str, float]] = {
     "deepseek-v4-flash": {
         "input_cost_per_token": 1.4e-07,
         "output_cost_per_token": 2.8e-07,
-        "cache_read_input_token_cost": 2.8e-08,
+        "cache_read_input_token_cost": 2.8e-09,
         "cache_creation_input_token_cost": 0.0,
-        "input_cost_per_token_cache_hit": 2.8e-08,
+        "input_cost_per_token_cache_hit": 2.8e-09,
     },
     "deepseek-v4-pro": {
-        "input_cost_per_token": 1.74e-06,
-        "output_cost_per_token": 3.48e-06,
-        "cache_read_input_token_cost": 1.4e-07,
+        "input_cost_per_token": 4.35e-07,
+        "output_cost_per_token": 8.7e-07,
+        "cache_read_input_token_cost": 3.625e-09,
         "cache_creation_input_token_cost": 0.0,
-        "input_cost_per_token_cache_hit": 1.4e-07,
+        "input_cost_per_token_cache_hit": 3.625e-09,
     },
 }
 

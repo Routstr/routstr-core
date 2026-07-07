@@ -55,7 +55,7 @@ class RoutstrUpstreamProvider(BaseUpstreamProvider):
         return path.lstrip("/")
 
     @classmethod
-    def from_db_row(
+    def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "RoutstrUpstreamProvider":
         import json

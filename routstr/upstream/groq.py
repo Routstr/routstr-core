@@ -20,7 +20,7 @@ class GroqUpstreamProvider(BaseUpstreamProvider):
         )
 
     @classmethod
-    def from_db_row(cls, provider_row: "UpstreamProviderRow") -> "GroqUpstreamProvider":
+    def _build_from_row(cls, provider_row: "UpstreamProviderRow") -> "GroqUpstreamProvider":
         return cls(
             api_key=provider_row.api_key,
             provider_fee=provider_row.provider_fee,

@@ -5,6 +5,12 @@ from typing import TYPE_CHECKING
 import httpx
 
 from .base import BaseUpstreamProvider
+from .pricing_resolver import (
+    FallbackPricingResolver,
+    ResolvedPricing,
+    _as_float,
+    estimate_context_length,
+)
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -45,7 +51,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
         )
 
     @classmethod
-    def from_db_row(
+    def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "GenericUpstreamProvider":
         return cls(
@@ -64,6 +70,40 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
             "platform_url": cls.platform_url,
         }
 
+    def _native_pricing(
+        self, model_id: str, model_spec: dict
+    ) -> ResolvedPricing | None:
+        """Read pricing/metadata from Venice's bespoke ``model_spec`` schema.
+
+        Returns ``None`` when the upstream reported no *usable* native price —
+        absent, non-numeric, negative, or both-zero — so the caller falls
+        through to the shared resolution chain instead of fabricating a number
+        or trusting a bogus one. This mirrors the money-safety guards the
+        litellm and OpenRouter rungs already apply: a both-zero price would
+        serve the model free, a negative one would credit the caller, and a
+        non-numeric string would otherwise throw and drop the whole catalog.
+        """
+        pricing_info = model_spec.get("pricing", {})
+        input_usd = _as_float(pricing_info.get("input", {}).get("usd"))
+        output_usd = _as_float(pricing_info.get("output", {}).get("usd"))
+        if input_usd is None or output_usd is None:
+            return None
+        if input_usd < 0 or output_usd < 0 or (input_usd == 0 and output_usd == 0):
+            return None
+
+        capabilities = model_spec.get("capabilities", {})
+        input_modalities = ["text"]
+        if capabilities.get("supportsVision", False):
+            input_modalities.append("image")
+
+        return ResolvedPricing(
+            prompt=input_usd / 1_000_000,
+            completion=output_usd / 1_000_000,
+            context_length=model_spec.get("availableContextTokens"),
+            source="native",
+            input_modalities=input_modalities,
+        )
+
     async def fetch_models(self) -> list[Model]:
         """Fetch models from upstream API using /models endpoint."""
         from ..payment.models import Architecture, Model, Pricing, TopProvider
@@ -78,6 +118,7 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                 response.raise_for_status()
                 data = response.json()
 
+                resolver = FallbackPricingResolver()
                 models_list = []
                 for model_data in data.get("data", []):
                     model_id = model_data.get("id", "")
@@ -89,41 +130,44 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                     owned_by = model_data.get("owned_by", "unknown")
                     model_spec = model_data.get("model_spec", {})
 
-                    context_length = 4096
-                    if model_spec.get("availableContextTokens"):
-                        context_length = model_spec["availableContextTokens"]
-                    elif any(
-                        pattern in model_id.lower() for pattern in ["32k", "32000"]
-                    ):
-                        context_length = 32768
-                    elif any(
-                        pattern in model_id.lower() for pattern in ["16k", "16000"]
-                    ):
-                        context_length = 16384
-                    elif any(pattern in model_id.lower() for pattern in ["8k", "8000"]):
-                        context_length = 8192
-                    elif "gpt-4" in model_id.lower():
-                        context_length = 8192
-                    elif "claude" in model_id.lower():
-                        context_length = 200000
+                    resolved = self._native_pricing(model_id, model_spec)
+                    if resolved is None:
+                        resolved = await resolver.resolve(model_id)
 
-                    pricing_info = model_spec.get("pricing", {})
-                    input_pricing = pricing_info.get("input", {})
-                    output_pricing = pricing_info.get("output", {})
+                    if resolved is None:
+                        # Fail closed: never invent a price. Import the model
+                        # disabled with a warning so the operator can price it
+                        # (the admin UI surfaces disabled remote models).
+                        logger.warning(
+                            f"No pricing source resolved for '{model_id}' from "
+                            f"{self.upstream_name}; importing it disabled",
+                            extra={"model_id": model_id, "base_url": self.base_url},
+                        )
+                        resolved = ResolvedPricing(
+                            prompt=0.0,
+                            completion=0.0,
+                            context_length=None,
+                            source="unresolved",
+                        )
+                        enabled = False
+                    else:
+                        enabled = True
 
-                    prompt_price = input_pricing.get("usd", 0.001) / 1000000
-                    completion_price = output_pricing.get("usd", 0.001) / 1000000
+                    # Prefer the source's own modality string (OpenRouter ships
+                    # one, e.g. "text+image->text"); otherwise derive it from the
+                    # captured input/output modalities in the same "in->out" shape
+                    # rather than flattening vision models to "text->text".
+                    modality = resolved.modality or (
+                        f"{'+'.join(resolved.input_modalities)}"
+                        f"->{'+'.join(resolved.output_modalities)}"
+                    )
 
-                    capabilities = model_spec.get("capabilities", {})
-                    input_modalities = ["text"]
-                    output_modalities = ["text"]
-
-                    if capabilities.get("supportsVision", False):
-                        input_modalities.append("image")
-
-                    modality = "text"
-                    if capabilities.get("supportsVision", False):
-                        modality = "text->text"
+                    # A source can carry a price but no context (e.g. a litellm
+                    # entry missing max_input_tokens); fall back to an id-based
+                    # estimate so we never persist a zero-length window.
+                    context_length = resolved.context_length or estimate_context_length(
+                        model_id
+                    )
 
                     spec_name = model_spec.get("name", model_name)
                     description = f"{spec_name}"
@@ -139,30 +183,33 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
                             context_length=context_length,
                             architecture=Architecture(
                                 modality=modality,
-                                input_modalities=input_modalities,
-                                output_modalities=output_modalities,
-                                tokenizer="unknown",
-                                instruct_type=None,
+                                input_modalities=resolved.input_modalities,
+                                output_modalities=resolved.output_modalities,
+                                tokenizer=resolved.tokenizer,
+                                instruct_type=resolved.instruct_type,
                             ),
                             pricing=Pricing(
-                                prompt=prompt_price,
-                                completion=completion_price,
+                                prompt=resolved.prompt,
+                                completion=resolved.completion,
                                 request=0.0,
                                 image=0.0,
                                 web_search=0.0,
                                 internal_reasoning=0.0,
-                                max_prompt_cost=0.001,
-                                max_completion_cost=0.001,
-                                max_cost=0.001,
+                                input_cache_read=resolved.input_cache_read,
+                                input_cache_write=resolved.input_cache_write,
                             ),
                             sats_pricing=None,
                             per_request_limits=None,
                             top_provider=TopProvider(
                                 context_length=context_length,
-                                max_completion_tokens=context_length // 2,
-                                is_moderated=False,
+                                max_completion_tokens=(
+                                    resolved.max_completion_tokens
+                                    if resolved.max_completion_tokens is not None
+                                    else context_length // 2
+                                ),
+                                is_moderated=bool(resolved.is_moderated),
                             ),
-                            enabled=True,
+                            enabled=enabled,
                             upstream_provider_id=None,
                             canonical_slug=None,
                         )
