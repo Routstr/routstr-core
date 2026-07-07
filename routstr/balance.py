@@ -23,6 +23,7 @@ from .lightning import lightning_router
 from .wallet import (
     classify_redemption_error,
     credit_balance,
+    is_mint_connection_error,
     recieve_token,
     send_to_lnurl,
     send_token,
@@ -435,14 +436,10 @@ async def refund_wallet_endpoint(
                 "has_refund_address": bool(key.refund_address),
             },
         )
-        if (
-            "mint" in error_msg.lower()
-            or "connection" in error_msg.lower()
-            or "ConnectError" in str(type(e))
-        ):
-            raise HTTPException(status_code=503, detail=f"Mint service unavailable: {error_msg}")
+        if is_mint_connection_error(e):
+            raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
-            raise HTTPException(status_code=500, detail=f"Refund failed: {error_msg}")
+            raise HTTPException(status_code=500, detail="Refund failed")
 
     await _refund_cache_set(bearer_value, result)
 

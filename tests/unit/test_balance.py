@@ -340,7 +340,10 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
 
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
-        patch("routstr.balance.send_token", AsyncMock(side_effect=Exception("mint down"))),
+        patch(
+            "routstr.balance.send_token",
+            AsyncMock(side_effect=MintConnectionError("raw mint outage detail")),
+        ),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
@@ -354,7 +357,43 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
             )
 
     assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Mint service unavailable"
+    assert "raw mint outage detail" not in exc_info.value.detail
     # Verify two exec calls: debit + restore
+    assert session.exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
+    """Unexpected send-side failures restore balance without leaking exception text."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=5000, refund_currency="sat")
+    raw_error = "database secret token raw-mint-response"
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.exec = AsyncMock(side_effect=[_update_result(1), _update_result(1)])
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", AsyncMock(side_effect=RuntimeError(raw_error))),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch("routstr.balance.logger"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Refund failed"
+    assert raw_error not in exc_info.value.detail
     assert session.exec.await_count == 2
 
 
