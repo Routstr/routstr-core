@@ -259,11 +259,26 @@ async def refund_wallet_endpoint(
             )
         )
         in_tx = in_tx_result.first()
+        cashu_fingerprint = hashlib.sha256(x_cashu.encode()).hexdigest()[:16]
         if in_tx is None:
+            logger.info(
+                "refund_wallet_endpoint: x-cashu inbound transaction not found",
+                extra={"cashu_fingerprint": cashu_fingerprint},
+            )
             raise HTTPException(status_code=404, detail="Refund not found")
 
         # Use the request_id to find the associated "out" (refund) transaction
         if in_tx.request_id is None:
+            logger.info(
+                "refund_wallet_endpoint: x-cashu inbound transaction has no request_id",
+                extra={
+                    "cashu_fingerprint": cashu_fingerprint,
+                    "cashu_transaction_id": in_tx.id,
+                    "amount": in_tx.amount,
+                    "unit": in_tx.unit,
+                    "mint_url": in_tx.mint_url,
+                },
+            )
             raise HTTPException(status_code=404, detail="Refund not found")
 
         out_tx_result = await session.exec(
@@ -274,8 +289,33 @@ async def refund_wallet_endpoint(
         )
         out_tx = out_tx_result.first()
         if out_tx is None:
-            raise HTTPException(status_code=404, detail="Refund not found")
+            logger.info(
+                "refund_wallet_endpoint: x-cashu refund transaction not ready",
+                extra={
+                    "cashu_fingerprint": cashu_fingerprint,
+                    "cashu_transaction_id": in_tx.id,
+                    "refund_request_id": in_tx.request_id,
+                    "amount": in_tx.amount,
+                    "unit": in_tx.unit,
+                    "mint_url": in_tx.mint_url,
+                    "age_seconds": max(0, int(time.time()) - in_tx.created_at),
+                },
+            )
+            raise HTTPException(
+                status_code=425,
+                detail="Refund not ready. Retry later.",
+                headers={"Retry-After": "5"},
+            )
         if out_tx.swept:
+            logger.info(
+                "refund_wallet_endpoint: x-cashu refund transaction already swept",
+                extra={
+                    "cashu_fingerprint": cashu_fingerprint,
+                    "cashu_transaction_id": in_tx.id,
+                    "refund_transaction_id": out_tx.id,
+                    "refund_request_id": in_tx.request_id,
+                },
+            )
             raise HTTPException(status_code=410, detail="Refund has been swept")
 
         out_tx.collected = True

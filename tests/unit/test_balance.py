@@ -2,6 +2,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from routstr.balance import refund_wallet_endpoint
@@ -88,8 +89,6 @@ async def test_refund_x_cashu_sat_unit() -> None:
 
 @pytest.mark.asyncio
 async def test_refund_x_cashu_not_found_raises_404() -> None:
-    from fastapi import HTTPException
-
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(None))
 
@@ -104,9 +103,32 @@ async def test_refund_x_cashu_not_found_raises_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refund_x_cashu_swept_raises_410() -> None:
-    from fastapi import HTTPException
+async def test_refund_x_cashu_pending_out_tx_raises_425() -> None:
+    in_tx = _make_cashu_tx(
+        token="cashuApending_token",
+        amount=0,
+        unit="msat",
+        type="in",
+        request_id="req-pending",
+    )
 
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(None)])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await refund_wallet_endpoint(
+            authorization="Bearer sk-somekey",
+            x_cashu="cashuApending_token",
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 425
+    assert exc_info.value.detail == "Refund not ready. Retry later."
+    assert exc_info.value.headers == {"Retry-After": "5"}
+
+
+@pytest.mark.asyncio
+async def test_refund_x_cashu_swept_raises_410() -> None:
     in_tx = _make_cashu_tx(token="cashuAswept_token", amount=0, unit="msat", type="in", request_id="req-swept")
     out_tx = _make_cashu_tx(token="cashuAswept", amount=100, unit="msat", type="out", request_id="req-swept", swept=True)
 
