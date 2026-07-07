@@ -112,6 +112,101 @@ async def test_native_model_spec_resolves_and_captures_metadata() -> None:
 
 
 # ---------------------------------------------------------------------------
+# native model_spec validation — a bogus native price is not authoritative
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_both_zero_price_falls_through_to_litellm() -> None:
+    """A native ``model_spec`` that prices both tokens at 0 is not a real price
+    (the same free-tier trap the litellm/OpenRouter rungs already reject). It
+    must not be treated as authoritative and served free; the resolver falls
+    through, so a litellm-known model lands on litellm's real rate instead."""
+    payload = {
+        "data": [
+            {
+                "id": "deepseek-chat",
+                "owned_by": "deepseek",
+                "model_spec": {
+                    "pricing": {"input": {"usd": 0}, "output": {"usd": 0}},
+                },
+            }
+        ]
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[])
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "deepseek-chat")
+    assert model.enabled is True
+    assert model.pricing.prompt == pytest.approx(2.8e-07)
+    assert model.pricing.completion == pytest.approx(4.2e-07)
+
+
+@pytest.mark.asyncio
+async def test_native_negative_price_falls_through_to_litellm() -> None:
+    """A negative native price would credit the caller's balance on every
+    request (a fund drain, not a discount). Reject it like any other unusable
+    price and fall through to the chain."""
+    payload = {
+        "data": [
+            {
+                "id": "deepseek-chat",
+                "owned_by": "deepseek",
+                "model_spec": {
+                    "pricing": {"input": {"usd": -0.5}, "output": {"usd": -1.5}},
+                },
+            }
+        ]
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[])
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "deepseek-chat")
+    assert model.enabled is True
+    assert model.pricing.prompt == pytest.approx(2.8e-07)
+    assert model.pricing.completion == pytest.approx(4.2e-07)
+
+
+@pytest.mark.asyncio
+async def test_native_non_numeric_price_does_not_break_catalog() -> None:
+    """A non-numeric native price (``"free"``) must not raise while parsing —
+    an unguarded ``"free" / 1_000_000`` throws and the outer catch drops the
+    *entire* provider catalog. It has to fail closed for that one model while
+    every other model in the same response still resolves."""
+    payload = {
+        "data": [
+            {
+                "id": "broken-price",
+                "owned_by": "mystery",
+                "model_spec": {
+                    "pricing": {"input": {"usd": "free"}, "output": {"usd": "free"}},
+                },
+            },
+            {"id": "deepseek-chat", "object": "model", "owned_by": "deepseek"},
+        ]
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[])
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    # One malformed entry must not empty the catalog.
+    assert {m.id for m in models} == {"broken-price", "deepseek-chat"}
+    broken = _model_by_id(models, "broken-price")
+    assert broken.enabled is False
+    healthy = _model_by_id(models, "deepseek-chat")
+    assert healthy.enabled is True
+    assert healthy.pricing.prompt == pytest.approx(2.8e-07)
+
+
+# ---------------------------------------------------------------------------
 # litellm rescue — the money-critical case (DeepSeek bare /models)
 # ---------------------------------------------------------------------------
 

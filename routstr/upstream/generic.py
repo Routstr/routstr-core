@@ -8,6 +8,7 @@ from .base import BaseUpstreamProvider
 from .pricing_resolver import (
     FallbackPricingResolver,
     ResolvedPricing,
+    _as_float,
     estimate_context_length,
 )
 
@@ -74,15 +75,20 @@ class GenericUpstreamProvider(BaseUpstreamProvider):
     ) -> ResolvedPricing | None:
         """Read pricing/metadata from Venice's bespoke ``model_spec`` schema.
 
-        Returns ``None`` when the upstream reported no native price (the common
-        case for bare OpenAI-compatible ``/models`` responses), so the caller
-        falls through to the shared resolution chain instead of fabricating a
-        number.
+        Returns ``None`` when the upstream reported no *usable* native price —
+        absent, non-numeric, negative, or both-zero — so the caller falls
+        through to the shared resolution chain instead of fabricating a number
+        or trusting a bogus one. This mirrors the money-safety guards the
+        litellm and OpenRouter rungs already apply: a both-zero price would
+        serve the model free, a negative one would credit the caller, and a
+        non-numeric string would otherwise throw and drop the whole catalog.
         """
         pricing_info = model_spec.get("pricing", {})
-        input_usd = pricing_info.get("input", {}).get("usd")
-        output_usd = pricing_info.get("output", {}).get("usd")
+        input_usd = _as_float(pricing_info.get("input", {}).get("usd"))
+        output_usd = _as_float(pricing_info.get("output", {}).get("usd"))
         if input_usd is None or output_usd is None:
+            return None
+        if input_usd < 0 or output_usd < 0 or (input_usd == 0 and output_usd == 0):
             return None
 
         capabilities = model_spec.get("capabilities", {})
