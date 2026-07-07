@@ -269,7 +269,20 @@ async def refund_wallet_endpoint(
         )
         out_tx = out_tx_result.first()
         if out_tx is None:
-            raise HTTPException(status_code=404, detail="Refund not found")
+            # The "in" row exists with a request_id, but the "out" (refund)
+            # row hasn't been written yet — the upstream request is still in
+            # flight and the refund will be minted once it completes. Tell the
+            # client to retry instead of 404ing permanently (race condition
+            # where /v1/wallet/refund is polled before the refund exists).
+            logger.debug(
+                "refund_wallet_endpoint: refund pending (in row exists, out row not yet created)",
+                extra={"request_id": in_tx.request_id},
+            )
+            raise HTTPException(
+                status_code=425,
+                detail="Refund is pending; retry shortly.",
+                headers={"Retry-After": "2"},
+            )
         if out_tx.swept:
             raise HTTPException(status_code=410, detail="Refund has been swept")
 
