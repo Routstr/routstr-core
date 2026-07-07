@@ -74,7 +74,7 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
         )
 
     @classmethod
-    def from_db_row(
+    def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "TinfoilUpstreamProvider":
         return cls(
