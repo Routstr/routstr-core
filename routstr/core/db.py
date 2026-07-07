@@ -455,6 +455,11 @@ class Secret(SQLModel, table=True):  # type: ignore
     id: int = Field(default=1, primary_key=True)
     admin_password_hash: str | None = Field(default=None)
     encrypted_nsec: str | None = Field(default=None)
+    # True once the vault owns the nsec (imported from legacy plaintext, or set
+    # via the admin API). A cleared nsec then stays cleared: bootstrap must not
+    # resurrect it from a stale legacy ``NSEC`` env var / settings blob, which an
+    # empty ``encrypted_nsec`` alone cannot distinguish from "never migrated".
+    nsec_managed: bool = Field(default=False)
     updated_at: int | None = Field(default=None)
 
 
@@ -531,12 +536,15 @@ async def set_nsec(session: AsyncSession, nsec: str) -> None:
     """Store the node's nsec, Fernet-encrypted, on the Secret singleton.
 
     An empty string clears it (the node then holds no Nostr identity and signs
-    no events).
+    no events). Either way the vault now owns the nsec, so ``nsec_managed`` is
+    set: a cleared identity must not be resurrected from a stale legacy ``NSEC``
+    on the next boot.
     """
     from .vault import encrypt
 
     secret = await get_secret(session)
     secret.encrypted_nsec = encrypt(nsec) if nsec else None
+    secret.nsec_managed = True
     secret.updated_at = int(time.time())
     session.add(secret)
     await session.commit()

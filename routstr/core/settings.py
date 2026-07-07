@@ -153,15 +153,15 @@ def _strip_secret_fields(data: dict[str, Any]) -> dict[str, Any]:
 def _apply_to_live_settings(data: dict[str, Any]) -> None:
     """Apply ``data`` onto the live ``settings`` for all in-process importers.
 
-    Secrets are owned by ``bootstrap_secrets`` (which decrypts the nsec into
-    memory before this runs) — they are never persisted to the blob, so ``data``
-    re-derived from the secret-free blob carries empty secret values. Skip those
-    empty overwrites so a live secret is never clobbered; a non-empty value
-    (legacy env, or a not-yet-stripped blob mid-migration) is still applied.
+    Secrets are owned exclusively by ``bootstrap_secrets``, which runs first and
+    has already decrypted the authoritative nsec into memory (importing any
+    legacy plaintext on the way). Never re-apply secret fields from env/blob
+    here: a non-empty but stale ``NSEC`` env var would otherwise override an nsec
+    the vault has taken ownership of (e.g. after the operator rotates it in the
+    UI), and an empty one would wipe the live value. Skip them entirely.
     """
-    live = settings.dict()
     for k, v in data.items():
-        if k in SECRET_FIELDS and not v and live.get(k):
+        if k in SECRET_FIELDS:
             continue
         setattr(settings, k, v)
 
@@ -504,7 +504,12 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
                 "ROUTSTR_SECRET_KEY. The key changed, or this database came from "
                 "another node. Restore the original ROUTSTR_SECRET_KEY to recover."
             ) from exc
-    else:
+    elif not secret.nsec_managed:
+        # The vault has not taken ownership yet: import any legacy plaintext
+        # (env, or the old settings blob). Once managed, an empty encrypted_nsec
+        # means the identity was intentionally cleared via the admin API, so this
+        # branch is skipped and the nsec stays empty rather than being resurrected
+        # from a stale legacy copy.
         legacy_nsec = _legacy_plaintext(raw_blob, "NSEC", "nsec")
         if legacy_nsec:
             # The node has a Nostr identity to protect. Encryption at rest is
@@ -519,6 +524,7 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
                     'print(Fernet.generate_key().decode())"'
                 )
             secret.encrypted_nsec = vault.encrypt(legacy_nsec)
+            secret.nsec_managed = True
             settings.nsec = legacy_nsec
             changed = True
 

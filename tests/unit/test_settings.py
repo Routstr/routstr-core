@@ -148,9 +148,10 @@ def test_settings_model_drops_admin_password_field() -> None:
 async def test_secret_fields_kept_in_memory_but_not_persisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("NSEC", NSEC_HEX)
-    # Reset the live globals so monkeypatch reverts them after the test.
-    monkeypatch.setattr(settings, "nsec", "")
+    # bootstrap_secrets (which runs first at boot) owns the nsec and has already
+    # decrypted it into memory; simulate that live value. initialize must keep it
+    # in memory for runtime consumers yet never write it to the settings blob.
+    monkeypatch.setattr(settings, "nsec", NSEC_HEX)
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with AsyncSession(engine, expire_on_commit=False) as session:

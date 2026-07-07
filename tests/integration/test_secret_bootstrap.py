@@ -17,7 +17,7 @@ from sqlmodel import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core import vault
-from routstr.core.db import get_secret
+from routstr.core.db import get_secret, set_nsec
 from routstr.core.settings import (
     SettingsService,
     bootstrap_secrets,
@@ -30,6 +30,9 @@ TEST_SECRET_KEY = "l_Tkp-7xmjcQ-IFhr6qhILrU8HPRbEmYMrfSbo_5srU="
 TEST_SECRET_KEY_ALT = "_Teyrky_iToeDK51Tj1FsI9MJ340_cqKGmeher-a7MQ="
 
 NSEC_HEX = "1" * 64
+# A different key, standing in for a stale value left behind in env/blob after
+# the vault has taken ownership of the real one.
+STALE_NSEC_HEX = "2" * 64
 
 
 @pytest.fixture
@@ -241,6 +244,54 @@ async def test_initialize_does_not_clobber_store_only_nsec(
         text("SELECT data FROM settings WHERE id = 1")
     )
     assert "nsec" not in json.loads(row.first()[0])
+
+
+@pytest.mark.asyncio
+async def test_stale_env_nsec_does_not_override_vault_nsec(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The vault owns the nsec, but a stale NSEC (e.g. the operator rotated the
+    # key in the UI yet left the old value in .env) is still in the environment.
+    # bootstrap decrypts the store value; initialize must NOT let the stale env
+    # value clobber it, or a restart silently reverts to the old identity.
+    await set_nsec(integration_session, NSEC_HEX)
+
+    monkeypatch.setenv("NSEC", STALE_NSEC_HEX)
+    await _create_settings_blob(integration_session, {"name": "LegacyNode"})
+
+    await bootstrap_secrets(integration_session)
+    await SettingsService.initialize(integration_session)
+
+    # The vault value wins; the stale env value is ignored.
+    assert settings.nsec == NSEC_HEX
+
+
+@pytest.mark.asyncio
+async def test_cleared_nsec_stays_cleared_across_reboot(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An identity was imported from env, then the operator cleared it via the
+    # admin API. The old NSEC is still in env. On the next boot the cleared
+    # identity must stay cleared, not get resurrected from the stale env value.
+    monkeypatch.setenv("NSEC", NSEC_HEX)
+    await bootstrap_secrets(integration_session)
+    assert settings.nsec == NSEC_HEX
+
+    # Clear via the admin path (mirrors the endpoint: store empty, live empty).
+    await set_nsec(integration_session, "")
+    monkeypatch.setattr(settings, "nsec", "")
+
+    # Reboot with the stale NSEC still present in env.
+    await bootstrap_secrets(integration_session)
+
+    reloaded = await get_secret(integration_session)
+    assert reloaded.nsec_managed is True
+    assert reloaded.encrypted_nsec is None  # not re-imported
+    assert settings.nsec == ""  # stays cleared
 
 
 @pytest.mark.asyncio
