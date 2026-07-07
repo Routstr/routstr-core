@@ -20,7 +20,14 @@ from .core.db import (
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
-from .wallet import credit_balance, recieve_token, send_to_lnurl, send_token
+from .wallet import (
+    classify_redemption_error,
+    credit_balance,
+    is_mint_connection_error,
+    recieve_token,
+    send_to_lnurl,
+    send_token,
+)
 
 router = APIRouter()
 balance_router = APIRouter(prefix="/v1/balance")
@@ -156,30 +163,18 @@ async def topup_wallet_endpoint(
         raise HTTPException(status_code=400, detail="Invalid token format")
     try:
         amount_msats = await credit_balance(cashu_token, billing_key, session)
-    except ValueError as e:
-        error_msg = str(e)
-        if "already spent" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Token already spent")
-        elif "invalid" in error_msg.lower() or "decode" in error_msg.lower():
-            raise HTTPException(status_code=400, detail="Invalid token format")
-        elif "insufficient" in error_msg.lower() or "melt fee" in error_msg.lower():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Token value is too small to cover swap fees. {error_msg}",
-            )
-        elif "failed to melt" in error_msg.lower():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to swap foreign mint token. {error_msg}",
-            )
-        else:
-            raise HTTPException(status_code=400, detail=f"Failed to redeem token: {error_msg}")
     except Exception as e:
-        logger.error(
-            "topup_wallet_endpoint: unhandled error",
-            extra={"error": str(e), "error_type": type(e).__name__},
-        )
-        raise HTTPException(status_code=500, detail="Internal server error")
+        # Shared taxonomy so top-up matches the bearer/X-Cashu paths (503 for an
+        # unreachable mint, 422 for fee/swap failures, 400 for token faults).
+        classified = classify_redemption_error(e)
+        if classified is None:
+            logger.error(
+                "topup_wallet_endpoint: unhandled error",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
+            raise HTTPException(status_code=500, detail="Internal server error")
+        _type, status_code, message, _code = classified
+        raise HTTPException(status_code=status_code, detail=message)
     return {"msats": amount_msats}
 
 
@@ -274,7 +269,20 @@ async def refund_wallet_endpoint(
         )
         out_tx = out_tx_result.first()
         if out_tx is None:
-            raise HTTPException(status_code=404, detail="Refund not found")
+            # The "in" row exists with a request_id, but the "out" (refund)
+            # row hasn't been written yet — the upstream request is still in
+            # flight and the refund will be minted once it completes. Tell the
+            # client to retry instead of 404ing permanently (race condition
+            # where /v1/wallet/refund is polled before the refund exists).
+            logger.debug(
+                "refund_wallet_endpoint: refund pending (in row exists, out row not yet created)",
+                extra={"request_id": in_tx.request_id},
+            )
+            raise HTTPException(
+                status_code=425,
+                detail="Refund is pending; retry shortly.",
+                headers={"Retry-After": "2"},
+            )
         if out_tx.swept:
             raise HTTPException(status_code=410, detail="Refund has been swept")
 
@@ -441,14 +449,10 @@ async def refund_wallet_endpoint(
                 "has_refund_address": bool(key.refund_address),
             },
         )
-        if (
-            "mint" in error_msg.lower()
-            or "connection" in error_msg.lower()
-            or "ConnectError" in str(type(e))
-        ):
-            raise HTTPException(status_code=503, detail=f"Mint service unavailable: {error_msg}")
+        if is_mint_connection_error(e):
+            raise HTTPException(status_code=503, detail="Mint service unavailable")
         else:
-            raise HTTPException(status_code=500, detail=f"Refund failed: {error_msg}")
+            raise HTTPException(status_code=500, detail="Refund failed")
 
     await _refund_cache_set(bearer_value, result)
 
