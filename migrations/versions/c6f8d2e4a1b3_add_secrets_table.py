@@ -1,8 +1,8 @@
 """add secrets table
 
 Revision ID: c6f8d2e4a1b3
-Revises: b5e7c9d1f3a2
-Create Date: 2026-06-24 00:00:00.000000
+Revises: c6d7e8f9a0b1
+Create Date: 2026-07-07 00:00:00.000000
 
 Creates the node-level singleton secret store (issue #553). Schema only; moving
 any legacy plaintext into the encrypted/hashed columns happens at bootstrap,
@@ -14,7 +14,7 @@ import sqlmodel
 from alembic import op
 
 revision = "c6f8d2e4a1b3"
-down_revision = "b5e7c9d1f3a2"
+down_revision = "c6d7e8f9a0b1"
 branch_labels = None
 depends_on = None
 
