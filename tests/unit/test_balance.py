@@ -104,6 +104,64 @@ async def test_refund_x_cashu_not_found_raises_404() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refund_x_cashu_pending_raises_425() -> None:
+    """in row exists with a request_id but out row not yet created → 425.
+
+    This is the race condition where /v1/wallet/refund is polled while the
+    upstream request is still in flight. The endpoint must signal "retry"
+    rather than a permanent 404.
+    """
+    from fastapi import HTTPException
+
+    x_cashu_token = "cashuApending_token"
+    in_tx = _make_cashu_tx(
+        token=x_cashu_token, amount=0, unit="msat", type="in", request_id="req-pending"
+    )
+
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[_exec_result(in_tx), _exec_result(None)])
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await refund_wallet_endpoint(
+            authorization="Bearer sk-somekey",
+            x_cashu=x_cashu_token,
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 425
+    assert exc_info.value.headers == {"Retry-After": "2"}
+
+
+@pytest.mark.asyncio
+async def test_refund_x_cashu_in_tx_without_request_id_raises_404() -> None:
+    """in row exists but has no request_id (cannot link to a refund) → 404.
+
+    This is a genuine "no refund will ever exist" case, distinct from the
+    pending 425 path.
+    """
+    from fastapi import HTTPException
+
+    x_cashu_token = "cashuAnoreqid_token"
+    in_tx = _make_cashu_tx(
+        token=x_cashu_token, amount=0, unit="msat", type="in", request_id=None
+    )
+
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[_exec_result(in_tx)])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await refund_wallet_endpoint(
+            authorization="Bearer sk-somekey",
+            x_cashu=x_cashu_token,
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_refund_x_cashu_swept_raises_410() -> None:
     from fastapi import HTTPException
 
