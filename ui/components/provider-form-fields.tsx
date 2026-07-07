@@ -119,6 +119,26 @@ export function ProviderFormFields({
       )}
 
       <div className='grid gap-2'>
+        <Label htmlFor={`${idPrefix}slug`}>
+          Slug {mode === 'create' ? '(optional, auto-generated)' : ''}
+        </Label>
+        <Input
+          id={`${idPrefix}slug`}
+          value={formData.slug || ''}
+          onChange={(e) =>
+            setFormData((prev) => ({
+              ...prev,
+              slug: e.target.value || undefined,
+            }))
+          }
+          placeholder='e.g. openai-prod'
+        />
+        <p className='text-muted-foreground text-xs'>
+          Stable external key used to update this provider via the admin API.
+        </p>
+      </div>
+
+      <div className='grid gap-2'>
         <Label htmlFor={`${idPrefix}base_url`}>Base URL</Label>
         <Input
           id={`${idPrefix}base_url`}

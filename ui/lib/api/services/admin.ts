@@ -14,6 +14,7 @@ export const ProviderTypeSchema = z.object({
 
 export const UpstreamProviderSchema = z.object({
   id: z.number(),
+  slug: z.string().nullable().optional(),
   provider_type: z.string(),
   base_url: z.string(),
   api_key: z.string().optional(),
@@ -31,6 +32,7 @@ export const CreateUpstreamProviderSchema = z.object({
   enabled: z.boolean().default(true),
   provider_fee: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
+  slug: z.string().optional(),
 });
 
 export const UpdateUpstreamProviderSchema = z.object({
@@ -41,6 +43,7 @@ export const UpdateUpstreamProviderSchema = z.object({
   enabled: z.boolean().optional(),
   provider_fee: z.number().optional(),
   provider_settings: z.record(z.string(), z.any()).nullable().optional(),
+  slug: z.string().optional(),
 });
 
 export const AdminModelPricingSchema = z.object({
@@ -50,6 +53,8 @@ export const AdminModelPricingSchema = z.object({
   image: z.number().optional(),
   web_search: z.number().optional(),
   internal_reasoning: z.number().optional(),
+  input_cache_read: z.number().optional(),
+  input_cache_write: z.number().optional(),
 });
 
 export const AdminModelArchitectureSchema = z.object({
@@ -146,7 +151,7 @@ export class AdminService {
     if (!pricing) return pricing;
     const result = { ...pricing };
 
-    // Only prompt and completion are per-token and need scaling to per-1M
+    // Token-priced fields are stored per-token by the API and shown per-1M in the UI.
     const convertField = (field: string) => {
       const val = result[field];
       if (val !== undefined && val !== null) {
@@ -161,6 +166,8 @@ export class AdminService {
 
     convertField('prompt');
     convertField('completion');
+    convertField('input_cache_read');
+    convertField('input_cache_write');
 
     // Other fields (request, image, etc.) are already flat fees (per item)
     // so we do NOT scale them.
@@ -174,7 +181,7 @@ export class AdminService {
     if (!pricing) return pricing;
     const result = { ...pricing };
 
-    // Only prompt and completion are per-1M in UI and need scaling down to per-token
+    // Token-priced fields are per-1M in the UI and need scaling down to per-token.
     const convertField = (field: string) => {
       const val = result[field];
       if (val !== undefined && val !== null) {
@@ -187,6 +194,8 @@ export class AdminService {
 
     convertField('prompt');
     convertField('completion');
+    convertField('input_cache_read');
+    convertField('input_cache_write');
 
     // Other fields stay as flat fees
 

@@ -51,7 +51,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         )
 
     @classmethod
-    def from_db_row(
+    def _build_from_row(
         cls, provider_row: "UpstreamProviderRow"
     ) -> "PPQAIUpstreamProvider":
         return cls(
@@ -248,17 +248,14 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 f"Disabling PPQ.AI provider ({self.base_url}) due to insufficient balance",
                 extra={"error": error_message},
             )
-            from sqlmodel import select
-
             from ..core.db import UpstreamProviderRow, create_session
 
             async with create_session() as session:
-                statement = select(UpstreamProviderRow).where(
-                    UpstreamProviderRow.base_url == self.base_url,
-                    UpstreamProviderRow.api_key == self.api_key,
+                provider = (
+                    await session.get(UpstreamProviderRow, self.db_id)
+                    if self.db_id is not None
+                    else None
                 )
-                result = await session.exec(statement)
-                provider = result.first()
 
                 if provider:
                     provider.enabled = False

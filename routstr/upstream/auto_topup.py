@@ -97,6 +97,8 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
 
     # Instantiate provider and check balance
     provider = RoutstrUpstreamProvider.from_db_row(row)
+    if provider is None:
+        return
     balance = await provider.get_balance()
 
     if balance is None:

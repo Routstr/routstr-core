@@ -405,6 +405,67 @@ async def test_deepseek_malformed_hit_tokens_coerce_to_zero() -> None:
 
 
 # ============================================================================
+# Truly-empty response with a non-zero USD cost → full refund
+#
+# When an upstream reports a USD cost but the response carries NO tokens at all
+# (input, output, cache-read and cache-creation all zero), billing the
+# USD-derived cost charges the user for nothing. Refund in full. The gate is
+# tightened relative to PR #489: a cache-read/-creation-only turn legitimately
+# reports zero prompt/completion tokens with a real cost and must still bill.
+# ============================================================================
+@pytest.mark.asyncio
+async def test_truly_empty_usd_cost_response_is_refunded(
+    mock_fixed_pricing: None,
+) -> None:
+    """0 input + 0 output + 0 cache tokens with a non-zero USD cost → refund."""
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_cost": 0.01,  # non-zero USD cost despite no tokens
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 0  # full refund
+    assert result.input_msats == 0
+    assert result.output_msats == 0
+    assert result.total_usd == 0.0
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+    assert result.cache_read_input_tokens == 0
+    assert result.cache_creation_input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_cache_read_only_usd_cost_response_is_billed(
+    mock_fixed_pricing: None,
+) -> None:
+    """Cache-read-only turn (0 prompt/completion, non-zero cost) still bills."""
+    response = {
+        "model": "claude-3-5-sonnet",
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 1000,  # real cached usage
+            "cache_creation_input_tokens": 0,
+            "total_cost": 0.01,  # non-zero USD cost
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    # NOT refunded — the USD cost is billed in full. Pinning the exact value
+    # guards against any future regression that would over-refund a cache-only
+    # turn (the bug in PR #489, which refunded whenever prompt+completion == 0).
+    assert result.total_msats == 200000
+    assert result.total_usd == 0.01
+    assert result.cache_read_input_tokens == 1000
+
+
+# ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================
 @pytest.mark.asyncio
