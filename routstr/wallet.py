@@ -1,9 +1,11 @@
 import asyncio
 import re
+import socket
 import time
 import typing
 from typing import TypedDict
 
+import httpx
 from cashu.core.base import Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
@@ -29,6 +31,149 @@ for _name, _field in _CashuMintInfo.model_fields.items():
 _CashuMintInfo.model_rebuild(force=True)
 
 logger = get_logger(__name__)
+
+
+class MintConnectionError(Exception):
+    """The mint could not be reached (network transport failure).
+
+    Maps to a 503, not a 4xx: the token is fine, the mint is just unavailable.
+    """
+
+
+class TokenConsumedError(Exception):
+    """A failure that happened AFTER the token's proofs were spent (melt
+    succeeded, or redemption already returned) — e.g. minting on the primary
+    mint or the DB credit then failed.
+
+    Non-retryable: the same token will not work again. Seals the cause chain so
+    a transport error underneath is never re-surfaced as a retryable
+    mint_unreachable.
+    """
+
+
+# httpx base classes cover their subclasses. HTTPStatusError is excluded on
+# purpose — that means the mint answered, just with an error status.
+_TRANSPORT_EXC_TYPES: tuple[type[BaseException], ...] = (
+    httpx.NetworkError,
+    httpx.TimeoutException,
+    ConnectionError,  # refused/reset/aborted
+    socket.gaierror,  # DNS failure
+    asyncio.TimeoutError,
+)
+
+
+def is_mint_connection_error(error: BaseException) -> bool:
+    """True if ``error`` (or anything in its cause/context chain) is a mint
+    transport failure. Walks the chain because some sites re-raise transport
+    errors wrapped in ValueError/MintConnectionError; matches on TYPE, not text.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TokenConsumedError):
+            # Sealed: the token was already spent, so whatever transport error
+            # sits underneath must not make this look retryable.
+            return False
+        if isinstance(current, MintConnectionError):
+            return True
+        if isinstance(current, _TRANSPORT_EXC_TYPES):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+# Redemption ``code`` values whose token is spent/consumed/unusable — the
+# X-Cashu path must NOT echo the original token for these (echoing invites a
+# retry with a token that can never succeed again).
+SPENT_TOKEN_CODES: frozenset[str] = frozenset(
+    {
+        "cashu_token_already_spent",
+        "cashu_token_consumed",
+        "cashu_token_zero_value",
+        "internal_error",
+    }
+)
+
+
+def classify_redemption_error(
+    error: Exception,
+) -> tuple[str, int, str, str] | None:
+    """Map a token-redemption failure to ``(type, status, message, code)``.
+
+    Single source of truth for every endpoint that redeems a token (bearer,
+    X-Cashu, top-up) so the same failure yields the same taxonomy everywhere.
+    ``type`` and ``code`` are stable client contract; ``message`` is sanitized
+    (raw error text stays in logs). Returns None for an unclassified internal
+    fault — the caller emits a generic 500.
+    """
+    if isinstance(error, TokenConsumedError):
+        return (
+            "token_consumed",
+            500,
+            "Token was redeemed but could not be credited; do not retry",
+            "cashu_token_consumed",
+        )
+    if is_mint_connection_error(error):
+        return (
+            "mint_unreachable",
+            503,
+            "Cashu mint is unreachable",
+            "cashu_mint_unreachable",
+        )
+    lowered = str(error).lower()
+    if "already spent" in lowered:
+        return (
+            "token_already_spent",
+            400,
+            "Cashu token already spent",
+            "cashu_token_already_spent",
+        )
+    if (
+        "insufficient" in lowered
+        or "melt fee" in lowered
+        or "exceed token amount" in lowered
+        or "estimate fees" in lowered
+    ):
+        return (
+            "mint_error",
+            422,
+            "Token value is too small to cover swap fees",
+            "cashu_token_swap_fees_exceed_amount",
+        )
+    if "failed to melt" in lowered:
+        return (
+            "mint_error",
+            422,
+            "Failed to swap token from foreign mint",
+            "cashu_foreign_mint_swap_failed",
+        )
+    if ("invalid" in lowered or "decode" in lowered) and "token" in lowered:
+        # Anchored to "token" so internal faults whose text merely contains
+        # "invalid"/"decode" fall through to the 500 branch, not a token error.
+        return (
+            "invalid_token",
+            400,
+            "Invalid Cashu token",
+            "invalid_cashu_token",
+        )
+    if "must be positive" in lowered or "yielded no value" in lowered:
+        # Redeemed to <= 0 (empty/dust token, or value fully consumed by fees).
+        # Consumed, so non-retryable, but its own code — not the generic bucket.
+        return (
+            "cashu_error",
+            400,
+            "Failed to redeem Cashu token: token yielded no value",
+            "cashu_token_zero_value",
+        )
+    if isinstance(error, ValueError):
+        return (
+            "cashu_error",
+            400,
+            "Failed to redeem Cashu token",
+            "cashu_token_redemption_failed",
+        )
+    return None
 
 
 async def get_balance(unit: str) -> int:
@@ -258,6 +403,8 @@ async def _calculate_swap_amount(
             "swap_to_primary_mint: fee estimation failed",
             extra={"error": str(e)},
         )
+        if is_mint_connection_error(e):
+            raise MintConnectionError("Cashu mint is unreachable") from e
         raise ValueError(f"Failed to estimate fees: {e}") from e
 
 
@@ -383,6 +530,13 @@ async def swap_to_primary_mint(
                 quote_id=melt_quote.quote,
             )
         except Exception as e:
+            # A down mint won't fix itself by retrying with a smaller amount.
+            if is_mint_connection_error(e):
+                logger.error(
+                    "swap_to_primary_mint: melt failed — mint unreachable",
+                    extra={"error": str(e), "foreign_mint": token_obj.mint},
+                )
+                raise MintConnectionError("Cashu mint is unreachable") from e
             shortfall = _melt_insufficient_shortfall(e)
             recomputed = 0
             if shortfall is not None:
@@ -458,21 +612,21 @@ async def swap_to_primary_mint(
                     # Recovery scan ran but did NOT restore the orphaned proofs
                     # (mint reports them as spent — they're stuck). Refuse to
                     # credit the API key balance for proofs we don't actually hold.
-                    raise ValueError(
+                    raise TokenConsumedError(
                         f"Swap recovery failed: mint signed outputs but proofs are "
                         f"unrecoverable (mint reports them spent). "
                         f"Expected {minted_amount}, recovered {balance_gained}. "
                         f"Local wallet DB ('.wallet/') state is corrupted — "
                         f"the counter for keyset is stuck at a bad index range."
                     )
-            except ValueError:
+            except TokenConsumedError:
                 raise
             except Exception as recovery_err:
                 logger.error(
                     "swap_to_primary_mint: recovery failed",
                     extra={"error": str(recovery_err)},
                 )
-                raise ValueError(
+                raise TokenConsumedError(
                     f"Mint on primary failed and recovery unsuccessful: {e}"
                 ) from e
         else:
@@ -485,7 +639,10 @@ async def swap_to_primary_mint(
                     "mint_quote_id": mint_quote.quote,
                 },
             )
-            raise
+            # Foreign proofs already melted (spent) — non-retryable.
+            raise TokenConsumedError(
+                "Mint on primary failed after successful melt"
+            ) from e
 
     logger.info(
         "swap_to_primary_mint: completed successfully",
@@ -543,19 +700,33 @@ async def credit_balance(
             extra={"old_balance": key.balance, "credit_amount": amount},
         )
 
-        # Use atomic SQL UPDATE to prevent race conditions during concurrent topups
-        stmt = (
-            update(db.ApiKey)
-            .where(col(db.ApiKey.hashed_key) == key.hashed_key)
-            .values(balance=(db.ApiKey.balance) + amount)
-        )
-        result = await session.exec(stmt)  # type: ignore[call-overload]
-        # If pruning removed this key after redemption, do not commit a no-op
-        # balance update and pretend the top-up succeeded.
-        if (getattr(result, "rowcount", 0) or 0) == 0:
-            raise ValueError("API key disappeared before credit could be recorded")
-        await session.commit()
-        await session.refresh(key)
+        # The token is already redeemed (spent) here, so any crediting failure
+        # is post-redemption and non-retryable — surface it as TokenConsumedError
+        # (a key that vanished mid-flight, or an unexpected DB fault), never a
+        # retryable/token-error taxonomy.
+        try:
+            # Atomic UPDATE to prevent race conditions during concurrent topups.
+            stmt = (
+                update(db.ApiKey)
+                .where(col(db.ApiKey.hashed_key) == key.hashed_key)
+                .values(balance=(db.ApiKey.balance) + amount)
+            )
+            result = await session.exec(stmt)  # type: ignore[call-overload]
+            # If pruning removed this key after redemption, do not commit a no-op
+            # balance update and pretend the top-up succeeded.
+            if (getattr(result, "rowcount", 0) or 0) == 0:
+                raise TokenConsumedError(
+                    "Token redeemed but the API key disappeared before the "
+                    "credit could be recorded"
+                )
+            await session.commit()
+            await session.refresh(key)
+        except TokenConsumedError:
+            raise
+        except Exception as db_error:
+            raise TokenConsumedError(
+                "Token redeemed but crediting the balance failed"
+            ) from db_error
 
         logger.info(
             "credit_balance: Balance updated successfully",
