@@ -63,30 +63,48 @@ _PROXY_ONLY_HEADERS = frozenset(
 def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
     """Parse ``X-Tinfoil-Usage-Metrics`` into an OpenAI-style usage dict.
 
-    The header format is ``prompt=<n>,completion=<n>,total=<n>``. Returns a dict
-    like ``{"prompt_tokens": n, "completion_tokens": n}`` suitable for
-    :func:`calculate_cost`, or ``None`` when the header is absent or malformed.
+    The header format is::
+
+        prompt=<n>,completion=<n>,total=<n>[,model=<name>]
+
+    The ``model`` field (added in tinfoilsh/confidential-model-router PR #385)
+    is extracted as a string and included in the returned dict under the
+    ``"model"`` key so callers can compare the served model against the
+    requested one and adjust pricing.
+
+    Returns a dict like ``{"prompt_tokens": n, "completion_tokens": n,
+    "model": "<name>"}`` suitable for :func:`calculate_cost` (which ignores
+    the extra ``model`` key in the usage sub-dict), or ``None`` when the
+    header is absent or malformed.
     """
     if not header_value:
         return None
     parts: dict[str, int] = {}
+    model: str | None = None
     for item in header_value.split(","):
         key, sep, value = item.partition("=")
         if not sep:
             continue
+        key = key.strip()
+        value = value.strip()
+        if key == "model":
+            model = value
+            continue
         try:
-            parts[key.strip()] = int(value.strip())
+            parts[key] = int(value)
         except (ValueError, TypeError):
             continue
     prompt = parts.get("prompt")
     completion = parts.get("completion")
     if prompt is not None and completion is not None:
-        result: dict[str, int] = {
+        result: dict[str, int | str] = {
             "prompt_tokens": prompt,
             "completion_tokens": completion,
         }
         if "total" in parts:
             result["total_tokens"] = parts["total"]
+        if model:
+            result["model"] = model
         return result
     logger.warning(
         "Failed to parse X-Tinfoil-Usage-Metrics header",
@@ -242,9 +260,15 @@ def _build_cost_info(
     output_tokens: int = 0,
     input_msats: int = 0,
     output_msats: int = 0,
+    actual_model: str | None = None,
 ) -> dict:
-    """Build a cost-info dict with token counts and per-token-type costs."""
-    return {
+    """Build a cost-info dict with token counts and per-token-type costs.
+
+    When ``actual_model`` is set (the served model differs from the requested
+    one), it is included in the returned dict so callers can use it for billing
+    finalization and logging.
+    """
+    result: dict[str, int | str | None] = {
         "total_msats": total_msats,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -252,6 +276,9 @@ def _build_cost_info(
         "input_msats": input_msats,
         "output_msats": output_msats,
     }
+    if actual_model:
+        result["actual_model"] = actual_model
+    return result
 
 
 def _inject_cost_response_headers(
@@ -280,48 +307,98 @@ async def _compute_ehbp_actual_cost(
     max_cost_for_model]`` so the refund never exceeds the reservation and is
     never zero.
 
+    When the usage-metrics header includes ``model=<name>`` and it differs
+    from ``model_obj.id``, the actual served model's pricing is used for the
+    cost calculation. The returned dict includes an ``"actual_model"`` key
+    in that case so callers can use it for billing finalization.
+
     Returns a dict with ``total_msats``, ``input_tokens``, ``output_tokens``,
-    ``total_tokens``, ``input_msats``, and ``output_msats``.
+    ``total_tokens``, ``input_msats``, and ``output_msats`` (and optionally
+    ``actual_model``).
     """
     usage_dict = parse_tinfoil_usage_metrics(usage_header)
     if usage_dict is None:
         return _build_cost_info(max_cost_for_model)
 
+    # The enclave may serve a different model than the one requested (e.g.
+    # due to failover).  The usage-metrics header's ``model=<name>`` carries
+    # the actual upstream model ID (e.g. ``glm-5-2``), which may differ from
+    # the client-facing ``model_obj.id`` (e.g. ``tinfoil-glm-5-2``) even when
+    # the correct model was served — the alias is resolved through
+    # ``model_obj.forwarded_model_id``.  Only when the served model differs
+    # from the expected upstream ID do we treat it as a real mismatch and
+    # look up the actual model's pricing.
+    actual_model: str | None = usage_dict.pop("model", None)  # type: ignore[arg-type]
+    pricing_model_id = model_obj.id
+    expected_upstream_model = model_obj.forwarded_model_id or model_obj.id
+    if actual_model and actual_model != expected_upstream_model:
+        from ..proxy import get_model_instance
+
+        # ``forwarded_model_id`` values are registered as routable aliases in
+        # the global model map, so ``get_model_instance`` will find a model
+        # whose upstream ID matches the actually-served model.
+        actual_model_obj = get_model_instance(actual_model)
+        if actual_model_obj:
+            logger.info(
+                "EHBP served model differs from requested, using actual "
+                "model for pricing",
+                extra={
+                    "requested_model": model_obj.id,
+                    "expected_upstream_model": expected_upstream_model,
+                    "actual_model": actual_model,
+                },
+            )
+            pricing_model_id = actual_model_obj.id
+        else:
+            logger.warning(
+                "EHBP served model not found in registry, falling back to "
+                "requested model for pricing",
+                extra={
+                    "requested_model": model_obj.id,
+                    "expected_upstream_model": expected_upstream_model,
+                    "actual_model": actual_model,
+                },
+            )
+            actual_model = None  # do not propagate unknown model
+    else:
+        # Models match or no model in header — use requested model's pricing.
+        actual_model = None
+
     try:
         cost = await calculate_cost(
-            {"model": model_obj.id, "usage": usage_dict},
+            {"model": pricing_model_id, "usage": usage_dict},
             max_cost_for_model,
         )
     except Exception as e:
         logger.warning(
             "EHBP usage cost calculation failed, falling back to max cost",
             extra={
-                "model": model_obj.id,
+                "model": pricing_model_id,
                 "error": str(e),
                 "usage": usage_dict,
             },
         )
-        return _build_cost_info(max_cost_for_model)
+        return _build_cost_info(max_cost_for_model, actual_model=actual_model)
 
     if isinstance(cost, MaxCostData):
         logger.warning(
             "EHBP calculate_cost returned MaxCostData (no model pricing), "
             "falling back to max cost",
             extra={
-                "model": model_obj.id,
+                "model": pricing_model_id,
                 "max_cost_for_model": max_cost_for_model,
                 "usage": usage_dict,
                 "cost_total_msats": cost.total_msats,
             },
         )
-        return _build_cost_info(max_cost_for_model)
+        return _build_cost_info(max_cost_for_model, actual_model=actual_model)
     if isinstance(cost, CostData):
         actual = max(int(cost.total_msats), int(settings.min_request_msat))
         clamped = min(actual, max_cost_for_model)
         logger.info(
             "EHBP actual cost computed from usage metrics",
             extra={
-                "model": model_obj.id,
+                "model": pricing_model_id,
                 "usage": usage_dict,
                 "cost_total_msats": cost.total_msats,
                 "clamped_msats": clamped,
@@ -334,16 +411,17 @@ async def _compute_ehbp_actual_cost(
             output_tokens=cost.output_tokens,
             input_msats=cost.input_msats,
             output_msats=cost.output_msats,
+            actual_model=actual_model,
         )
     # CostDataError
     logger.warning(
         "EHBP usage cost calculation error, falling back to max cost",
         extra={
-            "model": model_obj.id,
+            "model": pricing_model_id,
             "error": getattr(cost, "message", str(cost)),
         },
     )
-    return _build_cost_info(max_cost_for_model)
+    return _build_cost_info(max_cost_for_model, actual_model=actual_model)
 
 
 def _extract_usage_from_response(
@@ -771,8 +849,11 @@ async def forward_ehbp_request(
             cost_info = await _compute_ehbp_actual_cost(
                 usage_header, model_obj, max_cost_for_model
             )
+            # Use the actual served model for billing when it differs from
+            # the requested model.
+            billing_model = cost_info.pop("actual_model", None) or model_obj.id
             await finalize_ehbp_actual_cost_payment(
-                key, session, max_cost_for_model, model_obj.id, cost_info
+                key, session, max_cost_for_model, billing_model, cost_info
             )
             cost_data = {**cost_info, "total_usd": 0.0}
         else:
@@ -972,11 +1053,15 @@ async def forward_ehbp_x_cashu_request(
                 usage_header, model_obj, max_cost_for_model
             )
             actual_cost_msats = cost_info["total_msats"]
+            actual_model = cost_info.get("actual_model")
+            billing_model = actual_model or model_obj.id
             refund_amount = amount - _msats_to_unit_amount(actual_cost_msats, unit)
             logger.info(
                 "EHBP X-Cashu refund computed",
                 extra={
-                    "model": model_obj.id,
+                    "model": billing_model,
+                    "requested_model": model_obj.id,
+                    "actual_model": actual_model,
                     "redeemed_amount": amount,
                     "actual_cost_msats": actual_cost_msats,
                     "refund_amount": refund_amount,

@@ -64,6 +64,56 @@ class TestParseTinfoilUsageMetrics:
             "total_tokens": 300,
         }
 
+    def test_with_model_field(self) -> None:
+        result = parse_tinfoil_usage_metrics(
+            "prompt=42,completion=10,total=52,model=llama3-3-70b"
+        )
+        assert result == {
+            "prompt_tokens": 42,
+            "completion_tokens": 10,
+            "total_tokens": 52,
+            "model": "llama3-3-70b",
+        }
+
+    def test_with_model_no_total(self) -> None:
+        result = parse_tinfoil_usage_metrics(
+            "prompt=67,completion=42,model=gpt-oss-120b"
+        )
+        assert result == {
+            "prompt_tokens": 67,
+            "completion_tokens": 42,
+            "model": "gpt-oss-120b",
+        }
+
+    def test_model_with_dashes_and_numbers(self) -> None:
+        result = parse_tinfoil_usage_metrics(
+            "prompt=1,completion=1,total=2,model=kimi-k2-6"
+        )
+        assert result["model"] == "kimi-k2-6"
+
+    def test_model_with_extra_fields(self) -> None:
+        result = parse_tinfoil_usage_metrics(
+            "prompt=69,completion=20,total=89,"
+            "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+            "model=kimi-k2-6"
+        )
+        assert result["prompt_tokens"] == 69
+        assert result["completion_tokens"] == 20
+        assert result["total_tokens"] == 89
+        assert result["model"] == "kimi-k2-6"
+
+    def test_old_format_still_works(self) -> None:
+        """Headers without the model field (pre-PR #385) still parse."""
+        result = parse_tinfoil_usage_metrics(
+            "prompt=67,completion=42,total=109"
+        )
+        assert result == {
+            "prompt_tokens": 67,
+            "completion_tokens": 42,
+            "total_tokens": 109,
+        }
+        assert "model" not in result
+
 
 # ---------------------------------------------------------------------------
 # _strip_proxy_headers
@@ -191,6 +241,7 @@ class TestComputeEhbpActualCost:
     async def test_no_usage_falls_back_to_max_cost(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
+        model_obj.forwarded_model_id = "llama3-3-70b"
         result = await _compute_ehbp_actual_cost(None, model_obj, 100_000)
         assert result["total_msats"] == 100_000
         assert result["input_tokens"] == 0
@@ -200,6 +251,7 @@ class TestComputeEhbpActualCost:
     async def test_usage_parsed_and_clamped(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
+        model_obj.forwarded_model_id = "llama3-3-70b"
         # The actual cost from calculate_cost will be small; we just verify
         # it's clamped to min_request_msat at minimum.
         with patch(
@@ -234,6 +286,7 @@ class TestComputeEhbpActualCost:
     async def test_max_cost_data_falls_back(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
+        model_obj.forwarded_model_id = "llama3-3-70b"
         with patch(
             "routstr.upstream.ehbp.calculate_cost",
             new_callable=AsyncMock,
@@ -257,6 +310,178 @@ class TestComputeEhbpActualCost:
             assert result["total_msats"] == 50_000
             assert result["input_tokens"] == 0
             assert result["output_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_model_match_no_actual_model_key(self) -> None:
+        """When the served model matches the requested one, no actual_model key."""
+        model_obj = MagicMock()
+        model_obj.id = "llama3-3-70b"
+        model_obj.forwarded_model_id = "llama3-3-70b"
+        with patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=llama3-3-70b",
+                model_obj,
+                100_000,
+            )
+            assert "actual_model" not in result
+            # calculate_cost called with requested model
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "llama3-3-70b"
+
+    @pytest.mark.asyncio
+    async def test_alias_match_no_actual_model_key(self) -> None:
+        """When the served upstream model matches forwarded_model_id through
+        a client-facing alias, no actual_model key is set."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2"  # client-facing alias
+        model_obj.forwarded_model_id = "glm-5-2"  # actual upstream ID
+        with patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            # Tinfoil header returns the actual upstream model ID
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=glm-5-2",
+                model_obj,
+                100_000,
+            )
+            assert "actual_model" not in result
+            # calculate_cost called with the client-facing model ID (whose
+            # pricing includes the correct upstream rates)
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-glm-5-2"
+
+    @pytest.mark.asyncio
+    async def test_real_mismatch_uses_actual_model_for_pricing(self) -> None:
+        """When the served model differs from the expected upstream model,
+        the actual model's pricing is used."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-gpt-oss-120b"  # client-facing alias
+        model_obj.forwarded_model_id = "gpt-oss-120b"  # expected upstream
+
+        actual_model_obj = MagicMock()
+        actual_model_obj.id = "tinfoil-llama3-3-70b"  # client-facing of actual
+        actual_model_obj.forwarded_model_id = "llama3-3-70b"
+
+        with patch(
+            "routstr.proxy.get_model_instance",
+            return_value=actual_model_obj,
+        ), patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=20,
+                output_msats=40,
+                total_msats=60,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            # Tinfoil served llama3-3-70b instead of gpt-oss-120b
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=llama3-3-70b",
+                model_obj,
+                100_000,
+            )
+            assert result["actual_model"] == "llama3-3-70b"
+            assert result["total_msats"] == 60
+            # calculate_cost called with the actual model's client-facing ID
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-llama3-3-70b"
+
+    @pytest.mark.asyncio
+    async def test_model_mismatch_unknown_model_falls_back(self) -> None:
+        """When the served model is not in the registry, use requested model."""
+        model_obj = MagicMock()
+        model_obj.id = "gpt-oss-120b"
+        model_obj.forwarded_model_id = "gpt-oss-120b"
+
+        with patch(
+            "routstr.proxy.get_model_instance",
+            return_value=None,
+        ), patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=nonexistent",
+                model_obj,
+                100_000,
+            )
+            assert "actual_model" not in result
+            # calculate_cost called with the requested model (fallback)
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "gpt-oss-120b"
+
+    @pytest.mark.asyncio
+    async def test_old_format_no_model_uses_requested(self) -> None:
+        """Old format without model field uses requested model for pricing."""
+        model_obj = MagicMock()
+        model_obj.id = "llama3-3-70b"
+        model_obj.forwarded_model_id = "llama3-3-70b"
+        with patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=67,
+                output_tokens=42,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=67,completion=42,total=109",
+                model_obj,
+                100_000,
+            )
+            assert "actual_model" not in result
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "llama3-3-70b"
 
 
 # ---------------------------------------------------------------------------

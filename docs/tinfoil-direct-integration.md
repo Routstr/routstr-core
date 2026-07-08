@@ -395,8 +395,10 @@ and `routstr/upstream/ehbp.py`.
     `TINFOIL_API_KEY` env var.
 
 - `routstr/upstream/ehbp.py`:
-  - `parse_tinfoil_usage_metrics()` parses `prompt=N,completion=N[,total=N]`
-    into an OpenAI-style usage dict.
+  - `parse_tinfoil_usage_metrics()` parses
+    `prompt=N,completion=N[,total=N][,model=<name>]` into an OpenAI-style
+    usage dict. The `model` field (added in tinfoilsh/confidential-model-router
+    PR #385) is extracted as a string.
   - `_resolve_ehbp_target_url()` overrides the forwarding URL with
     `X-Tinfoil-Enclave-Url` when the SDK sends it.
   - `_strip_proxy_headers()` removes `X-Routstr-Model`,
@@ -404,11 +406,15 @@ and `routstr/upstream/ehbp.py`.
     forwarding to the enclave.
   - `_compute_ehbp_actual_cost()` converts the usage header into msats via
     `calculate_cost()`, clamped to `[min_request_msat, max_cost_for_model]`.
+    When the header's `model=<name>` differs from the requested model, the
+    actual served model's pricing is used for cost calculation.
   - `forward_ehbp_request()` (bearer auth): if `X-Tinfoil-Usage-Metrics` is
     present in the response header, finalizes with `adjust_payment_for_tokens()`
-    for exact billing; otherwise falls back to max-cost.
+    for exact billing; otherwise falls back to max-cost. Billing uses the
+    actual served model when it differs from the requested one.
   - `forward_ehbp_x_cashu_request()`: if usage is available, computes the
-    refund from actual cost instead of max cost.
+    refund from actual cost instead of max cost, using the actual served
+    model's pricing when applicable.
 
 - `routstr/proxy.py`: `/attestation` and `/tee/attestation` paths are forwarded
   to Tinfoil upstreams without model/cost/auth lookups.
@@ -448,10 +454,37 @@ TINFOIL_API_KEY=your-tinfoil-api-key
 
 The provider is auto-seeded on first startup.
 
+### Usage metrics header format
+
+Tinfoil returns usage metrics in the `X-Tinfoil-Usage-Metrics` response header
+(non-streaming) or HTTP trailer (streaming) when `X-Tinfoil-Request-Usage-Metrics:
+true` is sent. As of tinfoilsh/confidential-model-router PR #385, the format is:
+
+```
+prompt=<prompt_tokens>,completion=<completion_tokens>,total=<total_tokens>,model=<served_model>
+```
+
+The `model` field carries the actual model name served by the enclave.
+Routstr uses this to:
+
+- Verify the served model matches the expected upstream model. The comparison
+  uses ``model_obj.forwarded_model_id`` (the actual upstream ID, e.g.
+  ``glm-5-2``) rather than ``model_obj.id`` (the client-facing alias, e.g.
+  ``tinfoil-glm-5-2``), so aliased models don't trigger a spurious mismatch.
+- When they genuinely differ (Tinfoil served a different upstream model than
+  expected), look up the actual served model's pricing and use it for billing.
+  The reverse lookup uses ``get_model_instance``, which resolves
+  ``forwarded_model_id`` values registered as routable aliases.
+- Log the discrepancy for observability.
+
+If the actual model is not found in Routstr's model registry, billing falls
+back to the requested model's pricing.
+
 ### What still needs verification
 
-- End-to-end test with a real Tinfoil SDK client against a Routstr node with
-  `TINFOIL_API_KEY` set.
+- ~~End-to-end test with a real Tinfoil SDK client against a Routstr node with
+  `TINFOIL_API_KEY` set.~~ Verified: both non-streaming (header) and streaming
+  (trailer) responses include `model=<name>`.
 - Streaming requests: usage is delivered as an HTTP trailer. Currently the
   bearer path finalizes max-cost before streaming begins. Supporting streaming
   usage would require buffering the response (for X-Cashu) or a deferred
