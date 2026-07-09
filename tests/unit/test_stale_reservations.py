@@ -215,7 +215,7 @@ async def test_reset_all_reserved_balances_clears_reserved_at(session: AsyncSess
 def _refund_patches(refund_token: str = "cashuArefund"):  # type: ignore[no-untyped-def]
     return (
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
     )

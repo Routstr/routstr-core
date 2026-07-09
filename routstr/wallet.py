@@ -14,7 +14,7 @@ from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
-from .core.db import store_cashu_transaction
+from .core.db import store_cashu_transaction_with_retry
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 
@@ -734,7 +734,7 @@ async def credit_balance(
         )
 
         try:
-            await store_cashu_transaction(
+            await store_cashu_transaction_with_retry(
                 token=cashu_token,
                 amount=original_amount,
                 unit=original_unit,
@@ -744,7 +744,7 @@ async def credit_balance(
                 api_key_hashed_key=key.hashed_key,
             )
         except Exception:
-            pass
+            pass  # store_cashu_transaction_with_retry already logs + spools to outbox
 
         logger.debug(
             "Cashu token successfully redeemed and stored",

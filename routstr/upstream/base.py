@@ -20,7 +20,7 @@ from ..core.db import (
     AsyncSession,
     UpstreamProviderRow,
     create_session,
-    store_cashu_transaction,
+    store_cashu_transaction_with_retry,
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
@@ -3286,7 +3286,7 @@ class BaseUpstreamProvider:
                 )
 
                 try:
-                    await store_cashu_transaction(
+                    await store_cashu_transaction_with_retry(
                         token=refund_token,
                         amount=amount,
                         unit=unit,
@@ -3294,8 +3294,25 @@ class BaseUpstreamProvider:
                         typ="out",
                         request_id=request_id,
                     )
-                except Exception:
-                    pass  # store_cashu_transaction already logs
+                except Exception as store_exc:
+                    # store_cashu_transaction_with_retry returns False (and
+                    # spools to the outbox) on normal DB failures, so this only
+                    # fires on an unexpected raise. Catch it here so the outer
+                    # retry loop does NOT re-mint a second token (which would
+                    # double-spend). The full token is logged so it can be
+                    # recovered manually if the outbox write also failed.
+                    logger.critical(
+                        "send_refund: store_cashu_transaction_with_retry raised — "
+                        "refund token is minted; spooled to outbox if possible",
+                        extra={
+                            "error": str(store_exc),
+                            "amount": amount,
+                            "unit": unit,
+                            "mint": mint,
+                            "request_id": request_id,
+                            "token": refund_token,
+                        },
+                    )
 
                 return refund_token
             except Exception as e:
@@ -3640,17 +3657,14 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
-            try:
-                await store_cashu_transaction(
-                    token=refund_token,
-                    amount=emergency_refund,
-                    unit=unit,
-                    mint_url=mint,
-                    typ="out",
-                    request_id=request_id,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction_with_retry(
+                token=refund_token,
+                amount=emergency_refund,
+                unit=unit,
+                mint_url=mint,
+                typ="out",
+                request_id=request_id,
+            )
 
             logger.warning(
                 "Emergency refund issued due to JSON parse error",
@@ -4002,18 +4016,15 @@ class BaseUpstreamProvider:
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
-            try:
-                await store_cashu_transaction(
-                    token=x_cashu_token,
-                    amount=amount,
-                    unit=unit,
-                    mint_url=mint,
-                    typ="in",
-                    request_id=request_id,
-                    collected=True,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction_with_retry(
+                token=x_cashu_token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint,
+                typ="in",
+                request_id=request_id,
+                collected=True,
+            )
 
             logger.info(
                 "X-Cashu token redeemed for Responses API",
@@ -4604,17 +4615,14 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
-            try:
-                await store_cashu_transaction(
-                    token=refund_token,
-                    amount=emergency_refund,
-                    unit=unit,
-                    mint_url=mint,
-                    typ="out",
-                    request_id=request_id,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction_with_retry(
+                token=refund_token,
+                amount=emergency_refund,
+                unit=unit,
+                mint_url=mint,
+                typ="out",
+                request_id=request_id,
+            )
 
             logger.warning(
                 "Emergency refund issued for Responses API due to JSON parse error",
@@ -4678,18 +4686,15 @@ class BaseUpstreamProvider:
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
-            try:
-                await store_cashu_transaction(
-                    token=x_cashu_token,
-                    amount=amount,
-                    unit=unit,
-                    mint_url=mint,
-                    typ="in",
-                    request_id=request_id,
-                    collected=True,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction_with_retry(
+                token=x_cashu_token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint,
+                typ="in",
+                request_id=request_id,
+                collected=True,
+            )
 
             logger.info(
                 "X-Cashu token redeemed successfully",
