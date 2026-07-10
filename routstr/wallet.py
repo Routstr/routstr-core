@@ -1068,10 +1068,9 @@ async def slow_filter_spend_proofs(proofs: list[Proof], wallet: Wallet) -> list[
         return []
     _proofs = []
     _spent_proofs = []
-    # Smaller batch size to reduce per-request load on the mint.
-    # 1000 proofs per batch was too aggressive and triggered rate limits
-    # on mints with strict request quotas.
-    batch_size = 100
+    # Keep proof-state checks in large batches. Mint quotas count HTTP requests,
+    # so smaller batches make balance reads slower and more likely to hit 429s.
+    batch_size = 1000
     for i in range(0, len(proofs), batch_size):
         pb = proofs[i : i + batch_size]
         proof_states = await _mint_operation(

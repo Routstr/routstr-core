@@ -1347,6 +1347,25 @@ async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_balance_proof_check_uses_large_batches_to_avoid_rate_limit() -> None:
+    """Balance reads must not turn a few hundred proofs into many mint requests."""
+    from routstr.wallet import slow_filter_spend_proofs
+
+    proofs = [Mock() for _ in range(250)]
+    states = [Mock(state="UNSPENT") for _ in proofs]
+    wallet = Mock()
+    wallet.url = "http://mint:3338"
+    wallet.check_proof_state = AsyncMock(return_value=Mock(states=states))
+    wallet.set_reserved_for_send = AsyncMock()
+
+    result = await slow_filter_spend_proofs(proofs, wallet)
+
+    assert result == proofs
+    wallet.check_proof_state.assert_awaited_once_with(proofs)
+    wallet.set_reserved_for_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_mint_rate_limiter_serializes_waiters_after_refill() -> None:
     from routstr.wallet import _MintRateLimiter
 
