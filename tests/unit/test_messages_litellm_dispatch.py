@@ -11,6 +11,7 @@ import os
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.responses import Response, StreamingResponse
 
@@ -21,6 +22,7 @@ from routstr.core.db import ApiKey  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
 from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
 from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
+from routstr.wallet import MintConnectionError, TokenConsumedError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1308,3 +1310,320 @@ async def test_dispatch_uses_url_detected_prefix_for_fireworks_custom_row() -> N
         "fireworks_ai/accounts/fireworks/models/glm-5"
     )
     assert captured_kwargs["api_base"] == "https://api.fireworks.ai/inference/v1"
+
+
+# ---------------------------------------------------------------------------
+# X-Cashu redemption error taxonomy (unreachable mint + string codes)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name",
+    ["handle_x_cashu", "handle_x_cashu_responses"],
+)
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("All connection attempts failed"),
+        MintConnectionError("Cashu mint is unreachable"),
+        TimeoutError("timed out connecting to mint"),
+    ],
+)
+async def test_x_cashu_mint_unreachable_returns_503(
+    handler_name: str, error: Exception
+) -> None:
+    """Both X-Cashu entrypoints classify a down mint as 503 mint_unreachable,
+    not a generic 400 cashu_error."""
+    provider = _make_provider()
+    model = _make_model()
+    request = _make_request()
+
+    with patch(
+        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
+    ):
+        handler = getattr(provider, handler_name)
+        response = await handler(
+            request=request,
+            x_cashu_token="cashuAtoken",
+            path="v1/chat/completions",
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    assert response.status_code == 503
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "mint_unreachable"
+    assert body["error"]["message"] == "Cashu mint is unreachable"
+    assert body["error"]["code"] == "cashu_mint_unreachable"
+    if str(error) != body["error"]["message"]:
+        assert str(error) not in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name",
+    ["handle_x_cashu", "handle_x_cashu_responses"],
+)
+@pytest.mark.parametrize(
+    (
+        "error",
+        "expected_status",
+        "expected_type",
+        "expected_message",
+        "expected_code",
+    ),
+    [
+        (
+            ValueError("Mint Error: Token already spent"),
+            400,
+            "token_already_spent",
+            "Cashu token already spent",
+            "cashu_token_already_spent",
+        ),
+        (
+            ValueError("invalid token: could not decode"),
+            400,
+            "invalid_token",
+            "Invalid Cashu token",
+            "invalid_cashu_token",
+        ),
+        (
+            # Fee/swap failures now map to a granular 422 on the X-Cashu path,
+            # matching the bearer path (previously flattened to 400).
+            ValueError(
+                "Failed to estimate fees: Fees (7 sat) exceed token amount (5 sat)"
+            ),
+            422,
+            "mint_error",
+            "Token value is too small to cover swap fees",
+            "cashu_token_swap_fees_exceed_amount",
+        ),
+        (
+            ValueError("Failed to melt token from foreign mint http://m: boom"),
+            422,
+            "mint_error",
+            "Failed to swap token from foreign mint",
+            "cashu_foreign_mint_swap_failed",
+        ),
+        (
+            ValueError("some unexpected wallet condition"),
+            400,
+            "cashu_error",
+            "Failed to redeem Cashu token",
+            "cashu_token_redemption_failed",
+        ),
+        (
+            # Non-ValueError faults are internal errors (500), not token errors.
+            RuntimeError("db exploded"),
+            500,
+            "api_error",
+            "Internal error during token redemption",
+            "internal_error",
+        ),
+    ],
+)
+async def test_x_cashu_error_code_is_stable_string(
+    handler_name: str,
+    error: Exception,
+    expected_status: int,
+    expected_type: str,
+    expected_message: str,
+    expected_code: str,
+) -> None:
+    """X-Cashu emits a stable string ``code`` on every branch, matching the
+    bearer path's taxonomy instead of an int HTTP status."""
+    provider = _make_provider()
+    model = _make_model()
+    request = _make_request()
+
+    with patch(
+        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
+    ):
+        handler = getattr(provider, handler_name)
+        response = await handler(
+            request=request,
+            x_cashu_token="cashuAtoken",
+            path="v1/chat/completions",
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    assert response.status_code == expected_status
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == expected_type
+    assert body["error"]["message"] == expected_message
+    assert body["error"]["code"] == expected_code
+    assert isinstance(body["error"]["code"], str)
+    if str(error) != expected_message:
+        assert str(error) not in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "forward_attr"),
+    [
+        ("handle_x_cashu", "forward_x_cashu_request"),
+        ("handle_x_cashu_responses", "forward_x_cashu_responses_request"),
+    ],
+)
+async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
+    handler_name: str, forward_attr: str
+) -> None:
+    """A transport failure while forwarding (after the token is spent) maps to
+    502 upstream_error, never a retryable cashu_mint_unreachable."""
+    provider = _make_provider()
+    model = _make_model()
+    request = _make_request()
+
+    with (
+        patch(
+            "routstr.upstream.base.recieve_token",
+            new=AsyncMock(return_value=(5_000, "sat", "https://mint")),
+        ),
+        patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
+        patch.object(
+            provider,
+            forward_attr,
+            new=AsyncMock(side_effect=httpx.ConnectError("upstream down")),
+        ),
+    ):
+        handler = getattr(provider, handler_name)
+        response = await handler(
+            request=request,
+            x_cashu_token="cashuAtoken",
+            path="v1/chat/completions",
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    assert response.status_code == 502
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "upstream_error"
+    assert body["error"]["code"] != "cashu_mint_unreachable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name",
+    ["handle_x_cashu", "handle_x_cashu_responses"],
+)
+async def test_x_cashu_token_consumed_returns_500_and_no_echo(
+    handler_name: str,
+) -> None:
+    """A post-redemption failure (token spent, crediting/minting failed) is a
+    non-retryable 500 token_consumed and must NOT echo the spent token back."""
+    provider = _make_provider()
+    model = _make_model()
+    request = _make_request()
+
+    with patch(
+        "routstr.upstream.base.recieve_token",
+        new=AsyncMock(side_effect=TokenConsumedError("credit failed")),
+    ):
+        handler = getattr(provider, handler_name)
+        response = await handler(
+            request=request,
+            x_cashu_token="cashuAtoken",
+            path="v1/chat/completions",
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    assert response.status_code == 500
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "token_consumed"
+    assert body["error"]["code"] == "cashu_token_consumed"
+    assert "X-Cashu" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "error", "echoed"),
+    [
+        # Spent token: must NOT be echoed.
+        ("handle_x_cashu", ValueError("Token already spent"), False),
+        ("handle_x_cashu_responses", ValueError("Token already spent"), False),
+        # Unspent but unreachable mint: echo so the client can retry the token.
+        ("handle_x_cashu", MintConnectionError("mint down"), True),
+        ("handle_x_cashu_responses", MintConnectionError("mint down"), True),
+        # Consumed token (post-redemption): must NOT be echoed.
+        ("handle_x_cashu", TokenConsumedError("credit failed"), False),
+        ("handle_x_cashu_responses", TokenConsumedError("credit failed"), False),
+    ],
+)
+async def test_x_cashu_echoes_token_only_when_recoverable(
+    handler_name: str, error: Exception, echoed: bool
+) -> None:
+    provider = _make_provider()
+    model = _make_model()
+    request = _make_request()
+
+    with patch(
+        "routstr.upstream.base.recieve_token", new=AsyncMock(side_effect=error)
+    ):
+        handler = getattr(provider, handler_name)
+        response = await handler(
+            request=request,
+            x_cashu_token="cashuAtoken",
+            path="v1/chat/completions",
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    if echoed:
+        assert response.headers.get("X-Cashu") == "cashuAtoken"
+    else:
+        assert "X-Cashu" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "forward_attr"),
+    [
+        ("handle_x_cashu", "forward_x_cashu_request"),
+        ("handle_x_cashu_responses", "forward_x_cashu_responses_request"),
+    ],
+)
+@pytest.mark.parametrize("amount", [0, -5])
+async def test_x_cashu_zero_value_rejected_not_forwarded(
+    handler_name: str, forward_attr: str, amount: int
+) -> None:
+    """A token that redeems to <= 0 must be rejected as cashu_token_zero_value
+    (400) and NEVER forwarded as a free request — the X-Cashu path lacked the
+    guard that credit_balance has."""
+    provider = _make_provider()
+    model = _make_model()
+    request = _make_request()
+
+    with (
+        patch(
+            "routstr.upstream.base.recieve_token",
+            new=AsyncMock(return_value=(amount, "sat", "https://mint")),
+        ),
+        patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
+        patch.object(
+            provider,
+            forward_attr,
+            new=AsyncMock(side_effect=AssertionError("must not forward a zero-value token")),
+        ),
+    ):
+        handler = getattr(provider, handler_name)
+        response = await handler(
+            request=request,
+            x_cashu_token="cashuAtoken",
+            path="v1/chat/completions",
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    assert response.status_code == 400
+    body = json.loads(bytes(response.body))
+    assert body["error"]["type"] == "cashu_error"
+    assert (
+        body["error"]["message"]
+        == "Failed to redeem Cashu token: token yielded no value"
+    )
+    assert body["error"]["code"] == "cashu_token_zero_value"
+    # Spent-to-zero token must not be echoed back for retry.
+    assert "X-Cashu" not in response.headers

@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import math
 from typing import TypedDict
 
 import httpx
 from cashu.wallet.wallet import Proof, Wallet
+
+# The Cashu library issues POST /v1/melt/bolt11 with timeout=None, so a hung or
+# very slow mint can block a melt (and any caller, e.g. the payout loop)
+# indefinitely. Bound it here so callers fail instead of hanging forever.
+MELT_TIMEOUT_SECONDS = 60
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -220,10 +226,18 @@ async def raw_send_to_lnurl(
     if amount:
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
-    _ = await wallet.melt(
-        proofs=proofs,
-        invoice=bolt11_invoice,
-        fee_reserve_sat=melt_quote_resp.fee_reserve,
-        quote_id=melt_quote_resp.quote,
-    )
+    try:
+        _ = await asyncio.wait_for(
+            wallet.melt(
+                proofs=proofs,
+                invoice=bolt11_invoice,
+                fee_reserve_sat=melt_quote_resp.fee_reserve,
+                quote_id=melt_quote_resp.quote,
+            ),
+            timeout=MELT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError as e:
+        raise LNURLError(
+            f"Melt timed out after {MELT_TIMEOUT_SECONDS}s (mint unresponsive)"
+        ) from e
     return final_amount
