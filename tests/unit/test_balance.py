@@ -235,7 +235,7 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()) as mock_store,
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)) as mock_store,
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
     ):
@@ -270,7 +270,7 @@ async def test_apikey_refund_logs_token() -> None:
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
         patch("routstr.balance.logger") as mock_logger,
@@ -299,7 +299,7 @@ async def test_apikey_refund_log_includes_path() -> None:
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
         patch("routstr.balance.logger") as mock_logger,
@@ -338,7 +338,7 @@ async def test_apikey_refund_rejects_on_concurrent_balance_change() -> None:
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", mock_send_token),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
     ):
@@ -367,7 +367,10 @@ async def test_credit_balance_stores_apikey_transaction_history() -> None:
             "routstr.wallet.recieve_token",
             AsyncMock(return_value=(100, "sat", "https://mint.example")),
         ),
-        patch("routstr.wallet.store_cashu_transaction", AsyncMock()) as mock_store,
+        patch(
+            "routstr.wallet.store_cashu_transaction_with_retry",
+            AsyncMock(return_value=True),
+        ) as mock_store,
     ):
         amount = await credit_balance("cashuAtopup_token", key, session)
 
@@ -402,7 +405,7 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
             "routstr.balance.send_token",
             AsyncMock(side_effect=MintConnectionError("raw mint outage detail")),
         ),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
         patch("routstr.balance.logger"),
@@ -437,7 +440,7 @@ async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(side_effect=RuntimeError(raw_error))),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance.store_cashu_transaction_with_retry", AsyncMock(return_value=True)),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
         patch("routstr.balance.logger"),

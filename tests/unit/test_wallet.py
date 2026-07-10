@@ -1076,9 +1076,9 @@ async def test_credit_balance_msat_unit_not_converted() -> None:
 @pytest.mark.asyncio
 async def test_credit_balance_survives_audit_store_failure() -> None:
     """A failure writing the CashuTransaction history record must not undo the
-    already-committed balance credit. (The silent swallow is a known
-    audit-trail gap slated for its own fix — this test pins the financial
-    invariant that the user keeps their credit, not the swallow itself.)"""
+    already-committed balance credit. (Persistence is spooled to the outbox on
+    failure; this test pins the financial invariant that the user keeps their
+    credit, not the spool behavior itself.)"""
     mock_key = Mock()
     mock_key.balance = 0
     mock_key.hashed_key = "test_hash"
@@ -1092,8 +1092,8 @@ async def test_credit_balance_survives_audit_store_failure() -> None:
             return_value=(1000, "sat", "http://mint:3338"),
         ):
             with patch(
-                "routstr.wallet.store_cashu_transaction",
-                side_effect=Exception("history table locked"),
+                "routstr.wallet.store_cashu_transaction_with_retry",
+                AsyncMock(return_value=False),
             ):
                 amount = await credit_balance("cashuAtest", mock_key, mock_session)
 

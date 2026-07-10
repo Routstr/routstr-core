@@ -32,7 +32,7 @@ from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
-from .db import create_session, init_db, run_migrations
+from .db import create_session, init_db, periodic_cashu_outbox_replay, run_migrations
 from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
@@ -65,6 +65,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     refund_sweep_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    cashu_outbox_task = None
 
     try:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
@@ -142,6 +143,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
+        cashu_outbox_task = asyncio.create_task(periodic_cashu_outbox_replay())
 
         yield
 
@@ -187,6 +189,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
             invoice_watcher_task.cancel()
+        if cashu_outbox_task is not None:
+            cashu_outbox_task.cancel()
 
         try:
             tasks_to_wait = []
@@ -220,6 +224,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(routstr_fee_task)
             if invoice_watcher_task is not None:
                 tasks_to_wait.append(invoice_watcher_task)
+            if cashu_outbox_task is not None:
+                tasks_to_wait.append(cashu_outbox_task)
 
             if tasks_to_wait:
                 await asyncio.gather(*tasks_to_wait, return_exceptions=True)

@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import pathlib
 import sqlite3
@@ -10,7 +12,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, delete
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -24,6 +26,81 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
 
 engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
+
+
+# Durable JSONL outbox for cashu transactions when the DB is down.
+_cashu_outbox_lock = asyncio.Lock()
+
+
+def _cashu_outbox_path() -> pathlib.Path:
+    """Resolve the per-process cashu outbox file path."""
+    override = os.environ.get("CASHU_OUTBOX_PATH")
+    if override:
+        return pathlib.Path(override)
+
+    filename = f"cashu_outbox.{os.getpid()}.jsonl"
+
+    if DATABASE_URL.startswith("sqlite"):
+        raw = DATABASE_URL.split("///", 1)[-1]
+        if not raw or raw == ":memory:":
+            return pathlib.Path("/tmp").resolve() / filename
+        db_file = pathlib.Path(raw)
+        return db_file.parent.resolve() / filename
+
+    return pathlib.Path(filename).resolve()
+
+
+async def append_to_cashu_outbox(
+    *,
+    token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None,
+    typ: str,
+    request_id: str | None,
+    collected: bool,
+    created_at: int | None,
+    source: str,
+    api_key_hashed_key: str | None,
+) -> None:
+    """Append a transaction payload to the durable outbox. Never raises."""
+    entry = {
+        "outbox_id": uuid.uuid4().hex,
+        "queued_at": int(time.time()),
+        "token": token,
+        "amount": amount,
+        "unit": unit,
+        "mint_url": mint_url,
+        "type": typ,
+        "request_id": request_id,
+        "collected": collected,
+        "created_at": created_at,
+        "source": source,
+        "api_key_hashed_key": api_key_hashed_key,
+    }
+    line = json.dumps(entry, separators=(",", ":")) + "\n"
+    async with _cashu_outbox_lock:
+        try:
+            path = _cashu_outbox_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
+            logger.warning(
+                "Cashu transaction spooled to durable outbox",
+                extra={"outbox_path": str(path), "type": typ, "request_id": request_id},
+            )
+        except Exception as outbox_exc:
+            logger.critical(
+                "cashu outbox append failed; token may be unrecoverable",
+                extra={
+                    "error": str(outbox_exc),
+                    "type": typ,
+                    "request_id": request_id,
+                    "token": token,
+                },
+            )
 
 
 class ApiKey(SQLModel, table=True):  # type: ignore
@@ -249,6 +326,11 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 
 class CashuTransaction(SQLModel, table=True):  # type: ignore
     __tablename__ = "cashu_transactions"
+    __table_args__ = (
+        UniqueConstraint(
+            "token", "type", name="uq_cashu_transactions_token_type"
+        ),
+    )
 
     id: str = Field(
         primary_key=True,
@@ -290,9 +372,19 @@ async def store_cashu_transaction(
     created_at: int | None = None,
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
-) -> None:
+) -> bool:
+    """Persist a cashu transaction; idempotent on (token, type). Returns True on success."""
     try:
         async with create_session() as session:
+            existing = await session.exec(
+                select(CashuTransaction).where(
+                    CashuTransaction.token == token,
+                    CashuTransaction.type == typ,
+                )
+            )
+            if existing.first() is not None:
+                return True
+
             tx = CashuTransaction(
                 token=token,
                 amount=amount,
@@ -307,11 +399,225 @@ async def store_cashu_transaction(
             )
             session.add(tx)
             await session.commit()
-    except Exception as e:
-        logger.warning(
-            f"Failed to store cashu transaction: {e} (type={typ})",
-            extra={"error": str(e), "type": typ},
+        return True
+    except IntegrityError:
+        # A concurrent insert of the same (token, type) won the race.
+        async with create_session() as session:
+            existing = await session.exec(
+                select(CashuTransaction).where(
+                    CashuTransaction.token == token,
+                    CashuTransaction.type == typ,
+                )
+            )
+            if existing.first() is not None:
+                return True
+        logger.error(
+            f"Integrity error storing cashu transaction: non-duplicate violation (type={typ})",
+            extra={
+                "error": "non-duplicate IntegrityError",
+                "type": typ,
+                "request_id": request_id,
+                "amount": amount,
+                "unit": unit,
+                "mint_url": mint_url,
+            },
         )
+        return False
+    except Exception as e:
+        logger.error(
+            f"Failed to store cashu transaction: {e} (type={typ})",
+            extra={
+                "error": str(e),
+                "type": typ,
+                "request_id": request_id,
+                "amount": amount,
+                "unit": unit,
+                "mint_url": mint_url,
+                "token_preview": (token[:30] + "...") if len(token) > 30 else token,
+            },
+        )
+        return False
+
+
+async def store_cashu_transaction_with_retry(
+    token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    typ: str = "out",
+    request_id: str | None = None,
+    collected: bool = False,
+    created_at: int | None = None,
+    source: str = "x-cashu",
+    api_key_hashed_key: str | None = None,
+    max_retries: int = 3,
+) -> bool:
+    """Retry ``store_cashu_transaction`` with backoff; spool to the outbox on exhaustion."""
+    for attempt in range(max_retries):
+        ok = await store_cashu_transaction(
+            token=token,
+            amount=amount,
+            unit=unit,
+            mint_url=mint_url,
+            typ=typ,
+            request_id=request_id,
+            collected=collected,
+            created_at=created_at,
+            source=source,
+            api_key_hashed_key=api_key_hashed_key,
+        )
+        if ok:
+            return True
+        if attempt < max_retries - 1:
+            backoff = 0.5 * (2 ** attempt)
+            logger.warning(
+                "Retrying store_cashu_transaction",
+                extra={
+                    "attempt": attempt + 1,
+                    "backoff_seconds": backoff,
+                    "type": typ,
+                    "request_id": request_id,
+                },
+            )
+            await asyncio.sleep(backoff)
+
+    logger.critical(
+        "Cashu transaction spooled to outbox after retries exhausted",
+        extra={
+            "type": typ,
+            "request_id": request_id,
+            "amount": amount,
+            "unit": unit,
+            "mint_url": mint_url,
+            "token": token,
+        },
+    )
+    await append_to_cashu_outbox(
+        token=token,
+        amount=amount,
+        unit=unit,
+        mint_url=mint_url,
+        typ=typ,
+        request_id=request_id,
+        collected=collected,
+        created_at=created_at or int(time.time()),
+        source=source,
+        api_key_hashed_key=api_key_hashed_key,
+    )
+    return False
+
+
+async def replay_cashu_outbox(path: pathlib.Path | None = None) -> int:
+    """Replay spooled outbox entries into the DB. Returns the count persisted."""
+    if path is None:
+        path = _cashu_outbox_path()
+    if not path.exists():
+        return 0
+
+    # Hold the lock for the full read-replay-rewrite cycle so a concurrent
+    # appender cannot slip a new line between the read and the rewrite.
+    async with _cashu_outbox_lock:
+        try:
+            raw_lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception as e:
+            logger.error("Failed to read cashu outbox", extra={"error": str(e)})
+            return 0
+
+        entries: list[dict] = []
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "Skipping malformed outbox line",
+                    extra={"error": str(e), "line_preview": line[:80]},
+                )
+
+        if not entries:
+            return 0
+
+        persisted = 0
+        remaining: list[dict] = []
+        for entry in entries:
+            ok = await store_cashu_transaction(
+                token=entry["token"],
+                amount=entry["amount"],
+                unit=entry["unit"],
+                mint_url=entry.get("mint_url"),
+                typ=entry.get("type", "out"),
+                request_id=entry.get("request_id"),
+                collected=entry.get("collected", False),
+                created_at=entry.get("created_at"),
+                source=entry.get("source", "x-cashu"),
+                api_key_hashed_key=entry.get("api_key_hashed_key"),
+            )
+            if ok:
+                persisted += 1
+                logger.info(
+                    "Outbox entry replayed into DB",
+                    extra={
+                        "outbox_id": entry.get("outbox_id"),
+                        "type": entry.get("type"),
+                        "request_id": entry.get("request_id"),
+                    },
+                )
+            else:
+                remaining.append(entry)
+
+        try:
+            if remaining:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    for entry in remaining:
+                        fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+            else:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text("")
+                os.replace(tmp, path)
+        except Exception as e:
+            logger.error(
+                "Failed to rewrite cashu outbox after replay",
+                extra={"error": str(e), "remaining": len(remaining)},
+            )
+
+    return persisted
+
+
+async def replay_all_outbox_files() -> int:
+    """Replay every cashu outbox file in the outbox directory."""
+    override = os.environ.get("CASHU_OUTBOX_PATH")
+    if override:
+        return await replay_cashu_outbox(pathlib.Path(override))
+
+    outbox_dir = _cashu_outbox_path().parent
+
+    total = 0
+    for file in sorted(outbox_dir.glob("cashu_outbox.*.jsonl")):
+        total += await replay_cashu_outbox(file)
+    return total
+
+
+async def periodic_cashu_outbox_replay() -> None:
+    """Background loop that drains the cashu outbox into the database."""
+    interval = float(os.environ.get("CASHU_OUTBOX_REPLAY_INTERVAL", "30"))
+    logger.info("Starting cashu outbox replay loop", extra={"interval": interval})
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await replay_all_outbox_files()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Outbox replay iteration failed",
+                extra={"error": str(e), "error_type": type(e).__name__},
+            )
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore

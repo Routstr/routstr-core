@@ -1481,7 +1481,7 @@ async def test_x_cashu_transport_error_after_redemption_is_not_retryable(
             "routstr.upstream.base.recieve_token",
             new=AsyncMock(return_value=(5_000, "sat", "https://mint")),
         ),
-        patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
+        patch("routstr.upstream.base.store_cashu_transaction_with_retry", new=AsyncMock(return_value=True)),
         patch.object(
             provider,
             forward_attr,
@@ -1601,7 +1601,7 @@ async def test_x_cashu_zero_value_rejected_not_forwarded(
             "routstr.upstream.base.recieve_token",
             new=AsyncMock(return_value=(amount, "sat", "https://mint")),
         ),
-        patch("routstr.upstream.base.store_cashu_transaction", new=AsyncMock()),
+        patch("routstr.upstream.base.store_cashu_transaction_with_retry", new=AsyncMock(return_value=True)),
         patch.object(
             provider,
             forward_attr,
