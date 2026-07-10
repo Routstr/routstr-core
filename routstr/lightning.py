@@ -72,12 +72,13 @@ class InvoiceRecoverRequest(BaseModel):
 
 async def _request_mint_with_fallback(
     amount_sats: int,
+    *,
+    allowed_mints: list[str] | None = None,
 ) -> tuple[str, str, str]:
-    """Primary first, fall back to other trusted mints on rate-limit/transport failure."""
+    """Request a quote, falling back only among the allowed trusted mints."""
     tried: list[str] = []
-    candidates = [settings.primary_mint] + [
-        m for m in settings.cashu_mints if m != settings.primary_mint
-    ]
+    configured = allowed_mints or [settings.primary_mint, *settings.cashu_mints]
+    candidates = list(dict.fromkeys(configured))
     for mint_url in candidates:
         try:
             wallet = await get_wallet(mint_url, "sat")
@@ -104,9 +105,14 @@ async def _request_mint_with_fallback(
 
 
 async def generate_lightning_invoice(
-    amount_sats: int, description: str
+    amount_sats: int,
+    description: str,
+    *,
+    allowed_mints: list[str] | None = None,
 ) -> tuple[str, str, str]:
-    bolt11, payment_hash, mint_url = await _request_mint_with_fallback(amount_sats)
+    bolt11, payment_hash, mint_url = await _request_mint_with_fallback(
+        amount_sats, allowed_mints=allowed_mints
+    )
     return bolt11, payment_hash, mint_url
 
 
@@ -121,6 +127,7 @@ async def create_invoice(
     session: AsyncSession = Depends(get_session),
 ) -> InvoiceCreateResponse:
     api_key_token = _extract_bearer_api_key(authorization) or request.api_key
+    topup_api_key: ApiKey | None = None
 
     if request.purpose == "topup":
         if not api_key_token:
@@ -131,14 +138,21 @@ async def create_invoice(
         if not api_key_token.startswith("sk-"):
             raise HTTPException(status_code=400, detail="Invalid API key format")
 
-        api_key = await session.get(ApiKey, api_key_token[3:])
-        if not api_key:
+        topup_api_key = await session.get(ApiKey, api_key_token[3:])
+        if not topup_api_key:
             raise HTTPException(status_code=404, detail="API key not found")
 
     try:
         description = f"Routstr {request.purpose} {request.amount_sats} sats"
+        # An API key is backed by one mint. A top-up must use that same mint;
+        # falling back to another would create mixed-mint collateral that the
+        # current single refund_mint_url field cannot account for or refund.
+        allowed_mints = None
+        if request.purpose == "topup":
+            assert topup_api_key is not None
+            allowed_mints = [topup_api_key.refund_mint_url or settings.primary_mint]
         bolt11, payment_hash, mint_url = await generate_lightning_invoice(
-            request.amount_sats, description
+            request.amount_sats, description, allowed_mints=allowed_mints
         )
 
         invoice_id = generate_invoice_id()
@@ -308,6 +322,7 @@ async def create_api_key_from_invoice(
         lambda: wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash),
         op_name="invoice_mint_create",
         mint_url=mint_url,
+        retry_timeouts=False,
     )
 
     dummy_token = f"invoice-{invoice.id}-{invoice.payment_hash}"
@@ -338,6 +353,7 @@ async def topup_api_key_from_invoice(
         lambda: wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash),
         op_name="invoice_mint_topup",
         mint_url=mint_url,
+        retry_timeouts=False,
     )
 
     if not invoice.api_key_hash:

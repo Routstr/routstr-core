@@ -244,6 +244,7 @@ async def raw_send_to_lnurl(
                 ),
                 op_name="lnurl_melt",
                 mint_url=str(wallet.url),
+                retry_timeouts=False,
             ),
             timeout=MELT_TIMEOUT_SECONDS,
         )
