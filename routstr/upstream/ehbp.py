@@ -50,6 +50,14 @@ _TINFOIL_PROVIDER_TYPE = "tinfoil"
 _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
 _TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
 
+
+def _normalize_upstream_model_id(model_id: str | None) -> str:
+    """Normalize casing and whitespace for upstream identity comparisons."""
+    if not model_id:
+        return ""
+    return model_id.strip().lower()
+
+
 # Headers that must not be forwarded to the upstream enclave.
 _PROXY_ONLY_HEADERS = frozenset(
     {
@@ -331,50 +339,55 @@ async def _compute_ehbp_actual_cost(
     actual_model: str | None = usage_dict.pop("model", None)  # type: ignore[arg-type]
     pricing_model_id = model_obj.id
     expected_upstream_model = model_obj.forwarded_model_id or model_obj.id
-    # Case-insensitive comparison: ``get_model_instance`` lowercases lookup
-    # keys, so a casing difference between the header and the configured
-    # ``forwarded_model_id`` (e.g. ``GLM-5-2`` vs ``glm-5-2``) should not
-    # be treated as a real mismatch.
-    if (
-        actual_model
-        and actual_model.lower() != expected_upstream_model.lower()
-    ):
+    expected_identity = _normalize_upstream_model_id(expected_upstream_model)
+    served_identity = _normalize_upstream_model_id(actual_model)
+
+    # Ignore casing and surrounding whitespace when comparing the model
+    # reported by the enclave with the expected upstream model. Version
+    # suffixes remain part of the identity because a configured
+    # ``forwarded_model_id`` may intentionally include one.
+    if actual_model and served_identity != expected_identity:
         from ..proxy import get_model_instance
 
         # ``forwarded_model_id`` values are registered as routable aliases in
-        # the global model map, so ``get_model_instance`` will find a model
-        # whose upstream ID matches the actually-served model.  It also strips
-        # date-version suffixes (e.g. ``glm-5-2-20260415`` -> ``glm-5-2``),
-        # so a resolved model that is actually the *same* as the requested
-        # one is treated as a non-mismatch.
+        # the global model map. The resolved object can belong to a different
+        # provider and therefore have a different client-facing ``id`` while
+        # still representing the same upstream model.
         actual_model_obj = get_model_instance(actual_model)
-        if actual_model_obj and actual_model_obj.id != model_obj.id:
-            logger.info(
-                "EHBP served model differs from requested, using actual "
-                "model for pricing",
+        if actual_model_obj is None:
+            logger.warning(
+                "EHBP served model not found in registry, falling back "
+                "to requested model for pricing",
                 extra={
                     "requested_model": model_obj.id,
                     "expected_upstream_model": expected_upstream_model,
                     "actual_model": actual_model,
                 },
             )
-            pricing_model_id = actual_model_obj.id
+            actual_model = None
         else:
-            # Either the served model is not in the registry (unknown), or
-            # it resolves back to the requested model (e.g. a date-versioned
-            # alias like ``glm-5-2-20260415``).  In both cases use the
-            # requested model's pricing and do not propagate actual_model.
-            if actual_model_obj is None:
-                logger.warning(
-                    "EHBP served model not found in registry, falling back "
-                    "to requested model for pricing",
+            resolved_upstream_model = (
+                actual_model_obj.forwarded_model_id or actual_model_obj.id
+            )
+            resolved_identity = _normalize_upstream_model_id(
+                resolved_upstream_model
+            )
+            if resolved_identity != expected_identity:
+                logger.info(
+                    "EHBP served model differs from requested, using actual "
+                    "model for pricing",
                     extra={
                         "requested_model": model_obj.id,
                         "expected_upstream_model": expected_upstream_model,
                         "actual_model": actual_model,
+                        "resolved_upstream_model": resolved_upstream_model,
                     },
                 )
-            actual_model = None  # do not propagate unknown / same model
+                pricing_model_id = actual_model_obj.id
+            else:
+                # A different registry/client alias resolved to the same
+                # upstream model; retain the requested model's pricing.
+                actual_model = None
     else:
         # Models match or no model in header — use requested model's pricing.
         actual_model = None

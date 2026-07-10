@@ -491,6 +491,8 @@ class TestComputeEhbpActualCost:
         model_obj.id = "tinfoil-glm-5-2"
         model_obj.forwarded_model_id = "glm-5-2"  # lowercase
         with patch(
+            "routstr.proxy.get_model_instance"
+        ) as mock_get_model, patch(
             "routstr.upstream.ehbp.calculate_cost",
             new_callable=AsyncMock,
         ) as mock_calc:
@@ -515,11 +517,7 @@ class TestComputeEhbpActualCost:
             # No mismatch: requested model pricing used
             call_args = mock_calc.call_args
             assert call_args[0][0]["model"] == "tinfoil-glm-5-2"
-            # get_model_instance must not be consulted for a casing-only diff
-            assert not any(
-                call[0] == ("GLM-5-2",)
-                for call in mock_calc.call_args_list
-            )
+            mock_get_model.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_date_versioned_alias_resolves_to_requested(self) -> None:
@@ -529,15 +527,14 @@ class TestComputeEhbpActualCost:
         model_obj.id = "tinfoil-glm-5-2"
         model_obj.forwarded_model_id = "glm-5-2"
 
-        # get_model_instance strips the date suffix and returns the SAME model
-        actual_model_obj = MagicMock()
-        actual_model_obj.id = "tinfoil-glm-5-2"  # identical to requested
-        actual_model_obj.forwarded_model_id = "glm-5-2"
+        resolved_model_obj = MagicMock()
+        resolved_model_obj.id = "other-provider-glm-5-2"
+        resolved_model_obj.forwarded_model_id = "glm-5-2"
 
         with patch(
             "routstr.proxy.get_model_instance",
-            return_value=actual_model_obj,
-        ), patch(
+            return_value=resolved_model_obj,
+        ) as mock_get_model, patch(
             "routstr.upstream.ehbp.calculate_cost",
             new_callable=AsyncMock,
         ) as mock_calc:
@@ -552,16 +549,94 @@ class TestComputeEhbpActualCost:
                 input_tokens=42,
                 output_tokens=10,
             )
-            # Tinfoil returns a date-versioned ID
+            # Tinfoil returns a date-versioned ID with different casing.
             result = await _compute_ehbp_actual_cost(
-                "prompt=42,completion=10,total=52,model=glm-5-2-20260415",
+                "prompt=42,completion=10,total=52,model=GLM-5-2-20260415",
                 model_obj,
                 100_000,
             )
-            # No mismatch — resolves to the same model
+            # Registry resolution, rather than unconditional suffix removal,
+            # establishes that this alias represents the expected model.
             assert "actual_model" not in result
-            call_args = mock_calc.call_args
-            assert call_args[0][0]["model"] == "tinfoil-glm-5-2"
+            assert mock_calc.call_args[0][0]["model"] == "tinfoil-glm-5-2"
+            mock_get_model.assert_called_once_with("GLM-5-2-20260415")
+
+    @pytest.mark.asyncio
+    async def test_configured_date_version_is_preserved_as_identity(self) -> None:
+        """A date suffix in forwarded_model_id is meaningful and preserved."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2-20260415"
+        model_obj.forwarded_model_id = "glm-5-2-20260415"
+
+        with patch(
+            "routstr.proxy.get_model_instance"
+        ) as mock_get_model, patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=GLM-5-2-20260415",
+                model_obj,
+                100_000,
+            )
+
+            assert "actual_model" not in result
+            assert (
+                mock_calc.call_args[0][0]["model"]
+                == "tinfoil-glm-5-2-20260415"
+            )
+            mock_get_model.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_different_client_alias_same_upstream_identity(self) -> None:
+        """A global alias winner from another provider is not a failover when
+        its forwarded model ID matches the requested upstream identity."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2"
+        model_obj.forwarded_model_id = "glm-5-2"
+
+        resolved_model_obj = MagicMock()
+        resolved_model_obj.id = "other-provider-glm-5-2"
+        resolved_model_obj.forwarded_model_id = "GLM-5-2"
+
+        with patch(
+            "routstr.proxy.get_model_instance",
+            return_value=resolved_model_obj,
+        ) as mock_get_model, patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=provider-alias",
+                model_obj,
+                100_000,
+            )
+
+            mock_get_model.assert_called_once_with("provider-alias")
+            assert "actual_model" not in result
+            assert mock_calc.call_args[0][0]["model"] == "tinfoil-glm-5-2"
 
 
 # ---------------------------------------------------------------------------
