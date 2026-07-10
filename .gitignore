@@ -16,6 +16,9 @@ dist/
 *.db-shm
 *.db-wal
 .*wallet.sqlite3
+.wallet/
+AGENTS.md
+TEST_SUITE_OVERVIEW.md
 *models.json
 .cashu
 .relay
