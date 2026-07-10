@@ -26,11 +26,12 @@ async def patch_invoice_generation() -> Any:
     """Stub out `generate_lightning_invoice` so no mint round-trip is needed."""
     counter = {"n": 0}
 
-    async def fake_generate(amount_sats: int, description: str) -> tuple[str, str]:
+    async def fake_generate(amount_sats: int, description: str) -> tuple[str, str, str]:
         counter["n"] += 1
         return (
             f"lnbc{amount_sats}n1pfakeinvoice{counter['n']}",
             f"payment_hash_{counter['n']}",
+            "http://localhost:3338",
         )
 
     with patch(

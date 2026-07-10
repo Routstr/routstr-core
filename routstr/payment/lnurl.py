@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import math
 from typing import TypedDict
 
 import httpx
 from cashu.wallet.wallet import Proof, Wallet
+
+from ..core.settings import settings
+from ..wallet import _mint_operation
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -215,15 +219,23 @@ async def raw_send_to_lnurl(
         lnurl_data["callback_url"], final_amount
     )
 
-    melt_quote_resp = await wallet.melt_quote(invoice=bolt11_invoice)
+    melt_quote_resp = await _mint_operation(
+        lambda: wallet.melt_quote(invoice=bolt11_invoice),
+        op_name="lnurl_melt_quote",
+        mint_url=str(wallet.url),
+    )
 
     if amount:
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
-    _ = await wallet.melt(
-        proofs=proofs,
-        invoice=bolt11_invoice,
-        fee_reserve_sat=melt_quote_resp.fee_reserve,
-        quote_id=melt_quote_resp.quote,
+    _ = await _mint_operation(
+        lambda: wallet.melt(
+            proofs=proofs,
+            invoice=bolt11_invoice,
+            fee_reserve_sat=melt_quote_resp.fee_reserve,
+            quote_id=melt_quote_resp.quote,
+        ),
+        op_name="lnurl_melt",
+        mint_url=str(wallet.url),
     )
     return final_amount

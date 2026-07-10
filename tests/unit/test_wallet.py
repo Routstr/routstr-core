@@ -1321,3 +1321,244 @@ async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
                     await swap_to_primary_mint(mock_token, mock_token_wallet)
 
     assert mock_token_wallet.melt.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# _mint_operation factory + retry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mint_operation_factory_retry_succeeds() -> None:
+    """_mint_operation accepts a zero-arg factory, not a dead coroutine.
+    A factory that raises twice then succeeds must be retried and return."""
+    from routstr.core.settings import settings
+    from routstr.wallet import _mint_operation
+
+    calls = 0
+
+    async def factory():
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise TimeoutError("timeout")
+        return "ok"
+
+    with patch.object(settings, "mint_retry_max_attempts", 3):
+        with patch.object(settings, "mint_operation_timeout_seconds", 0):
+            with patch.object(settings, "mint_max_requests_per_minute", 0):
+                with patch("asyncio.sleep", AsyncMock()):
+                    result = await _mint_operation(
+                        factory, op_name="test_retry", mint_url="http://mint:3338"
+                    )
+
+    assert calls == 3
+    assert result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_mint_operation_factory_retry_exhausted() -> None:
+    """When the factory always times out, _mint_operation raises
+    httpx.TimeoutException after mint_retry_max_attempts + 1 attempts."""
+    from routstr.core.settings import settings
+    from routstr.wallet import _mint_operation
+
+    calls = 0
+
+    async def factory():
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("always timeout")
+
+    with patch.object(settings, "mint_retry_max_attempts", 2):
+        with patch.object(settings, "mint_operation_timeout_seconds", 0):
+            with patch.object(settings, "mint_max_requests_per_minute", 0):
+                with patch("asyncio.sleep", AsyncMock()):
+                    with pytest.raises(httpx.TimeoutException):
+                        await _mint_operation(
+                            factory, op_name="test_exhaust", mint_url="http://mint:3338"
+                        )
+
+    assert calls == 3  # max_attempts(2) + 1
+
+
+# ---------------------------------------------------------------------------
+# Trusted-mint fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lightning_mint_fallback_for_topups() -> None:
+    """When the primary mint is unreachable, _request_mint_with_fallback
+    falls back to a secondary trusted mint."""
+    from routstr.core.settings import settings
+    from routstr.lightning import _request_mint_with_fallback
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.request_mint = AsyncMock(
+        side_effect=httpx.ConnectError("primary down")
+    )
+
+    mock_quote = Mock()
+    mock_quote.request = "lnbc1secondary"
+    mock_quote.quote = "quote_secondary"
+    mock_secondary_wallet = Mock()
+    mock_secondary_wallet.request_mint = AsyncMock(return_value=mock_quote)
+
+    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
+    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+
+    with patch.object(settings, "primary_mint", primary):
+        with patch.object(settings, "cashu_mints", [primary, secondary]):
+            with patch.object(settings, "mint_max_requests_per_minute", 0):
+                with patch.object(settings, "mint_operation_timeout_seconds", 0):
+                    with patch("routstr.lightning.get_wallet", side_effect=mock_get):
+                        bolt11, quote_id, mint_url = await _request_mint_with_fallback(
+                            1000
+                        )
+
+    assert mint_url == secondary
+    assert bolt11 == "lnbc1secondary"
+    assert quote_id == "quote_secondary"
+    mock_primary_wallet.request_mint.assert_called_once()
+    mock_secondary_wallet.request_mint.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_swap_falls_back_to_secondary_mint() -> None:
+    """When the primary mint is unreachable, swap_to_primary_mint falls back
+    to a secondary trusted mint as the swap destination."""
+    from routstr.core.settings import settings
+    from routstr.wallet import _wallet_last_load, _wallets, swap_to_primary_mint
+
+    _wallets.clear()
+    _wallet_last_load.clear()
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+    foreign = "http://foreign:3338"
+
+    mock_token = Mock()
+    mock_token.mint = foreign
+    mock_token.unit = "sat"
+    mock_token.amount = 1000
+    mock_token.keysets = ["keyset1"]
+    mock_token.proofs = [Mock(amount=1000)]
+
+    mock_token_wallet = Mock()
+    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_proofs = AsyncMock()
+    mock_token_wallet.get_fees_for_proofs = Mock(return_value=0)
+    mock_token_wallet.melt_quote = AsyncMock(
+        return_value=Mock(quote="melt_q", amount=990, fee_reserve=10)
+    )
+    mock_token_wallet.melt = AsyncMock(return_value=Mock())
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.request_mint = AsyncMock(
+        side_effect=httpx.ConnectError("primary down")
+    )
+
+    mint_quote = Mock(quote="mint_q_secondary", request="lnbc1secondary")
+    mock_secondary_wallet = Mock()
+    mock_secondary_wallet.load_mint = AsyncMock()
+    mock_secondary_wallet.load_proofs = AsyncMock()
+    mock_secondary_wallet.available_balance = Mock(amount=0)
+    mock_secondary_wallet.keysets = ["ks_secondary"]
+    mock_secondary_wallet.restore_tokens_for_keyset = AsyncMock()
+    mock_secondary_wallet.request_mint = AsyncMock(return_value=mint_quote)
+    mock_secondary_wallet.mint = AsyncMock(return_value=Mock())
+
+    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
+    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+
+    with patch.object(settings, "primary_mint", primary):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch.object(settings, "cashu_mints", [primary, secondary]):
+                with patch.object(settings, "mint_max_requests_per_minute", 0):
+                    with patch.object(settings, "mint_operation_timeout_seconds", 0):
+                        with patch("asyncio.sleep", AsyncMock()):
+                            with patch(
+                                "routstr.wallet.get_wallet", side_effect=mock_get
+                            ):
+                                amount, unit, mint_url = (
+                                    await swap_to_primary_mint(
+                                        mock_token, mock_token_wallet
+                                    )
+                                )
+
+    assert mint_url == secondary
+    assert amount == 990  # 1000 - 10 fee_reserve
+    assert unit == "sat"
+    mock_secondary_wallet.mint.assert_called_once()
+    mock_primary_wallet.mint.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lightning_mint_fallback_on_429() -> None:
+    """A 429 from the primary mint should trigger fallback to a secondary,
+    not just transport errors."""
+    from routstr.core.settings import settings
+    from routstr.lightning import _request_mint_with_fallback
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+
+    mock_resp = Mock(status_code=429, headers={})
+    mock_resp.raise_for_status = Mock(side_effect=httpx.HTTPStatusError(
+        "rate limited", request=Mock(), response=mock_resp
+    ))
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.request_mint = AsyncMock(
+        side_effect=httpx.HTTPStatusError("rate limited", request=Mock(), response=mock_resp)
+    )
+
+    mock_quote = Mock(request="lnbc1secondary", quote="quote_secondary")
+    mock_secondary_wallet = Mock()
+    mock_secondary_wallet.request_mint = AsyncMock(return_value=mock_quote)
+
+    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
+    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+
+    with patch.object(settings, "primary_mint", primary):
+        with patch.object(settings, "cashu_mints", [primary, secondary]):
+            with patch.object(settings, "mint_retry_max_attempts", 0):
+                with patch.object(settings, "mint_max_requests_per_minute", 0):
+                    with patch.object(settings, "mint_operation_timeout_seconds", 0):
+                        with patch("routstr.lightning.get_wallet", side_effect=mock_get):
+                            bolt11, quote_id, mint_url = await _request_mint_with_fallback(1000)
+
+    assert mint_url == secondary
+    mock_secondary_wallet.request_mint.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_lightning_mint_fallback_all_fail() -> None:
+    """When every trusted mint fails, _request_mint_with_fallback raises
+    MintConnectionError instead of trying indefinitely."""
+    from routstr.core.settings import settings
+    from routstr.lightning import _request_mint_with_fallback
+    from routstr.wallet import MintConnectionError
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.request_mint = AsyncMock(side_effect=httpx.ConnectError("down"))
+    mock_secondary_wallet = Mock()
+    mock_secondary_wallet.request_mint = AsyncMock(side_effect=httpx.ConnectError("down"))
+
+    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
+    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+
+    with patch.object(settings, "primary_mint", primary):
+        with patch.object(settings, "cashu_mints", [primary, secondary]):
+            with patch.object(settings, "mint_retry_max_attempts", 0):
+                with patch.object(settings, "mint_max_requests_per_minute", 0):
+                    with patch.object(settings, "mint_operation_timeout_seconds", 0):
+                        with patch("routstr.lightning.get_wallet", side_effect=mock_get):
+                            with pytest.raises(MintConnectionError):
+                                await _request_mint_with_fallback(1000)

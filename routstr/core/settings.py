@@ -49,6 +49,23 @@ class Settings(BaseSettings):
     payout_interval_seconds: int = Field(
         default=900, gt=0, env="PAYOUT_INTERVAL_SECONDS"
     )
+    # Timeout (seconds) for individual mint API operations (melt, mint, swap,
+    # checkstate). When a mint is slow or rate-limiting, operations are
+    # cancelled after this delay instead of hanging indefinitely.
+    mint_operation_timeout_seconds: int = Field(
+        default=30, gt=0, env="MINT_OPERATION_TIMEOUT_SECONDS"
+    )
+    # Maximum mint API requests per minute, per mint URL. Nutshell mints
+    # (e.g. Minibits) enforce 20/min/IP on transaction endpoints (mint, melt,
+    # swap, quotes) and 60/min/IP globally. 20 stays under the transaction
+    # bucket since most calls here are transaction ops. 0 = unlimited.
+    mint_max_requests_per_minute: int = Field(
+        default=20, ge=0, env="MINT_MAX_REQUESTS_PER_MINUTE"
+    )
+    # Max retries when a mint returns 429 or times out (exponential backoff).
+    mint_retry_max_attempts: int = Field(
+        default=3, ge=0, env="MINT_RETRY_MAX_ATTEMPTS"
+    )
 
     # Pricing
     # Default behavior: derive pricing from MODELS
