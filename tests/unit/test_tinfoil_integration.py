@@ -89,6 +89,7 @@ class TestParseTinfoilUsageMetrics:
         result = parse_tinfoil_usage_metrics(
             "prompt=1,completion=1,total=2,model=kimi-k2-6"
         )
+        assert result is not None
         assert result["model"] == "kimi-k2-6"
 
     def test_model_with_extra_fields(self) -> None:
@@ -97,6 +98,7 @@ class TestParseTinfoilUsageMetrics:
             "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
             "model=kimi-k2-6"
         )
+        assert result is not None
         assert result["prompt_tokens"] == 69
         assert result["completion_tokens"] == 20
         assert result["total_tokens"] == 89
