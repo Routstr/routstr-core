@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import socket
+from collections.abc import Generator
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -21,7 +22,7 @@ from routstr.wallet import (
 
 
 @pytest.fixture(autouse=True)
-def isolate_wallet_runtime_state():
+def isolate_wallet_runtime_state() -> Generator[None, None, None]:
     """Keep production limiter/wallet caches from leaking across unit tests."""
     from routstr import wallet as wallet_module
     from routstr.core.settings import settings
