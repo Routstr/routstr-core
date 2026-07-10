@@ -137,8 +137,8 @@ def test_create_model_mappings_includes_db_override_for_missing_cached_model(
 
     model_instances, provider_map, unique_models = create_model_mappings(
         upstreams=[provider],
-        overrides_by_id={"azure/gpt-4o": (override_row, 1.01)},
-        disabled_model_ids=set(),
+        overrides_by_key={("azure/gpt-4o", 7): (override_row, 1.01)},
+        disabled_model_keys=set(),
     )
 
     assert "azure/gpt-4o" in model_instances
@@ -182,11 +182,73 @@ def test_create_model_mappings_dedupes_with_provider_identity_not_provider_type(
 
     _, provider_map, _ = create_model_mappings(
         upstreams=[provider_a, provider_b],
-        overrides_by_id={"azure/gpt-4o": (override_row, 1.01)},
-        disabled_model_ids=set(),
+        overrides_by_key={("azure/gpt-4o", 2): (override_row, 1.01)},
+        disabled_model_keys=set(),
     )
 
     providers_for_alias = provider_map["azure/gpt-4o"]
     assert provider_a in providers_for_alias
     assert provider_b in providers_for_alias
     assert len(providers_for_alias) == 2
+
+
+def test_create_model_mappings_applies_override_only_to_matching_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-id overrides must not add provider-specific aliases to other providers."""
+    provider_a_model = create_test_model("same-id", prompt_price=0.01)
+    provider_a = create_test_provider(
+        "provider-a",
+        "https://provider-a.example/v1",
+        db_id=1,
+        models=[provider_a_model],
+    )
+    provider_b_model = create_test_model("same-id", prompt_price=0.02)
+    provider_b = create_test_provider(
+        "provider-b",
+        "https://provider-b.example/v1",
+        db_id=2,
+        models=[provider_b_model],
+    )
+
+    override_model = create_test_model("same-id", prompt_price=0.001)
+    override_model.alias_ids = ["provider-b-only"]
+    override_row = SimpleNamespace(id="same-id", upstream_provider_id=2, enabled=True)
+
+    def fake_row_to_model(*args, **kwargs) -> Model:  # type: ignore[no-untyped-def]
+        return override_model
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", fake_row_to_model)
+
+    _, provider_map, _ = create_model_mappings(
+        upstreams=[provider_a, provider_b],
+        overrides_by_key={("same-id", 2): (override_row, 1.01)},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["provider-b-only"] == [provider_b]
+    assert set(provider_map["same-id"]) == {provider_a, provider_b}
+
+
+def test_create_model_mappings_disables_only_matching_provider() -> None:
+    """Disabled overrides are scoped to the provider row, not the shared model id."""
+    provider_a = create_test_provider(
+        "provider-a",
+        "https://provider-a.example/v1",
+        db_id=1,
+        models=[create_test_model("same-id")],
+    )
+    provider_b = create_test_provider(
+        "provider-b",
+        "https://provider-b.example/v1",
+        db_id=2,
+        models=[create_test_model("same-id")],
+    )
+
+    _, provider_map, _ = create_model_mappings(
+        upstreams=[provider_a, provider_b],
+        overrides_by_key={},
+        disabled_model_keys={("same-id", 2)},
+    )
+
+    assert provider_map["same-id"] == [provider_a]
