@@ -113,42 +113,109 @@ All errors follow a consistent JSON structure:
 **Status:** 402  
 **Resolution:** Top up API key balance
 
-#### Invalid Token
+### Cashu Token Redemption Errors
+
+These errors are returned when a Cashu token you pay with cannot be redeemed.
+They apply to every endpoint that accepts a token:
+
+- **Per-request payment** via the `X-Cashu` header (chat completions + Responses API).
+- **API key top-up** via `POST /v1/wallet/topup`.
+- **Minting an API key** from a token sent in `Authorization: Bearer <cashu-token>`.
+
+All three share one classifier, so the same failure yields the same HTTP status
+and sanitized message everywhere. Structured error envelopes (`X-Cashu` and
+`Authorization: Bearer <cashu-token>`) also expose the same `type` and `code` —
+branch on `type` (or `code` for finer granularity). `POST /v1/wallet/topup`
+keeps its existing plain-string `detail` envelope, so branch on status there.
+
+| `type` | Status | `code` | Retryable | Meaning |
+|--------|--------|--------|-----------|---------|
+| `token_already_spent` | 400 | `cashu_token_already_spent` | No | The token was already redeemed. |
+| `invalid_token` | 400 | `invalid_cashu_token` | No | The token is malformed or cannot be decoded. |
+| `mint_error` | 422 | `cashu_token_swap_fees_exceed_amount` | No | Token value is too small to cover the mint's swap/melt fees. |
+| `mint_error` | 422 | `cashu_foreign_mint_swap_failed` | No | Swapping the token from a foreign mint to the primary mint failed. |
+| `mint_unreachable` | 503 | `cashu_mint_unreachable` | **Yes** | The mint could not be reached (DNS failure, refused/reset connection, timeout). The token is fine — retry once the mint recovers. |
+| `cashu_error` | 400 | `cashu_token_redemption_failed` | No | The token could not be redeemed for another expected reason. |
+| `cashu_error` | 400 | `cashu_token_zero_value` | No | The token redeemed to zero (empty/dust token, or value fully consumed by fees). |
+| `token_consumed` | 500 | `cashu_token_consumed` | No | The token was **spent** (melted/redeemed) but crediting it then failed. Do not retry — the token is gone; contact support to reconcile. |
+| `api_error` | 500 | `internal_error` | Maybe | Unexpected server-side fault during redemption. |
+
+!!! important "Retry only `mint_unreachable`"
+    Only `mint_unreachable` (503) means the same token will work again later —
+    everything else is a permanent property of the token and must not be
+    blindly retried. Use exponential backoff for the 503. In particular, a
+    `token_consumed` 500 means the mint already spent the token, so a retry
+    would fail as `token_already_spent`.
+
+#### Mint Unreachable (retryable)
 
 ```json
 {
   "error": {
-    "type": "payment_error",
-    "message": "Invalid Cashu token",
-    "code": "invalid_token",
-    "details": {
-      "reason": "Token already spent"
-    }
+    "type": "mint_unreachable",
+    "message": "Cashu mint is unreachable",
+    "code": "cashu_mint_unreachable"
   }
 }
 ```
 
-**Status:** 400  
-**Resolution:** Use a valid, unspent token
+**Status:** 503
 
-#### Mint Unavailable
+**Resolution:** The token is valid — the mint is temporarily down. Retry with
+backoff, or pay with a token from a different mint.
+
+#### Token Already Spent
 
 ```json
 {
   "error": {
-    "type": "payment_error",
-    "message": "Cannot connect to Cashu mint",
-    "code": "mint_unavailable",
-    "details": {
-      "mint_url": "https://mint.example.com",
-      "retry_after": 60
-    }
+    "type": "token_already_spent",
+    "message": "Cashu token already spent",
+    "code": "cashu_token_already_spent"
   }
 }
 ```
 
-**Status:** 503  
-**Resolution:** Try again later or use different mint
+**Status:** 400
+
+**Resolution:** Use a fresh, unspent token. Do not retry with the same token.
+
+#### Response envelope differs by endpoint
+
+The `error` object above is identical everywhere, but the surrounding envelope
+depends on how you paid:
+
+- **`X-Cashu` header payments** (chat + Responses API) return the object at the
+  top level, alongside a `request_id`:
+
+  ```json
+  {
+    "error": { "type": "mint_unreachable", "message": "Cashu mint is unreachable", "code": "cashu_mint_unreachable" },
+    "request_id": "req-abc123"
+  }
+  ```
+
+  The original token is echoed back in the `X-Cashu` **response header only when
+  it is still spendable** (e.g. `mint_unreachable`, `invalid_cashu_token`, fee
+  errors) so you can recover/retry it. It is **not** echoed for spent/consumed
+  tokens (`cashu_token_already_spent`, `cashu_token_consumed`,
+  `cashu_token_zero_value`, `internal_error`) — retrying those can never succeed.
+
+- **`Authorization: Bearer <cashu-token>`** (API key minting) wraps it in
+  FastAPI's `detail` field:
+
+  ```json
+  { "detail": { "error": { "type": "mint_unreachable", "message": "Cashu mint is unreachable", "code": "cashu_mint_unreachable" } } }
+  ```
+
+- **`POST /v1/wallet/topup`** returns a plain string message under `detail` —
+  it carries the shared HTTP **status** and **message** (e.g. `503` for an
+  unreachable mint) but not the structured `type`/`code`, so branch on the
+  status code here:
+
+  ```json
+  { "detail": "Cashu mint is unreachable" }
+  ```
 
 ### Validation Errors
 
@@ -347,7 +414,7 @@ class ErrorHandler:
         'rate_limit',
         'upstream_timeout',
         'model_overloaded',
-        'mint_unavailable'
+        'cashu_mint_unreachable'
     }
     
     # Errors requiring user action

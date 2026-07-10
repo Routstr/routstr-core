@@ -174,12 +174,12 @@ async def test_topup_retries_when_quote_fee_exceeds_estimate(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_topup_returns_400_when_retries_exhausted(
+async def test_topup_returns_422_when_retries_exhausted(
     authenticated_client: AsyncClient,
 ) -> None:
     """A mint that escalates fee_reserve on every re-quote (1 → 10 → 25 → 50)
-    exhausts the retry budget: clean 400 with an actionable message, melt never
-    executed."""
+    exhausts the retry budget: clean 422 mint_error/too-small taxonomy, melt
+    never executed."""
     mock_token, token_wallet, primary_wallet = _make_swap_mocks(
         1000, fee_reserves=[1, 10, 25, 50]
     )
@@ -188,7 +188,7 @@ async def test_topup_returns_400_when_retries_exhausted(
         authenticated_client, mock_token, token_wallet, primary_wallet
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
     assert "too small to cover swap fees" in response.json()["detail"]
     assert token_wallet.melt_quote.call_count == 4  # estimation + 3 attempts
     token_wallet.melt.assert_not_called()

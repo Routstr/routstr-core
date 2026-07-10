@@ -1,12 +1,13 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.responses import JSONResponse
 
-from routstr.balance import refund_wallet_endpoint
+from routstr.balance import refund_wallet_endpoint, topup_wallet_endpoint
 from routstr.core.db import ApiKey, CashuTransaction
-from routstr.wallet import credit_balance
+from routstr.wallet import MintConnectionError, credit_balance
 
 
 def _make_cashu_tx(
@@ -397,7 +398,10 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
 
     with (
         patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
-        patch("routstr.balance.send_token", AsyncMock(side_effect=Exception("mint down"))),
+        patch(
+            "routstr.balance.send_token",
+            AsyncMock(side_effect=MintConnectionError("raw mint outage detail")),
+        ),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
         patch("routstr.balance._refund_cache_set", AsyncMock()),
@@ -411,7 +415,43 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
             )
 
     assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Mint service unavailable"
+    assert "raw mint outage detail" not in exc_info.value.detail
     # Verify two exec calls: debit + restore
+    assert session.exec.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
+    """Unexpected send-side failures restore balance without leaking exception text."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=5000, refund_currency="sat")
+    raw_error = "database secret token raw-mint-response"
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.exec = AsyncMock(side_effect=[_update_result(1), _update_result(1)])
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.send_token", AsyncMock(side_effect=RuntimeError(raw_error))),
+        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch("routstr.balance.logger"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Refund failed"
+    assert raw_error not in exc_info.value.detail
     assert session.exec.await_count == 2
 
 
@@ -459,3 +499,190 @@ async def test_refund_unknown_sk_bearer_returns_401() -> None:
 
     assert exc_info.value.status_code == 401
     session.get.assert_awaited_once()
+
+
+# --- Topup redemption error taxonomy (POST /v1/wallet/topup) ------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("All connection attempts failed"),
+        MintConnectionError("connect to mint refused"),
+        TimeoutError("timed out connecting to mint"),
+    ],
+)
+async def test_topup_mint_unreachable_returns_503(error: Exception) -> None:
+    """A down mint must surface 503 (retryable), not 400 or 500 — the token is
+    fine, so the client should retry once the mint recovers."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.credit_balance", AsyncMock(side_effect=error)),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Cashu mint is unreachable"
+
+
+@pytest.mark.asyncio
+async def test_topup_already_spent_still_returns_400() -> None:
+    """Regression: the mint-unreachable short-circuit must not swallow the
+    existing ValueError substring buckets."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch(
+            "routstr.balance.credit_balance",
+            AsyncMock(side_effect=ValueError("Token already spent")),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Cashu token already spent"
+
+
+@pytest.mark.asyncio
+async def test_topup_zero_value_returns_400_zero_value_message() -> None:
+    """A dust/zero redemption maps to the documented zero-value message, not the
+    generic redemption-failed one."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch(
+            "routstr.balance.credit_balance",
+            AsyncMock(
+                side_effect=ValueError("Redeemed token amount must be positive, got 0 msats")
+            ),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Failed to redeem Cashu token: token yielded no value"
+
+
+@pytest.mark.asyncio
+async def test_topup_token_consumed_returns_500() -> None:
+    """A post-redemption crediting failure (token spent) is a non-retryable 500,
+    not a 4xx that invites a retry."""
+    from fastapi import HTTPException
+
+    from routstr.wallet import TokenConsumedError
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch(
+            "routstr.balance.credit_balance",
+            AsyncMock(side_effect=TokenConsumedError("credit failed")),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == (
+        "Token was redeemed but could not be credited; do not retry"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_detail"),
+    [
+        (
+            ValueError(
+                "Failed to estimate fees: Fees (7 sat) exceed token amount (5 sat)"
+            ),
+            422,
+            "Token value is too small to cover swap fees",
+        ),
+        (
+            ValueError(
+                "Token amount (5 sat) is insufficient to cover melt fees."
+            ),
+            422,
+            "Token value is too small to cover swap fees",
+        ),
+        (
+            ValueError("Failed to melt token from foreign mint http://m: boom"),
+            422,
+            "Failed to swap token from foreign mint",
+        ),
+    ],
+)
+async def test_topup_fee_and_swap_failures_return_422(
+    error: Exception, expected_status: int, expected_detail: str
+) -> None:
+    """Fee/swap failures map to 422 (shared taxonomy), matching the bearer and
+    X-Cashu paths — previously top-up flattened these to 400."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.credit_balance", AsyncMock(side_effect=error)),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.detail == expected_detail
+
+
+@pytest.mark.asyncio
+async def test_topup_unexpected_non_valueerror_returns_500() -> None:
+    """A non-ValueError, non-transport fault is an internal error (500), not a
+    sanitized 400 — the merged except must preserve this."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch(
+            "routstr.balance.credit_balance",
+            AsyncMock(side_effect=RuntimeError("db exploded")),
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Internal server error"

@@ -20,7 +20,11 @@ from .payment.cost_calculation import (
     MaxCostData,
     calculate_cost,
 )
-from .wallet import credit_balance, deserialize_token_from_string
+from .wallet import (
+    classify_redemption_error,
+    credit_balance,
+    deserialize_token_from_string,
+)
 
 logger = get_logger(__name__)
 payments_logger = get_logger("routstr.payments")
@@ -76,6 +80,37 @@ async def check_and_reset_limit(key: ApiKey, session: AsyncSession) -> bool:
             await session.flush()
             return True
     return False
+
+
+def redemption_error_to_http_exception(error: Exception) -> HTTPException:
+    """Map a Cashu token redemption failure to a sanitized client-facing error.
+
+    Thin wrapper over the shared :func:`classify_redemption_error` so the bearer
+    path stays identical to the X-Cashu and top-up paths.
+    """
+    classified = classify_redemption_error(error)
+    if classified is None:
+        return HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "message": "Internal error during token redemption",
+                    "type": "api_error",
+                    "code": "internal_error",
+                }
+            },
+        )
+    error_type, status_code, message, error_code = classified
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": error_code,
+            }
+        },
+    )
 
 
 async def validate_bearer_key(
@@ -216,7 +251,17 @@ async def validate_bearer_key(
 
         try:
             hashed_key = hashlib.sha256(bearer_key.encode()).hexdigest()
-            token_obj = deserialize_token_from_string(bearer_key)
+            try:
+                token_obj = deserialize_token_from_string(bearer_key)
+            except Exception as decode_error:
+                # A malformed token is a bad token (400 invalid_cashu_token via
+                # the shared taxonomy), not an auth failure (401) — otherwise it
+                # would fall through to the generic "Invalid API key" handler.
+                raise redemption_error_to_http_exception(
+                    ValueError(
+                        f"Invalid Cashu token: could not decode token ({decode_error})"
+                    )
+                ) from decode_error
             logger.debug(
                 "Generated token hash", extra={"hash_preview": hashed_key[:16] + "..."}
             )
@@ -334,19 +379,32 @@ async def validate_bearer_key(
                         "error_type": type(credit_error).__name__,
                     },
                 )
-                raise credit_error
+                await session.rollback()
+                raise redemption_error_to_http_exception(credit_error) from credit_error
 
             if msats <= 0:
                 logger.error(
                     "Token redemption returned zero or negative amount",
                     extra={"msats": msats, "key_hash": hashed_key[:8] + "..."},
                 )
-                # Defense-in-depth: credit_balance now refuses to commit on a
-                # zero/negative redemption, but if a row was nonetheless
-                # persisted, drop it so we never leave an orphan zero-balance key.
+                # Defense-in-depth: credit_balance already raises
+                # ValueError("Redeemed token amount must be positive…") before
+                # returning (wallet.py), so this branch is only reachable if a
+                # zero/negative row was somehow persisted; drop it so we never
+                # leave an orphan zero-balance key. Reuse the shared taxonomy
+                # (cashu_error) so the envelope matches the mapper above.
                 await session.delete(new_key)
                 await session.commit()
-                raise Exception("Token redemption failed")
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "message": "Failed to redeem Cashu token: token yielded no value",
+                            "type": "cashu_error",
+                            "code": "cashu_token_zero_value",
+                        }
+                    },
+                )
 
             await session.refresh(new_key)
             await session.commit()
@@ -379,7 +437,7 @@ async def validate_bearer_key(
                 status_code=401,
                 detail={
                     "error": {
-                        "message": f"Invalid or expired Cashu key: {str(e)}",
+                        "message": "Invalid or expired Cashu key",
                         "type": "invalid_request_error",
                         "code": "invalid_api_key",
                     }

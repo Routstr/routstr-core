@@ -12,10 +12,7 @@ from sqlmodel import select
 
 from routstr.core.db import ApiKey
 
-from .utils import (
-    CashuTokenGenerator,
-    ResponseValidator,
-)
+from .utils import ResponseValidator
 
 
 @pytest.mark.integration
@@ -79,29 +76,31 @@ async def test_api_key_generation_invalid_token(
     # Capture initial state
     await db_snapshot.capture()
 
-    # Test various invalid tokens
-    invalid_tokens = [
-        CashuTokenGenerator.generate_invalid_token(),  # Malformed token
-        "not-a-cashu-token",  # Wrong format
-        "cashuA",  # Empty token
-        "cashuA" + "x" * 1000,  # Invalid base64
+    # Non-Cashu bearer values are invalid API keys (401). Malformed values that
+    # look like Cashu tokens use the shared Cashu taxonomy (400 invalid_token).
+    invalid_tokens: list[tuple[str, int, str | None]] = [
+        ("not-a-cashu-token", 401, None),
+        ("sk-not-a-real-api-key", 401, None),
+        ("cashuA", 400, "invalid_cashu_token"),
+        ("cashuA" + "x" * 1000, 400, "invalid_cashu_token"),
     ]
 
-    for invalid_token in invalid_tokens:
+    for invalid_token, expected_status, expected_code in invalid_tokens:
         integration_client.headers["Authorization"] = f"Bearer {invalid_token}"
         response = await integration_client.get("/v1/wallet/info")
 
-        # Should fail with 401
-        assert response.status_code == 401, (
+        assert response.status_code == expected_status, (
             f"Token {invalid_token[:20]}... should be invalid"
         )
 
         # Validate error response
         validator = ResponseValidator()
         error_validation = validator.validate_error_response(
-            response, expected_status=401, expected_error_key="detail"
+            response, expected_status=expected_status, expected_error_key="detail"
         )
         assert error_validation["valid"]
+        if expected_code is not None:
+            assert response.json()["detail"]["error"]["code"] == expected_code
 
     # Verify no database changes
     diff = await db_snapshot.diff()
