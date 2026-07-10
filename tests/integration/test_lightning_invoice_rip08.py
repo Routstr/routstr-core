@@ -26,11 +26,17 @@ async def patch_invoice_generation() -> Any:
     """Stub out `generate_lightning_invoice` so no mint round-trip is needed."""
     counter = {"n": 0}
 
-    async def fake_generate(amount_sats: int, description: str) -> tuple[str, str]:
+    async def fake_generate(
+        amount_sats: int,
+        description: str,
+        *,
+        allowed_mints: list[str] | None = None,
+    ) -> tuple[str, str, str]:
         counter["n"] += 1
         return (
             f"lnbc{amount_sats}n1pfakeinvoice{counter['n']}",
             f"payment_hash_{counter['n']}",
+            "http://localhost:3338",
         )
 
     with patch(
@@ -95,6 +101,9 @@ async def test_topup_with_authorization_header(
     body = resp.json()
     assert body["amount_sats"] == 500
     assert body["bolt11"].startswith("lnbc")
+    assert patch_invoice_generation.call_args.kwargs["allowed_mints"] == [
+        "http://localhost:3338"
+    ]
 
 
 @pytest.mark.integration

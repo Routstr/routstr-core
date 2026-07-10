@@ -11,7 +11,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from .core.db import ApiKey, LightningInvoice, create_session, get_session
 from .core.logging import get_logger
 from .core.settings import settings
-from .wallet import get_wallet
+from .wallet import (
+    MintConnectionError,
+    _is_mint_rate_limited,
+    _mint_operation,
+    get_wallet,
+    is_mint_connection_error,
+)
 
 logger = get_logger(__name__)
 
@@ -64,12 +70,50 @@ class InvoiceRecoverRequest(BaseModel):
     bolt11: str = Field(description="BOLT11 invoice string")
 
 
+async def _request_mint_with_fallback(
+    amount_sats: int,
+    *,
+    allowed_mints: list[str] | None = None,
+) -> tuple[str, str, str]:
+    """Request a quote, falling back only among the allowed trusted mints."""
+    tried: list[str] = []
+    configured = allowed_mints or [settings.primary_mint, *settings.cashu_mints]
+    candidates = list(dict.fromkeys(configured))
+    for mint_url in candidates:
+        try:
+            wallet = await get_wallet(mint_url, "sat")
+            quote = await _mint_operation(
+                lambda: wallet.request_mint(amount_sats),
+                op_name="request_mint_invoice",
+                mint_url=mint_url,
+            )
+            return quote.request, quote.quote, mint_url
+        except Exception as e:
+            tried.append(f"{mint_url}: {type(e).__name__}")
+            if not is_mint_connection_error(e) and not _is_mint_rate_limited(e):
+                raise
+            logger.warning(
+                "request_mint failed, trying fallback mint",
+                extra={
+                    "failed_mint": mint_url,
+                    "error": str(e),
+                    "tried": tried,
+                },
+            )
+            continue
+    raise MintConnectionError(f"All mints failed for request_mint: {tried}")
+
+
 async def generate_lightning_invoice(
-    amount_sats: int, description: str
-) -> tuple[str, str]:
-    wallet = await get_wallet(settings.primary_mint, "sat")
-    quote = await wallet.request_mint(amount_sats)
-    return quote.request, quote.quote
+    amount_sats: int,
+    description: str,
+    *,
+    allowed_mints: list[str] | None = None,
+) -> tuple[str, str, str]:
+    bolt11, payment_hash, mint_url = await _request_mint_with_fallback(
+        amount_sats, allowed_mints=allowed_mints
+    )
+    return bolt11, payment_hash, mint_url
 
 
 def generate_invoice_id() -> str:
@@ -83,6 +127,7 @@ async def create_invoice(
     session: AsyncSession = Depends(get_session),
 ) -> InvoiceCreateResponse:
     api_key_token = _extract_bearer_api_key(authorization) or request.api_key
+    topup_api_key: ApiKey | None = None
 
     if request.purpose == "topup":
         if not api_key_token:
@@ -93,14 +138,21 @@ async def create_invoice(
         if not api_key_token.startswith("sk-"):
             raise HTTPException(status_code=400, detail="Invalid API key format")
 
-        api_key = await session.get(ApiKey, api_key_token[3:])
-        if not api_key:
+        topup_api_key = await session.get(ApiKey, api_key_token[3:])
+        if not topup_api_key:
             raise HTTPException(status_code=404, detail="API key not found")
 
     try:
         description = f"Routstr {request.purpose} {request.amount_sats} sats"
-        bolt11, payment_hash = await generate_lightning_invoice(
-            request.amount_sats, description
+        # An API key is backed by one mint. A top-up must use that same mint;
+        # falling back to another would create mixed-mint collateral that the
+        # current single refund_mint_url field cannot account for or refund.
+        allowed_mints = None
+        if request.purpose == "topup":
+            assert topup_api_key is not None
+            allowed_mints = [topup_api_key.refund_mint_url or settings.primary_mint]
+        bolt11, payment_hash, mint_url = await generate_lightning_invoice(
+            request.amount_sats, description, allowed_mints=allowed_mints
         )
 
         invoice_id = generate_invoice_id()
@@ -115,6 +167,7 @@ async def create_invoice(
             status="pending",
             api_key_hash=api_key_token[3:] if api_key_token else None,
             purpose=request.purpose,
+            mint_url=mint_url,
             balance_limit=request.balance_limit,
             balance_limit_reset=request.balance_limit_reset,
             validity_date=request.validity_date,
@@ -223,9 +276,14 @@ async def check_invoice_payment(
     invoice: LightningInvoice, session: AsyncSession
 ) -> None:
     try:
-        wallet = await get_wallet(settings.primary_mint, "sat")
+        mint_url = invoice.mint_url or settings.primary_mint
+        wallet = await get_wallet(mint_url, "sat")
 
-        mint_status = await wallet.get_mint_quote(invoice.payment_hash)
+        mint_status = await _mint_operation(
+            lambda: wallet.get_mint_quote(invoice.payment_hash),
+            op_name="get_mint_quote",
+            mint_url=mint_url,
+        )
 
         if mint_status.paid:
             invoice.status = "paid"
@@ -258,8 +316,14 @@ async def check_invoice_payment(
 async def create_api_key_from_invoice(
     invoice: LightningInvoice, session: AsyncSession
 ) -> ApiKey:
-    wallet = await get_wallet(settings.primary_mint, "sat")
-    await wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash)
+    mint_url = invoice.mint_url or settings.primary_mint
+    wallet = await get_wallet(mint_url, "sat")
+    await _mint_operation(
+        lambda: wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash),
+        op_name="invoice_mint_create",
+        mint_url=mint_url,
+        retry_timeouts=False,
+    )
 
     dummy_token = f"invoice-{invoice.id}-{invoice.payment_hash}"
     hashed_key = hashlib.sha256(dummy_token.encode()).hexdigest()
@@ -268,7 +332,7 @@ async def create_api_key_from_invoice(
         hashed_key=hashed_key,
         balance=invoice.amount_sats * 1000,  # Convert to msats
         refund_currency="sat",
-        refund_mint_url=settings.primary_mint,
+        refund_mint_url=mint_url,
         balance_limit=invoice.balance_limit,
         balance_limit_reset=invoice.balance_limit_reset,
         validity_date=invoice.validity_date,
@@ -283,8 +347,14 @@ async def create_api_key_from_invoice(
 async def topup_api_key_from_invoice(
     invoice: LightningInvoice, session: AsyncSession
 ) -> None:
-    wallet = await get_wallet(settings.primary_mint, "sat")
-    await wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash)
+    mint_url = invoice.mint_url or settings.primary_mint
+    wallet = await get_wallet(mint_url, "sat")
+    await _mint_operation(
+        lambda: wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash),
+        op_name="invoice_mint_topup",
+        mint_url=mint_url,
+        retry_timeouts=False,
+    )
 
     if not invoice.api_key_hash:
         raise ValueError("No API key associated with topup invoice")
@@ -297,7 +367,9 @@ async def topup_api_key_from_invoice(
     await session.flush()
 
 
-INVOICE_WATCH_INTERVAL_SECONDS = 5
+# Nutshell mints throttle Lightning backend lookups to once per 10s per
+# quote, so polling faster just burns the global request budget for nothing.
+INVOICE_WATCH_INTERVAL_SECONDS = 10
 INVOICE_WATCH_BATCH_LIMIT = 100
 
 
