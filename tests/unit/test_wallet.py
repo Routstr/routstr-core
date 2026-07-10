@@ -27,15 +27,15 @@ def isolate_wallet_runtime_state() -> Generator[None, None, None]:
     from routstr import wallet as wallet_module
     from routstr.core.settings import settings
 
-    original_rpm = settings.mint_max_requests_per_minute
-    settings.mint_max_requests_per_minute = 0
-    wallet_module._MintRateLimiter._limiters.clear()
+    original_concurrency = settings.mint_max_concurrency
+    settings.mint_max_concurrency = 0
+    wallet_module._MintRateGuard._guards.clear()
     wallet_module._wallets.clear()
     wallet_module._wallet_last_load.clear()
     wallet_module._wallet_load_locks.clear()
     yield
-    settings.mint_max_requests_per_minute = original_rpm
-    wallet_module._MintRateLimiter._limiters.clear()
+    settings.mint_max_concurrency = original_concurrency
+    wallet_module._MintRateGuard._guards.clear()
     wallet_module._wallets.clear()
     wallet_module._wallet_last_load.clear()
     wallet_module._wallet_load_locks.clear()
@@ -1342,7 +1342,7 @@ async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-mint limiter + _mint_operation factory/retry
+# Per-mint adaptive guard + _mint_operation factory/retry
 # ---------------------------------------------------------------------------
 
 
@@ -1366,42 +1366,54 @@ async def test_balance_proof_check_uses_large_batches_to_avoid_rate_limit() -> N
 
 
 @pytest.mark.asyncio
-async def test_mint_rate_limiter_serializes_waiters_after_refill() -> None:
-    from routstr.wallet import _MintRateLimiter
+async def test_mint_rate_guard_bounds_concurrency() -> None:
+    from routstr.wallet import _MintRateGuard
 
-    limiter = _MintRateLimiter("http://mint:3338", 60)
-    limiter._tokens = 0
-    limiter._last_refill = 0
-    clock = {"now": 0.0}
-    sleeps: list[float] = []
-    real_sleep = asyncio.sleep
+    guard = _MintRateGuard("http://mint:3338", 2)
+    active = 0
+    peak = 0
 
-    async def fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
-        clock["now"] += delay
-        await real_sleep(0)
+    async def operation() -> None:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
 
-    with patch("routstr.wallet.time.monotonic", side_effect=lambda: clock["now"]):
-        with patch("routstr.wallet.asyncio.sleep", side_effect=fake_sleep):
-            await asyncio.gather(limiter.acquire(), limiter.acquire())
+    await asyncio.gather(*(guard.run(operation) for _ in range(5)))
 
-    assert sleeps == pytest.approx([1.0, 1.0])
-    assert clock["now"] == pytest.approx(2.0)
+    assert peak == 2
 
 
-def test_mint_rate_limiter_rebuilds_when_setting_changes() -> None:
+@pytest.mark.asyncio
+async def test_mint_rate_guard_waits_for_adaptive_cooldown() -> None:
+    from routstr.wallet import _MintRateGuard
+
+    guard = _MintRateGuard("http://mint:3338", 2)
+    guard._cooldown_until = 15.0
+    operation = AsyncMock(return_value="ok")
+
+    with patch("routstr.wallet.time.monotonic", return_value=10.0):
+        with patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep:
+            assert await guard.run(operation) == "ok"
+
+    sleep.assert_awaited_once_with(5.0)
+    operation.assert_awaited_once()
+
+
+def test_mint_rate_guard_rebuilds_when_setting_changes() -> None:
     from routstr.core.settings import settings
-    from routstr.wallet import _MintRateLimiter
+    from routstr.wallet import _MintRateGuard
 
-    with patch.object(settings, "mint_max_requests_per_minute", 20):
-        first = _MintRateLimiter.get("http://mint:3338")
-    with patch.object(settings, "mint_max_requests_per_minute", 10):
-        second = _MintRateLimiter.get("http://mint:3338")
+    with patch.object(settings, "mint_max_concurrency", 4):
+        first = _MintRateGuard.get("http://mint:3338")
+    with patch.object(settings, "mint_max_concurrency", 2):
+        second = _MintRateGuard.get("http://mint:3338")
 
     assert first is not None
     assert second is not None
     assert first is not second
-    assert second._max == 10
+    assert second._max_concurrency == 2
 
 
 @pytest.mark.asyncio
@@ -1425,12 +1437,32 @@ async def test_mint_operation_honors_retry_after_as_minimum() -> None:
     sleep = AsyncMock()
     with patch.object(settings, "mint_retry_max_attempts", 1):
         with patch.object(settings, "mint_operation_timeout_seconds", 0):
-            with patch("routstr.wallet.time.monotonic", return_value=0.1):
-                with patch("routstr.wallet.asyncio.sleep", sleep):
-                    result = await _mint_operation(factory, mint_url="http://mint:3338")
+            with patch.object(settings, "mint_max_concurrency", 1):
+                with patch("routstr.wallet.time.monotonic", return_value=0.1):
+                    with patch("routstr.wallet.asyncio.sleep", sleep):
+                        result = await _mint_operation(
+                            factory, mint_url="http://mint:3338"
+                        )
 
     assert result == "ok"
     sleep.assert_awaited_once_with(60.0)
+
+
+@pytest.mark.asyncio
+async def test_mint_operation_timeout_includes_adaptive_cooldown() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import _mint_operation, _MintRateGuard
+
+    operation = AsyncMock(return_value="unexpected")
+    with patch.object(settings, "mint_max_concurrency", 1):
+        guard = _MintRateGuard.get("http://mint:3338")
+        assert guard is not None
+        guard.apply_cooldown(60)
+        with patch.object(settings, "mint_operation_timeout_seconds", 0.01):
+            with pytest.raises(httpx.TimeoutException, match="total timeout"):
+                await _mint_operation(operation, mint_url="http://mint:3338")
+
+    operation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1492,7 +1524,7 @@ async def test_mint_operation_factory_retry_succeeds() -> None:
 
     with patch.object(settings, "mint_retry_max_attempts", 3):
         with patch.object(settings, "mint_operation_timeout_seconds", 0):
-            with patch.object(settings, "mint_max_requests_per_minute", 0):
+            with patch.object(settings, "mint_max_concurrency", 0):
                 with patch("asyncio.sleep", AsyncMock()):
                     result = await _mint_operation(
                         factory, op_name="test_retry", mint_url="http://mint:3338"
@@ -1518,7 +1550,7 @@ async def test_mint_operation_factory_retry_exhausted() -> None:
 
     with patch.object(settings, "mint_retry_max_attempts", 2):
         with patch.object(settings, "mint_operation_timeout_seconds", 0):
-            with patch.object(settings, "mint_max_requests_per_minute", 0):
+            with patch.object(settings, "mint_max_concurrency", 0):
                 with patch("asyncio.sleep", AsyncMock()):
                     with pytest.raises(httpx.TimeoutException):
                         await _mint_operation(
@@ -1559,7 +1591,7 @@ async def test_lightning_mint_fallback_for_topups() -> None:
 
     with patch.object(settings, "primary_mint", primary):
         with patch.object(settings, "cashu_mints", [primary, secondary]):
-            with patch.object(settings, "mint_max_requests_per_minute", 0):
+            with patch.object(settings, "mint_max_concurrency", 0):
                 with patch.object(settings, "mint_operation_timeout_seconds", 0):
                     with patch("routstr.lightning.get_wallet", side_effect=mock_get):
                         bolt11, quote_id, mint_url = await _request_mint_with_fallback(
@@ -1624,7 +1656,7 @@ async def test_swap_falls_back_to_secondary_mint() -> None:
     with patch.object(settings, "primary_mint", primary):
         with patch.object(settings, "primary_mint_unit", "sat"):
             with patch.object(settings, "cashu_mints", [primary, secondary]):
-                with patch.object(settings, "mint_max_requests_per_minute", 0):
+                with patch.object(settings, "mint_max_concurrency", 0):
                     with patch.object(settings, "mint_operation_timeout_seconds", 0):
                         with patch("asyncio.sleep", AsyncMock()):
                             with patch(
@@ -1674,7 +1706,7 @@ async def test_lightning_mint_fallback_on_429() -> None:
     with patch.object(settings, "primary_mint", primary):
         with patch.object(settings, "cashu_mints", [primary, secondary]):
             with patch.object(settings, "mint_retry_max_attempts", 0):
-                with patch.object(settings, "mint_max_requests_per_minute", 0):
+                with patch.object(settings, "mint_max_concurrency", 0):
                     with patch.object(settings, "mint_operation_timeout_seconds", 0):
                         with patch(
                             "routstr.lightning.get_wallet", side_effect=mock_get
@@ -1713,7 +1745,7 @@ async def test_lightning_mint_fallback_all_fail() -> None:
     with patch.object(settings, "primary_mint", primary):
         with patch.object(settings, "cashu_mints", [primary, secondary]):
             with patch.object(settings, "mint_retry_max_attempts", 0):
-                with patch.object(settings, "mint_max_requests_per_minute", 0):
+                with patch.object(settings, "mint_max_concurrency", 0):
                     with patch.object(settings, "mint_operation_timeout_seconds", 0):
                         with patch(
                             "routstr.lightning.get_wallet", side_effect=mock_get
