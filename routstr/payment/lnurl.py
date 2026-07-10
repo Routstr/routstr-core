@@ -7,8 +7,11 @@ from typing import TypedDict
 import httpx
 from cashu.wallet.wallet import Proof, Wallet
 
-from ..core.settings import settings
-from ..wallet import _mint_operation
+# The Cashu library issues POST /v1/melt/bolt11 with timeout=None, so a hung or
+# very slow mint can block a melt (and any caller, e.g. the payout loop)
+# indefinitely. _mint_operation (imported lazily in raw_send_to_lnurl to avoid
+# a circular import with wallet.py) bounds it via MINT_OPERATION_TIMEOUT_SECONDS.
+MELT_TIMEOUT_SECONDS = 60
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -219,6 +222,8 @@ async def raw_send_to_lnurl(
         lnurl_data["callback_url"], final_amount
     )
 
+    from ..wallet import _mint_operation
+
     melt_quote_resp = await _mint_operation(
         lambda: wallet.melt_quote(invoice=bolt11_invoice),
         op_name="lnurl_melt_quote",
@@ -228,14 +233,22 @@ async def raw_send_to_lnurl(
     if amount:
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
-    _ = await _mint_operation(
-        lambda: wallet.melt(
-            proofs=proofs,
-            invoice=bolt11_invoice,
-            fee_reserve_sat=melt_quote_resp.fee_reserve,
-            quote_id=melt_quote_resp.quote,
-        ),
-        op_name="lnurl_melt",
-        mint_url=str(wallet.url),
-    )
+    try:
+        _ = await asyncio.wait_for(
+            _mint_operation(
+                lambda: wallet.melt(
+                    proofs=proofs,
+                    invoice=bolt11_invoice,
+                    fee_reserve_sat=melt_quote_resp.fee_reserve,
+                    quote_id=melt_quote_resp.quote,
+                ),
+                op_name="lnurl_melt",
+                mint_url=str(wallet.url),
+            ),
+            timeout=MELT_TIMEOUT_SECONDS,
+        )
+    except (httpx.TimeoutException, asyncio.TimeoutError) as e:
+        raise LNURLError(
+            f"Melt timed out after {MELT_TIMEOUT_SECONDS}s (mint unresponsive)"
+        ) from e
     return final_amount

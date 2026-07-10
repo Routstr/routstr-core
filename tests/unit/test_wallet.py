@@ -1337,7 +1337,7 @@ async def test_mint_operation_factory_retry_succeeds() -> None:
 
     calls = 0
 
-    async def factory():
+    async def factory() -> str:
         nonlocal calls
         calls += 1
         if calls < 3:
@@ -1365,7 +1365,7 @@ async def test_mint_operation_factory_retry_exhausted() -> None:
 
     calls = 0
 
-    async def factory():
+    async def factory() -> None:
         nonlocal calls
         calls += 1
         raise TimeoutError("always timeout")

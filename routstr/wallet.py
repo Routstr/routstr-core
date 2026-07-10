@@ -3,10 +3,10 @@ import re
 import socket
 import time
 import typing
-from typing import TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
 
 import httpx
-from cashu.core.base import Proof, Token
+from cashu.core.base import MintQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
@@ -16,6 +16,7 @@ from sqlmodel import col, select, update
 from .core import db, get_logger
 from .core.db import store_cashu_transaction
 from .core.settings import settings
+from .payment.lnurl import raw_send_to_lnurl
 
 # cashu still declares Optional[X] without explicit defaults on MintInfo.
 # Under pydantic v2 those are required, but real mints omit many of them.
@@ -129,8 +130,8 @@ def _is_mint_rate_limited(error: BaseException) -> bool:
 
 
 async def _mint_operation(
-    factory, *, op_name: str = "mint_operation", mint_url: str = ""
-):
+    factory: Callable[[], Awaitable[Any]], *, op_name: str = "mint_operation", mint_url: str = ""
+) -> Any:
     """Wrap a mint API callable with rate limiting, timeout, and retry.
 
     ``factory`` must be a zero-arg callable that returns a fresh coroutine
@@ -207,7 +208,7 @@ async def _mint_operation(
     raise RuntimeError(f"{op_name}: exhausted retries unexpectedly")
 
 
-def _parse_retry_after(headers) -> float | None:
+def _parse_retry_after(headers: Any) -> float | None:
     """Parse a Retry-After header (delta-seconds form) into seconds."""
     raw = headers.get("retry-after") or headers.get("Retry-After")
     if raw is None:
@@ -507,7 +508,7 @@ def _melt_insufficient_shortfall(error: Exception) -> int | None:
 
 async def _request_mint_with_fallback(
     amount: int, *, op_name: str, primary_wallet: Wallet | None = None
-) -> tuple[Wallet, str, object]:
+) -> tuple[Wallet, str, MintQuote]:
     """Try request_mint on the primary mint, fall back to other trusted mints
     on transport or rate-limit failure. Returns the wallet, mint_url, and quote."""
     candidates = [settings.primary_mint] + [
@@ -1178,54 +1179,71 @@ async def fetch_all_balances(
 async def periodic_payout() -> None:
     while True:
         await asyncio.sleep(settings.payout_interval_seconds)
-        print(settings.payout_interval_seconds)
-        if not settings.receive_ln_address:
-            continue
         try:
-            from .payment.lnurl import raw_send_to_lnurl
+            if not settings.receive_ln_address:
+                continue
+
+            # Include the primary mint even if it is not listed in cashu_mints,
+            # matching fetch_all_balances(); otherwise primary-mint funds never
+            # auto-payout.
+            mint_urls: list[str] = list(settings.cashu_mints)
+            if settings.primary_mint and settings.primary_mint not in mint_urls:
+                mint_urls.append(settings.primary_mint)
 
             async with db.create_session() as session:
-                for mint_url in settings.cashu_mints:
+                for mint_url in mint_urls:
                     for unit in ["sat", "msat"]:
-                        wallet = await get_wallet(mint_url, unit)
-                        proofs = get_proofs_per_mint_and_unit(
-                            wallet, mint_url, unit, not_reserved=True
-                        )
-                        proofs = await slow_filter_spend_proofs(proofs, wallet)
-                        await asyncio.sleep(5)
-                        user_balance = await db.balances_for_mint_and_unit(
-                            session, mint_url, unit
-                        )
-                        if unit == "sat":
-                            user_balance = user_balance // 1000
-                        proofs_balance = sum(proof.amount for proof in proofs)
-                        available_balance = proofs_balance - user_balance
-                        # Threshold is configured in sats; convert for msat wallets.
-                        min_amount = (
-                            settings.min_payout_sat
-                            if unit == "sat"
-                            else settings.min_payout_sat * 1000
-                        )
-                        if available_balance > min_amount:
-                            amount_received = await raw_send_to_lnurl(
-                                wallet,
-                                proofs,
-                                settings.receive_ln_address,
-                                unit,
-                                amount=available_balance,
+                        # Isolate failures per mint/unit so one slow or failing
+                        # mint does not abort payout for every other mint/unit.
+                        try:
+                            wallet = await get_wallet(mint_url, unit)
+                            proofs = get_proofs_per_mint_and_unit(
+                                wallet, mint_url, unit, not_reserved=True
                             )
-                            logger.info(
-                                "Payout sent successfully",
+                            proofs = await slow_filter_spend_proofs(proofs, wallet)
+                            await asyncio.sleep(5)
+                            user_balance = await db.balances_for_mint_and_unit(
+                                session, mint_url, unit
+                            )
+                            if unit == "sat":
+                                user_balance = user_balance // 1000
+                            proofs_balance = sum(proof.amount for proof in proofs)
+                            available_balance = proofs_balance - user_balance
+                            # Threshold is configured in sats; convert for msat wallets.
+                            min_amount = (
+                                settings.min_payout_sat
+                                if unit == "sat"
+                                else settings.min_payout_sat * 1000
+                            )
+                            if available_balance > min_amount:
+                                amount_received = await raw_send_to_lnurl(
+                                    wallet,
+                                    proofs,
+                                    settings.receive_ln_address,
+                                    unit,
+                                    amount=available_balance,
+                                )
+                                logger.info(
+                                    "Payout sent successfully",
+                                    extra={
+                                        "mint_url": mint_url,
+                                        "unit": unit,
+                                        "balance": available_balance,
+                                        "amount_received": amount_received,
+                                    },
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Error sending payout: {type(e).__name__}",
                                 extra={
+                                    "error": str(e),
                                     "mint_url": mint_url,
                                     "unit": unit,
-                                    "balance": available_balance,
-                                    "amount_received": amount_received,
                                 },
                             )
         except Exception as e:
             logger.error(
-                f"Error sending payout: {type(e).__name__}",
+                f"Error in periodic payout cycle: {type(e).__name__}",
                 extra={"error": str(e)},
             )
 
@@ -1298,7 +1316,6 @@ async def periodic_routstr_fee_payout() -> None:
     while True:
         await asyncio.sleep(ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS)
         try:
-            from .payment.lnurl import raw_send_to_lnurl
 
             async with db.create_session() as session:
                 fee = await db.get_routstr_fee(session)
@@ -1328,7 +1345,6 @@ async def periodic_routstr_fee_payout() -> None:
 
 
 async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
-    from .payment.lnurl import raw_send_to_lnurl
 
     wallet = await get_wallet(mint, unit)
     proofs = wallet._get_proofs_per_keyset(wallet.proofs)[wallet.keyset_id]
