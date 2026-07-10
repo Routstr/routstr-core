@@ -62,60 +62,46 @@ _TRANSPORT_EXC_TYPES: tuple[type[BaseException], ...] = (
 )
 
 
-class _MintRateLimiter:
-    """Per-mint token-bucket rate limiter.
+class _MintRateGuard:
+    """Bound concurrency and adapt to actual per-mint 429 responses."""
 
-    Enforces a maximum number of mint API requests per minute per mint URL.
-    When the bucket is empty, callers block until a token is available.
-    This prevents the node runner from being rate-limited or blocked by
-    mints that enforce request quotas.
-    """
-
-    _limiters: dict[str, "_MintRateLimiter"] = {}
+    _guards: dict[str, "_MintRateGuard"] = {}
 
     @classmethod
-    def get(cls, mint_url: str) -> "_MintRateLimiter | None":
-        rpm = settings.mint_max_requests_per_minute
-        if rpm <= 0:
+    def get(cls, mint_url: str) -> "_MintRateGuard | None":
+        concurrency = settings.mint_max_concurrency
+        if concurrency <= 0:
             return None
-        limiter = cls._limiters.get(mint_url)
-        if limiter is None or limiter._max != rpm:
-            limiter = cls(mint_url, rpm)
-            cls._limiters[mint_url] = limiter
-        return limiter
+        guard = cls._guards.get(mint_url)
+        if guard is None or guard._max_concurrency != concurrency:
+            guard = cls(mint_url, concurrency)
+            cls._guards[mint_url] = guard
+        return guard
 
-    def __init__(self, mint_url: str, max_per_minute: int):
+    def __init__(self, mint_url: str, max_concurrency: int):
         self._mint_url = mint_url
-        self._max = max_per_minute
-        # Refill rate: tokens per second
-        self._refill_rate = max_per_minute / 60.0
-        self._tokens: float = float(max_per_minute)
-        self._last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
+        self._max_concurrency = max_concurrency
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._cooldown_until = 0.0
 
-    async def acquire(self) -> None:
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                elapsed = now - self._last_refill
-                self._tokens = min(
-                    self._max, self._tokens + elapsed * self._refill_rate
-                )
-                self._last_refill = now
-                if self._tokens >= 1:
-                    self._tokens -= 1
-                    return
+    def apply_cooldown(self, delay: float) -> None:
+        self._cooldown_until = max(
+            self._cooldown_until, time.monotonic() + max(0.0, delay)
+        )
 
-                wait = (1 - self._tokens) / self._refill_rate
+    async def run(self, factory: Callable[[], Awaitable[Any]]) -> Any:
+        async with self._semaphore:
+            wait = self._cooldown_until - time.monotonic()
+            if wait > 0:
                 logger.debug(
-                    "Mint rate limiter: throttling",
+                    "Mint rate guard: cooling down",
                     extra={
                         "mint_url": self._mint_url,
                         "wait_seconds": round(wait, 2),
-                        "tokens_available": round(self._tokens, 2),
                     },
                 )
                 await asyncio.sleep(wait)
+            return await factory()
 
 
 def _is_mint_rate_limited(error: BaseException) -> bool:
@@ -141,80 +127,77 @@ async def _mint_operation(
     mint_url: str = "",
     retry_timeouts: bool = True,
 ) -> Any:
-    """Wrap a mint API callable with rate limiting, timeout, and retry.
+    """Run a mint operation with bounded concurrency and adaptive cooldown.
 
-    ``factory`` must be a zero-arg callable that returns a fresh coroutine
-    each call — a pre-created coroutine can only be awaited once, so on retry
-    the original would be dead.
+    The timeout covers concurrency queueing, 429 cooldown, backoff, and network
+    work together. ``factory`` must return a fresh coroutine for every retry.
     """
-    limiter = _MintRateLimiter.get(mint_url) if mint_url else None
+    guard = _MintRateGuard.get(mint_url) if mint_url else None
     timeout = settings.mint_operation_timeout_seconds
     max_attempts = settings.mint_retry_max_attempts + 1
 
-    last_exc: Exception | None = None
-    for attempt in range(max_attempts):
-        if limiter is not None:
-            await limiter.acquire()
+    async def invoke() -> Any:
+        if guard is not None:
+            return await guard.run(factory)
+        return await factory()
 
-        try:
-            if timeout > 0:
-                return await asyncio.wait_for(factory(), timeout=timeout)
-            return await factory()
-        except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-            last_exc = exc
-            if retry_timeouts and attempt < max_attempts - 1:
-                backoff = (2**attempt) + (time.monotonic() % 1.0)
-                logger.warning(
-                    "Mint operation timed out, retrying",
-                    extra={
-                        "op_name": op_name,
-                        "mint_url": mint_url,
-                        "attempt": attempt + 1,
-                        "backoff_seconds": round(backoff, 2),
-                    },
-                )
-                await asyncio.sleep(backoff)
-                continue
-            raise httpx.TimeoutException(
-                f"{op_name} timed out after {timeout}s (retried {attempt + 1}x)"
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            if _is_mint_rate_limited(exc) and attempt < max_attempts - 1:
-                backoff = (2**attempt) + (time.monotonic() % 1.0)
-                retry_after = _parse_retry_after(exc.response.headers)
-                if retry_after is not None:
-                    backoff = max(retry_after, backoff)
-                logger.warning(
-                    "Mint returned 429, backing off",
-                    extra={
-                        "op_name": op_name,
-                        "mint_url": mint_url,
-                        "attempt": attempt + 1,
-                        "backoff_seconds": round(backoff, 2),
-                    },
-                )
-                await asyncio.sleep(backoff)
-                continue
-            raise
-        except Exception as exc:
-            if _is_mint_rate_limited(exc) and attempt < max_attempts - 1:
-                backoff = (2**attempt) + (time.monotonic() % 1.0)
-                logger.warning(
-                    "Mint rate-limited, backing off",
-                    extra={
-                        "op_name": op_name,
-                        "mint_url": mint_url,
-                        "attempt": attempt + 1,
-                        "backoff_seconds": round(backoff, 2),
-                    },
-                )
-                await asyncio.sleep(backoff)
-                continue
-            raise
+    async def run_with_retries() -> Any:
+        for attempt in range(max_attempts):
+            try:
+                return await invoke()
+            except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+                if retry_timeouts and attempt < max_attempts - 1:
+                    backoff = (2**attempt) + (time.monotonic() % 1.0)
+                    logger.warning(
+                        "Mint operation timed out, retrying",
+                        extra={
+                            "op_name": op_name,
+                            "mint_url": mint_url,
+                            "attempt": attempt + 1,
+                            "backoff_seconds": round(backoff, 2),
+                        },
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise httpx.TimeoutException(
+                    f"{op_name} timed out (attempts: {attempt + 1})"
+                ) from exc
+            except Exception as exc:
+                if not _is_mint_rate_limited(exc):
+                    raise
 
-    if last_exc:
-        raise last_exc
-    raise RuntimeError(f"{op_name}: exhausted retries unexpectedly")
+                backoff = (2**attempt) + (time.monotonic() % 1.0)
+                if isinstance(exc, httpx.HTTPStatusError):
+                    retry_after = _parse_retry_after(exc.response.headers)
+                    if retry_after is not None:
+                        backoff = max(retry_after, backoff)
+                if guard is not None:
+                    guard.apply_cooldown(backoff)
+
+                if attempt >= max_attempts - 1:
+                    raise
+                logger.warning(
+                    "Mint rate-limited, applying cooldown",
+                    extra={
+                        "op_name": op_name,
+                        "mint_url": mint_url,
+                        "attempt": attempt + 1,
+                        "cooldown_seconds": round(backoff, 2),
+                    },
+                )
+                if guard is None:
+                    await asyncio.sleep(backoff)
+
+        raise RuntimeError(f"{op_name}: exhausted retries unexpectedly")
+
+    try:
+        if timeout > 0:
+            return await asyncio.wait_for(run_with_retries(), timeout=timeout)
+        return await run_with_retries()
+    except asyncio.TimeoutError as exc:
+        raise httpx.TimeoutException(
+            f"{op_name} exceeded its {timeout}s total timeout"
+        ) from exc
 
 
 def _parse_retry_after(headers: Any) -> float | None:
