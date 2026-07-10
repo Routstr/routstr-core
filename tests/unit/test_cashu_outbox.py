@@ -9,9 +9,12 @@ These cover the guarantees introduced by the refund-token persistence fix:
 import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, select
 
@@ -26,7 +29,7 @@ from routstr.core.db import (
 )
 
 
-def _in_memory_engine():
+def _in_memory_engine() -> AsyncEngine:
     return create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -35,7 +38,9 @@ def _in_memory_engine():
 
 
 @pytest.fixture
-async def fresh_engine(monkeypatch, tmp_path):
+async def fresh_engine(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> AsyncIterator[tuple[AsyncEngine, Path]]:
     """Point db.engine at an isolated in-memory DB and the outbox at a tmp file."""
     engine = _in_memory_engine()
     async with engine.begin() as conn:
@@ -52,7 +57,9 @@ async def fresh_engine(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_store_is_idempotent_on_duplicate(fresh_engine):
+async def test_store_is_idempotent_on_duplicate(
+    fresh_engine: tuple[AsyncEngine, Path]
+) -> None:
     """Inserting the same (token, type) twice yields exactly one row."""
     _, _ = fresh_engine
     ok1 = await store_cashu_transaction(
@@ -71,7 +78,9 @@ async def test_store_is_idempotent_on_duplicate(fresh_engine):
 
 
 @pytest.mark.asyncio
-async def test_with_retry_succeeds_first_try(fresh_engine):
+async def test_with_retry_succeeds_first_try(
+    fresh_engine: tuple[AsyncEngine, Path]
+) -> None:
     _, _ = fresh_engine
     ok = await store_cashu_transaction_with_retry(
         token="cashuAtokenB", amount=50, unit="sat", typ="out", request_id="req-2"
@@ -83,13 +92,15 @@ async def test_with_retry_succeeds_first_try(fresh_engine):
 
 
 @pytest.mark.asyncio
-async def test_with_retry_succeeds_after_transient_failure(fresh_engine, monkeypatch):
+async def test_with_retry_succeeds_after_transient_failure(
+    fresh_engine: tuple[AsyncEngine, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """First attempt fails, second succeeds; no outbox spool, one row."""
     _, _ = fresh_engine
     calls = {"n": 0}
     real_store = store_cashu_transaction
 
-    async def flaky_store(*args, **kwargs):
+    async def flaky_store(*args: Any, **kwargs: Any) -> bool:
         calls["n"] += 1
         if calls["n"] == 1:
             return False
@@ -112,12 +123,12 @@ async def test_with_retry_succeeds_after_transient_failure(fresh_engine, monkeyp
 
 @pytest.mark.asyncio
 async def test_with_retry_spools_full_token_to_outbox_on_exhaustion(
-    fresh_engine, monkeypatch
-):
+    fresh_engine: tuple[AsyncEngine, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """When the DB stays down, the full token is spooled to the outbox file."""
     _, outbox = fresh_engine
 
-    async def always_fail(*args, **kwargs):
+    async def always_fail(*args: Any, **kwargs: Any) -> bool:
         return False
 
     monkeypatch.setattr(db, "store_cashu_transaction", always_fail)
@@ -141,7 +152,9 @@ async def test_with_retry_spools_full_token_to_outbox_on_exhaustion(
 
 
 @pytest.mark.asyncio
-async def test_replay_drains_outbox_into_db(fresh_engine):
+async def test_replay_drains_outbox_into_db(
+    fresh_engine: tuple[AsyncEngine, Path]
+) -> None:
     """Outbox entries are persisted on replay and the outbox is cleared."""
     _, outbox = fresh_engine
     entry = {
@@ -172,7 +185,7 @@ async def test_replay_drains_outbox_into_db(fresh_engine):
 
 
 @pytest.mark.asyncio
-async def test_replay_is_idempotent(fresh_engine):
+async def test_replay_is_idempotent(fresh_engine: tuple[AsyncEngine, Path]) -> None:
     """Replaying an outbox whose entries already exist in the DB drops them."""
     _, outbox = fresh_engine
     # Pre-seed the DB row.
@@ -206,7 +219,9 @@ async def test_replay_is_idempotent(fresh_engine):
 
 
 @pytest.mark.asyncio
-async def test_replay_keeps_entries_that_still_fail(fresh_engine, monkeypatch):
+async def test_replay_keeps_entries_that_still_fail(
+    fresh_engine: tuple[AsyncEngine, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """If replay still can't persist an entry, it stays in the outbox."""
     _, outbox = fresh_engine
     monkeypatch.setattr(db, "store_cashu_transaction", lambda *a, **k: _afail())
@@ -236,7 +251,9 @@ async def test_replay_keeps_entries_that_still_fail(fresh_engine, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_replay_drops_corrupt_lines_and_persists_valid_ones(fresh_engine):
+async def test_replay_drops_corrupt_lines_and_persists_valid_ones(
+    fresh_engine: tuple[AsyncEngine, Path]
+) -> None:
     """Corrupt JSONL lines are dropped; valid entries are persisted."""
     _, outbox = fresh_engine
     valid_entry = {
@@ -269,7 +286,9 @@ async def test_replay_drops_corrupt_lines_and_persists_valid_ones(fresh_engine):
 
 
 @pytest.mark.asyncio
-async def test_store_concurrent_duplicate_insert_yields_one_row(monkeypatch, tmp_path):
+async def test_store_concurrent_duplicate_insert_yields_one_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """Two concurrent stores of the same (token, type) yield one row, both True."""
     db_file = tmp_path / "concurrent.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
@@ -298,7 +317,9 @@ async def test_store_concurrent_duplicate_insert_yields_one_row(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_replay_under_concurrent_replay_is_idempotent(fresh_engine):
+async def test_replay_under_concurrent_replay_is_idempotent(
+    fresh_engine: tuple[AsyncEngine, Path]
+) -> None:
     """Two concurrent replay calls on a seeded outbox yield one row, outbox empty."""
     _, outbox = fresh_engine
     entry = {
@@ -328,7 +349,9 @@ async def test_replay_under_concurrent_replay_is_idempotent(fresh_engine):
 
 
 @pytest.mark.asyncio
-async def test_replay_all_drains_orphaned_outbox_files(monkeypatch, tmp_path):
+async def test_replay_all_drains_orphaned_outbox_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """replay_all_outbox_files drains every per-PID outbox file, including orphans."""
     engine = _in_memory_engine()
     async with engine.begin() as conn:
@@ -342,7 +365,7 @@ async def test_replay_all_drains_orphaned_outbox_files(monkeypatch, tmp_path):
         lambda: tmp_path / f"cashu_outbox.{os.getpid()}.jsonl",
     )
 
-    def _make_entry(token: str, oid: str) -> dict:
+    def _make_entry(token: str, oid: str) -> dict[str, object]:
         return {
             "outbox_id": oid,
             "queued_at": 1,
@@ -379,10 +402,10 @@ async def test_replay_all_drains_orphaned_outbox_files(monkeypatch, tmp_path):
 # --- tiny async helpers (can't use `await` inside lambdas) ---
 
 
-async def _asyncio_sleep_zero():
+async def _asyncio_sleep_zero() -> None:
     """No-op async sleep replacement for fast tests."""
     return None
 
 
-async def _afail():
+async def _afail() -> bool:
     return False
