@@ -483,6 +483,86 @@ class TestComputeEhbpActualCost:
             call_args = mock_calc.call_args
             assert call_args[0][0]["model"] == "llama3-3-70b"
 
+    @pytest.mark.asyncio
+    async def test_case_insensitive_model_match(self) -> None:
+        """Casing differences between the header and forwarded_model_id
+        should not trigger a spurious mismatch."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2"
+        model_obj.forwarded_model_id = "glm-5-2"  # lowercase
+        with patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            # Header returns uppercase — same model, different casing
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=GLM-5-2",
+                model_obj,
+                100_000,
+            )
+            assert "actual_model" not in result
+            # No mismatch: requested model pricing used
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-glm-5-2"
+            # get_model_instance must not be consulted for a casing-only diff
+            assert not any(
+                call[0] == ("GLM-5-2",)
+                for call in mock_calc.call_args_list
+            )
+
+    @pytest.mark.asyncio
+    async def test_date_versioned_alias_resolves_to_requested(self) -> None:
+        """When the served model is a date-versioned alias that resolves back
+        to the requested model, no mismatch is propagated."""
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2"
+        model_obj.forwarded_model_id = "glm-5-2"
+
+        # get_model_instance strips the date suffix and returns the SAME model
+        actual_model_obj = MagicMock()
+        actual_model_obj.id = "tinfoil-glm-5-2"  # identical to requested
+        actual_model_obj.forwarded_model_id = "glm-5-2"
+
+        with patch(
+            "routstr.proxy.get_model_instance",
+            return_value=actual_model_obj,
+        ), patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=10,
+                total_msats=15,
+                total_usd=0.0,
+                input_tokens=42,
+                output_tokens=10,
+            )
+            # Tinfoil returns a date-versioned ID
+            result = await _compute_ehbp_actual_cost(
+                "prompt=42,completion=10,total=52,model=glm-5-2-20260415",
+                model_obj,
+                100_000,
+            )
+            # No mismatch — resolves to the same model
+            assert "actual_model" not in result
+            call_args = mock_calc.call_args
+            assert call_args[0][0]["model"] == "tinfoil-glm-5-2"
+
 
 # ---------------------------------------------------------------------------
 # TinfoilUpstreamProvider

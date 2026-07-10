@@ -331,14 +331,24 @@ async def _compute_ehbp_actual_cost(
     actual_model: str | None = usage_dict.pop("model", None)  # type: ignore[arg-type]
     pricing_model_id = model_obj.id
     expected_upstream_model = model_obj.forwarded_model_id or model_obj.id
-    if actual_model and actual_model != expected_upstream_model:
+    # Case-insensitive comparison: ``get_model_instance`` lowercases lookup
+    # keys, so a casing difference between the header and the configured
+    # ``forwarded_model_id`` (e.g. ``GLM-5-2`` vs ``glm-5-2``) should not
+    # be treated as a real mismatch.
+    if (
+        actual_model
+        and actual_model.lower() != expected_upstream_model.lower()
+    ):
         from ..proxy import get_model_instance
 
         # ``forwarded_model_id`` values are registered as routable aliases in
         # the global model map, so ``get_model_instance`` will find a model
-        # whose upstream ID matches the actually-served model.
+        # whose upstream ID matches the actually-served model.  It also strips
+        # date-version suffixes (e.g. ``glm-5-2-20260415`` -> ``glm-5-2``),
+        # so a resolved model that is actually the *same* as the requested
+        # one is treated as a non-mismatch.
         actual_model_obj = get_model_instance(actual_model)
-        if actual_model_obj:
+        if actual_model_obj and actual_model_obj.id != model_obj.id:
             logger.info(
                 "EHBP served model differs from requested, using actual "
                 "model for pricing",
@@ -350,16 +360,21 @@ async def _compute_ehbp_actual_cost(
             )
             pricing_model_id = actual_model_obj.id
         else:
-            logger.warning(
-                "EHBP served model not found in registry, falling back to "
-                "requested model for pricing",
-                extra={
-                    "requested_model": model_obj.id,
-                    "expected_upstream_model": expected_upstream_model,
-                    "actual_model": actual_model,
-                },
-            )
-            actual_model = None  # do not propagate unknown model
+            # Either the served model is not in the registry (unknown), or
+            # it resolves back to the requested model (e.g. a date-versioned
+            # alias like ``glm-5-2-20260415``).  In both cases use the
+            # requested model's pricing and do not propagate actual_model.
+            if actual_model_obj is None:
+                logger.warning(
+                    "EHBP served model not found in registry, falling back "
+                    "to requested model for pricing",
+                    extra={
+                        "requested_model": model_obj.id,
+                        "expected_upstream_model": expected_upstream_model,
+                        "actual_model": actual_model,
+                    },
+                )
+            actual_model = None  # do not propagate unknown / same model
     else:
         # Models match or no model in header — use requested model's pricing.
         actual_model = None
