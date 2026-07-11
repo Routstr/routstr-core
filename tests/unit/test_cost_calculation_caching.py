@@ -532,6 +532,35 @@ async def test_total_only_usd_cost_uses_model_prices_for_component_split(
     assert result.output_msats == 6671
 
 
+@pytest.mark.asyncio
+async def test_upstream_inference_cost_details_set_nonzero_components() -> None:
+    """OpenAI-compatible upstream inference aliases retain their exact split."""
+    response = {
+        "model": "z-ai/glm-5.2-20260616",
+        "usage": {
+            "prompt_tokens": 211,
+            "completion_tokens": 500,
+            "total_tokens": 711,
+            "cost": 0.00242155,
+            "cost_details": {
+                "upstream_inference_cost": 0.00242155,
+                "upstream_inference_prompt_cost": 0.00022155,
+                "upstream_inference_completions_cost": 0.0022,
+            },
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_tokens == 211
+    assert result.output_tokens == 500
+    assert result.input_msats == 4431
+    assert result.output_msats == 44000
+    assert result.total_msats == 48431
+    assert result.input_msats + result.output_msats == result.total_msats
+
+
 # ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================

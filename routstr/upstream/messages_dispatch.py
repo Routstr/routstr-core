@@ -317,6 +317,27 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
         total_cost += _coerce_float(usage.get("total_cost"))
         input_cost += _coerce_float(usage.get("input_cost"))
         output_cost += _coerce_float(usage.get("output_cost"))
+        cost_details = usage.get("cost_details")
+        if isinstance(cost_details, dict):
+            total_cost = max(
+                total_cost,
+                _coerce_float(cost_details.get("total_cost")),
+                _coerce_float(cost_details.get("upstream_inference_cost")),
+            )
+            input_cost = max(
+                input_cost,
+                _coerce_float(cost_details.get("input_cost")),
+                _coerce_float(
+                    cost_details.get("upstream_inference_prompt_cost")
+                ),
+            )
+            output_cost = max(
+                output_cost,
+                _coerce_float(cost_details.get("output_cost")),
+                _coerce_float(
+                    cost_details.get("upstream_inference_completions_cost")
+                ),
+            )
 
     msg_for_meta = event.get("message")
     if isinstance(msg_for_meta, dict):
@@ -340,14 +361,21 @@ def annotate_event(event: dict, requested_model: str | None) -> AnnotatedEvent:
         total_cost = max(
             total_cost,
             _coerce_float(root_cost_details.get("total_cost")),
+            _coerce_float(root_cost_details.get("upstream_inference_cost")),
         )
         input_cost = max(
             input_cost,
             _coerce_float(root_cost_details.get("input_cost")),
+            _coerce_float(
+                root_cost_details.get("upstream_inference_prompt_cost")
+            ),
         )
         output_cost = max(
             output_cost,
             _coerce_float(root_cost_details.get("output_cost")),
+            _coerce_float(
+                root_cost_details.get("upstream_inference_completions_cost")
+            ),
         )
 
     event_type = str(event.get("type") or "")

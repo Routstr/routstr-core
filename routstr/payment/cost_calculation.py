@@ -1,4 +1,5 @@
 import math
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from pydantic.v1 import BaseModel
 
@@ -157,11 +158,18 @@ async def calculate_cost(
                 },
             )
         try:
-            input_usd = _coerce_usd(
-                usage_data.get("cost_details", {}).get("input_cost", 0)
+            cost_details = usage_data.get("cost_details", {})
+            if not isinstance(cost_details, dict):
+                cost_details = {}
+            input_usd = _first_usd(
+                cost_details,
+                "input_cost",
+                "upstream_inference_prompt_cost",
             )
-            output_usd = _coerce_usd(
-                usage_data.get("cost_details", {}).get("output_cost", 0)
+            output_usd = _first_usd(
+                cost_details,
+                "output_cost",
+                "upstream_inference_completions_cost",
             )
             return _calculate_from_usd_cost(
                 usd_cost,
@@ -256,6 +264,15 @@ def _coerce_usd(value: object) -> float:
         return 0.0
 
 
+def _first_usd(source: dict, *fields: str) -> float:
+    """Return the first positive USD value among equivalent provider fields."""
+    for field in fields:
+        value = _coerce_usd(source.get(field))
+        if value > 0:
+            return value
+    return 0.0
+
+
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
     """Resolve USD cost with clear priority order.
 
@@ -263,7 +280,11 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
     """
     cost_details = usage_data.get("cost_details")
     if isinstance(cost_details, dict):
-        cost = _coerce_usd(cost_details.get("total_cost"))
+        cost = _first_usd(
+            cost_details,
+            "total_cost",
+            "upstream_inference_cost",
+        )
         if cost > 0:
             return cost
 
@@ -359,19 +380,32 @@ def _calculate_from_usd_cost(
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     provider_fee = _resolve_provider_fee(response_data.get("model", ""))
-    usd_cost = usd_cost * provider_fee
-    input_usd = input_usd * provider_fee
-    output_usd = output_usd * provider_fee
-    sats_per_usd = 1.0 / sats_usd_price()
-    cost_in_sats = usd_cost * sats_per_usd
-    cost_in_msats = math.ceil(cost_in_sats * 1000)
+    fee_decimal = Decimal(str(provider_fee))
+    usd_cost_decimal = Decimal(str(usd_cost)) * fee_decimal
+    input_usd_decimal = Decimal(str(input_usd)) * fee_decimal
+    output_usd_decimal = Decimal(str(output_usd)) * fee_decimal
+    sats_usd_decimal = Decimal(str(sats_usd_price()))
 
-    if input_usd > 0 or output_usd > 0:
+    usd_cost = float(usd_cost_decimal)
+    input_usd = float(input_usd_decimal)
+    output_usd = float(output_usd_decimal)
+    cost_in_sats = float(usd_cost_decimal / sats_usd_decimal)
+    cost_in_msats = int(
+        (usd_cost_decimal * Decimal(1000) / sats_usd_decimal).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+    )
+
+    if input_usd_decimal > 0 or output_usd_decimal > 0:
         # The total is the authoritative billed amount. Allocating that integer
         # total proportionally avoids losing sub-millisatoshi remainders when
         # input and output components are each truncated independently.
-        component_usd = input_usd + output_usd
-        input_msats = math.floor(cost_in_msats * input_usd / component_usd)
+        component_usd = input_usd_decimal + output_usd_decimal
+        input_msats = int(
+            (
+                Decimal(cost_in_msats) * input_usd_decimal / component_usd
+            ).to_integral_value(rounding=ROUND_FLOOR)
+        )
         output_msats = cost_in_msats - input_msats
     else:
         # Providers often report only a total USD cost. Derive the visible
