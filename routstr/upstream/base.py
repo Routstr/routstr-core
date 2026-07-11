@@ -1748,14 +1748,19 @@ class BaseUpstreamProvider:
                     total_cost = max(
                         total_cost,
                         _coerce_usd(cd.get("total_cost")),
+                        _coerce_usd(cd.get("upstream_inference_cost")),
                     )
                     input_cost = max(
                         input_cost,
                         _coerce_usd(cd.get("input_cost")),
+                        _coerce_usd(cd.get("upstream_inference_prompt_cost")),
                     )
                     output_cost = max(
                         output_cost,
                         _coerce_usd(cd.get("output_cost")),
+                        _coerce_usd(
+                            cd.get("upstream_inference_completions_cost")
+                        ),
                     )
                 for field in ("total_cost", "cost"):
                     total_cost = max(

@@ -161,6 +161,31 @@ def test_cost_details_extracted_from_event_root() -> None:
     assert result.output_cost == 0.005
 
 
+@pytest.mark.unit
+def test_upstream_inference_cost_details_extracted_from_usage() -> None:
+    """Provider inference aliases inside usage preserve the USD split."""
+    event = {
+        "usage": {
+            "input_tokens": 211,
+            "output_tokens": 500,
+            "cost": 0.00242155,
+            "cost_details": {
+                "upstream_inference_cost": 0.00242155,
+                "upstream_inference_prompt_cost": 0.00022155,
+                "upstream_inference_completions_cost": 0.0022,
+            },
+        }
+    }
+
+    result = annotate_event(event, None)
+
+    assert result.input_tokens == 211
+    assert result.output_tokens == 500
+    assert result.total_cost == 0.00242155
+    assert result.input_cost == 0.00022155
+    assert result.output_cost == 0.0022
+
+
 # ============================================================================
 # Test 7: No Duplicated Dict Lookups
 # ============================================================================
