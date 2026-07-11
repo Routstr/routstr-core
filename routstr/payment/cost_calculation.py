@@ -111,6 +111,12 @@ async def calculate_cost(
     if not isinstance(usage_data, dict):
         usage_data = {}
 
+    logger.warning(
+        "Upstream response cost and usage: cost=%s usage=%s",
+        usage_data.get("cost"),
+        usage_data,
+    )
+
     input_tokens = usage.input_tokens
     output_tokens = usage.output_tokens
     cache_read_tokens = usage.cache_read_tokens
