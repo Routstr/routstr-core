@@ -290,7 +290,8 @@ class BaseUpstreamProvider:
         ):
             logger.warning(
                 "Repairing missing client cost breakdown before response: "
-                "cost=%s",
+                "model=%s cost=%s",
+                response_json.get("model", "unknown"),
                 cost_dict,
             )
             output_msats = total_msats * output_tokens // priced_tokens
@@ -300,7 +301,11 @@ class BaseUpstreamProvider:
             cost_dict["input_msats"] = input_msats
             cost_dict["output_msats"] = output_msats
 
-        logger.warning("Client-facing cost metadata: cost=%s", cost_dict)
+        logger.warning(
+            "Client-facing cost metadata: model=%s cost=%s",
+            response_json.get("model", "unknown"),
+            cost_dict,
+        )
 
         sats_cost = total_msats // 1000
 

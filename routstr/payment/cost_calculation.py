@@ -112,7 +112,8 @@ async def calculate_cost(
         usage_data = {}
 
     logger.warning(
-        "Upstream response cost and usage: cost=%s usage=%s",
+        "Upstream response cost and usage: model=%s cost=%s usage=%s",
+        response_data.get("model", "unknown"),
         usage_data.get("cost"),
         usage_data,
     )
