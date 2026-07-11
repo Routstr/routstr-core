@@ -5,7 +5,7 @@ edge cases, and billing accuracy.
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -498,6 +498,38 @@ async def test_small_usd_cost_components_sum_to_rounded_total(
     assert isinstance(result, CostData)
     assert result.total_msats == expected_msats
     assert result.input_msats + result.output_msats == result.total_msats
+
+
+@pytest.mark.asyncio
+async def test_total_only_usd_cost_uses_model_prices_for_component_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reported total is split by priced tokens, not raw token counts."""
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    response = {
+        "model": "z-ai/glm-5.2-20260616",
+        "usage": {
+            "prompt_tokens": 375,
+            "completion_tokens": 218,
+            "total_cost": 0.00039088,
+        },
+    }
+    pricing = Mock(
+        prompt=0.0001,
+        completion=0.001,
+        input_cache_read=0.0001,
+        input_cache_write=0.0001,
+    )
+    model = Mock(sats_pricing=pricing)
+
+    with patch("routstr.proxy.get_model_instance", return_value=model):
+        result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 7818
+    assert result.input_msats + result.output_msats == result.total_msats
+    assert result.input_msats == 1147
+    assert result.output_msats == 6671
 
 
 # ============================================================================

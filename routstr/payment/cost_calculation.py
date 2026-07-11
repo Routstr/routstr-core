@@ -374,16 +374,38 @@ def _calculate_from_usd_cost(
         input_msats = math.floor(cost_in_msats * input_usd / component_usd)
         output_msats = cost_in_msats - input_msats
     else:
-        effective_input_tokens = (
-            input_tokens + cache_read_tokens + cache_creation_tokens
+        # Providers often report only a total USD cost. Derive the visible
+        # input/output split from the model's relative token prices; raw token
+        # counts alone are misleading when completion tokens cost more.
+        try:
+            pricing_rates = _get_pricing_rates(response_data)
+        except ValueError:
+            pricing_rates = None
+
+        if pricing_rates is None:
+            input_rate = float(settings.fixed_per_1k_input_tokens) * 1000.0
+            output_rate = float(settings.fixed_per_1k_output_tokens) * 1000.0
+            cache_read_rate = input_rate
+            cache_creation_rate = input_rate
+        else:
+            input_rate, output_rate, cache_read_rate, cache_creation_rate = (
+                pricing_rates
+            )
+
+        input_weight = (
+            input_tokens * input_rate
+            + cache_read_tokens * cache_read_rate
+            + cache_creation_tokens * cache_creation_rate
         )
-        total_tokens = effective_input_tokens + output_tokens
-        input_msats = (
-            int(cost_in_msats * effective_input_tokens / total_tokens)
-            if total_tokens > 0
-            else 0
-        )
-        output_msats = cost_in_msats - input_msats
+        output_weight = output_tokens * output_rate
+        total_weight = input_weight + output_weight
+
+        if total_weight > 0:
+            input_msats = math.floor(cost_in_msats * input_weight / total_weight)
+            output_msats = cost_in_msats - input_msats
+        else:
+            input_msats = 0
+            output_msats = cost_in_msats
 
     logger.info(
         "Using cost from usage data/details",
