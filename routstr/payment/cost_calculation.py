@@ -367,8 +367,12 @@ def _calculate_from_usd_cost(
     cost_in_msats = math.ceil(cost_in_sats * 1000)
 
     if input_usd > 0 or output_usd > 0:
-        input_msats = int((input_usd * sats_per_usd) * 1000)
-        output_msats = int((output_usd * sats_per_usd) * 1000)
+        # The total is the authoritative billed amount. Allocating that integer
+        # total proportionally avoids losing sub-millisatoshi remainders when
+        # input and output components are each truncated independently.
+        component_usd = input_usd + output_usd
+        input_msats = math.floor(cost_in_msats * input_usd / component_usd)
+        output_msats = cost_in_msats - input_msats
     else:
         effective_input_tokens = (
             input_tokens + cache_read_tokens + cache_creation_tokens
