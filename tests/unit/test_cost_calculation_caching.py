@@ -5,7 +5,7 @@ edge cases, and billing accuracy.
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -463,6 +463,73 @@ async def test_cache_read_only_usd_cost_response_is_billed(
     assert result.total_msats == 200000
     assert result.total_usd == 0.01
     assert result.cache_read_input_tokens == 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("total_cost", "input_cost", "output_cost", "expected_msats"),
+    [
+        (0.000471, 0.00023451, 0.00023649, 9420),
+        (0.00000004, 0.00000002, 0.00000002, 1),
+    ],
+)
+async def test_small_usd_cost_components_sum_to_rounded_total(
+    total_cost: float,
+    input_cost: float,
+    output_cost: float,
+    expected_msats: int,
+) -> None:
+    """Small USD component costs must retain every billed millisatoshi."""
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "cost_details": {
+                "total_cost": total_cost,
+                "input_cost": input_cost,
+                "output_cost": output_cost,
+            },
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == expected_msats
+    assert result.input_msats + result.output_msats == result.total_msats
+
+
+@pytest.mark.asyncio
+async def test_total_only_usd_cost_uses_model_prices_for_component_split(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reported total is split by priced tokens, not raw token counts."""
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    response = {
+        "model": "z-ai/glm-5.2-20260616",
+        "usage": {
+            "prompt_tokens": 375,
+            "completion_tokens": 218,
+            "total_cost": 0.00039088,
+        },
+    }
+    pricing = Mock(
+        prompt=0.0001,
+        completion=0.001,
+        input_cache_read=0.0001,
+        input_cache_write=0.0001,
+    )
+    model = Mock(sats_pricing=pricing)
+
+    with patch("routstr.proxy.get_model_instance", return_value=model):
+        result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 7818
+    assert result.input_msats + result.output_msats == result.total_msats
+    assert result.input_msats == 1147
+    assert result.output_msats == 6671
 
 
 # ============================================================================
