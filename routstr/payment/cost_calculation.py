@@ -287,54 +287,92 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
 def _get_pricing_rates(
     response_data: dict,
 ) -> tuple[float, float, float, float] | None:
-    """Get model-based pricing rates or None if using fixed pricing.
+    """Get configured rates, falling back to LiteLLM's model cost map.
 
-    Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate)
+    Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate).
+    ``None`` means configured fixed pricing should be used by the caller.
     """
-    if settings.fixed_pricing:
+    if settings.fixed_pricing and (
+        settings.fixed_per_1k_input_tokens
+        or settings.fixed_per_1k_output_tokens
+    ):
         return None
 
+    from .models import litellm_cost_entry
     from ..proxy import get_model_instance
 
     response_model = response_data.get("model", "")
     model_obj = get_model_instance(response_model)
 
-    if not model_obj:
-        logger.error("Invalid model in response", extra={"response_model": response_model})
-        raise ValueError(f"Invalid model: {response_model}")
+    if model_obj and model_obj.sats_pricing:
+        try:
+            mspp = float(model_obj.sats_pricing.prompt)
+            mspc = float(model_obj.sats_pricing.completion)
+            mscr = float(model_obj.sats_pricing.input_cache_read or 0)
+            mscw = float(model_obj.sats_pricing.input_cache_write or 0)
 
-    if not model_obj.sats_pricing:
-        logger.error(
-            "Model pricing not defined",
-            extra={"model": response_model, "model_id": response_model},
+            mspp_1k = mspp * 1_000_000.0
+            mspc_1k = mspc * 1_000_000.0
+            mscr_1k = mscr * 1_000_000.0 if mscr > 0 else mspp_1k
+            mscw_1k = mscw * 1_000_000.0 if mscw > 0 else mspp_1k
+            source = "configured"
+        except Exception as e:
+            logger.error("Invalid pricing data", extra={"error": str(e)})
+            raise ValueError("Invalid pricing data") from e
+    else:
+        pricing_model = (
+            model_obj.forwarded_model_id if model_obj else None
+        ) or response_model
+        pricing = litellm_cost_entry(pricing_model)
+        if pricing is None:
+            logger.error(
+                "Model pricing not found in configured models or LiteLLM",
+                extra={
+                    "response_model": response_model,
+                    "pricing_model": pricing_model,
+                },
+            )
+            raise ValueError(f"Pricing not found for model: {response_model}")
+
+        input_usd = _coerce_usd(pricing.get("input_cost_per_token"))
+        output_usd = _coerce_usd(pricing.get("output_cost_per_token"))
+        if input_usd <= 0 or output_usd <= 0:
+            raise ValueError(f"Incomplete LiteLLM pricing for model: {pricing_model}")
+
+        provider_fee = _resolve_provider_fee(response_model)
+        usd_per_sat = sats_usd_price()
+        mspp_1k = input_usd * provider_fee * 1_000_000.0 / usd_per_sat
+        mspc_1k = output_usd * provider_fee * 1_000_000.0 / usd_per_sat
+        cache_read_usd = _coerce_usd(
+            pricing.get("cache_read_input_token_cost")
         )
-        raise ValueError("Model pricing not defined")
-
-    try:
-        mspp = float(model_obj.sats_pricing.prompt)
-        mspc = float(model_obj.sats_pricing.completion)
-        mscr = float(model_obj.sats_pricing.input_cache_read or 0)
-        mscw = float(model_obj.sats_pricing.input_cache_write or 0)
-
-        mspp_1k = mspp * 1_000_000.0
-        mspc_1k = mspc * 1_000_000.0
-        mscr_1k = mscr * 1_000_000.0 if mscr > 0 else mspp_1k
-        mscw_1k = mscw * 1_000_000.0 if mscw > 0 else mspp_1k
-
-        logger.info(
-            "Applied model-specific pricing",
-            extra={
-                "model": response_model,
-                "input_price_msats_per_1k": mspp_1k,
-                "output_price_msats_per_1k": mspc_1k,
-                "cache_read_price_msats_per_1k": mscr_1k,
-                "cache_write_price_msats_per_1k": mscw_1k,
-            },
+        cache_write_usd = _coerce_usd(
+            pricing.get("cache_creation_input_token_cost")
         )
-        return mspp_1k, mspc_1k, mscr_1k, mscw_1k
-    except Exception as e:
-        logger.error("Invalid pricing data", extra={"error": str(e)})
-        raise ValueError("Invalid pricing data") from e
+        mscr_1k = (
+            cache_read_usd * provider_fee * 1_000_000.0 / usd_per_sat
+            if cache_read_usd > 0
+            else mspp_1k
+        )
+        mscw_1k = (
+            cache_write_usd * provider_fee * 1_000_000.0 / usd_per_sat
+            if cache_write_usd > 0
+            else mspp_1k
+        )
+        source = "litellm"
+
+    logger.info(
+        "Applied model-specific pricing",
+        extra={
+            "model": response_model,
+            "pricing_source": source,
+            "input_price_msats_per_1k": mspp_1k,
+            "output_price_msats_per_1k": mspc_1k,
+            "cache_read_price_msats_per_1k": mscr_1k,
+            "cache_write_price_msats_per_1k": mscw_1k,
+        },
+    )
+    return mspp_1k, mspc_1k, mscr_1k, mscw_1k
 
 
 def _resolve_provider_fee(model_id: str) -> float:

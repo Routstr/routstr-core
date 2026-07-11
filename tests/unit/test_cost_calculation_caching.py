@@ -504,6 +504,43 @@ async def test_small_usd_cost_components_sum_to_rounded_total(
 # Test 13: Missing Usage Block
 # ============================================================================
 @pytest.mark.asyncio
+async def test_missing_upstream_cost_uses_litellm_model_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token usage without an upstream cost is priced from LiteLLM."""
+    monkeypatch.setattr(settings, "fixed_pricing", True)
+    monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
+    monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 0)
+    monkeypatch.setattr(
+        "routstr.payment.models.litellm_cost_entry",
+        lambda model: {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002,
+        },
+    )
+    response = {
+        "model": "priced-by-litellm",
+        "usage": {
+            "prompt_tokens": 90,
+            "completion_tokens": 80,
+            "total_tokens": 170,
+            "prompt_tokens_details": {"cached_tokens": 0},
+            "completion_tokens_details": {"reasoning_tokens": 74},
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 90,
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=10000)
+
+    assert isinstance(result, CostData)
+    assert not isinstance(result, MaxCostData)
+    assert result.input_msats == 1800
+    assert result.output_msats == 3200
+    assert result.input_msats + result.output_msats == result.total_msats == 5000
+
+
+@pytest.mark.asyncio
 async def test_missing_usage_block(mock_fixed_pricing: None) -> None:
     """When usage is missing, return MaxCostData with zero tokens."""
     response = {"model": "gpt-4", "choices": [{"message": {"content": "test"}}]}
