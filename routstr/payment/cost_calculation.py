@@ -163,11 +163,16 @@ async def calculate_cost(
                 },
             )
         try:
+            cost_details = usage_data.get("cost_details", {})
+            if not isinstance(cost_details, dict):
+                cost_details = {}
             input_usd = _coerce_usd(
-                usage_data.get("cost_details", {}).get("input_cost", 0)
+                cost_details.get("input_cost")
+                or cost_details.get("upstream_inference_prompt_cost")
             )
             output_usd = _coerce_usd(
-                usage_data.get("cost_details", {}).get("output_cost", 0)
+                cost_details.get("output_cost")
+                or cost_details.get("upstream_inference_completions_cost")
             )
             return _calculate_from_usd_cost(
                 usd_cost,

@@ -500,6 +500,35 @@ async def test_small_usd_cost_components_sum_to_rounded_total(
     assert result.input_msats + result.output_msats == result.total_msats
 
 
+@pytest.mark.asyncio
+async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
+    """OpenRouter component aliases must determine the input/output split."""
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 373,
+            "completion_tokens": 173,
+            "total_tokens": 546,
+            "cost": 0.001347233518,
+            "is_byok": False,
+            "prompt_tokens_details": {"cached_tokens": 0},
+            "cost_details": {
+                "upstream_inference_cost": 0.001347233518,
+                "upstream_inference_prompt_cost": 0.000663652044,
+                "upstream_inference_completions_cost": 0.000683581474,
+            },
+            "completion_tokens_details": {"reasoning_tokens": 37},
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_msats == 13273
+    assert result.output_msats == 13672
+    assert result.input_msats + result.output_msats == result.total_msats == 26945
+
+
 # ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================
