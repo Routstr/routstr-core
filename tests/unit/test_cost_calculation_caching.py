@@ -506,27 +506,30 @@ async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
     response = {
         "model": "gpt-4",
         "usage": {
-            "prompt_tokens": 373,
-            "completion_tokens": 173,
-            "total_tokens": 546,
-            "cost": 0.001347233518,
+            "prompt_tokens": 375,
+            "completion_tokens": 158,
+            "total_tokens": 533,
+            "cost": 0.00022354,
             "is_byok": False,
-            "prompt_tokens_details": {"cached_tokens": 0},
-            "cost_details": {
-                "upstream_inference_cost": 0.001347233518,
-                "upstream_inference_prompt_cost": 0.000663652044,
-                "upstream_inference_completions_cost": 0.000683581474,
+            "prompt_tokens_details": {
+                "cached_tokens": 286,
+                "cache_write_tokens": 0,
             },
-            "completion_tokens_details": {"reasoning_tokens": 37},
+            "cost_details": {
+                "upstream_inference_cost": 0.00022354,
+                "upstream_inference_prompt_cost": 0.00004974,
+                "upstream_inference_completions_cost": 0.0001738,
+            },
+            "completion_tokens_details": {"reasoning_tokens": 17},
         },
     }
 
     result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
-    assert result.input_msats == 13273
-    assert result.output_msats == 13672
-    assert result.input_msats + result.output_msats == result.total_msats == 26945
+    assert result.input_msats == 994
+    assert result.output_msats == 3477
+    assert result.input_msats + result.output_msats == result.total_msats == 4471
 
 
 # ============================================================================

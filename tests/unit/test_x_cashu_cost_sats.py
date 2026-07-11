@@ -1,5 +1,6 @@
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -30,6 +31,44 @@ def _make_cost_data(total_msats: int = 5000) -> CostData:
         input_tokens=100,
         output_tokens=50,
     )
+
+
+def test_inject_cost_metadata_repairs_zero_components_with_reported_tokens() -> None:
+    provider = _make_provider()
+    response = {
+        "usage": {
+            "prompt_tokens": 83,
+            "completion_tokens": 114,
+            "total_tokens": 197,
+        }
+    }
+    broken_cost = {
+        "base_msats": 5000,
+        "input_msats": 0,
+        "output_msats": 0,
+        "total_msats": 5000,
+        "total_usd": 0.00025,
+        "input_tokens": 83,
+        "output_tokens": 114,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    }
+
+    provider.inject_cost_metadata(
+        response,
+        broken_cost,
+        SimpleNamespace(balance=10000),
+    )
+
+    client_cost = response["metadata"]["routstr"]["cost"]
+    assert client_cost["input_msats"] == 2107
+    assert client_cost["output_msats"] == 2893
+    assert client_cost["input_msats"] + client_cost["output_msats"] == 5000
+    assert response["cost"] == {
+        **client_cost,
+        "sats_cost": 5,
+        "remaining_balance_msats": 10000,
+    }
 
 
 # ---------------------------------------------------------------------------

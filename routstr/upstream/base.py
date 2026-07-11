@@ -274,6 +274,34 @@ class BaseUpstreamProvider:
             total_usd = cost_data.total_usd
             cost_dict = cost_data.dict()
 
+        input_msats = int(cost_dict.get("input_msats", 0) or 0)
+        output_msats = int(cost_dict.get("output_msats", 0) or 0)
+        input_tokens = int(cost_dict.get("input_tokens", 0) or 0)
+        output_tokens = int(cost_dict.get("output_tokens", 0) or 0)
+        cache_tokens = int(cost_dict.get("cache_read_input_tokens", 0) or 0) + int(
+            cost_dict.get("cache_creation_input_tokens", 0) or 0
+        )
+        priced_tokens = input_tokens + cache_tokens + output_tokens
+        if (
+            total_msats > 0
+            and input_msats == 0
+            and output_msats == 0
+            and priced_tokens > 0
+        ):
+            logger.warning(
+                "Repairing missing client cost breakdown before response: "
+                "cost=%s",
+                cost_dict,
+            )
+            output_msats = total_msats * output_tokens // priced_tokens
+            input_msats = total_msats - output_msats
+            cost_dict = cost_dict.copy()
+            cost_dict["base_msats"] = 0
+            cost_dict["input_msats"] = input_msats
+            cost_dict["output_msats"] = output_msats
+
+        logger.warning("Client-facing cost metadata: cost=%s", cost_dict)
+
         sats_cost = total_msats // 1000
 
         # Inject into top-level usage block (OpenAI/Anthropic style)
