@@ -501,6 +501,34 @@ async def test_small_usd_cost_components_sum_to_rounded_total(
 
 
 @pytest.mark.asyncio
+async def test_zero_msat_component_with_positive_tokens_logs_error() -> None:
+    """A rounded-to-zero component is observable even when billing is valid."""
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "cost_details": {
+                "total_cost": 0.00000004,
+                "input_cost": 0.00000002,
+                "output_cost": 0.00000002,
+            },
+        },
+    }
+
+    with patch("routstr.payment.cost_calculation.logger.error") as log_error:
+        result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 1
+    log_error.assert_called_once()
+    assert log_error.call_args.args[0] == (
+        "Positive token usage produced a zero millisatoshi cost component"
+    )
+    assert log_error.call_args.kwargs["extra"]["zero_components"] == ["input"]
+
+
+@pytest.mark.asyncio
 async def test_total_only_usd_cost_uses_model_prices_for_component_split(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -368,6 +368,43 @@ def _resolve_provider_fee(model_id: str) -> float:
     return float(providers[0].provider_fee)
 
 
+def _log_zero_cost_components(
+    cost: CostData,
+    response_data: dict,
+    calculation_source: str,
+) -> None:
+    """Log suspicious zero component costs without changing the billed total."""
+    input_usage = (
+        cost.input_tokens
+        + cost.cache_read_input_tokens
+        + cost.cache_creation_input_tokens
+    )
+    zero_components = []
+    if cost.total_msats > 0 and input_usage > 0 and cost.input_msats == 0:
+        zero_components.append("input")
+    if cost.total_msats > 0 and cost.output_tokens > 0 and cost.output_msats == 0:
+        zero_components.append("output")
+    if not zero_components:
+        return
+
+    logger.error(
+        "Positive token usage produced a zero millisatoshi cost component",
+        extra={
+            "zero_components": zero_components,
+            "calculation_source": calculation_source,
+            "model": response_data.get("model", "unknown"),
+            "input_tokens": cost.input_tokens,
+            "output_tokens": cost.output_tokens,
+            "cache_read_input_tokens": cost.cache_read_input_tokens,
+            "cache_creation_input_tokens": cost.cache_creation_input_tokens,
+            "input_msats": cost.input_msats,
+            "output_msats": cost.output_msats,
+            "total_msats": cost.total_msats,
+            "total_usd": cost.total_usd,
+        },
+    )
+
+
 def _calculate_from_usd_cost(
     usd_cost: float,
     input_usd: float,
@@ -451,7 +488,7 @@ def _calculate_from_usd_cost(
         },
     )
 
-    return CostData(
+    cost = CostData(
         base_msats=0,
         input_msats=input_msats,
         output_msats=output_msats,
@@ -464,6 +501,8 @@ def _calculate_from_usd_cost(
         cache_read_msats=0,
         cache_creation_msats=0,
     )
+    _log_zero_cost_components(cost, response_data, "usd")
+    return cost
 
 
 def _calculate_from_tokens(
@@ -520,7 +559,7 @@ def _calculate_from_tokens(
     visible_output_msats = int(calc_output_msats)
     visible_input_msats = token_based_cost - visible_output_msats
 
-    return CostData(
+    cost = CostData(
         base_msats=0,
         input_msats=visible_input_msats,
         output_msats=visible_output_msats,
@@ -533,3 +572,5 @@ def _calculate_from_tokens(
         cache_read_msats=int(calc_cache_read_msats),
         cache_creation_msats=int(calc_cache_write_msats),
     )
+    _log_zero_cost_components(cost, response_data, "tokens")
+    return cost
