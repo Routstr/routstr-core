@@ -733,9 +733,8 @@ async def credit_balance(
             extra={"new_balance": key.balance},
         )
 
-        transaction_stored = False
         try:
-            transaction_stored = await store_cashu_transaction(
+            await store_cashu_transaction(
                 token=cashu_token,
                 amount=original_amount,
                 unit=original_unit,
@@ -748,13 +747,8 @@ async def credit_balance(
             pass
 
         logger.debug(
-            "Cashu token successfully redeemed",
-            extra={
-                "amount": amount,
-                "unit": unit,
-                "mint_url": mint_url,
-                "transaction_stored": transaction_stored,
-            },
+            "Cashu token successfully redeemed and stored",
+            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
         )
         return amount
     except Exception as e:
