@@ -2718,6 +2718,64 @@ class BaseUpstreamProvider:
 
         transformed_body = self.prepare_request_body(request_body, model_obj)
 
+        def request_shape(body: bytes | None) -> dict[str, Any]:
+            """Return diagnostic request metadata without prompt/tool contents."""
+            if not body:
+                return {"body_present": False}
+            try:
+                parsed = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return {"body_present": True, "valid_json": False}
+            if not isinstance(parsed, dict):
+                return {
+                    "body_present": True,
+                    "valid_json": True,
+                    "json_type": type(parsed).__name__,
+                }
+            messages = parsed.get("messages")
+            roles = (
+                [
+                    message.get("role", "unknown")
+                    for message in messages
+                    if isinstance(message, dict)
+                ]
+                if isinstance(messages, list)
+                else []
+            )
+            tools = parsed.get("tools")
+            return {
+                "body_present": True,
+                "valid_json": True,
+                "keys": sorted(parsed.keys()),
+                "model": parsed.get("model", "unknown"),
+                "stream": parsed.get("stream", False),
+                "stream_options": parsed.get("stream_options"),
+                "message_count": len(messages)
+                if isinstance(messages, list)
+                else 0,
+                "message_roles": roles,
+                "tool_count": len(tools) if isinstance(tools, list) else 0,
+                "tool_choice": parsed.get("tool_choice"),
+                "max_tokens": parsed.get("max_tokens"),
+                "max_completion_tokens": parsed.get("max_completion_tokens"),
+                "reasoning_effort": parsed.get("reasoning_effort"),
+                "thinking_type": (
+                    parsed.get("thinking", {}).get("type")
+                    if isinstance(parsed.get("thinking"), dict)
+                    else None
+                ),
+            }
+
+        logger.warning(
+            "Upstream request shape: provider=%s path=%s forwarded_model=%s "
+            "original=%s transformed=%s",
+            self.provider_type,
+            path,
+            original_model_id or "unknown",
+            request_shape(request_body),
+            request_shape(transformed_body),
+        )
+
         logger.debug(
             "Forwarding request to upstream",
             extra={
@@ -2896,15 +2954,18 @@ class BaseUpstreamProvider:
                     upstream_is_streaming = "text/event-stream" in content_type
                     is_streaming = client_wants_streaming and upstream_is_streaming
 
-                    logger.debug(
-                        "Response type analysis",
-                        extra={
-                            "is_streaming": is_streaming,
-                            "client_wants_streaming": client_wants_streaming,
-                            "upstream_is_streaming": upstream_is_streaming,
-                            "content_type": content_type,
-                            "key_hash": key.hashed_key[:8] + "...",
-                        },
+                    logger.warning(
+                        "Upstream response route: provider=%s path=%s model=%s "
+                        "client_stream=%s upstream_stream=%s selected_stream=%s "
+                        "content_type=%s status=%s",
+                        self.provider_type,
+                        path,
+                        original_model_id or "unknown",
+                        client_wants_streaming,
+                        upstream_is_streaming,
+                        is_streaming,
+                        content_type,
+                        response.status_code,
                     )
 
                     if is_streaming and response.status_code == 200:
