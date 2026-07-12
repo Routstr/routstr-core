@@ -290,7 +290,7 @@ async def store_cashu_transaction(
     created_at: int | None = None,
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
-) -> None:
+) -> bool:
     try:
         async with create_session() as session:
             tx = CashuTransaction(
@@ -307,11 +307,13 @@ async def store_cashu_transaction(
             )
             session.add(tx)
             await session.commit()
+        return True
     except Exception as e:
         logger.warning(
             f"Failed to store cashu transaction: {e} (type={typ})",
             extra={"error": str(e), "type": typ},
         )
+        return False
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
