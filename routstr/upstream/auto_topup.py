@@ -4,7 +4,12 @@ import json
 from sqlmodel import select
 
 from ..core import get_logger
-from ..core.db import UpstreamProviderRow, create_session
+from ..core.db import (
+    CashuTransaction,
+    UpstreamProviderRow,
+    create_session,
+    store_cashu_transaction,
+)
 from ..wallet import send_token
 from .routstr import RoutstrUpstreamProvider
 
@@ -61,6 +66,26 @@ async def _run_auto_topup_cycle() -> None:
                     "error_type": type(e).__name__,
                 },
             )
+
+
+async def _mark_topup_collected(token: str) -> None:
+    """Mark the outgoing auto-topup transaction as consumed by the provider."""
+    async with create_session() as session:
+        result = await session.exec(
+            select(CashuTransaction).where(
+                CashuTransaction.token == token,
+                CashuTransaction.type == "out",
+            )
+        )
+        transaction = result.first()
+        if transaction is None:
+            logger.critical(
+                "Auto top-up transaction disappeared before collection update"
+            )
+            return
+        transaction.collected = True
+        session.add(transaction)
+        await session.commit()
 
 
 async def _check_and_topup(row: UpstreamProviderRow) -> None:
@@ -123,7 +148,6 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         },
     )
 
-    print(amount, mint_url)
     try:
         token = await send_token(amount, "sat", mint_url)
     except Exception as e:
@@ -138,6 +162,22 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
+    transaction_stored = await store_cashu_transaction(
+        token=token,
+        amount=amount,
+        unit="sat",
+        mint_url=mint_url,
+        typ="out",
+        collected=False,
+        source="auto_topup",
+    )
+    if not transaction_stored:
+        logger.error(
+            "Aborting auto top-up because the token could not be persisted",
+            extra={"provider_id": row.id, "amount": amount, "mint_url": mint_url},
+        )
+        return
+
     result = await provider.topup(token)
 
     if "error" in result:
@@ -149,6 +189,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
             },
         )
     else:
+        await _mark_topup_collected(token)
         logger.info(
             "Auto top-up completed successfully",
             extra={
