@@ -255,6 +255,62 @@ async def test_openrouter_mid_stream_error_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cost_metadata_is_ready_before_finish_reason_is_exposed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finish-aware client must not cancel before cost finalization runs."""
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test_key"
+    )
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "test_hash"
+    key.balance = 1000
+    adjustment = AsyncMock(
+        return_value={
+            "base_msats": 0,
+            "input_msats": 40,
+            "output_msats": 60,
+            "total_msats": 100,
+            "total_usd": 0.0001,
+            "input_tokens": 3,
+            "output_tokens": 2,
+        }
+    )
+    mock_session = MagicMock()
+    mock_session.get = AsyncMock(return_value=key)
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_ctx.__aexit__ = AsyncMock(return_value=None)
+    warning = MagicMock()
+    monkeypatch.setattr(base, "adjust_payment_for_tokens", adjustment)
+    monkeypatch.setattr(base, "create_session", MagicMock(return_value=mock_ctx))
+    monkeypatch.setattr(base.logger, "warning", warning)
+
+    chunks = [
+        b'data: {"id":"g","model":"deepseek-v4-flash",'
+        b'"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    response = await provider.handle_streaming_chat_completion(
+        response=_make_response(chunks),
+        key=key,
+        max_cost_for_model=100,
+        background_tasks=MagicMock(),
+    )
+
+    first = await anext(response.body_iterator)
+
+    assert b'"finish_reason": "stop"' in bytes(first)
+    adjustment.assert_awaited_once()
+    assert any(
+        call.args
+        and call.args[0] == "Client-facing cost metadata: model=%s cost=%s"
+        for call in warning.call_args_list
+    )
+
+
+@pytest.mark.asyncio
 async def test_gemini_combined_content_and_usage_chunk() -> None:
     """Gemini thinking models pack usage into the final *content* chunk.
 

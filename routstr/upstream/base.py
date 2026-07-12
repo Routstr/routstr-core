@@ -853,6 +853,7 @@ class BaseUpstreamProvider:
             last_model_seen: str | None = None
             usage_chunk_data: dict | None = None
             done_seen: bool = False
+            pending_finish_event: bytes | None = None
 
             async def finalize_db_only() -> None:
                 nonlocal usage_finalized
@@ -895,6 +896,7 @@ class BaseUpstreamProvider:
                   end of stream.
                 """
                 nonlocal last_model_seen, usage_chunk_data, done_seen
+                nonlocal pending_finish_event
 
                 event = raw_event.strip(b"\r\n")
                 if not event:
@@ -970,16 +972,36 @@ class BaseUpstreamProvider:
                             # Forward the content now, without usage, so token
                             # usage is reported exactly once (in the trailer).
                             forward = {k: v for k, v in obj.items() if k != "usage"}
-                            yield (
+                            encoded = (
                                 prefix
                                 + b"data: "
                                 + json.dumps(forward).encode()
                                 + b"\n\n"
                             )
+                            if any(
+                                choice.get("finish_reason") is not None
+                                for choice in obj.get("choices", [])
+                                if isinstance(choice, dict)
+                            ):
+                                pending_finish_event = encoded
+                            else:
+                                yield encoded
                             return
                         usage_chunk_data = obj
                         return
-                    yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
+                    encoded = prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
+                    if any(
+                        choice.get("finish_reason") is not None
+                        for choice in obj.get("choices", [])
+                        if isinstance(choice, dict)
+                    ):
+                        # Some consumers stop reading immediately at
+                        # finish_reason. Hold it until payment finalization and
+                        # client cost metadata are ready so cancellation cannot
+                        # make the cost trailer disappear.
+                        pending_finish_event = encoded
+                    else:
+                        yield encoded
                 else:
                     if final:
                         # Final flush of a truncated tail: the upstream closed
@@ -1022,6 +1044,7 @@ class BaseUpstreamProvider:
                     for out in _process_event(buffer, final=True):
                         yield out
 
+                cost_trailer: bytes | None = None
                 async with create_session() as session:
                     fresh_key = await session.get(key.__class__, key.hashed_key)
                     if fresh_key:
@@ -1098,8 +1121,14 @@ class BaseUpstreamProvider:
                                 },
                             )
 
-                        yield f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                        cost_trailer = (
+                            f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                        )
 
+                if pending_finish_event is not None:
+                    yield pending_finish_event
+                if cost_trailer is not None:
+                    yield cost_trailer
                 if done_seen:
                     yield b"data: [DONE]\n\n"
 
