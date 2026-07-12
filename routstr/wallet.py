@@ -988,54 +988,58 @@ async def periodic_payout() -> None:
             )
 
 
+async def _refund_sweep_once(cutoff: int) -> None:
+    async with db.create_session() as session:
+        stmt = select(db.CashuTransaction).where(
+            db.CashuTransaction.type == "out",
+            db.CashuTransaction.collected == False,  # noqa: E712
+            db.CashuTransaction.swept == False,  # noqa: E712
+            db.CashuTransaction.created_at < cutoff,
+        )
+        results = await session.exec(stmt)
+        refunds = results.all()
+
+        for refund in refunds:
+            try:
+                await recieve_token(refund.token)
+                refund.swept = True
+                session.add(refund)
+                logger.info(
+                    "Swept uncollected refund",
+                    extra={
+                        "id": refund.id,
+                        "amount": refund.amount,
+                        "unit": refund.unit,
+                    },
+                )
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "already spent" in error_msg:
+                    refund.collected = True
+                    session.add(refund)
+                    logger.info(
+                        "Refund already spent (client collected), marking swept",
+                        extra={
+                            "id": refund.id,
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "Failed to sweep refund",
+                        extra={
+                            "id": refund.id,
+                            "error": str(e),
+                        },
+                    )
+        await session.commit()
+
+
 async def periodic_refund_sweep() -> None:
     while True:
         await asyncio.sleep(60 * 60)  # every hour
         try:
             cutoff = int(time.time()) - settings.refund_sweep_ttl_seconds
-            async with db.create_session() as session:
-                stmt = select(db.CashuTransaction).where(
-                    db.CashuTransaction.type == "out",
-                    db.CashuTransaction.collected == False,  # noqa: E712
-                    db.CashuTransaction.swept == False,  # noqa: E712
-                    db.CashuTransaction.created_at < cutoff,
-                )
-                results = await session.exec(stmt)
-                refunds = results.all()
-
-                for refund in refunds:
-                    try:
-                        await recieve_token(refund.token)
-                        refund.swept = True
-                        session.add(refund)
-                        logger.info(
-                            "Swept uncollected refund",
-                            extra={
-                                "id": refund.id,
-                                "amount": refund.amount,
-                                "unit": refund.unit,
-                            },
-                        )
-                    except Exception as e:
-                        error_msg = str(e).lower()
-                        if "already spent" in error_msg:
-                            refund.collected = True
-                            session.add(refund)
-                            logger.info(
-                                "Refund already spent (client collected), marking swept",
-                                extra={
-                                    "id": refund.id,
-                                },
-                            )
-                        else:
-                            logger.warning(
-                                "Failed to sweep refund",
-                                extra={
-                                    "id": refund.id,
-                                    "error": str(e),
-                                },
-                            )
-                await session.commit()
+            await _refund_sweep_once(cutoff)
         except Exception as e:
             logger.error(
                 "Error in periodic refund sweep",
