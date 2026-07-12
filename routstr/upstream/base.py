@@ -1146,16 +1146,36 @@ class BaseUpstreamProvider:
                                 },
                             )
 
-                            # Fall back so we still emit a non-zero sats cost downstream.
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            # Payment settlement can fail after calculate_cost()
+                            # has already produced a valid breakdown (for example
+                            # because of a concurrent reservation/database race).
+                            # Never replace that client-visible calculation with
+                            # the old all-zero fallback. Recalculate without DB
+                            # mutation so the stream still carries accurate cost
+                            # metadata while the exception remains fully logged.
+                            fallback_cost = await calculate_cost(
+                                adjustment_input,
+                                max_cost_for_model,
+                            )
+                            if isinstance(fallback_cost, CostDataError):
+                                cost_data = {
+                                    "base_msats": max_cost_for_model,
+                                    "input_msats": 0,
+                                    "output_msats": 0,
+                                    "total_msats": max_cost_for_model,
+                                    "total_usd": 0.0,
+                                    "input_tokens": 0,
+                                    "output_tokens": 0,
+                                }
+                            else:
+                                cost_data = fallback_cost.dict()
+                            logger.warning(
+                                "Streaming payment finalization failed; using "
+                                "calculated client cost: model=%s error=%s cost=%s",
+                                adjustment_input.get("model", "unknown"),
+                                str(e),
+                                cost_data,
+                            )
 
                         if usage_chunk_data is None:
                             if not hasattr(self, "_current_stream_id"):

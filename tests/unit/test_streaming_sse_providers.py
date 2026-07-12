@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from routstr.core.db import ApiKey
+from routstr.payment.cost_calculation import CostData
 from routstr.upstream import base
 from routstr.upstream.base import BaseUpstreamProvider
 
@@ -326,6 +327,65 @@ async def test_cost_metadata_is_ready_before_finish_reason_is_exposed(
         and str(call.args[0]).startswith("Streaming cost finalization returned:")
         for call in warning.call_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_payment_failure_preserves_calculated_client_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB finalization failure must not replace valid costs with zeros."""
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test_key"
+    )
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "test_hash"
+    key.balance = 1000
+    mock_session = MagicMock()
+    mock_session.get = AsyncMock(return_value=key)
+    mock_ctx = MagicMock()
+    mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_ctx.__aexit__ = AsyncMock(return_value=None)
+    calculated = CostData(
+        base_msats=0,
+        input_msats=23,
+        output_msats=61,
+        total_msats=84,
+        total_usd=0.00005,
+        input_tokens=89,
+        output_tokens=194,
+    )
+    monkeypatch.setattr(
+        base,
+        "adjust_payment_for_tokens",
+        AsyncMock(side_effect=RuntimeError("concurrent reservation failure")),
+    )
+    monkeypatch.setattr(
+        base,
+        "calculate_cost",
+        AsyncMock(return_value=calculated),
+    )
+    monkeypatch.setattr(base, "create_session", MagicMock(return_value=mock_ctx))
+
+    chunks = [
+        b'data: {"id":"d","model":"deepseek-v4-flash",'
+        b'"choices":[{"delta":{},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":89,"completion_tokens":194,'
+        b'"total_tokens":283,"prompt_cache_hit_tokens":0,'
+        b'"prompt_cache_miss_tokens":89}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    response = await provider.handle_streaming_chat_completion(
+        response=_make_response(chunks),
+        key=key,
+        max_cost_for_model=100,
+        background_tasks=MagicMock(),
+    )
+    first = await anext(response.body_iterator)
+    payload = json.loads(bytes(first).split(b"data: ", 1)[1])
+
+    assert payload["cost"]["input_msats"] == 23
+    assert payload["cost"]["output_msats"] == 61
+    assert payload["cost"]["total_msats"] == 84
 
 
 @pytest.mark.asyncio
