@@ -854,6 +854,47 @@ class BaseUpstreamProvider:
             usage_chunk_data: dict | None = None
             done_seen: bool = False
             pending_finish_event: tuple[bytes, dict] | None = None
+            observed_event_shapes: set[tuple] = set()
+
+            def warn_event_shape(
+                raw_event: bytes,
+                obj: dict | None = None,
+            ) -> None:
+                """Log each distinct SSE framing/semantic shape once per stream."""
+                fields = tuple(
+                    line.split(b":", 1)[0].decode("ascii", errors="replace")
+                    for line in raw_event.split(b"\n")
+                    if line
+                )
+                choices = obj.get("choices") if isinstance(obj, dict) else None
+                finish_reasons = tuple(
+                    choice.get("finish_reason")
+                    for choice in choices or []
+                    if isinstance(choice, dict)
+                    and choice.get("finish_reason") is not None
+                )
+                shape = (
+                    fields,
+                    tuple(sorted(obj.keys())) if isinstance(obj, dict) else (),
+                    isinstance(obj.get("usage"), dict)
+                    if isinstance(obj, dict)
+                    else False,
+                    len(choices) if isinstance(choices, list) else None,
+                    finish_reasons,
+                )
+                if shape in observed_event_shapes or len(observed_event_shapes) >= 12:
+                    return
+                observed_event_shapes.add(shape)
+                logger.warning(
+                    "Streaming SSE event shape: model=%s fields=%s "
+                    "json_keys=%s has_usage=%s choices=%s finish_reasons=%s",
+                    (obj or {}).get("model", last_model_seen or "unknown"),
+                    fields,
+                    shape[1],
+                    shape[2],
+                    shape[3],
+                    finish_reasons,
+                )
 
             async def finalize_db_only() -> None:
                 nonlocal usage_finalized
@@ -917,6 +958,7 @@ class BaseUpstreamProvider:
                         field_lines.append(line)
 
                 if not data_lines:
+                    warn_event_shape(event)
                     return
 
                 data = b"\n".join(data_lines)
@@ -936,6 +978,8 @@ class BaseUpstreamProvider:
                     obj = json.loads(data)
                 except Exception:
                     obj = None
+
+                warn_event_shape(event, obj if isinstance(obj, dict) else None)
 
                 if isinstance(obj, dict):
                     self._apply_provider_field(obj)
@@ -1058,11 +1102,39 @@ class BaseUpstreamProvider:
                                     "usage": None,
                                 }
                             )
-                            cost_data = await adjust_payment_for_tokens(
-                                fresh_key,
-                                adjustment_input,
-                                session,
-                                max_cost_for_model,
+                            logger.warning(
+                                "Streaming cost finalization starting: model=%s "
+                                "has_usage=%s",
+                                adjustment_input.get("model", "unknown"),
+                                isinstance(adjustment_input.get("usage"), dict),
+                            )
+                            finalization_task = asyncio.create_task(
+                                adjust_payment_for_tokens(
+                                    fresh_key,
+                                    adjustment_input,
+                                    session,
+                                    max_cost_for_model,
+                                )
+                            )
+                            try:
+                                cost_data = await asyncio.shield(finalization_task)
+                            except asyncio.CancelledError:
+                                # The upstream response is already complete, so
+                                # abandoning payment finalization here loses the
+                                # client cost trailer and leaves the reservation
+                                # unsettled. Finish the shielded task before
+                                # allowing stream teardown to continue.
+                                logger.warning(
+                                    "Streaming cost finalization cancellation "
+                                    "deferred: model=%s",
+                                    adjustment_input.get("model", "unknown"),
+                                )
+                                cost_data = await finalization_task
+                            logger.warning(
+                                "Streaming cost finalization returned: model=%s "
+                                "cost=%s",
+                                adjustment_input.get("model", "unknown"),
+                                cost_data,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1123,6 +1195,12 @@ class BaseUpstreamProvider:
 
                         cost_trailer = (
                             f"data: {json.dumps(usage_chunk_data)}\n\n".encode()
+                        )
+                    else:
+                        logger.warning(
+                            "Streaming cost finalization skipped: API key not found; "
+                            "model=%s",
+                            last_model_seen or "unknown",
                         )
 
                 if pending_finish_event is not None:

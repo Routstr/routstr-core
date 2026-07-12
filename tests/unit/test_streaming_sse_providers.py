@@ -316,6 +316,16 @@ async def test_cost_metadata_is_ready_before_finish_reason_is_exposed(
         and call.args[0] == "Client-facing cost metadata: model=%s cost=%s"
         for call in warning.call_args_list
     )
+    assert any(
+        call.args
+        and str(call.args[0]).startswith("Streaming SSE event shape:")
+        for call in warning.call_args_list
+    )
+    assert any(
+        call.args
+        and str(call.args[0]).startswith("Streaming cost finalization returned:")
+        for call in warning.call_args_list
+    )
 
 
 @pytest.mark.asyncio
