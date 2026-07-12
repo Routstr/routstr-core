@@ -853,7 +853,7 @@ class BaseUpstreamProvider:
             last_model_seen: str | None = None
             usage_chunk_data: dict | None = None
             done_seen: bool = False
-            pending_finish_event: bytes | None = None
+            pending_finish_event: tuple[bytes, dict] | None = None
 
             async def finalize_db_only() -> None:
                 nonlocal usage_finalized
@@ -983,7 +983,7 @@ class BaseUpstreamProvider:
                                 for choice in obj.get("choices", [])
                                 if isinstance(choice, dict)
                             ):
-                                pending_finish_event = encoded
+                                pending_finish_event = (prefix, forward)
                             else:
                                 yield encoded
                             return
@@ -997,9 +997,9 @@ class BaseUpstreamProvider:
                     ):
                         # Some consumers stop reading immediately at
                         # finish_reason. Hold it until payment finalization and
-                        # client cost metadata are ready so cancellation cannot
-                        # make the cost trailer disappear.
-                        pending_finish_event = encoded
+                        # attach cost metadata to this same event so clients do
+                        # not need to consume a later proprietary trailer.
+                        pending_finish_event = (prefix, obj)
                     else:
                         yield encoded
                 else:
@@ -1126,7 +1126,17 @@ class BaseUpstreamProvider:
                         )
 
                 if pending_finish_event is not None:
-                    yield pending_finish_event
+                    finish_prefix, finish_obj = pending_finish_event
+                    if usage_chunk_data is not None:
+                        for field in ("provider", "metadata", "cost"):
+                            if field in usage_chunk_data:
+                                finish_obj[field] = usage_chunk_data[field]
+                    yield (
+                        finish_prefix
+                        + b"data: "
+                        + json.dumps(finish_obj).encode()
+                        + b"\n\n"
+                    )
                 if cost_trailer is not None:
                     yield cost_trailer
                 if done_seen:

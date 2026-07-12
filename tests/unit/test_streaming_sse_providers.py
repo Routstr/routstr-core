@@ -288,8 +288,12 @@ async def test_cost_metadata_is_ready_before_finish_reason_is_exposed(
 
     chunks = [
         b'data: {"id":"g","model":"deepseek-v4-flash",'
-        b'"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}],'
-        b'"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+        b'"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n',
+        b'data: {"id":"g","model":"deepseek-v4-flash","choices":[],'
+        b'"usage":{"prompt_tokens":90,"completion_tokens":233,'
+        b'"total_tokens":323,"prompt_tokens_details":{"cached_tokens":0},'
+        b'"completion_tokens_details":{"reasoning_tokens":227},'
+        b'"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":90}}\n\n',
         b"data: [DONE]\n\n",
     ]
     response = await provider.handle_streaming_chat_completion(
@@ -301,7 +305,11 @@ async def test_cost_metadata_is_ready_before_finish_reason_is_exposed(
 
     first = await anext(response.body_iterator)
 
-    assert b'"finish_reason": "stop"' in bytes(first)
+    first_payload = json.loads(bytes(first).split(b"data: ", 1)[1])
+    assert first_payload["choices"][0]["finish_reason"] == "stop"
+    assert first_payload["cost"]["input_msats"] == 40
+    assert first_payload["cost"]["output_msats"] == 60
+    assert first_payload["metadata"]["routstr"]["cost"]["total_msats"] == 100
     adjustment.assert_awaited_once()
     assert any(
         call.args
