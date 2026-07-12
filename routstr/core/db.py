@@ -1,3 +1,4 @@
+import asyncio
 import os
 import pathlib
 import sqlite3
@@ -10,7 +11,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, delete
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -105,8 +106,7 @@ async def reset_all_reserved_balances(session: AsyncSession) -> None:
 async def release_stale_reservations(
     session: AsyncSession, max_age_seconds: int
 ) -> int:
-    """Release reservations whose last reserve is older than max_age_seconds.
-    """
+    """Release reservations whose last reserve is older than max_age_seconds."""
     cutoff = int(time.time()) - max_age_seconds
     stmt = (
         update(ApiKey)
@@ -154,9 +154,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.total_spent) == 0)
         .where(col(ApiKey.total_requests) == 0)
         .where(col(ApiKey.parent_key_hash).is_(None))
-        .where(
-            (col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff)
-        )
+        .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~pending_invoice)
         .where(~has_children)
     )
@@ -246,6 +244,9 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
 
 class CashuTransaction(SQLModel, table=True):  # type: ignore
     __tablename__ = "cashu_transactions"
+    __table_args__ = (
+        UniqueConstraint("token", "type", name="uq_cashu_transactions_token_type"),
+    )
 
     id: str = Field(
         primary_key=True,
@@ -276,6 +277,23 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
     )
 
 
+async def _insert_cashu_transaction(transaction: CashuTransaction) -> None:
+    async with create_session() as session:
+        session.add(transaction)
+        await session.commit()
+
+
+async def _cashu_transaction_exists(token: str, typ: str) -> bool:
+    async with create_session() as session:
+        result = await session.exec(
+            select(CashuTransaction).where(
+                CashuTransaction.token == token,
+                CashuTransaction.type == typ,
+            )
+        )
+        return result.first() is not None
+
+
 async def store_cashu_transaction(
     token: str,
     amount: int,
@@ -287,28 +305,80 @@ async def store_cashu_transaction(
     created_at: int | None = None,
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
-) -> None:
-    try:
-        async with create_session() as session:
-            tx = CashuTransaction(
-                token=token,
-                amount=amount,
-                unit=unit,
-                mint_url=mint_url,
-                type=typ,
-                request_id=request_id,
-                collected=collected,
-                created_at=created_at or int(time.time()),
-                source=source,
-                api_key_hashed_key=api_key_hashed_key,
+    max_attempts: int = 3,
+) -> bool:
+    """Store a Cashu transaction, retrying transient database failures."""
+    transaction = CashuTransaction(
+        token=token,
+        amount=amount,
+        unit=unit,
+        mint_url=mint_url,
+        type=typ,
+        request_id=request_id,
+        collected=collected,
+        created_at=created_at or int(time.time()),
+        source=source,
+        api_key_hashed_key=api_key_hashed_key,
+    )
+
+    last_error_type: str | None = None
+    attempts_performed = 0
+    for attempt in range(1, max_attempts + 1):
+        attempts_performed = attempt
+        retry_error: OperationalError | None = None
+        try:
+            await _insert_cashu_transaction(transaction)
+            return True
+        except IntegrityError as error:
+            last_error_type = type(error).__name__
+            try:
+                if await _cashu_transaction_exists(token, typ):
+                    return True
+            except OperationalError as lookup_error:
+                retry_error = lookup_error
+            except Exception as lookup_error:
+                last_error_type = type(lookup_error).__name__
+                break
+            else:
+                break
+        except OperationalError as error:
+            retry_error = error
+        except Exception as error:
+            last_error_type = type(error).__name__
+            break
+
+        if retry_error is not None:
+            last_error_type = type(retry_error.orig).__name__
+            if attempt == max_attempts:
+                break
+            delay = 0.25 * (2 ** (attempt - 1))
+            logger.warning(
+                "Transient database failure storing Cashu transaction; retrying",
+                extra={
+                    "error_type": last_error_type,
+                    "type": typ,
+                    "request_id": request_id,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "retry_delay_seconds": delay,
+                },
             )
-            session.add(tx)
-            await session.commit()
-    except Exception as e:
-        logger.warning(
-            f"Failed to store cashu transaction: {e} (type={typ})",
-            extra={"error": str(e), "type": typ},
-        )
+            await asyncio.sleep(delay)
+
+    logger.critical(
+        "Cashu transaction could not be stored",
+        extra={
+            "error_type": last_error_type,
+            "type": typ,
+            "request_id": request_id,
+            "amount": amount,
+            "unit": unit,
+            "mint_url": mint_url,
+            "attempts_performed": attempts_performed,
+            "max_attempts": max_attempts,
+        },
+    )
+    return False
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
@@ -358,9 +428,7 @@ class CliToken(SQLModel, table=True):  # type: ignore
     """Long-lived authorization token for CLI/agent use against admin endpoints."""
 
     __tablename__ = "cli_tokens"
-    id: str = Field(
-        primary_key=True, default_factory=lambda: uuid.uuid4().hex
-    )
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
     token: str = Field(unique=True, index=True, description="Bearer token value")
     name: str = Field(description="Human-readable label for this token")
     created_at: int = Field(default_factory=lambda: int(time.time()))
