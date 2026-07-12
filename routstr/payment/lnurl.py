@@ -5,12 +5,14 @@ import math
 from typing import TypedDict
 
 import httpx
+from cashu.core.base import MeltQuoteState
 from cashu.wallet.wallet import Proof, Wallet
 
 # The Cashu library issues POST /v1/melt/bolt11 with timeout=None, so a hung or
 # very slow mint can block a melt (and any caller, e.g. the payout loop)
-# indefinitely. Bound it here so callers fail instead of hanging forever.
+# indefinitely. Bound both the melt and the follow-up quote reconciliation.
 MELT_TIMEOUT_SECONDS = 60
+MELT_RECONCILE_TIMEOUT_SECONDS = 10
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -29,6 +31,60 @@ class LNURLData(TypedDict):
 
 class LNURLError(Exception):
     """LNURL related errors."""
+
+
+class MeltOutcomeUncertainError(LNURLError):
+    """A timed-out melt whose final state could not be established safely."""
+
+    def __init__(self, quote_id: str, reason: str) -> None:
+        self.quote_id = quote_id
+        super().__init__(f"Melt outcome uncertain for quote {quote_id}: {reason}")
+
+
+async def _reconcile_timed_out_melt(
+    wallet: Wallet, proofs: list[Proof], quote_id: str
+) -> None:
+    """Resolve a timed-out melt without making reserved proofs spendable early."""
+    try:
+        quote = await asyncio.wait_for(
+            wallet.get_melt_quote(quote_id),
+            timeout=MELT_RECONCILE_TIMEOUT_SECONDS,
+        )
+    except Exception as error:
+        raise MeltOutcomeUncertainError(
+            quote_id, f"quote reconciliation failed: {type(error).__name__}: {error}"
+        ) from error
+
+    if quote is None:
+        raise MeltOutcomeUncertainError(quote_id, "mint returned no quote")
+
+    if quote.state == MeltQuoteState.paid:
+        try:
+            # get_melt_quote updates the wallet database; explicitly invalidate
+            # the known-spent inputs so in-memory state cannot expose them.
+            await wallet.invalidate(proofs)
+            await wallet.load_proofs(reload=True)
+        except Exception as error:
+            raise MeltOutcomeUncertainError(
+                quote_id,
+                f"local reconciliation failed: {type(error).__name__}: {error}",
+            ) from error
+        return
+
+    if quote.state == MeltQuoteState.unpaid:
+        try:
+            await wallet.set_reserved_for_melt(
+                proofs, reserved=False, quote_id=None
+            )
+            await wallet.load_proofs(reload=True)
+        except Exception as error:
+            raise MeltOutcomeUncertainError(
+                quote_id,
+                f"local reconciliation failed: {type(error).__name__}: {error}",
+            ) from error
+        raise LNURLError(f"Melt timed out and quote {quote_id} is unpaid")
+
+    raise MeltOutcomeUncertainError(quote_id, f"mint reports {quote.state.value}")
 
 
 async def decode_lnurl(lnurl: str) -> str:
@@ -236,8 +292,8 @@ async def raw_send_to_lnurl(
             ),
             timeout=MELT_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError as e:
-        raise LNURLError(
-            f"Melt timed out after {MELT_TIMEOUT_SECONDS}s (mint unresponsive)"
-        ) from e
+    except asyncio.TimeoutError:
+        await _reconcile_timed_out_melt(
+            wallet, proofs, melt_quote_resp.quote
+        )
     return final_amount

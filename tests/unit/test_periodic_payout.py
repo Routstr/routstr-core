@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from routstr.payment.lnurl import MeltOutcomeUncertainError
 from routstr.wallet import periodic_payout
 
 # Sentinel interval used to break the otherwise-infinite payout loop after
@@ -152,3 +153,48 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
     extra = logger.error.call_args.kwargs["extra"]
     assert message == "Error in periodic payout cycle: RuntimeError"
     assert extra == {"error": "db unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_periodic_payout_logs_uncertain_melt_with_full_context() -> None:
+    """Operators can identify and reconcile a payout with an unknown outcome."""
+    from routstr.core.settings import settings
+
+    logger = MagicMock()
+    uncertain = MeltOutcomeUncertainError("quote-123", "mint reports PENDING")
+
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]), patch.object(
+        settings, "primary_mint", "http://mint:3338"
+    ), patch.object(settings, "receive_ln_address", "owner@ln.tld"), patch.object(
+        settings, "payout_interval_seconds", _INTERVAL
+    ), patch.object(settings, "min_payout_sat", 10), patch(
+        "routstr.wallet.asyncio.sleep", _one_cycle_sleep()
+    ), patch("routstr.wallet.db.create_session", _fake_session), patch(
+        "routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())
+    ), patch(
+        "routstr.wallet.get_proofs_per_mint_and_unit",
+        MagicMock(return_value=[MagicMock(amount=100_000)]),
+    ), patch(
+        "routstr.wallet.slow_filter_spend_proofs",
+        AsyncMock(side_effect=lambda proofs, wallet: proofs),
+    ), patch(
+        "routstr.wallet.db.balances_for_mint_and_unit", AsyncMock(return_value=0)
+    ), patch(
+        "routstr.wallet.raw_send_to_lnurl", AsyncMock(side_effect=uncertain)
+    ), patch("routstr.wallet.logger", logger):
+        with pytest.raises(_LoopBreak):
+            await periodic_payout()
+
+    uncertain_logs = [
+        call
+        for call in logger.error.call_args_list
+        if call.args[0] == "Payout melt outcome uncertain"
+    ]
+    assert uncertain_logs
+    assert uncertain_logs[0].kwargs["extra"] == {
+        "error": str(uncertain),
+        "quote_id": "quote-123",
+        "mint_url": "http://mint:3338",
+        "unit": "sat",
+        "address": "owner@ln.tld",
+    }

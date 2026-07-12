@@ -16,7 +16,7 @@ from sqlmodel import col, select, update
 from .core import db, get_logger
 from .core.db import store_cashu_transaction
 from .core.settings import settings
-from .payment.lnurl import raw_send_to_lnurl
+from .payment.lnurl import MeltOutcomeUncertainError, raw_send_to_lnurl
 
 # cashu still declares Optional[X] without explicit defaults on MintInfo.
 # Under pydantic v2 those are required, but real mints omit many of them.
@@ -972,6 +972,17 @@ async def periodic_payout() -> None:
                                         "amount_received": amount_received,
                                     },
                                 )
+                        except MeltOutcomeUncertainError as e:
+                            logger.error(
+                                "Payout melt outcome uncertain",
+                                extra={
+                                    "error": str(e),
+                                    "quote_id": e.quote_id,
+                                    "mint_url": mint_url,
+                                    "unit": unit,
+                                    "address": settings.receive_ln_address,
+                                },
+                            )
                         except Exception as e:
                             logger.error(
                                 f"Error sending payout: {type(e).__name__}",
