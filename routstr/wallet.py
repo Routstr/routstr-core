@@ -1034,12 +1034,17 @@ async def _refund_sweep_once(cutoff: int) -> None:
         await session.commit()
 
 
+async def refund_sweep_once() -> None:
+    """Sweep eligible uncollected refund tokens once."""
+    cutoff = int(time.time()) - settings.refund_sweep_ttl_seconds
+    await _refund_sweep_once(cutoff)
+
+
 async def periodic_refund_sweep() -> None:
     while True:
         await asyncio.sleep(60 * 60)  # every hour
         try:
-            cutoff = int(time.time()) - settings.refund_sweep_ttl_seconds
-            await _refund_sweep_once(cutoff)
+            await refund_sweep_once()
         except Exception as e:
             logger.error(
                 "Error in periodic refund sweep",
