@@ -94,6 +94,23 @@ def _merge_duplicate_transactions(connection: Connection) -> None:
 def upgrade() -> None:
     connection = op.get_bind()
     _merge_duplicate_transactions(connection)
+
+    existing_index = next(
+        (
+            index
+            for index in sa.inspect(connection).get_indexes("cashu_transactions")
+            if index["name"] == _INDEX_NAME
+        ),
+        None,
+    )
+    if existing_index is not None:
+        if existing_index["unique"] and existing_index["column_names"] == [
+            "token",
+            "type",
+        ]:
+            return
+        op.drop_index(_INDEX_NAME, table_name="cashu_transactions")
+
     op.create_index(
         _INDEX_NAME,
         "cashu_transactions",

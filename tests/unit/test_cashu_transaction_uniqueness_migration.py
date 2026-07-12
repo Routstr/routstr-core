@@ -108,3 +108,51 @@ def test_duplicate_merge_preserves_state_and_missing_linkage() -> None:
             "api_key_hashed_key": "hashed-key",
         }
     ]
+
+
+def test_upgrade_is_idempotent_when_unique_index_already_exists(monkeypatch) -> None:
+    engine = sa.create_engine("sqlite:///:memory:")
+    metadata = sa.MetaData()
+    sa.Table(
+        "cashu_transactions",
+        metadata,
+        sa.Column("id", sa.String, primary_key=True),
+        sa.Column("token", sa.String, nullable=False),
+        sa.Column("type", sa.String, nullable=False),
+        sa.Column("created_at", sa.Integer, nullable=False),
+        sa.Column("collected", sa.Boolean, nullable=False),
+        sa.Column("swept", sa.Boolean, nullable=False),
+        sa.Column("source", sa.String, nullable=False),
+        sa.Column("request_id", sa.String),
+        sa.Column("mint_url", sa.String),
+        sa.Column("api_key_hashed_key", sa.String),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX uq_cashu_transactions_token_type "
+            "ON cashu_transactions (token, type)"
+        )
+        monkeypatch.setattr(migration.op, "get_bind", lambda: connection)
+        monkeypatch.setattr(
+            migration.op,
+            "create_index",
+            lambda *args, **kwargs: connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX uq_cashu_transactions_token_type "
+                "ON cashu_transactions (token, type)"
+            ),
+        )
+
+        migration.upgrade()
+
+        indexes = sa.inspect(connection).get_indexes("cashu_transactions")
+
+    assert indexes == [
+        {
+            "name": "uq_cashu_transactions_token_type",
+            "column_names": ["token", "type"],
+            "unique": 1,
+            "dialect_options": {},
+        }
+    ]
