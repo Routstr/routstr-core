@@ -306,6 +306,7 @@ def _get_pricing_rates(
 
     from .models import litellm_cost_entry
     from ..proxy import get_model_instance
+    from .models import litellm_cost_entry
 
     response_model = response_data.get("model", "")
     model_obj = get_model_instance(response_model)
