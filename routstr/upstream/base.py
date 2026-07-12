@@ -1322,31 +1322,12 @@ class BaseUpstreamProvider:
             )
 
             await session.refresh(key)
-            remaining_balance_msats = key.balance
 
-            # Merge cost into usage for OpenCode
-            if "usage" in response_json:
-                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
-                response_json["usage"]["cost_sats"] = (
-                    cost_data.get("total_msats", 0) // 1000
-                )
-                response_json["usage"]["remaining_balance_msats"] = (
-                    remaining_balance_msats
-                )
-                self._fold_cache_into_input_tokens(response_json["usage"])
-
-            # Keep detailed cost
-            response_json["metadata"] = response_json.get("metadata", {})
-            response_json["metadata"]["routstr"] = {"cost": cost_data}
-            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
-                cost_data.get("total_msats", 0) // 1000
-            )
-            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
-                remaining_balance_msats
-            )
-            response_json["cost"] = cost_data
-            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
-            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
+            # Use the same metadata path as streaming responses. The previous
+            # non-streaming-only serializer bypassed component repair and the
+            # client-facing diagnostic log, allowing a valid total to be sent
+            # with zero input/output costs.
+            self.inject_cost_metadata(response_json, cost_data, key)
 
             logger.debug(
                 "Payment adjustment completed for non-streaming",
