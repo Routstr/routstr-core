@@ -1360,6 +1360,18 @@ class BaseUpstreamProvider:
 
             if requested_model:
                 response_json["model"] = requested_model
+            logger.warning(
+                "Non-streaming response final cost before serialization: "
+                "model=%s top_level=%s metadata=%s usage_cost=%s",
+                response_json.get("model", "unknown"),
+                response_json.get("cost"),
+                response_json.get("metadata", {})
+                .get("routstr", {})
+                .get("cost"),
+                response_json.get("usage", {}).get("cost")
+                if isinstance(response_json.get("usage"), dict)
+                else None,
+            )
             return Response(
                 content=json.dumps(response_json).encode(),
                 status_code=response.status_code,
