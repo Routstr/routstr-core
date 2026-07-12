@@ -1060,31 +1060,71 @@ async def test_credit_balance_msat_unit_not_converted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_credit_balance_survives_audit_store_failure() -> None:
-    """A failure writing the CashuTransaction history record must not undo the
-    already-committed balance credit. (The silent swallow is a known
-    audit-trail gap slated for its own fix — this test pins the financial
-    invariant that the user keeps their credit, not the swallow itself.)"""
-    mock_key = Mock()
-    mock_key.balance = 0
-    mock_key.hashed_key = "test_hash"
+async def test_credit_balance_reports_audit_store_false() -> None:
+    mock_key = Mock(balance=0, hashed_key="test_hash")
     mock_session = AsyncMock()
+    debug = Mock()
 
     from routstr.core.settings import settings
 
-    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
-        with patch(
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch(
             "routstr.wallet.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),
-        ):
-            with patch(
-                "routstr.wallet.store_cashu_transaction",
-                side_effect=Exception("history table locked"),
-            ):
-                amount = await credit_balance("cashuAtest", mock_key, mock_session)
+        ),
+        patch("routstr.wallet.store_cashu_transaction", return_value=False),
+        patch("routstr.wallet.logger.debug", debug),
+    ):
+        amount = await credit_balance("cashuAtest", mock_key, mock_session)
 
     assert amount == 1_000_000
     assert mock_session.commit.called
+    debug.assert_called_once_with(
+        "Cashu token successfully redeemed",
+        extra={
+            "amount": 1_000_000,
+            "unit": "sat",
+            "mint_url": "http://mint:3338",
+            "transaction_stored": False,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_credit_balance_survives_audit_store_failure() -> None:
+    """A failed CashuTransaction history write must not undo balance credit."""
+    mock_key = Mock(balance=0, hashed_key="test_hash")
+    mock_session = AsyncMock()
+    debug = Mock()
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch(
+            "routstr.wallet.recieve_token",
+            return_value=(1000, "sat", "http://mint:3338"),
+        ),
+        patch(
+            "routstr.wallet.store_cashu_transaction",
+            side_effect=Exception("history table locked"),
+        ),
+        patch("routstr.wallet.logger.debug", debug),
+    ):
+        amount = await credit_balance("cashuAtest", mock_key, mock_session)
+
+    assert amount == 1_000_000
+    assert mock_session.commit.called
+    debug.assert_called_once_with(
+        "Cashu token successfully redeemed",
+        extra={
+            "amount": 1_000_000,
+            "unit": "sat",
+            "mint_url": "http://mint:3338",
+            "transaction_stored": False,
+        },
+    )
 
 
 @pytest.mark.asyncio

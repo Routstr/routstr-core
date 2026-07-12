@@ -321,22 +321,41 @@ async def store_cashu_transaction(
         api_key_hashed_key=api_key_hashed_key,
     )
 
+    last_error_type: str | None = None
+    attempts_performed = 0
     for attempt in range(1, max_attempts + 1):
+        attempts_performed = attempt
+        retry_error: OperationalError | None = None
         try:
             await _insert_cashu_transaction(transaction)
             return True
-        except IntegrityError:
-            if await _cashu_transaction_exists(token, typ):
-                return True
-            break
+        except IntegrityError as error:
+            last_error_type = type(error).__name__
+            try:
+                if await _cashu_transaction_exists(token, typ):
+                    return True
+            except OperationalError as lookup_error:
+                retry_error = lookup_error
+            except Exception as lookup_error:
+                last_error_type = type(lookup_error).__name__
+                break
+            else:
+                break
         except OperationalError as error:
+            retry_error = error
+        except Exception as error:
+            last_error_type = type(error).__name__
+            break
+
+        if retry_error is not None:
+            last_error_type = type(retry_error.orig).__name__
             if attempt == max_attempts:
                 break
             delay = 0.25 * (2 ** (attempt - 1))
             logger.warning(
                 "Transient database failure storing Cashu transaction; retrying",
                 extra={
-                    "error": str(error),
+                    "error_type": last_error_type,
                     "type": typ,
                     "request_id": request_id,
                     "attempt": attempt,
@@ -345,18 +364,17 @@ async def store_cashu_transaction(
                 },
             )
             await asyncio.sleep(delay)
-        except Exception:
-            break
 
     logger.critical(
-        "Cashu transaction could not be stored after bounded retries",
+        "Cashu transaction could not be stored",
         extra={
+            "error_type": last_error_type,
             "type": typ,
             "request_id": request_id,
             "amount": amount,
             "unit": unit,
             "mint_url": mint_url,
-            "token": token,
+            "attempts_performed": attempts_performed,
             "max_attempts": max_attempts,
         },
     )
