@@ -14,6 +14,7 @@ from .core.settings import settings
 from .wallet import (
     MintConnectionError,
     _is_mint_rate_limited,
+    _mint_cooldown_remaining,
     _mint_operation,
     get_wallet,
     is_mint_connection_error,
@@ -75,17 +76,39 @@ async def _request_mint_with_fallback(
     *,
     allowed_mints: list[str] | None = None,
 ) -> tuple[str, str, str]:
-    """Request a quote, falling back only among the allowed trusted mints."""
+    """Request a quote, falling back only among the allowed trusted mints.
+
+    Guards against amount_sats <= 0: the cashu library's PostMintQuoteRequest
+    enforces ``amount > 0`` (Pydantic Field(gt=0)), so passing 0 raises a
+    cryptic validation error deep in the stack.  Fail fast with context.
+    """
+    if amount_sats <= 0:
+        raise ValueError(
+            f"generate_lightning_invoice: amount_sats must be > 0, got {amount_sats}."
+        )
     tried: list[str] = []
     configured = allowed_mints or [settings.primary_mint, *settings.cashu_mints]
     candidates = list(dict.fromkeys(configured))
     for mint_url in candidates:
+        cooldown = _mint_cooldown_remaining(mint_url)
+        if cooldown > 0:
+            tried.append(f"{mint_url}: cooling down")
+            logger.info(
+                "Skipping rate-limited mint",
+                extra={
+                    "mint_url": mint_url,
+                    "cooldown_seconds": round(cooldown, 2),
+                    "op_name": "request_mint_invoice",
+                },
+            )
+            continue
         try:
-            wallet = await get_wallet(mint_url, "sat")
+            wallet = await get_wallet(mint_url, "sat", retry_on_rate_limit=False)
             quote = await _mint_operation(
                 lambda: wallet.request_mint(amount_sats),
                 op_name="request_mint_invoice",
                 mint_url=mint_url,
+                retry_on_rate_limit=False,
             )
             return quote.request, quote.quote, mint_url
         except Exception as e:
