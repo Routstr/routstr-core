@@ -14,6 +14,8 @@ builds on, independent of any database or app wiring:
   command in the message.
 """
 
+from pathlib import Path
+
 import pytest
 from cryptography.fernet import InvalidToken
 
@@ -124,12 +126,17 @@ def test_password_hashing_is_key_independent(
 # --- fail-fast on missing/malformed key ------------------------------------
 
 
-def test_missing_key_fails_fast_with_generation_command(
-    monkeypatch: pytest.MonkeyPatch,
+def test_decrypt_without_any_key_fails_fast_with_generation_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # Reading secrets is strict: with no key in env AND no key file, decrypt
+    # fails fast with the generation command rather than silently minting a new
+    # key (a fresh key could never match already-encrypted ciphertext). Only the
+    # encrypt path auto-provisions; the read path never does.
     monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(tmp_path / "absent.key"))
     with pytest.raises(RuntimeError) as exc:
-        vault.encrypt("x")
+        vault.decrypt("fernet:v1:not-real-ciphertext")
     msg = str(exc.value)
     assert "ROUTSTR_SECRET_KEY" in msg
     assert "Fernet.generate_key" in msg
@@ -139,3 +146,125 @@ def test_malformed_key_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROUTSTR_SECRET_KEY", "not-a-valid-fernet-key")
     with pytest.raises(RuntimeError):
         vault.encrypt("x")
+
+
+def test_malformed_env_key_does_not_self_provision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A malformed env key is an operator mistake, not an unset key: it must fail
+    # loudly, never silently generate a different key to a file (which would hide
+    # the mistake and could brick secrets the operator meant to key differently).
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY", "not-a-valid-fernet-key")
+    key_file = tmp_path / "routstr_secret.key"
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(key_file))
+    with pytest.raises(RuntimeError):
+        vault.encrypt("x")
+    assert not key_file.exists()
+
+
+# --- auto-provisioned key file (non-breaking upgrade path) -----------------
+
+
+@pytest.fixture
+def generated_key_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """No env key; the key file points at a fresh, empty tmp location.
+
+    Exercises what an existing node hits when it upgrades without setting
+    ROUTSTR_SECRET_KEY: the master key is auto-generated and persisted here so
+    boot does not break, while secrets are still never written in plaintext.
+    """
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    key_file = tmp_path / "routstr_secret.key"
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(key_file))
+    return key_file
+
+
+def test_encrypt_without_key_generates_and_persists_key_file(
+    generated_key_file: Path,
+) -> None:
+    # Encryption at rest stays mandatory, but a missing key is provisioned rather
+    # than fatal: encrypt generates a key, writes it to the key file (owner-only),
+    # and the value round-trips — decrypt, still with no env key, reads the same
+    # file key back.
+    key_file = generated_key_file
+    assert not key_file.exists()
+
+    token = vault.encrypt("nsec1secret")
+
+    assert token.startswith("fernet:v1:")
+    assert key_file.exists()
+    assert key_file.stat().st_mode & 0o077 == 0  # not group/other-accessible
+    assert vault.decrypt(token) == "nsec1secret"
+
+
+def test_generated_key_warns_operator_with_path_and_value(
+    generated_key_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The whole point of auto-generating is that an upgrading operator MUST NOT
+    # miss it: the notice names the file to back up, prints the key so it can be
+    # promoted into a secrets manager, and shouts the back-up imperative.
+    key_file = generated_key_file
+    vault.encrypt("x")
+
+    out = capsys.readouterr().out
+    assert "ROUTSTR_SECRET_KEY" in out
+    assert str(key_file) in out
+    assert key_file.read_text().strip() in out
+    assert "BACK UP" in out.upper()
+
+
+def test_existing_key_file_is_reused_and_warns_only_once(
+    generated_key_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Once the key exists, later encrypts reuse it (never rotate a key that
+    # secrets were already encrypted under) and stay silent (no repeated notice).
+    key_file = generated_key_file
+    vault.encrypt("a")
+    first_key = key_file.read_text()
+    capsys.readouterr()  # drain the one-time notice
+
+    vault.encrypt("b")
+
+    assert key_file.read_text() == first_key
+    assert capsys.readouterr().out == ""
+
+
+def test_env_key_takes_precedence_over_key_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An explicit env key wins over a persisted file key (an operator-supplied
+    # key from a secrets manager overrides the auto-generated one), and the file
+    # is left untouched.
+    key_file = tmp_path / "routstr_secret.key"
+    key_file.write_text(KEY_B)
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(key_file))
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY", KEY_A)
+
+    token = vault.encrypt("x")
+
+    assert vault.decrypt(token) == "x"  # env key (A) decrypts it
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY", KEY_B)
+    with pytest.raises(InvalidToken):
+        vault.decrypt(token)  # the file key (B) does not
+    assert key_file.read_text() == KEY_B  # file key never used or overwritten
+
+
+def test_generated_key_defaults_beside_the_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With no env key and no explicit key-file path, the key is provisioned next
+    # to the SQLite database, so it rides whatever volume already persists the
+    # data instead of landing in the working directory (where a container
+    # recreate would lose it and brick decryption).
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)  # isolate the working-dir fallback from the repo
+    db_dir = tmp_path / "data"
+    db_dir.mkdir()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir}/routstr.db")
+
+    token = vault.encrypt("beside-the-db")
+
+    assert (db_dir / "routstr_secret.key").exists()
+    assert not (tmp_path / "routstr_secret.key").exists()  # not the working dir
+    assert vault.decrypt(token) == "beside-the-db"

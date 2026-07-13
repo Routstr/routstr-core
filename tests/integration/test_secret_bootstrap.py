@@ -10,6 +10,7 @@ silently corrupting state.
 
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 import pytest
@@ -166,25 +167,46 @@ async def test_fail_fast_when_nsec_encrypted_with_different_key(
         await bootstrap_secrets(integration_session)
 
 
-# --- encryption is mandatory: a node with an nsec needs ROUTSTR_SECRET_KEY -----
+# --- encryption is mandatory, key custody is not: upgrade without a key --------
 
 
 @pytest.mark.asyncio
-async def test_legacy_nsec_without_secret_key_fails_fast(
+async def test_legacy_nsec_without_secret_key_generates_and_encrypts(
     clean_secret_env: None,
     integration_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # A node with a Nostr identity must not boot without a key to encrypt it:
-    # encryption at rest is mandatory, not opt-in. The failure names the missing
-    # key and hands over the generation command rather than crashing opaquely or
-    # silently persisting the nsec in plaintext. No env/blob copy is dropped — the
-    # node refuses until the operator sets the key.
+    # A node upgrading with a legacy plaintext NSEC but no ROUTSTR_SECRET_KEY must
+    # NOT break. Encryption at rest stays mandatory (the nsec is never persisted
+    # in plaintext), but the key custody is flexible: bootstrap generates a master
+    # key, persists it to the key file, warns loudly, and encrypts the identity —
+    # so the node keeps running instead of refusing to boot.
     monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    key_file = tmp_path / "routstr_secret.key"
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(key_file))
     monkeypatch.setenv("NSEC", NSEC_HEX)
 
-    with pytest.raises(RuntimeError, match="ROUTSTR_SECRET_KEY"):
-        await bootstrap_secrets(integration_session)
+    await bootstrap_secrets(integration_session)
+
+    # A master key was generated and persisted...
+    assert key_file.exists()
+    # ...the nsec is encrypted at rest under it, never stored in plaintext...
+    secret = await get_secret(integration_session)
+    assert secret.encrypted_nsec is not None
+    assert vault.is_encrypted(secret.encrypted_nsec) is True
+    assert vault.decrypt(secret.encrypted_nsec) == NSEC_HEX
+    assert secret.nsec_managed is True
+    # ...the node holds the live identity (npub derived from it)...
+    assert settings.nsec == NSEC_HEX
+    assert settings.npub == derive_npub_from_nsec(NSEC_HEX)
+    # ...and the operator is loudly told a key was generated and must be backed up
+    # (path + value shown) so an upgrade cannot silently create an unbacked key.
+    out = capsys.readouterr().out
+    assert str(key_file) in out
+    assert key_file.read_text().strip() in out
+    assert "BACK UP" in out.upper()
 
 
 # --- boot ordering: rescue legacy blob secrets before they are stripped ----
