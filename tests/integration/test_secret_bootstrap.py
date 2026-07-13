@@ -269,6 +269,33 @@ async def test_stale_env_nsec_does_not_override_vault_nsec(
 
 
 @pytest.mark.asyncio
+async def test_stale_env_nsec_does_not_split_npub_from_vault_nsec(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # As above, the vault owns the nsec while a stale NSEC lingers in env. The
+    # private key correctly comes from the vault, but the npub must too: if
+    # initialize derives the public key from the stale env nsec, the node ends up
+    # with a private key from the vault and a public key from the old env value,
+    # and anything reading settings.npub announces the wrong Nostr identity.
+    expected_npub = derive_npub_from_nsec(NSEC_HEX)
+    stale_npub = derive_npub_from_nsec(STALE_NSEC_HEX)
+    assert expected_npub and stale_npub and expected_npub != stale_npub  # guard
+
+    await set_nsec(integration_session, NSEC_HEX)
+
+    monkeypatch.setenv("NSEC", STALE_NSEC_HEX)
+    await _create_settings_blob(integration_session, {"name": "LegacyNode"})
+
+    await bootstrap_secrets(integration_session)
+    await SettingsService.initialize(integration_session)
+
+    assert settings.nsec == NSEC_HEX
+    assert settings.npub == expected_npub
+
+
+@pytest.mark.asyncio
 async def test_cleared_nsec_stays_cleared_across_reboot(
     clean_secret_env: None,
     integration_session: AsyncSession,

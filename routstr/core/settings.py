@@ -337,12 +337,15 @@ class SettingsService:
                     merged_dict.get("cashu_mints", [])
                 )
 
-            # Keep npub consistent with the live nsec. bootstrap_secrets may hold
-            # the decrypted nsec (from the encrypted store) even when neither env
-            # nor the blob carries an nsec/npub; derive from that live value so
-            # initialize never wipes a known public key back to empty, leaving a
-            # private key with no matching npub.
-            if not merged_dict.get("npub") and settings.nsec:
+            # Keep npub consistent with the live nsec. bootstrap_secrets has
+            # already run and holds the single authoritative nsec (decrypted from
+            # the encrypted store, or freshly imported). merged_dict starts from
+            # the env/blob, which may carry a STALE nsec — and therefore a stale
+            # derived npub — after the vault took ownership. Derive from the live
+            # value and OVERRIDE, not just fill: otherwise the node keeps the
+            # vault's private key but announces the old env key's npub (npub is a
+            # pure derivation of nsec, never configured independently of it).
+            if settings.nsec:
                 derived_npub = derive_npub_from_nsec(settings.nsec)
                 if derived_npub:
                     merged_dict["npub"] = derived_npub
