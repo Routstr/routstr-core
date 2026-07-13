@@ -375,4 +375,4 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
         with pytest.raises(asyncio.CancelledError):
             await proxy_module.proxy(request, "v1/chat/completions", session=session)
 
-    revert_mock.assert_awaited_once_with(key, session, 1_000)
+    revert_mock.assert_awaited_once_with(key, session, 900)

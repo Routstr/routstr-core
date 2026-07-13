@@ -35,6 +35,25 @@ ROUTSTR_LN_ADDRESS: str = "npub130mznv74rxs032peqym6g3wqavh472623mt3z5w73xq9r6qq
 ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
 ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
 
+
+def _format_msat_amount(amount: int) -> str:
+    sats = f"{amount / 1000:.3f}".rstrip("0").rstrip(".")
+    return f"{sats} sats ({amount} msats)"
+
+
+def _model_balance_error(required: int, available: int) -> dict[str, dict[str, str]]:
+    return {
+        "error": {
+            "message": (
+                f"Insufficient balance: {_format_msat_amount(required)} required "
+                f"for this model; {_format_msat_amount(available)} available."
+            ),
+            "type": "insufficient_quota",
+            "code": "insufficient_balance",
+        }
+    }
+
+
 # TODO: implement prepaid api key (not like it was before)
 # PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
 # PREPAID_BALANCE = int(os.environ.get("PREPAID_BALANCE", "0")) * 1000  # Convert to msats
@@ -206,13 +225,7 @@ async def validate_bearer_key(
                 )
                 raise HTTPException(
                     status_code=402,
-                    detail={
-                        "error": {
-                            "message": f"Insufficient balance: {min_cost} mSats required for this model. {billing_key.total_balance} available.",
-                            "type": "insufficient_quota",
-                            "code": "insufficient_balance",
-                        }
-                    },
+                    detail=_model_balance_error(min_cost, billing_key.total_balance),
                 )
 
             # Early check: Spending limit check (Child key limit)
@@ -302,13 +315,7 @@ async def validate_bearer_key(
                 if min_cost > 0 and existing_key.total_balance < min_cost:
                     raise HTTPException(
                         status_code=402,
-                        detail={
-                            "error": {
-                                "message": f"Insufficient balance: {min_cost} mSats required for this model. {existing_key.total_balance} available.",
-                                "type": "insufficient_quota",
-                                "code": "insufficient_balance",
-                            }
-                        },
+                        detail=_model_balance_error(min_cost, existing_key.total_balance),
                     )
 
                 return existing_key
