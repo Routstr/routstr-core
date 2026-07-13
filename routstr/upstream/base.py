@@ -45,6 +45,7 @@ from ..wallet import (
     classify_redemption_error,
     recieve_token,
     send_token,
+    token_mint_url,
 )
 from . import messages_dispatch
 from .cache_breakpoints import (
@@ -3290,7 +3291,7 @@ class BaseUpstreamProvider:
                         token=refund_token,
                         amount=amount,
                         unit=unit,
-                        mint_url=mint,
+                        mint_url=token_mint_url(refund_token, mint),
                         typ="out",
                         request_id=request_id,
                     )
@@ -3645,7 +3646,7 @@ class BaseUpstreamProvider:
                     token=refund_token,
                     amount=emergency_refund,
                     unit=unit,
-                    mint_url=mint,
+                    mint_url=token_mint_url(refund_token, mint),
                     typ="out",
                     request_id=request_id,
                 )
@@ -4609,7 +4610,7 @@ class BaseUpstreamProvider:
                     token=refund_token,
                     amount=emergency_refund,
                     unit=unit,
-                    mint_url=mint,
+                    mint_url=token_mint_url(refund_token, mint),
                     typ="out",
                     request_id=request_id,
                 )

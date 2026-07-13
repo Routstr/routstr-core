@@ -66,6 +66,10 @@ async def test_auto_topup_persists_before_sending_and_marks_success_collected() 
             "routstr.upstream.auto_topup.store_cashu_transaction",
             AsyncMock(return_value=True),
         ) as store,
+        patch(
+            "routstr.upstream.auto_topup.token_mint_url",
+            return_value="https://fallback-mint.test",
+        ),
         patch("routstr.upstream.auto_topup.create_session", return_value=session),
     ):
         await _check_and_topup(_row())
@@ -74,7 +78,7 @@ async def test_auto_topup_persists_before_sending_and_marks_success_collected() 
         token="cashu-token",
         amount=50,
         unit="sat",
-        mint_url="https://mint.test",
+        mint_url="https://fallback-mint.test",
         typ="out",
         collected=False,
         source="auto_topup",
@@ -138,6 +142,12 @@ async def test_auto_topup_does_not_send_untracked_token() -> None:
             "routstr.upstream.auto_topup.store_cashu_transaction",
             AsyncMock(return_value=False),
         ),
+        patch(
+            "routstr.upstream.auto_topup.release_token_reservation",
+            AsyncMock(),
+        ) as reclaim,
     ):
         await _check_and_topup(_row())
+
+    reclaim.assert_awaited_once_with("cashu-token")
     provider.topup.assert_not_awaited()

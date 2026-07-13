@@ -27,6 +27,7 @@ from .wallet import (
     recieve_token,
     send_to_lnurl,
     send_token,
+    token_mint_url,
 )
 
 router = APIRouter()
@@ -220,7 +221,11 @@ async def _lookup_key_no_create(
 
 
 async def _restore_balance(
-    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int, mint_url: str
+    session: AsyncSession,
+    hashed_key: str,
+    balance: int,
+    reserved_balance: int,
+    mint_url: str,
 ) -> None:
     """Restore balance after a failed refund mint attempt."""
     restore_stmt = (
@@ -235,7 +240,11 @@ async def _restore_balance(
     await session.commit()
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
-        extra={"hashed_key": hashed_key, "restored_balance": balance, "mint_url": mint_url},
+        extra={
+            "hashed_key": hashed_key,
+            "restored_balance": balance,
+            "mint_url": mint_url,
+        },
     )
 
 
@@ -389,15 +398,14 @@ async def refund_wallet_endpoint(
             detail="Balance changed concurrently. Please retry the refund.",
         )
 
-    # --- MINT: balance is locked at zero, safe to create the refund token ---
-    # Proofs from untrusted mints are swapped to primary_mint on receive.
-    # Use primary_mint unless key.refund_mint_url is an explicitly trusted mint.
+    # The balance is locked at zero, so it is safe to create the refund token.
     effective_refund_mint = (
         key.refund_mint_url
         if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints
         else settings.primary_mint
     )
     try:
+        refund_currency = key.refund_currency or "sat"
         if key.refund_address:
             await send_to_lnurl(
                 remaining_balance,
@@ -407,10 +415,10 @@ async def refund_wallet_endpoint(
             )
             result = {"recipient": key.refund_address}
         else:
-            refund_currency = key.refund_currency or "sat"
             token = await send_token(
                 remaining_balance, refund_currency, effective_refund_mint
             )
+            effective_refund_mint = token_mint_url(token, effective_refund_mint)
             result = {"token": token}
 
         if key.refund_currency == "sat":
@@ -431,11 +439,23 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         error_msg = str(e)
         logger.error(
             "refund_wallet_endpoint: mint/send failed",
@@ -462,7 +482,7 @@ async def refund_wallet_endpoint(
                 token=result["token"],
                 amount=remaining_balance,
                 unit=key.refund_currency or "sat",
-                mint_url=key.refund_mint_url,
+                mint_url=effective_refund_mint,
                 typ="out",
                 collected=False,
                 source="apikey",
@@ -654,7 +674,6 @@ async def reset_child_key_spent(
     await session.commit()
 
     return {"success": True, "message": "Child key balance reset successfully."}
-
 
 
 @router.api_route(

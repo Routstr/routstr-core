@@ -170,6 +170,59 @@ async def test_send_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_release_token_reservation_unreserves_local_proofs() -> None:
+    from routstr.wallet import release_token_reservation
+
+    token_proof = Mock(secret="proof-secret", reserved=True)
+    cached_proof = Mock(secret="proof-secret", reserved=True)
+    token = Mock(mint="http://mint:3338", unit="sat", proofs=[token_proof])
+    wallet = Mock(proofs=[cached_proof], set_reserved_for_send=AsyncMock())
+    with (
+        patch("routstr.wallet.deserialize_token_from_string", return_value=token),
+        patch(
+            "routstr.wallet.get_wallet", AsyncMock(return_value=wallet)
+        ) as get_wallet,
+    ):
+        await release_token_reservation("cashu-token")
+
+    get_wallet.assert_awaited_once_with("http://mint:3338", "sat", load=False)
+    wallet.set_reserved_for_send.assert_awaited_once_with(token.proofs, reserved=False)
+    assert token_proof.reserved is False
+    assert cached_proof.reserved is False
+
+
+@pytest.mark.asyncio
+async def test_refund_mint_falls_back_to_trusted_mint_with_funds() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import find_trusted_mint_with_funds
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+
+    def wallet_for(mint: str, amount: int) -> Mock:
+        keyset = Mock(id=f"keyset-{mint}", mint_url=mint)
+        keyset.unit.name = "sat"
+        proof = Mock(id=keyset.id, amount=amount, reserved=False)
+        return Mock(keysets={keyset.id: keyset}, proofs=[proof])
+
+    wallets = {
+        primary: wallet_for(primary, 50),
+        secondary: wallet_for(secondary, 200),
+    }
+    with (
+        patch.object(settings, "primary_mint", primary),
+        patch.object(settings, "cashu_mints", [primary, secondary]),
+        patch(
+            "routstr.wallet.get_wallet",
+            AsyncMock(side_effect=lambda mint, *args, **kwargs: wallets[mint]),
+        ),
+    ):
+        mint = await find_trusted_mint_with_funds(100, "sat", primary)
+
+    assert mint == secondary
+
+
+@pytest.mark.asyncio
 async def test_credit_balance() -> None:
     token_data = {
         "token": [{"mint": "http://mint:3338", "proofs": [{"amount": 1000}]}],
@@ -1417,6 +1470,25 @@ def test_mint_rate_guard_rebuilds_when_setting_changes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mint_rate_guard_keeps_cooldown_when_concurrency_is_unlimited() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import _MintRateGuard
+
+    operation = AsyncMock(return_value="ok")
+    with (
+        patch.object(settings, "mint_max_concurrency", 0),
+        patch("routstr.wallet.time.monotonic", return_value=0),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        guard = _MintRateGuard.get("http://mint:3338")
+        guard.apply_cooldown(5)
+        assert await guard.run(operation) == "ok"
+
+    sleep.assert_awaited_once_with(5)
+    operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_mint_operation_honors_retry_after_as_minimum() -> None:
     from routstr.core.settings import settings
     from routstr.wallet import _mint_operation
@@ -1495,7 +1567,9 @@ async def test_get_wallet_initializes_and_loads_once_concurrently() -> None:
     with patch(
         "routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)
     ) as create:
-        with patch("routstr.wallet.time.monotonic", return_value=100.0):
+        # A fresh wallet must load even when the host has been up for less than
+        # the reload interval.
+        with patch("routstr.wallet.time.monotonic", return_value=10.0):
             first, second = await asyncio.gather(
                 get_wallet("http://mint:3338"), get_wallet("http://mint:3338")
             )
@@ -1504,6 +1578,36 @@ async def test_get_wallet_initializes_and_loads_once_concurrently() -> None:
     create.assert_awaited_once()
     mock_wallet.load_mint.assert_awaited_once()
     mock_wallet.load_proofs.assert_awaited_once_with(reload=True)
+
+
+@pytest.mark.asyncio
+async def test_get_wallet_can_surface_429_without_retrying() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import get_wallet
+
+    request = httpx.Request("GET", "http://mint:3338/v1/info")
+    response = httpx.Response(429, request=request, headers={"Retry-After": "60"})
+    wallet = Mock(
+        load_mint=AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "rate limited", request=request, response=response
+            )
+        ),
+        load_proofs=AsyncMock(),
+    )
+
+    with (
+        patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=wallet)),
+        patch.object(settings, "mint_retry_max_attempts", 3),
+        patch.object(settings, "mint_operation_timeout_seconds", 0),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+    ):
+        with pytest.raises(httpx.HTTPStatusError):
+            await get_wallet("http://mint:3338", retry_on_rate_limit=False)
+
+    wallet.load_mint.assert_awaited_once()
+    wallet.load_proofs.assert_not_awaited()
+    sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1752,3 +1856,161 @@ async def test_lightning_mint_fallback_all_fail() -> None:
                         ):
                             with pytest.raises(MintConnectionError):
                                 await _request_mint_with_fallback(1000)
+
+
+@pytest.mark.asyncio
+async def test_lightning_mint_fallback_rejects_zero_amount() -> None:
+    """Zero or negative amounts must be rejected before reaching the mint."""
+    from routstr.lightning import _request_mint_with_fallback
+
+    with pytest.raises(ValueError, match="amount_sats must be > 0"):
+        await _request_mint_with_fallback(0)
+
+    with pytest.raises(ValueError, match="amount_sats must be > 0"):
+        await _request_mint_with_fallback(-5)
+
+
+@pytest.mark.asyncio
+async def test_wallet_request_mint_fallback_rejects_zero_amount() -> None:
+    """Zero or negative amounts must be rejected before reaching the mint."""
+    from routstr.wallet import _request_mint_with_fallback
+
+    with pytest.raises(ValueError, match="amount must be > 0"):
+        await _request_mint_with_fallback(0, op_name="test")
+
+    with pytest.raises(ValueError, match="amount must be > 0"):
+        await _request_mint_with_fallback(-1, op_name="test")
+
+
+@pytest.mark.asyncio
+async def test_wallet_fallback_on_429_no_in_place_retry() -> None:
+    """A 429 from the primary mint must trigger immediate fallback to the
+    secondary — _mint_operation must NOT retry in-place when
+    retry_on_rate_limit=False is set by _request_mint_with_fallback."""
+    from routstr.core.settings import settings
+    from routstr.wallet import _request_mint_with_fallback
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+
+    request = httpx.Request("POST", "http://primary:3338/v1/mint/quote/bolt11")
+    response = httpx.Response(429, request=request, headers={"Retry-After": "60"})
+    primary_call_count = 0
+
+    async def primary_request_mint(_amount: int) -> None:
+        nonlocal primary_call_count
+        primary_call_count += 1
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.request_mint = AsyncMock(side_effect=primary_request_mint)
+
+    mock_quote = Mock(quote="q_secondary", request="lnbc1secondary")
+    mock_secondary_wallet = Mock()
+    mock_secondary_wallet.request_mint = AsyncMock(return_value=mock_quote)
+
+    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
+    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+
+    with patch.object(settings, "primary_mint", primary):
+        with patch.object(settings, "cashu_mints", [primary, secondary]):
+            with patch.object(settings, "mint_retry_max_attempts", 3):
+                with patch.object(settings, "mint_max_concurrency", 0):
+                    with patch.object(settings, "mint_operation_timeout_seconds", 0):
+                        with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
+                            with patch(
+                                "routstr.wallet.get_wallet", side_effect=mock_get
+                            ):
+                                _, mint_url, _ = await _request_mint_with_fallback(
+                                    1000, op_name="test_429_fallback"
+                                )
+
+    assert mint_url == secondary
+    assert primary_call_count == 1
+    mock_secondary_wallet.request_mint.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wallet_fallback_skips_mint_during_cooldown() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import _MintRateGuard, _request_mint_with_fallback
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+    primary_wallet = Mock(request_mint=AsyncMock())
+    quote = Mock(quote="q_secondary", request="lnbc1secondary")
+    secondary_wallet = Mock(request_mint=AsyncMock(return_value=quote))
+    wallets = {primary: primary_wallet, secondary: secondary_wallet}
+
+    with (
+        patch.object(settings, "primary_mint", primary),
+        patch.object(settings, "cashu_mints", [primary, secondary]),
+        patch.object(settings, "mint_max_concurrency", 0),
+        patch.object(settings, "mint_operation_timeout_seconds", 0),
+        patch("routstr.wallet.time.monotonic", return_value=10),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+        patch(
+            "routstr.wallet.get_wallet",
+            AsyncMock(side_effect=lambda mint, *args, **kwargs: wallets[mint]),
+        ),
+    ):
+        _MintRateGuard.get(primary).apply_cooldown(60)
+        _, mint_url, _ = await _request_mint_with_fallback(
+            1000, op_name="test_cooldown_fallback"
+        )
+
+    assert mint_url == secondary
+    primary_wallet.request_mint.assert_not_awaited()
+    secondary_wallet.request_mint.assert_awaited_once_with(1000)
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lightning_fallback_on_429_no_in_place_retry() -> None:
+    """Same as above but for the lightning.py _request_mint_with_fallback."""
+    from routstr.core.settings import settings
+    from routstr.lightning import _request_mint_with_fallback
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+
+    request = httpx.Request("POST", "http://primary:3338/v1/mint/quote/bolt11")
+    response = httpx.Response(429, request=request, headers={"Retry-After": "60"})
+    primary_call_count = 0
+
+    async def primary_request_mint(_amount: int) -> None:
+        nonlocal primary_call_count
+        primary_call_count += 1
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    mock_primary_wallet = Mock()
+    mock_primary_wallet.request_mint = AsyncMock(side_effect=primary_request_mint)
+
+    mock_quote = Mock(quote="q_secondary", request="lnbc1secondary")
+    mock_secondary_wallet = Mock()
+    mock_secondary_wallet.request_mint = AsyncMock(return_value=mock_quote)
+
+    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
+    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+
+    with patch.object(settings, "primary_mint", primary):
+        with patch.object(settings, "cashu_mints", [primary, secondary]):
+            with patch.object(settings, "mint_retry_max_attempts", 3):
+                with patch.object(settings, "mint_max_concurrency", 0):
+                    with patch.object(settings, "mint_operation_timeout_seconds", 0):
+                        with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
+                            with patch(
+                                "routstr.lightning.get_wallet", side_effect=mock_get
+                            ):
+                                _, _, first_mint = await _request_mint_with_fallback(
+                                    1000
+                                )
+                                _, _, second_mint = await _request_mint_with_fallback(
+                                    1000
+                                )
+
+    assert first_mint == second_mint == secondary
+    assert primary_call_count == 1
+    assert mock_secondary_wallet.request_mint.await_count == 2
+    mock_sleep.assert_not_called()
