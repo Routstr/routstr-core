@@ -1710,71 +1710,72 @@ async def test_lightning_mint_fallback_for_topups() -> None:
 
 
 @pytest.mark.asyncio
-async def test_swap_falls_back_to_secondary_mint() -> None:
-    """When the primary mint is unreachable, swap_to_primary_mint falls back
-    to a secondary trusted mint as the swap destination."""
+async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
     from routstr.core.settings import settings
-    from routstr.wallet import _wallet_last_load, _wallets, swap_to_primary_mint
-
-    _wallets.clear()
-    _wallet_last_load.clear()
+    from routstr.wallet import swap_to_primary_mint
 
     primary = "http://primary:3338"
     secondary = "http://secondary:3338"
     foreign = "http://foreign:3338"
 
-    mock_token = Mock()
-    mock_token.mint = foreign
-    mock_token.unit = "sat"
-    mock_token.amount = 1000
-    mock_token.keysets = ["keyset1"]
-    mock_token.proofs = [Mock(amount=1000)]
-
-    mock_token_wallet = Mock()
-    mock_token_wallet.load_mint = AsyncMock()
-    mock_token_wallet.load_proofs = AsyncMock()
-    mock_token_wallet.get_fees_for_proofs = Mock(return_value=0)
-    mock_token_wallet.melt_quote = AsyncMock(
-        return_value=Mock(quote="melt_q", amount=990, fee_reserve=10)
+    token = Mock(
+        mint=foreign,
+        unit="sat",
+        amount=1000,
+        keysets=["keyset1"],
+        proofs=[Mock(amount=1000)],
     )
-    mock_token_wallet.melt = AsyncMock(return_value=Mock())
-
-    mock_primary_wallet = Mock()
-    mock_primary_wallet.request_mint = AsyncMock(
-        side_effect=httpx.ConnectError("primary down")
+    source_wallet = Mock(
+        load_mint=AsyncMock(),
+        load_proofs=AsyncMock(),
+        get_fees_for_proofs=Mock(return_value=0),
+        melt_quote=AsyncMock(
+            return_value=Mock(quote="melt_q", amount=990, fee_reserve=10)
+        ),
+        melt=AsyncMock(return_value=Mock()),
     )
 
     mint_quote = Mock(quote="mint_q_secondary", request="lnbc1secondary")
-    mock_secondary_wallet = Mock()
-    mock_secondary_wallet.load_mint = AsyncMock()
-    mock_secondary_wallet.load_proofs = AsyncMock()
-    mock_secondary_wallet.available_balance = Mock(amount=0)
-    mock_secondary_wallet.keysets = ["ks_secondary"]
-    mock_secondary_wallet.restore_tokens_for_keyset = AsyncMock()
-    mock_secondary_wallet.request_mint = AsyncMock(return_value=mint_quote)
-    mock_secondary_wallet.mint = AsyncMock(return_value=Mock())
+    secondary_wallet = Mock(
+        load_mint=AsyncMock(),
+        load_proofs=AsyncMock(),
+        available_balance=Mock(amount=0),
+        keysets=["ks_secondary"],
+        restore_tokens_for_keyset=AsyncMock(),
+        request_mint=AsyncMock(return_value=mint_quote),
+        mint=AsyncMock(return_value=Mock()),
+    )
 
-    wallets_map = {primary: mock_primary_wallet, secondary: mock_secondary_wallet}
-    mock_get = AsyncMock(side_effect=lambda m, *a, **kw: wallets_map[m])
+    async def get_wallet(mint: str, *args: object, **kwargs: object) -> Mock:
+        if mint == primary:
+            raise httpx.ConnectError("primary down")
+        return secondary_wallet
 
-    with patch.object(settings, "primary_mint", primary):
-        with patch.object(settings, "primary_mint_unit", "sat"):
-            with patch.object(settings, "cashu_mints", [primary, secondary]):
-                with patch.object(settings, "mint_max_concurrency", 0):
-                    with patch.object(settings, "mint_operation_timeout_seconds", 0):
-                        with patch("asyncio.sleep", AsyncMock()):
-                            with patch(
-                                "routstr.wallet.get_wallet", side_effect=mock_get
-                            ):
-                                amount, unit, mint_url = await swap_to_primary_mint(
-                                    mock_token, mock_token_wallet
-                                )
+    mock_get = AsyncMock(side_effect=get_wallet)
+    with (
+        patch.object(settings, "primary_mint", primary),
+        patch.object(settings, "primary_mint_unit", "sat"),
+        patch.object(settings, "cashu_mints", [primary, secondary]),
+        patch.object(settings, "mint_max_concurrency", 0),
+        patch.object(settings, "mint_operation_timeout_seconds", 0),
+        patch("asyncio.sleep", AsyncMock()),
+        patch("routstr.wallet.get_wallet", side_effect=mock_get),
+        patch("routstr.wallet.logger.warning") as warning,
+    ):
+        amount, unit, mint_url = await swap_to_primary_mint(token, source_wallet)
 
-    assert mint_url == secondary
-    assert amount == 990  # 1000 - 10 fee_reserve
-    assert unit == "sat"
-    mock_secondary_wallet.mint.assert_called_once()
-    mock_primary_wallet.mint.assert_not_called()
+    assert (amount, unit, mint_url) == (990, "sat", secondary)
+    secondary_wallet.mint.assert_awaited_once()
+    assert mock_get.await_args_list[0].args[0] == primary
+    assert any(call.args[0] == secondary for call in mock_get.await_args_list)
+    events = {
+        call.kwargs["extra"]["event"]
+        for call in warning.call_args_list
+        if "extra" in call.kwargs and "event" in call.kwargs["extra"]
+    }
+    assert "cashu_destination_failed" in events
+    assert "cashu_destination_selected" in events
+    assert "cashu_swap_completed" in events
 
 
 @pytest.mark.asyncio

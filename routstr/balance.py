@@ -145,6 +145,17 @@ class TopupRequest(BaseModel):
     cashu_token: str
 
 
+def _error_chain(error: BaseException) -> list[dict[str, str]]:
+    chain: list[dict[str, str]] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append({"type": type(current).__name__, "message": str(current)})
+        current = current.__cause__ or current.__context__
+    return chain
+
+
 @router.post("/topup")
 async def topup_wallet_endpoint(
     cashu_token: str | None = None,
@@ -162,6 +173,18 @@ async def topup_wallet_endpoint(
     cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")
+
+    source_mint = token_mint_url(cashu_token, "unknown")
+    logger.warning(
+        "Cashu wallet top-up started",
+        extra={
+            "event": "cashu_topup_started",
+            "source_mint": source_mint,
+            "primary_mint": settings.primary_mint,
+            "trusted_mints": settings.cashu_mints,
+            "key_hash": billing_key.hashed_key[:8],
+        },
+    )
     try:
         amount_msats = await credit_balance(cashu_token, billing_key, session)
     except Exception as e:
@@ -170,12 +193,41 @@ async def topup_wallet_endpoint(
         classified = classify_redemption_error(e)
         if classified is None:
             logger.error(
-                "topup_wallet_endpoint: unhandled error",
-                extra={"error": str(e), "error_type": type(e).__name__},
+                "Cashu wallet top-up failed with an unhandled error",
+                extra={
+                    "event": "cashu_topup_failed",
+                    "source_mint": source_mint,
+                    "primary_mint": settings.primary_mint,
+                    "trusted_mints": settings.cashu_mints,
+                    "error_chain": _error_chain(e),
+                },
             )
             raise HTTPException(status_code=500, detail="Internal server error")
-        _type, status_code, message, _code = classified
+        error_type, status_code, message, error_code = classified
+        logger.warning(
+            "Cashu wallet top-up failed",
+            extra={
+                "event": "cashu_topup_failed",
+                "source_mint": source_mint,
+                "primary_mint": settings.primary_mint,
+                "trusted_mints": settings.cashu_mints,
+                "status_code": status_code,
+                "error_type": error_type,
+                "error_code": error_code,
+                "error_chain": _error_chain(e),
+            },
+        )
         raise HTTPException(status_code=status_code, detail=message)
+
+    logger.warning(
+        "Cashu wallet top-up completed",
+        extra={
+            "event": "cashu_topup_completed",
+            "source_mint": source_mint,
+            "credited_msats": amount_msats,
+            "key_hash": billing_key.hashed_key[:8],
+        },
+    )
     return {"msats": amount_msats}
 
 

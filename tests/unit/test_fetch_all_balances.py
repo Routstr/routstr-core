@@ -1,9 +1,22 @@
+from collections.abc import Generator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from routstr.wallet import fetch_all_balances
+
+
+@pytest.fixture(autouse=True)
+def clear_balance_fetch_state() -> Generator[None, None, None]:
+    from routstr import wallet
+
+    wallet._balance_fetch_failures.clear()
+    wallet._balance_fetch_locks.clear()
+    yield
+    wallet._balance_fetch_failures.clear()
+    wallet._balance_fetch_locks.clear()
 
 
 @asynccontextmanager
@@ -21,7 +34,7 @@ def _patches(proof_amount: int = 1000):  # type: ignore[no-untyped-def]
         ),
         patch(
             "routstr.wallet.slow_filter_spend_proofs",
-            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+            AsyncMock(side_effect=lambda proofs, wallet, **kwargs: proofs),
         ),
         patch(
             "routstr.wallet.db.balances_for_mint_and_unit",
@@ -50,6 +63,40 @@ async def test_fetch_all_balances_falls_back_to_primary_mint() -> None:
 
     assert [d["mint_url"] for d in details] == ["http://primary:3338"]
     assert total_wallet == 1000
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
+    from routstr.core.settings import settings
+
+    get_wallet = AsyncMock(side_effect=httpx.ConnectError("mint unavailable"))
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch.object(settings, "primary_mint", "http://mint:3338"),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch("routstr.wallet.time.monotonic", return_value=10),
+        patch("routstr.wallet.logger.warning") as warning,
+    ):
+        first = await fetch_all_balances(units=["sat"])
+        second = await fetch_all_balances(units=["sat"])
+
+    assert first[0][0]["error"] == "mint unavailable"
+    assert second[0][0]["error"] == "mint unavailable"
+    assert get_wallet.await_count == 1
+    warning.assert_called_once()
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch.object(settings, "primary_mint", "http://mint:3338"),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch("routstr.wallet.time.monotonic", return_value=71),
+        patch("routstr.wallet.logger.warning"),
+    ):
+        await fetch_all_balances(units=["sat"])
+
+    assert get_wallet.await_count == 2
 
 
 @pytest.mark.asyncio
