@@ -94,12 +94,10 @@ async def get_all_models_with_overrides(
         provider_result = await session.exec(select(UpstreamProviderRow))
         providers_by_id = {p.id: p for p in provider_result.all()}
 
-        overrides_by_id: dict[str, tuple[ModelRow, float]] = {
-            row.id: (
+        overrides_by_key: dict[tuple[str, int], tuple[ModelRow, float]] = {
+            (row.id.lower(), row.upstream_provider_id): (
                 row,
-                providers_by_id[row.upstream_provider_id].provider_fee
-                if row.upstream_provider_id in providers_by_id
-                else 1.01,
+                providers_by_id[row.upstream_provider_id].provider_fee,
             )
             for row in override_rows
             if row.upstream_provider_id is not None
@@ -107,17 +105,28 @@ async def get_all_models_with_overrides(
             and providers_by_id[row.upstream_provider_id].enabled
         }
 
-    all_models: dict[str, Model] = {}
+    all_models: dict[tuple[str, str], Model] = {}
 
     for upstream in upstreams:
+        upstream_db_id = getattr(upstream, "db_id", None)
+        provider_key = (
+            f"db:{upstream_db_id}"
+            if isinstance(upstream_db_id, int)
+            else f"{getattr(upstream, 'provider_type', '')}|{getattr(upstream, 'base_url', '')}"
+        )
         for model in upstream.get_cached_models():
-            if model.id in overrides_by_id:
-                override_row, provider_fee = overrides_by_id[model.id]
-                all_models[model.id] = _row_to_model(
+            model_key = (
+                (model.id.lower(), upstream_db_id)
+                if isinstance(upstream_db_id, int)
+                else None
+            )
+            if model_key is not None and model_key in overrides_by_key:
+                override_row, provider_fee = overrides_by_key[model_key]
+                all_models[(model.id.lower(), provider_key)] = _row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
             elif model.enabled:
-                all_models[model.id] = model
+                all_models[(model.id.lower(), provider_key)] = model
 
     return list(all_models.values())
 

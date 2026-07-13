@@ -4,7 +4,12 @@ import json
 from sqlmodel import select
 
 from ..core import get_logger
-from ..core.db import UpstreamProviderRow, create_session
+from ..core.db import (
+    CashuTransaction,
+    UpstreamProviderRow,
+    create_session,
+    store_cashu_transaction,
+)
 from ..wallet import send_token
 from .routstr import RoutstrUpstreamProvider
 
@@ -123,7 +128,6 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         },
     )
 
-    print(amount, mint_url)
     try:
         token = await send_token(amount, "sat", mint_url)
     except Exception as e:
@@ -138,6 +142,22 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
+    stored = await store_cashu_transaction(
+        token=token,
+        amount=amount,
+        unit="sat",
+        mint_url=mint_url,
+        typ="out",
+        collected=False,
+        source="auto_topup",
+    )
+    if not stored:
+        logger.critical(
+            "Aborting auto top-up because its cashu token could not be persisted",
+            extra={"provider_id": row.id, "mint_url": mint_url},
+        )
+        return
+
     result = await provider.topup(token)
 
     if "error" in result:
@@ -149,6 +169,26 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
             },
         )
     else:
+        async with create_session() as session:
+            transaction = (
+                await session.exec(
+                    select(CashuTransaction).where(
+                        CashuTransaction.token == token,
+                        CashuTransaction.type == "out",
+                        CashuTransaction.source == "auto_topup",
+                    )
+                )
+            ).first()
+            if transaction is None:
+                logger.critical(
+                    "Completed auto top-up transaction is missing from the database",
+                    extra={"provider_id": row.id, "mint_url": mint_url},
+                )
+            else:
+                transaction.collected = True
+                session.add(transaction)
+                await session.commit()
+
         logger.info(
             "Auto top-up completed successfully",
             extra={

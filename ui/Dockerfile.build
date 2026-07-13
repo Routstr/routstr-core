@@ -6,14 +6,14 @@ RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 # Copy package files
-COPY package.json pnpm-lock.yaml* ./
-RUN corepack enable pnpm && corepack prepare pnpm@latest --activate
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
+RUN corepack enable pnpm && corepack prepare pnpm@10.15.0 --activate
 RUN pnpm install --frozen-lockfile
 
 # Build the UI
 FROM base AS builder
 WORKDIR /app
-RUN corepack enable pnpm && corepack prepare pnpm@latest --activate
+RUN corepack enable pnpm && corepack prepare pnpm@10.15.0 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 

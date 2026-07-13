@@ -142,22 +142,23 @@ async def refresh_model_maps() -> None:
         result = await session.exec(query)
         provider_rows = result.all()
 
-    overrides_by_id: dict[str, tuple[ModelRow, float]] = {}
-    disabled_model_ids: set[str] = set()
+    overrides_by_key: dict[tuple[str, int], tuple[ModelRow, float]] = {}
+    disabled_model_keys: set[tuple[str, int]] = set()
 
     for provider in provider_rows:
         if not provider.enabled:
             continue
         for model in provider.models:
+            model_key = (model.id.lower(), model.upstream_provider_id)
             if model.enabled:
-                overrides_by_id[model.id] = (model, provider.provider_fee)
+                overrides_by_key[model_key] = (model, provider.provider_fee)
             else:
-                disabled_model_ids.add(model.id)
+                disabled_model_keys.add(model_key)
 
     _model_instances, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,
-        overrides_by_id=overrides_by_id,
-        disabled_model_ids=disabled_model_ids,
+        overrides_by_key=overrides_by_key,
+        disabled_model_keys=disabled_model_keys,
     )
 
 

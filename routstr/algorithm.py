@@ -86,8 +86,8 @@ def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
 
 def create_model_mappings(
     upstreams: list["BaseUpstreamProvider"],
-    overrides_by_id: dict[str, tuple],
-    disabled_model_ids: set[str],
+    overrides_by_key: dict[tuple[str, int], tuple],
+    disabled_model_keys: set[tuple[str, int]],
 ) -> tuple[
     dict[str, "Model"], dict[str, list["BaseUpstreamProvider"]], dict[str, "Model"]
 ]:
@@ -107,8 +107,9 @@ def create_model_mappings(
 
     Args:
         upstreams: List of all upstream provider instances
-        overrides_by_id: Dict of model overrides from database {model_id: (ModelRow, fee)}
-        disabled_model_ids: Set of model IDs that should be excluded
+        overrides_by_key: Dict of model overrides from database
+            {(model_id_lower, upstream_provider_id): (ModelRow, fee)}
+        disabled_model_keys: Set of provider-scoped model keys that should be excluded
 
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
@@ -179,14 +180,22 @@ def create_model_mappings(
         """Process all models from a given provider."""
         upstream_prefix = getattr(upstream, "upstream_name", None)
         provider_key = get_provider_identity(upstream)
+        upstream_db_id = getattr(upstream, "db_id", None)
 
         for model in upstream.get_cached_models():
-            if not model.enabled or model.id in disabled_model_ids:
+            model_key = (
+                (model.id.lower(), upstream_db_id)
+                if isinstance(upstream_db_id, int)
+                else None
+            )
+            if not model.enabled or (
+                model_key is not None and model_key in disabled_model_keys
+            ):
                 continue
 
-            # Apply overrides if present
-            if model.id in overrides_by_id:
-                override_row, provider_fee = overrides_by_id[model.id]
+            # Apply overrides only for this provider's model row.
+            if model_key is not None and model_key in overrides_by_key:
+                override_row, provider_fee = overrides_by_key[model_key]
                 model_to_use = _row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
@@ -237,13 +246,10 @@ def create_model_mappings(
 
     # Include enabled DB overrides even when provider discovery misses models.
     # This is important for deployment-based providers like Azure.
-    for model_id, override_data in overrides_by_id.items():
-        if model_id in disabled_model_ids:
+    for (model_id, upstream_provider_id), override_data in overrides_by_key.items():
+        if (model_id, upstream_provider_id) in disabled_model_keys:
             continue
         override_row, provider_fee = override_data
-        upstream_provider_id = getattr(override_row, "upstream_provider_id", None)
-        if not isinstance(upstream_provider_id, int):
-            continue
 
         upstream_for_override = providers_by_db_id.get(upstream_provider_id)
         if upstream_for_override is None:
