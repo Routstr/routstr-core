@@ -1229,6 +1229,23 @@ def _chain(outer: BaseException, cause: BaseException) -> BaseException:
     return outer
 
 
+def test_rate_limited_mint_is_classified_as_unreachable() -> None:
+    from routstr.wallet import classify_redemption_error
+
+    request = httpx.Request("POST", "http://mint:3338/v1/swap")
+    response = httpx.Response(429, request=request)
+    error = httpx.HTTPStatusError(
+        "rate limited", request=request, response=response
+    )
+
+    assert classify_redemption_error(error) == (
+        "mint_unreachable",
+        503,
+        "Cashu mint is unreachable",
+        "cashu_mint_unreachable",
+    )
+
+
 @pytest.mark.parametrize(
     "error",
     [

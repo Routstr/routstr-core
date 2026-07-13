@@ -14,9 +14,11 @@ def clear_balance_fetch_state() -> Generator[None, None, None]:
 
     wallet._balance_fetch_failures.clear()
     wallet._balance_fetch_locks.clear()
+    wallet._MintRateGuard._guards.clear()
     yield
     wallet._balance_fetch_failures.clear()
     wallet._balance_fetch_locks.clear()
+    wallet._MintRateGuard._guards.clear()
 
 
 @asynccontextmanager
@@ -97,6 +99,31 @@ async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
         await fetch_all_balances(units=["sat"])
 
     assert get_wallet.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_balance_failure_applies_mint_cooldown_to_other_units() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import _mint_cooldown_remaining
+
+    mint = "http://mint:3338"
+    get_wallet = AsyncMock(side_effect=httpx.ConnectError("mint unavailable"))
+    with (
+        patch.object(settings, "cashu_mints", [mint]),
+        patch.object(settings, "primary_mint", mint),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch("routstr.wallet.time.monotonic", return_value=10),
+        patch("routstr.wallet.logger.warning") as warning,
+    ):
+        details, *_ = await fetch_all_balances(units=["sat", "msat"])
+        cooldown = _mint_cooldown_remaining(mint)
+
+    assert get_wallet.await_count == 1
+    assert warning.call_count == 1
+    assert cooldown == 60
+    assert details[0]["error"] == "mint unavailable"
+    assert details[1]["error"] == "Mint cooldown is active"
 
 
 @pytest.mark.asyncio

@@ -319,7 +319,7 @@ def classify_redemption_error(
             "The mint that issued this Cashu token is unreachable; the token cannot be redeemed at another mint",
             "cashu_source_mint_unreachable",
         )
-    if is_mint_connection_error(error):
+    if _is_mint_rate_limited(error) or is_mint_connection_error(error):
         return (
             "mint_unreachable",
             503,
@@ -1456,7 +1456,7 @@ class BalanceDetail(TypedDict, total=False):
 
 _BALANCE_FETCH_RETRY_SECONDS = 60.0
 _balance_fetch_failures: dict[tuple[str, str], tuple[float, str]] = {}
-_balance_fetch_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_balance_fetch_locks: dict[str, asyncio.Lock] = {}
 
 
 def _balance_error(mint_url: str, unit: str, error: str) -> BalanceDetail:
@@ -1489,7 +1489,7 @@ async def fetch_all_balances(
         session: db.AsyncSession, mint_url: str, unit: str
     ) -> BalanceDetail:
         key = (mint_url, unit)
-        lock = _balance_fetch_locks.setdefault(key, asyncio.Lock())
+        lock = _balance_fetch_locks.setdefault(mint_url, asyncio.Lock())
         async with lock:
             now = time.monotonic()
             failure = _balance_fetch_failures.get(key)
@@ -1498,7 +1498,7 @@ async def fetch_all_balances(
 
             cooldown = _mint_cooldown_remaining(mint_url)
             if cooldown > 0:
-                error = "Mint is cooling down after a rate limit"
+                error = "Mint cooldown is active"
                 _balance_fetch_failures[key] = (now + cooldown, error)
                 return _balance_error(mint_url, unit, error)
 
@@ -1516,6 +1516,12 @@ async def fetch_all_balances(
                     session, mint_url, unit
                 )
             except Exception as error:
+                connection_failure = is_mint_connection_error(error)
+                rate_limited = _is_mint_rate_limited(error)
+                if connection_failure or rate_limited:
+                    _MintRateGuard.get(mint_url).apply_cooldown(
+                        _BALANCE_FETCH_RETRY_SECONDS
+                    )
                 retry_delay = max(
                     _BALANCE_FETCH_RETRY_SECONDS,
                     _mint_cooldown_remaining(mint_url),
@@ -1528,6 +1534,9 @@ async def fetch_all_balances(
                         "mint_url": mint_url,
                         "unit": unit,
                         "error": str(error),
+                        "connection_failure": connection_failure,
+                        "rate_limited": rate_limited,
+                        "mint_cooldown_applied": connection_failure or rate_limited,
                         "retry_seconds": round(retry_delay, 2),
                     },
                 )
