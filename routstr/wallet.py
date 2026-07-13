@@ -415,18 +415,15 @@ async def _redeem_same_mint(
         )
     except Exception as error:
         if is_mint_connection_error(error):
-            alternatives = [
-                mint for mint in settings.cashu_mints if mint != token_obj.mint
-            ]
             logger.warning(
-                "Same-mint redemption failed",
+                "Same-mint redemption failed; client must use a different token",
                 extra={
                     "event": "cashu_same_mint_redemption_failed",
                     "source_mint": token_obj.mint,
                     "source_unit": token_obj.unit,
                     "source_amount": token_obj.amount,
-                    "cross_mint_fallback_available": bool(alternatives),
-                    "destination_candidates": alternatives,
+                    "cross_mint_fallback_attempted": False,
+                    "action": "retry_with_token_from_another_mint",
                     "error": str(error),
                     "error_type": type(error).__name__,
                 },
@@ -465,11 +462,6 @@ async def recieve_token(
         )
         return await swap_to_trusted_mint(token_obj, wallet)
 
-    destinations = [
-        mint
-        for mint in dict.fromkeys([settings.primary_mint, *settings.cashu_mints])
-        if mint != token_obj.mint
-    ]
     logger.warning(
         "Trying same-mint Cashu redemption",
         extra={
@@ -477,42 +469,10 @@ async def recieve_token(
             "source_mint": token_obj.mint,
             "source_unit": token_obj.unit,
             "source_amount": token_obj.amount,
-            "cross_mint_fallback_available": bool(destinations),
-            "destination_candidates": destinations,
+            "cross_mint_fallback_on_connection_failure": False,
         },
     )
-    try:
-        return await _redeem_same_mint(wallet, token_obj)
-    except SourceMintConnectionError as same_mint_error:
-        if not destinations:
-            raise
-        logger.warning(
-            "Same-mint redemption failed; trying cross-mint swap",
-            extra={
-                "event": "cashu_cross_mint_fallback_started",
-                "source_mint": token_obj.mint,
-                "source_unit": token_obj.unit,
-                "source_amount": token_obj.amount,
-                "destination_candidates": destinations,
-                "same_mint_error": str(same_mint_error),
-            },
-        )
-        try:
-            return await swap_to_trusted_mint(
-                token_obj, wallet, force_cross_mint=True
-            )
-        except Exception as swap_error:
-            logger.error(
-                "Cross-mint fallback failed",
-                extra={
-                    "event": "cashu_cross_mint_fallback_failed",
-                    "source_mint": token_obj.mint,
-                    "destination_candidates": destinations,
-                    "error": str(swap_error),
-                    "error_type": type(swap_error).__name__,
-                },
-            )
-            raise
+    return await _redeem_same_mint(wallet, token_obj)
 
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
@@ -688,11 +648,7 @@ def _melt_insufficient_shortfall(error: Exception) -> int | None:
 
 
 async def _request_mint_with_fallback(
-    amount: int,
-    *,
-    op_name: str,
-    primary_wallet: Wallet | None = None,
-    excluded_mints: set[str] | None = None,
+    amount: int, *, op_name: str, primary_wallet: Wallet | None = None
 ) -> tuple[Wallet, str, MintQuote]:
     """Try request_mint on the primary mint, fall back to other trusted mints
     on transport or rate-limit failure. Returns the wallet, mint_url, and quote.
@@ -706,13 +662,9 @@ async def _request_mint_with_fallback(
             f"_request_mint_with_fallback({op_name}): amount must be > 0, got {amount}. "
             f"Token value is too small after fee deduction or unit conversion."
         )
-    excluded_mints = excluded_mints or set()
-    candidates = [
-        mint
-        for mint in [settings.primary_mint, *settings.cashu_mints]
-        if mint not in excluded_mints
-    ]
-    candidates = list(dict.fromkeys(candidates))
+    candidates = list(
+        dict.fromkeys([settings.primary_mint, *settings.cashu_mints])
+    )
     logger.warning(
         "Trying trusted destination mints",
         extra={
@@ -823,7 +775,6 @@ async def _calculate_swap_amount(
     token_wallet: Wallet,
     primary_wallet: Wallet | None,
     proofs: list,
-    excluded_mints: set[str] | None = None,
 ) -> int:
     """
     Calculate the amount to mint on the primary mint after accounting for
@@ -834,7 +785,7 @@ async def _calculate_swap_amount(
     else:
         receive_amount = amount_msat
 
-    if token_mint_url == settings.primary_mint and not excluded_mints:
+    if token_mint_url == settings.primary_mint:
         logger.info(
             "swap_to_primary_mint: skipping fee estimation (same mint)",
             extra={"minted_amount": receive_amount},
@@ -881,7 +832,6 @@ async def _calculate_swap_amount(
             receive_amount,
             op_name="swap_fee_est_mint_quote",
             primary_wallet=primary_wallet,
-            excluded_mints=excluded_mints,
         )
         stage = "source_fee_quote"
         dummy_melt_quote = await _mint_operation(
@@ -950,10 +900,7 @@ async def _calculate_swap_amount(
 
 
 async def swap_to_trusted_mint(
-    token_obj: Token,
-    token_wallet: Wallet,
-    *,
-    force_cross_mint: bool = False,
+    token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, str, str]:
     logger.warning(
         "Starting Cashu cross-mint swap",
@@ -980,7 +927,7 @@ async def swap_to_trusted_mint(
     # If the token is already from the primary mint, we don't need a cross-mint
     # swap — redeem it same-mint. There's no melt/Lightning fee, but the mint's
     # NUT-02 input fee still applies; _redeem_same_mint accounts for it.
-    if token_obj.mint == settings.primary_mint and not force_cross_mint:
+    if token_obj.mint == settings.primary_mint:
         logger.info(
             "swap_to_primary_mint: token already on primary mint, skipping swap",
             extra={
@@ -992,7 +939,6 @@ async def swap_to_trusted_mint(
         return await _redeem_same_mint(token_wallet, token_obj)
 
     primary_wallet: Wallet | None = None
-    excluded_mints = {token_obj.mint} if force_cross_mint else None
 
     minted_amount = await _calculate_swap_amount(
         amount_msat,
@@ -1001,7 +947,6 @@ async def swap_to_trusted_mint(
         token_wallet,
         primary_wallet,
         token_obj.proofs,
-        excluded_mints,
     )
 
     # The estimate above is non-binding: the mint may demand a higher fee on the
@@ -1035,7 +980,6 @@ async def swap_to_trusted_mint(
             minted_amount,
             op_name="swap_request_mint",
             primary_wallet=primary_wallet,
-            excluded_mints=excluded_mints,
         )
         logger.info(
             "swap_to_primary_mint: mint quote received",
@@ -1298,17 +1242,10 @@ async def swap_to_trusted_mint(
 
 
 async def swap_to_primary_mint(
-    token_obj: Token,
-    token_wallet: Wallet,
-    *,
-    force_cross_mint: bool = False,
+    token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, str, str]:
     """Backward-compatible alias for callers using the old function name."""
-    return await swap_to_trusted_mint(
-        token_obj,
-        token_wallet,
-        force_cross_mint=force_cross_mint,
-    )
+    return await swap_to_trusted_mint(token_obj, token_wallet)
 
 
 async def credit_balance(

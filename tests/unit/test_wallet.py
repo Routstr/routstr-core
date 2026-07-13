@@ -160,8 +160,9 @@ async def test_recieve_token_trusted_mint_deducts_input_fee() -> None:
 
 
 @pytest.mark.asyncio
-async def test_primary_mint_failure_falls_back_to_secondary_swap() -> None:
+async def test_primary_mint_failure_does_not_try_another_mint() -> None:
     from routstr.core.settings import settings
+    from routstr.wallet import SourceMintConnectionError
 
     source = "http://primary:3338"
     destination = "http://secondary:3338"
@@ -173,48 +174,29 @@ async def test_primary_mint_failure_falls_back_to_secondary_swap() -> None:
         proofs=[Mock(amount=100)],
     )
     source_wallet = Mock(
-        load_mint=AsyncMock(side_effect=httpx.ConnectError("split endpoint down")),
-        get_fees_for_proofs=Mock(return_value=0),
-        melt_quote=AsyncMock(
-            return_value=Mock(quote="melt_quote", amount=90, fee_reserve=10)
-        ),
-        melt=AsyncMock(return_value=Mock()),
+        load_mint=AsyncMock(side_effect=httpx.ConnectError("mint unavailable"))
     )
-    mint_quote = Mock(quote="mint_quote", request="lnbc1destination")
-    destination_wallet = Mock(
-        request_mint=AsyncMock(return_value=mint_quote),
-        load_proofs=AsyncMock(),
-        available_balance=Mock(amount=0),
-        mint=AsyncMock(return_value=Mock()),
-        keysets=["destination_keyset"],
-    )
-
-    async def get_wallet(mint: str, *args: object, **kwargs: object) -> Mock:
-        return source_wallet if mint == source else destination_wallet
+    get_wallet = AsyncMock(return_value=source_wallet)
 
     with (
         patch.object(settings, "primary_mint", source),
-        patch.object(settings, "primary_mint_unit", "sat"),
         patch.object(settings, "cashu_mints", [source, destination]),
-        patch.object(settings, "mint_max_concurrency", 0),
-        patch.object(settings, "mint_operation_timeout_seconds", 0),
         patch("routstr.wallet.deserialize_token_from_string", return_value=token),
-        patch("routstr.wallet.get_wallet", AsyncMock(side_effect=get_wallet)),
+        patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.logger.warning") as warning,
     ):
-        amount, unit, mint = await recieve_token("cashuAtoken")
+        with pytest.raises(SourceMintConnectionError):
+            await recieve_token("cashuAtoken")
 
-    assert (amount, unit, mint) == (90, "sat", destination)
-    source_wallet.melt.assert_awaited_once()
-    destination_wallet.mint.assert_awaited_once()
-    events = {
-        call.kwargs["extra"].get("event")
+    get_wallet.assert_awaited_once_with(source, "sat", load=False)
+    failure = next(
+        call.kwargs["extra"]
         for call in warning.call_args_list
-        if "extra" in call.kwargs
-    }
-    assert "cashu_cross_mint_fallback_started" in events
-    assert "cashu_destination_selected" in events
-    assert "cashu_swap_completed" in events
+        if call.kwargs.get("extra", {}).get("event")
+        == "cashu_same_mint_redemption_failed"
+    )
+    assert failure["cross_mint_fallback_attempted"] is False
+    assert failure["action"] == "retry_with_token_from_another_mint"
 
 
 @pytest.mark.asyncio
