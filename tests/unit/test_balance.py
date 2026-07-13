@@ -535,6 +535,29 @@ async def test_topup_mint_unreachable_returns_503(error: Exception) -> None:
 
 
 @pytest.mark.asyncio
+async def test_topup_unreachable_source_mint_explains_why_fallback_is_impossible() -> None:
+    from fastapi import HTTPException
+
+    from routstr.wallet import SourceMintConnectionError
+
+    key = _make_api_key(balance=1000)
+    session = MagicMock()
+    error = SourceMintConnectionError("Issuing Cashu mint is unreachable")
+
+    with (
+        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
+        patch("routstr.balance.credit_balance", AsyncMock(side_effect=error)),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await topup_wallet_endpoint(
+                cashu_token="cashuAtoken", key=key, session=session
+            )
+
+    assert exc_info.value.status_code == 503
+    assert "cannot be redeemed at another mint" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_topup_already_spent_still_returns_400() -> None:
     """Regression: the mint-unreachable short-circuit must not swallow the
     existing ValueError substring buckets."""
