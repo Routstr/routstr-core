@@ -55,7 +55,10 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
 
 1. **Prepare your `.env`**:
    ```bash
-   # Required: encrypts secrets at rest. The node won't start without it.
+   # Optional: encrypts node secrets at rest. If unset, the node generates a key
+   # on first start, writes it to routstr_secret.key, and prints it once — back
+   # up that file. Set it explicitly to manage the key yourself (recommended in
+   # production).
    ROUTSTR_SECRET_KEY=<generated-key>
    NAME="My AI Node"
    DESCRIPTION="Fast access to models"
@@ -63,10 +66,11 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
    RECEIVE_LN_ADDRESS=yourname@wallet.com
    ```
 
-   Generate `ROUTSTR_SECRET_KEY` once and keep it stable — changing it makes
-   previously encrypted secrets unreadable:
+   If you don't set one, a key is generated and printed on first start — save it
+   somewhere safe (losing it makes previously encrypted secrets unreadable). To
+   supply your own, generate it once and keep it stable:
    ```bash
-   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
 
 2. **Start the services**:
@@ -80,7 +84,7 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
    ```bash
    docker compose logs routstr | grep -i admin
    ```
-   (Lost it? Reset with `python scripts/reset_admin_password.py --regenerate`.)
+   (Lost it? Reset with `docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate`.)
 
 4. **Configure**:
    Open [http://localhost:8000/admin/](http://localhost:8000/admin/) to connect your AI providers and set pricing.

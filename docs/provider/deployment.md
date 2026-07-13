@@ -156,9 +156,20 @@ Example `.env`:
 UPSTREAM_BASE_URL=https://api.openai.com/v1
 UPSTREAM_API_KEY=sk-proj-...
 ADMIN_PASSWORD=change-me
+# Encrypts node secrets at rest. Optional — if unset, a key is generated next to
+# your database (on the same volume) and printed once. Set it explicitly to
+# manage the key yourself.
+ROUTSTR_SECRET_KEY=
 NAME=My Provider Node
 RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
 ```
+
+!!! note "Secret key persistence"
+    If you leave `ROUTSTR_SECRET_KEY` unset, the node generates one and stores it
+    as `routstr_secret.key` **next to your database**, so it persists on the same
+    volume as your data — just include that volume in your backups. For stronger
+    isolation (keeping the key off the data volume), set `ROUTSTR_SECRET_KEY` from
+    a secrets manager instead.
 
 See [Configuration](configuration.md) for all available options.
 

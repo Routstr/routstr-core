@@ -15,6 +15,11 @@ Before running your node, you should create a `.env` file in the project root. T
 ```bash
 ADMIN_PASSWORD=your-secure-password
 
+# Encrypts node secrets at rest. Optional — if unset, the node generates a key on
+# first start and prints it once (back it up). Set it to manage the key yourself
+# (recommended in production). See "Secrets at Rest" below.
+ROUTSTR_SECRET_KEY=
+
 # Node Identity
 NAME="My AI Node"
 DESCRIPTION="Fast access to models"
@@ -124,6 +129,8 @@ Use environment variables for:
 | `UPSTREAM_BASE_URL`  | Upstream API endpoint             | —                                    |
 | `UPSTREAM_API_KEY`   | Upstream API key                  | —                                    |
 | `ADMIN_PASSWORD`     | Dashboard password                | (none)                               |
+| `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
+| `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
 | `DATABASE_URL`       | Database connection string        | `sqlite+aiosqlite:///keys.db`        |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
@@ -141,6 +148,20 @@ Use environment variables for:
 ### Priority
 
 Environment variables are read on startup. Dashboard settings override them and persist in the database. Once you change a setting in the dashboard, the env var is ignored for that setting.
+
+### Secrets at Rest
+
+The node's Nostr private key (`nsec`) is encrypted in the database using
+`ROUTSTR_SECRET_KEY`. You don't have to set it: if it's unset, the node generates a
+key on first start, writes it **beside the database** (the file named by
+`ROUTSTR_SECRET_KEY_FILE`, default `routstr_secret.key`) so it persists on the same
+volume as your data, and prints it once.
+
+**Back up that key** — it lives on the same volume as your database, so include it
+in your backups. If it is lost or changed, previously encrypted secrets can't be
+decrypted and must be re-entered — there is no rotation. To keep the key off the
+data volume, set `ROUTSTR_SECRET_KEY` explicitly (an env value always takes
+precedence over the file). See also [Deployment](deployment.md).
 
 ---
 

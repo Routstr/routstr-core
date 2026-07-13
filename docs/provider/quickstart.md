@@ -32,6 +32,10 @@ Create a `.env` file in the root of the project to store your secrets:
 # Initial Admin Password
 ADMIN_PASSWORD=mysecretpassword
 
+# Encrypts node secrets at rest. Optional — if unset, the node generates a key on
+# first start and prints it once (back it up).
+ROUTSTR_SECRET_KEY=
+
 # Node Identity
 NAME="My AI Node"
 DESCRIPTION="Fast access to models"
