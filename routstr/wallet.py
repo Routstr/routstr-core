@@ -58,6 +58,8 @@ class TokenConsumedError(Exception):
 # httpx base classes cover their subclasses. HTTPStatusError is excluded on
 # purpose — that means the mint answered, just with an error status.
 _MINT_TRANSPORT_COOLDOWN_SECONDS = 30.0
+_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS = 60.0
+_MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 7 * 60 * 60
 
 _TRANSPORT_EXC_TYPES: tuple[type[BaseException], ...] = (
     httpx.NetworkError,
@@ -90,6 +92,7 @@ class _MintRateGuard:
         )
         self._cooldown_until = 0.0
         self._cooldown_reason: str | None = None
+        self._consecutive_rate_limits = 0
         self._needs_probe = False
         self._probe_lock = asyncio.Lock()
 
@@ -102,6 +105,25 @@ class _MintRateGuard:
         elif self._cooldown_reason is None and reason is not None:
             self._cooldown_reason = reason
         self._needs_probe = True
+
+    def apply_rate_limit_cooldown(self, retry_after: float | None = None) -> float:
+        remaining = self.cooldown_remaining()
+        if remaining > 0 and self._cooldown_reason == "rate_limited":
+            minimum = min(
+                _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS,
+                max(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, retry_after or 0.0),
+            )
+            if minimum > remaining:
+                self.apply_cooldown(minimum, reason="rate_limited")
+                return minimum
+            return remaining
+
+        self._consecutive_rate_limits += 1
+        base = max(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, retry_after or 0.0)
+        multiplier = 2 ** min(self._consecutive_rate_limits - 1, 10)
+        delay = min(_MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS, base * multiplier)
+        self.apply_cooldown(delay, reason="rate_limited")
+        return delay
 
     def cooldown_remaining(self) -> float:
         return max(0.0, self._cooldown_until - time.monotonic())
@@ -132,9 +154,16 @@ class _MintRateGuard:
         try:
             result = await factory()
         except Exception as error:
-            # Keep queued callers behind the probe while _mint_operation applies
-            # the precise Retry-After/backoff from this failure.
-            self.apply_cooldown(1.0)
+            # Keep queued callers behind the probe. Handle rate limits here so
+            # the next exponential step is recorded before another waiter can
+            # acquire the probe lock.
+            if _is_mint_rate_limited(error):
+                retry_after = None
+                if isinstance(error, httpx.HTTPStatusError):
+                    retry_after = _parse_retry_after(error.response.headers)
+                self.apply_rate_limit_cooldown(retry_after)
+            else:
+                self.apply_cooldown(1.0)
             logger.warning(
                 "Mint cooldown probe failed",
                 extra={
@@ -142,6 +171,8 @@ class _MintRateGuard:
                     "mint_url": self._mint_url,
                     "error": str(error),
                     "error_type": type(error).__name__,
+                    "cooldown_seconds": round(self.cooldown_remaining(), 2),
+                    "consecutive_rate_limits": self._consecutive_rate_limits,
                 },
             )
             raise
@@ -149,6 +180,7 @@ class _MintRateGuard:
         self._needs_probe = False
         self._cooldown_until = 0.0
         self._cooldown_reason = None
+        self._consecutive_rate_limits = 0
         logger.warning(
             "Mint cooldown probe succeeded; restoring normal concurrency",
             extra={
@@ -260,8 +292,9 @@ async def _mint_operation(
                     retry_after = _parse_retry_after(exc.response.headers)
                     if retry_after is not None:
                         backoff = max(retry_after, backoff)
+                cooldown = backoff
                 if guard is not None:
-                    guard.apply_cooldown(backoff, reason="rate_limited")
+                    cooldown = guard.apply_rate_limit_cooldown(backoff)
 
                 # When the caller has a fallback strategy (trusted-mint
                 # list), re-raise immediately so the caller can try the next
@@ -272,7 +305,10 @@ async def _mint_operation(
                         extra={
                             "op_name": op_name,
                             "mint_url": mint_url,
-                            "cooldown_seconds": round(backoff, 2),
+                            "cooldown_seconds": round(cooldown, 2),
+                            "consecutive_rate_limits": guard._consecutive_rate_limits
+                            if guard is not None
+                            else attempt + 1,
                         },
                     )
                     raise
@@ -285,11 +321,14 @@ async def _mint_operation(
                         "op_name": op_name,
                         "mint_url": mint_url,
                         "attempt": attempt + 1,
-                        "cooldown_seconds": round(backoff, 2),
+                        "cooldown_seconds": round(cooldown, 2),
+                        "consecutive_rate_limits": guard._consecutive_rate_limits
+                        if guard is not None
+                        else attempt + 1,
                     },
                 )
                 if guard is None:
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(cooldown)
 
         raise RuntimeError(f"{op_name}: exhausted retries unexpectedly")
 
@@ -1648,7 +1687,11 @@ async def fetch_all_balances(
                     if connection_failure
                     else "mint_error"
                 )
-                if connection_failure or rate_limited:
+                if rate_limited:
+                    _MintRateGuard.get(mint_url).apply_rate_limit_cooldown(
+                        _BALANCE_FETCH_RETRY_SECONDS
+                    )
+                elif connection_failure:
                     _MintRateGuard.get(mint_url).apply_cooldown(
                         _BALANCE_FETCH_RETRY_SECONDS, reason=error_code
                     )

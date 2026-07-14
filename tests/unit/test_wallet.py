@@ -1510,6 +1510,33 @@ async def test_mint_rate_guard_waits_for_adaptive_cooldown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mint_rate_guard_exponentially_backs_off_repeated_429s() -> None:
+    from routstr.wallet import _MintRateGuard
+
+    guard = _MintRateGuard("http://mint:3338", 4)
+    expected_delays = [60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 25200]
+    now = 0.0
+
+    with patch("routstr.wallet.time.monotonic") as monotonic:
+        for index, expected in enumerate(expected_delays, start=1):
+            monotonic.return_value = now
+            assert guard.apply_rate_limit_cooldown(60) == expected
+            assert guard._consecutive_rate_limits == index
+            if index == 1:
+                # Concurrent responses from the same 429 wave do not escalate
+                # the retry count before the first cooldown probe.
+                assert guard.apply_rate_limit_cooldown(60) == expected
+                assert guard._consecutive_rate_limits == 1
+            now += expected + 1
+
+        monotonic.return_value = now
+        operation = AsyncMock(return_value="ok")
+        assert await guard.run(operation) == "ok"
+        assert guard._consecutive_rate_limits == 0
+        assert guard.apply_rate_limit_cooldown(60) == 60
+
+
+@pytest.mark.asyncio
 async def test_mint_rate_guard_allows_one_probe_after_cooldown() -> None:
     from routstr.wallet import _MintRateGuard
 
