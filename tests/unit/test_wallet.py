@@ -1234,9 +1234,7 @@ def test_rate_limited_mint_is_classified_as_unreachable() -> None:
 
     request = httpx.Request("POST", "http://mint:3338/v1/swap")
     response = httpx.Response(429, request=request)
-    error = httpx.HTTPStatusError(
-        "rate limited", request=request, response=response
-    )
+    error = httpx.HTTPStatusError("rate limited", request=request, response=response)
 
     assert classify_redemption_error(error) == (
         "mint_unreachable",
