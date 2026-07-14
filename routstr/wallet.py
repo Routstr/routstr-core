@@ -89,30 +89,82 @@ class _MintRateGuard:
             asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
         )
         self._cooldown_until = 0.0
+        self._needs_probe = False
+        self._probe_lock = asyncio.Lock()
 
     def apply_cooldown(self, delay: float) -> None:
         self._cooldown_until = max(
             self._cooldown_until, time.monotonic() + max(0.0, delay)
         )
+        self._needs_probe = True
 
     def cooldown_remaining(self) -> float:
         return max(0.0, self._cooldown_until - time.monotonic())
 
-    async def _run_after_cooldown(self, factory: Callable[[], Awaitable[Any]]) -> Any:
-        wait = self.cooldown_remaining()
-        if wait > 0:
+    async def _wait_for_cooldown(self) -> None:
+        while True:
+            deadline = self._cooldown_until
+            wait = max(0.0, deadline - time.monotonic())
+            if wait <= 0:
+                return
             logger.debug(
                 "Mint rate guard: cooling down",
                 extra={"mint_url": self._mint_url, "wait_seconds": round(wait, 2)},
             )
             await asyncio.sleep(wait)
-        return await factory()
+            if self._cooldown_until <= deadline:
+                return
+
+    async def _run_probe(self, factory: Callable[[], Awaitable[Any]]) -> Any:
+        await self._wait_for_cooldown()
+        logger.warning(
+            "Mint cooldown ended; sending one probe request",
+            extra={"event": "mint_cooldown_probe_started", "mint_url": self._mint_url},
+        )
+        try:
+            result = await factory()
+        except Exception as error:
+            # Keep queued callers behind the probe while _mint_operation applies
+            # the precise Retry-After/backoff from this failure.
+            self.apply_cooldown(1.0)
+            logger.warning(
+                "Mint cooldown probe failed",
+                extra={
+                    "event": "mint_cooldown_probe_failed",
+                    "mint_url": self._mint_url,
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise
+
+        self._needs_probe = False
+        self._cooldown_until = 0.0
+        logger.warning(
+            "Mint cooldown probe succeeded; restoring normal concurrency",
+            extra={
+                "event": "mint_cooldown_probe_succeeded",
+                "mint_url": self._mint_url,
+            },
+        )
+        return result
 
     async def run(self, factory: Callable[[], Awaitable[Any]]) -> Any:
-        if self._semaphore is None:
-            return await self._run_after_cooldown(factory)
-        async with self._semaphore:
-            return await self._run_after_cooldown(factory)
+        while True:
+            if self._needs_probe or self.cooldown_remaining() > 0:
+                async with self._probe_lock:
+                    if self.cooldown_remaining() > 0:
+                        self._needs_probe = True
+                    if self._needs_probe:
+                        return await self._run_probe(factory)
+                continue
+
+            if self._semaphore is None:
+                return await factory()
+            async with self._semaphore:
+                if self._needs_probe:
+                    continue
+                return await factory()
 
 
 def _mint_cooldown_remaining(mint_url: str) -> float:

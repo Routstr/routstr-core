@@ -1511,6 +1511,35 @@ async def test_mint_rate_guard_waits_for_adaptive_cooldown() -> None:
     operation.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_mint_rate_guard_allows_one_probe_after_cooldown() -> None:
+    from routstr.wallet import _MintRateGuard
+
+    guard = _MintRateGuard("http://mint:3338", 4)
+    guard.apply_cooldown(0)
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+    calls = 0
+
+    async def operation() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            probe_started.set()
+            await release_probe.wait()
+        return calls
+
+    tasks = [asyncio.create_task(guard.run(operation)) for _ in range(5)]
+    await probe_started.wait()
+    await asyncio.sleep(0)
+    assert calls == 1
+
+    release_probe.set()
+    await asyncio.gather(*tasks)
+    assert calls == 5
+    assert guard._needs_probe is False
+
+
 def test_mint_rate_guard_rebuilds_when_setting_changes() -> None:
     from routstr.core.settings import settings
     from routstr.wallet import _MintRateGuard
