@@ -71,6 +71,14 @@ class InvoiceRecoverRequest(BaseModel):
     bolt11: str = Field(description="BOLT11 invoice string")
 
 
+def _trusted_mint_candidates() -> list[str]:
+    return [
+        mint
+        for mint in dict.fromkeys([settings.primary_mint, *settings.cashu_mints])
+        if mint
+    ]
+
+
 async def _request_mint_with_fallback(
     amount_sats: int,
     *,
@@ -167,13 +175,13 @@ async def create_invoice(
 
     try:
         description = f"Routstr {request.purpose} {request.amount_sats} sats"
-        # An API key is backed by one mint. A top-up must use that same mint;
-        # falling back to another would create mixed-mint collateral that the
-        # current single refund_mint_url field cannot account for or refund.
         allowed_mints = None
         if request.purpose == "topup":
             assert topup_api_key is not None
-            allowed_mints = [topup_api_key.refund_mint_url or settings.primary_mint]
+            # Top-ups are not pinned to the key's previous/backing mint. Use any
+            # currently available trusted mint so rate limits/cooldowns on one
+            # mint do not block Lightning top-ups.
+            allowed_mints = _trusted_mint_candidates()
         bolt11, payment_hash, mint_url = await generate_lightning_invoice(
             request.amount_sats, description, allowed_mints=allowed_mints
         )
