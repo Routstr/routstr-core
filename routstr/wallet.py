@@ -1576,11 +1576,13 @@ async def _get_supported_mint_units(mint_url: str) -> list[str]:
         mint_url=mint_url,
         retry_on_rate_limit=False,
     )
-    units = list(
-        dict.fromkeys(
-            keyset.unit.name for keyset in keysets if keyset.active and keyset.unit.name
-        )
-    )
+    units: list[str] = []
+    for keyset in keysets:
+        if not keyset.active or keyset.unit is None:
+            continue
+        unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
+        if unit and unit not in units:
+            units.append(unit)
     if not units:
         units = [settings.primary_mint_unit]
     elif settings.primary_mint_unit in units:

@@ -121,10 +121,10 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     from routstr.core.settings import settings
     from routstr.wallet import _get_supported_mint_units
 
-    sat = MagicMock(active=True)
-    sat.unit.name = "sat"
-    msat = MagicMock(active=False)
-    msat.unit.name = "msat"
+    # Cashu versions/mints may deserialize keyset units as either strings or
+    # Unit enum-like objects. Both representations must be accepted.
+    sat = MagicMock(active=True, unit="sat")
+    msat = MagicMock(active=False, unit="msat")
     usd = MagicMock(active=True)
     usd.unit.name = "usd"
     wallet = MagicMock()
