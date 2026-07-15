@@ -310,29 +310,6 @@ async def update_nsec(request: Request, payload: NsecUpdate) -> dict[str, object
     return {"ok": True, "npub": npub}
 
 
-class SetupRequest(BaseModel):
-    password: str
-
-
-@admin_router.post("/api/setup")
-async def initial_setup(request: Request, payload: SetupRequest) -> dict[str, object]:
-    async with create_session() as session:
-        secret = await get_secret(session)
-        if secret.admin_password_hash:
-            raise HTTPException(status_code=409, detail="Admin password already set")
-        pw = (payload.password or "").strip()
-        if len(pw) < vault.MIN_PASSWORD_LENGTH:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Password must be at least "
-                    f"{vault.MIN_PASSWORD_LENGTH} characters"
-                ),
-            )
-        await set_admin_password(session, pw)
-    return {"ok": True}
-
-
 class AdminLoginRequest(BaseModel):
     password: str
 
