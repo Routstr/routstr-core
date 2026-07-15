@@ -467,9 +467,10 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
         hash it, and log it once with the /admin URL.
     """
     from cryptography.fernet import InvalidToken
+    from sqlmodel import col, update
 
     from . import vault
-    from .db import get_secret
+    from .db import NsecState, Secret, get_secret
 
     raw_blob = await _read_raw_settings_blob(db_session)
     secret = await get_secret(db_session)
@@ -482,23 +483,52 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
         )
         if legacy_password:
             secret.admin_password_hash = vault.hash_password(legacy_password)
+            changed = True
         else:
             generated = secrets.token_urlsafe(24)
-            secret.admin_password_hash = vault.hash_password(generated)
-            admin_url = (settings.http_url or "http://localhost:8000").rstrip("/")
-            # Print to stdout rather than the logger: the operator must see this
-            # once (e.g. `docker compose logs`), but it must not be persisted
-            # into the on-disk log files the logger also writes to.
-            print(
-                "No admin password set; generated a temporary one (shown only "
-                f"now): {generated}\nLog in at {admin_url}/admin and change it "
-                "from the dashboard settings.",
-                flush=True,
+            # Claim the empty slot atomically: only the worker whose UPDATE flips
+            # NULL -> hash owns the generated password and announces it. On a
+            # shared DB a racing worker gets rowcount 0, so it neither clobbers
+            # the winner's hash (which the operator may already be using) nor
+            # prints a second password that would never work.
+            claim_stmt = (
+                update(Secret)
+                .where(col(Secret.id) == 1)
+                .where(col(Secret.admin_password_hash).is_(None))
+                .values(
+                    admin_password_hash=vault.hash_password(generated),
+                    updated_at=int(time.time()),
+                )
             )
-        changed = True
+            result = await db_session.exec(claim_stmt)  # type: ignore[call-overload]
+            await db_session.commit()
+            await db_session.refresh(secret)
+            if result.rowcount == 1:
+                admin_url = (settings.http_url or "http://localhost:8000").rstrip("/")
+                # Print to stdout rather than the logger: the operator must see
+                # this once (e.g. `docker compose logs`), but it must not be
+                # persisted into the on-disk log files the logger also writes to.
+                print(
+                    "No admin password set; generated a temporary one (shown "
+                    f"only now): {generated}\nLog in at {admin_url}/admin and "
+                    "change it from the dashboard settings.",
+                    flush=True,
+                )
 
-    # Nostr nsec — reversible Fernet encryption.
-    if secret.encrypted_nsec is not None:
+    # Nostr nsec — reversible Fernet encryption. ``nsec_state`` is the single
+    # source of truth for ownership, so "intentionally cleared" is never
+    # conflated with "never migrated" (the bug the old bool could not encode).
+    if secret.nsec_state == NsecState.encrypted:
+        # The vault owns the identity: decrypt the ciphertext, never re-read
+        # env/blob. A missing ciphertext here means the row is inconsistent (a
+        # failed write or manual edit); fail fast rather than silently dropping
+        # the identity and falling back to a stale legacy copy.
+        if secret.encrypted_nsec is None:
+            raise RuntimeError(
+                "nsec_state is 'encrypted' but no ciphertext is stored; the "
+                "secrets row is inconsistent. Refusing to boot rather than "
+                "silently resurrecting a stale legacy NSEC."
+            )
         try:
             settings.nsec = vault.decrypt(secret.encrypted_nsec)
         except InvalidToken as exc:
@@ -507,21 +537,23 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
                 "ROUTSTR_SECRET_KEY. The key changed, or this database came from "
                 "another node. Restore the original ROUTSTR_SECRET_KEY to recover."
             ) from exc
-    elif not secret.nsec_managed:
-        # The vault has not taken ownership yet: import any legacy plaintext
-        # (env, or the old settings blob). Once managed, an empty encrypted_nsec
-        # means the identity was intentionally cleared via the admin API, so this
-        # branch is skipped and the nsec stays empty rather than being resurrected
-        # from a stale legacy copy.
+    elif secret.nsec_state == NsecState.cleared:
+        # The operator emptied the identity via the admin API. A fresh process
+        # has already reloaded a stale ``NSEC`` from env/blob into the live
+        # settings (and may have derived its npub); actively clear both so the
+        # cleared store wins rather than silently resurrecting the old identity.
+        settings.nsec = ""
+        settings.npub = ""
+    else:  # NsecState.legacy — the vault has not taken ownership yet.
+        # Import any legacy plaintext (env, or the old settings blob) exactly
+        # once. Encryption at rest is mandatory, but a missing key is
+        # provisioned, not fatal: vault.encrypt generates and persists a master
+        # key (with a loud one-time operator notice) when none was supplied, so
+        # an upgrading node keeps running. The nsec is never stored in plaintext.
         legacy_nsec = _legacy_plaintext(raw_blob, "NSEC", "nsec")
         if legacy_nsec:
-            # The node has a Nostr identity to protect. Encryption at rest is
-            # mandatory, but a missing key is provisioned, not fatal:
-            # vault.encrypt generates and persists a master key (with a loud
-            # one-time operator notice) when none was supplied, so an upgrading
-            # node keeps running. The nsec is never persisted in plaintext.
             secret.encrypted_nsec = vault.encrypt(legacy_nsec)
-            secret.nsec_managed = True
+            secret.nsec_state = NsecState.encrypted
             settings.nsec = legacy_nsec
             changed = True
 

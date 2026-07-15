@@ -18,7 +18,7 @@ from sqlmodel import text
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core import vault
-from routstr.core.db import get_secret, set_nsec
+from routstr.core.db import NsecState, get_secret, set_nsec
 from routstr.core.settings import (
     SettingsService,
     bootstrap_secrets,
@@ -111,6 +111,57 @@ async def test_hashes_legacy_admin_password_from_blob(
     assert vault.verify_password("blobpw", secret.admin_password_hash or "") is True
 
 
+@pytest.mark.asyncio
+async def test_admin_password_race_adopts_winner_without_clobber(
+    clean_secret_env: None,
+    integration_engine: Any,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Two workers boot against one shared DB and both read a null admin password.
+    # The first to commit "wins" and shows the operator its generated password. A
+    # worker that read null but lost the race must NOT overwrite the winner's hash
+    # (which the operator may already be logging in with) and must NOT print a
+    # second password that will never work.
+    #
+    # The race window is forced deterministically: a hook fires inside bootstrap's
+    # generate branch (so it only runs once this worker has committed to
+    # generating) and commits the winner's password on a separate connection
+    # before this worker writes its own.
+    import sqlite3
+
+    from routstr.core import settings as settings_mod
+
+    db_file = integration_engine.url.database
+    winner_hash = vault.hash_password("winner-password-123")
+    real_token = settings_mod.secrets.token_urlsafe
+
+    def commit_winner_then_generate(nbytes: int) -> str:
+        conn = sqlite3.connect(db_file)
+        conn.execute(
+            "UPDATE secrets SET admin_password_hash = ? WHERE id = 1", (winner_hash,)
+        )
+        conn.commit()
+        conn.close()
+        return real_token(nbytes)
+
+    monkeypatch.setattr(
+        settings_mod.secrets, "token_urlsafe", commit_winner_then_generate
+    )
+
+    await get_secret(integration_session)  # row exists, password still null
+    capsys.readouterr()  # drop anything emitted before the race resolves
+    await bootstrap_secrets(integration_session)
+
+    secret = await get_secret(integration_session)
+    assert secret.admin_password_hash is not None
+    # The winner's password survives and still verifies — no clobber.
+    assert vault.verify_password("winner-password-123", secret.admin_password_hash)
+    # The losing worker stayed silent — no second generated password was leaked.
+    assert "generated a temporary" not in capsys.readouterr().out
+
+
 # --- nsec ------------------------------------------------------------------
 
 
@@ -137,6 +188,7 @@ async def test_decrypts_existing_nsec_column(
 ) -> None:
     secret = await get_secret(integration_session)
     secret.encrypted_nsec = vault.encrypt(NSEC_HEX)
+    secret.nsec_state = NsecState.encrypted
     integration_session.add(secret)
     await integration_session.commit()
     stored = secret.encrypted_nsec
@@ -159,6 +211,7 @@ async def test_fail_fast_when_nsec_encrypted_with_different_key(
     monkeypatch.setenv("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY_ALT)
     secret = await get_secret(integration_session)
     secret.encrypted_nsec = vault.encrypt(NSEC_HEX)
+    secret.nsec_state = NsecState.encrypted
     integration_session.add(secret)
     await integration_session.commit()
 
@@ -197,7 +250,7 @@ async def test_legacy_nsec_without_secret_key_generates_and_encrypts(
     assert secret.encrypted_nsec is not None
     assert vault.is_encrypted(secret.encrypted_nsec) is True
     assert vault.decrypt(secret.encrypted_nsec) == NSEC_HEX
-    assert secret.nsec_managed is True
+    assert secret.nsec_state == NsecState.encrypted
     # ...the node holds the live identity (npub derived from it)...
     assert settings.nsec == NSEC_HEX
     assert settings.npub == derive_npub_from_nsec(NSEC_HEX)
@@ -253,6 +306,7 @@ async def test_initialize_does_not_clobber_store_only_nsec(
     await _create_settings_blob(integration_session, {"name": "LegacyNode"})
     secret = await get_secret(integration_session)
     secret.encrypted_nsec = vault.encrypt(NSEC_HEX)
+    secret.nsec_state = NsecState.encrypted
     integration_session.add(secret)
     await integration_session.commit()
 
@@ -325,23 +379,29 @@ async def test_cleared_nsec_stays_cleared_across_reboot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # An identity was imported from env, then the operator cleared it via the
-    # admin API. The old NSEC is still in env. On the next boot the cleared
+    # admin API. The old NSEC is still in env. On the NEXT PROCESS the cleared
     # identity must stay cleared, not get resurrected from the stale env value.
     monkeypatch.setenv("NSEC", NSEC_HEX)
     await bootstrap_secrets(integration_session)
     assert settings.nsec == NSEC_HEX
 
-    # Clear via the admin path (mirrors the endpoint: store empty, live empty).
+    # Clear via the admin path (store empty, vault owns it).
     await set_nsec(integration_session, "")
-    monkeypatch.setattr(settings, "nsec", "")
 
-    # Reboot with the stale NSEC still present in env.
+    # Simulate a fresh process rather than pre-clearing the live singleton: the
+    # pydantic settings global reloads the (still-stale) NSEC from env and derives
+    # its npub, which is exactly the in-memory state a new boot starts from before
+    # bootstrap runs. The cleared store must win over this stale live value.
+    monkeypatch.setattr(settings, "nsec", NSEC_HEX)
+    monkeypatch.setattr(settings, "npub", derive_npub_from_nsec(NSEC_HEX))
+
     await bootstrap_secrets(integration_session)
 
     reloaded = await get_secret(integration_session)
-    assert reloaded.nsec_managed is True
+    assert reloaded.nsec_state == NsecState.cleared
     assert reloaded.encrypted_nsec is None  # not re-imported
     assert settings.nsec == ""  # stays cleared
+    assert settings.npub == ""  # and no derived public identity survives
 
 
 @pytest.mark.asyncio
@@ -360,6 +420,7 @@ async def test_initialize_keeps_npub_matching_store_only_nsec(
     await _create_settings_blob(integration_session, {"name": "LegacyNode"})
     secret = await get_secret(integration_session)
     secret.encrypted_nsec = vault.encrypt(NSEC_HEX)
+    secret.nsec_state = NsecState.encrypted
     integration_session.add(secret)
     await integration_session.commit()
 

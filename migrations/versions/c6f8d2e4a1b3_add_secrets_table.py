@@ -6,9 +6,10 @@ Create Date: 2026-07-07 00:00:00.000000
 
 Creates the node-level singleton secret store (issue #553). Schema only; moving
 any legacy plaintext into the encrypted/hashed columns happens at bootstrap,
-where the live ROUTSTR_SECRET_KEY is available. ``nsec_managed`` records that the
-vault has taken ownership of the nsec, so a cleared identity is never resurrected
-from a stale legacy ``NSEC`` env var / settings blob on the next boot.
+where the live ROUTSTR_SECRET_KEY is available. ``nsec_state`` records the vault's
+ownership of the nsec (legacy | encrypted | cleared), so a cleared identity is
+never resurrected from a stale legacy ``NSEC`` env var / settings blob on the next
+boot.
 """
 
 import sqlalchemy as sa
@@ -36,10 +37,10 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column(
-            "nsec_managed",
-            sa.Boolean(),
+            "nsec_state",
+            sqlmodel.sql.sqltypes.AutoString(),
             nullable=False,
-            server_default=sa.false(),
+            server_default="legacy",
         ),
         sa.Column("updated_at", sa.Integer(), nullable=True),
         sa.PrimaryKeyConstraint("id"),

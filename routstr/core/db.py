@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from enum import Enum
 from typing import AsyncGenerator
 
 from alembic import command
@@ -443,6 +444,26 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     payout_started_at: int | None = Field(default=None)
 
 
+class NsecState(str, Enum):
+    """Ownership state of the node's nsec — an explicit 3-state machine.
+
+    The single ``encrypted_nsec`` column cannot distinguish "never migrated" from
+    "intentionally cleared" (both leave it empty), which let a cleared identity be
+    resurrected from a stale legacy ``NSEC``. This names the three states so the
+    bootstrap branches on ownership rather than inferring it:
+
+    * ``legacy`` — the vault has not taken ownership; a plaintext ``NSEC`` (env or
+      old settings blob) may still exist and should be migrated in once.
+    * ``encrypted`` — the vault owns a ciphertext; decrypt it, never re-read env.
+    * ``cleared`` — the vault owns it but the operator emptied it; stay empty,
+      never re-import from a stale legacy copy.
+    """
+
+    legacy = "legacy"
+    encrypted = "encrypted"
+    cleared = "cleared"
+
+
 class Secret(SQLModel, table=True):  # type: ignore
     """Node-level secrets, stored encrypted/hashed at rest (singleton, id=1).
 
@@ -455,11 +476,7 @@ class Secret(SQLModel, table=True):  # type: ignore
     id: int = Field(default=1, primary_key=True)
     admin_password_hash: str | None = Field(default=None)
     encrypted_nsec: str | None = Field(default=None)
-    # True once the vault owns the nsec (imported from legacy plaintext, or set
-    # via the admin API). A cleared nsec then stays cleared: bootstrap must not
-    # resurrect it from a stale legacy ``NSEC`` env var / settings blob, which an
-    # empty ``encrypted_nsec`` alone cannot distinguish from "never migrated".
-    nsec_managed: bool = Field(default=False)
+    nsec_state: NsecState = Field(default=NsecState.legacy)
     updated_at: int | None = Field(default=None)
 
 
@@ -536,15 +553,15 @@ async def set_nsec(session: AsyncSession, nsec: str) -> None:
     """Store the node's nsec, Fernet-encrypted, on the Secret singleton.
 
     An empty string clears it (the node then holds no Nostr identity and signs
-    no events). Either way the vault now owns the nsec, so ``nsec_managed`` is
-    set: a cleared identity must not be resurrected from a stale legacy ``NSEC``
-    on the next boot.
+    no events). Either way the vault now owns the nsec, so the state moves off
+    ``legacy``: a cleared identity (``cleared``) must not be resurrected from a
+    stale legacy ``NSEC`` on the next boot.
     """
     from .vault import encrypt
 
     secret = await get_secret(session)
     secret.encrypted_nsec = encrypt(nsec) if nsec else None
-    secret.nsec_managed = True
+    secret.nsec_state = NsecState.encrypted if nsec else NsecState.cleared
     secret.updated_at = int(time.time())
     session.add(secret)
     await session.commit()
