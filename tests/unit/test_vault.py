@@ -197,19 +197,20 @@ def test_encrypt_without_key_generates_and_persists_key_file(
     assert vault.decrypt(token) == "nsec1secret"
 
 
-def test_generated_key_warns_operator_with_path_and_value(
+def test_generated_key_warns_operator_with_path_not_value(
     generated_key_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The whole point of auto-generating is that an upgrading operator MUST NOT
-    # miss it: the notice names the file to back up, prints the key so it can be
-    # promoted into a secrets manager, and shouts the back-up imperative.
+    # The notice names the file to back up and shouts the back-up imperative so an
+    # upgrading operator cannot miss it, but it MUST NOT echo the key value: the
+    # secret lives in the 0600 file, and printing it would leak it into captured
+    # stdout / aggregated container logs.
     key_file = generated_key_file
     vault.encrypt("x")
 
     out = capsys.readouterr().out
     assert "ROUTSTR_SECRET_KEY" in out
     assert str(key_file) in out
-    assert key_file.read_text().strip() in out
+    assert key_file.read_text().strip() not in out
     assert "BACK UP" in out.upper()
 
 
@@ -227,6 +228,74 @@ def test_existing_key_file_is_reused_and_warns_only_once(
 
     assert key_file.read_text() == first_key
     assert capsys.readouterr().out == ""
+
+
+def test_generated_key_is_published_atomically(
+    generated_key_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The key must appear at its final path only as a complete file: it is written
+    # to a temp file and atomically linked into place. If the publish (link) step
+    # fails — e.g. the process crashes — the destination must be absent, never a
+    # half-written or empty file that a later boot would read as a corrupt key and
+    # then refuse to decrypt every secret. No temp debris is left behind.
+    key_file = generated_key_file
+
+    def boom(src: object, dst: object) -> None:
+        raise OSError("crash during atomic publish")
+
+    monkeypatch.setattr(vault.os, "link", boom)
+
+    with pytest.raises(OSError):
+        vault.encrypt("x")
+
+    assert not key_file.exists()
+    assert list(key_file.parent.iterdir()) == []
+
+
+def test_racing_worker_adopts_winners_key_without_clobber(
+    generated_key_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two workers auto-generate a key concurrently. The first to link "wins" and
+    # its key is the one on disk; a worker that loses the link race must adopt the
+    # winner's key — secrets may already be encrypted under it — rather than
+    # clobber it or crash. Force the race deterministically: the winner publishes
+    # its key at the final path just as this worker tries to link, so os.link
+    # raises FileExistsError and the loser reads the winner's key back.
+    key_file = generated_key_file
+
+    def winner_links_first(src: object, dst: object) -> None:
+        key_file.write_text(KEY_A)  # the winner's already-published key
+        raise FileExistsError
+
+    monkeypatch.setattr(vault.os, "link", winner_links_first)
+
+    token = vault.encrypt("secret")
+
+    # The winner's key stays put and the loser encrypted under it, so the value
+    # round-trips under KEY_A even though this worker had generated its own key.
+    assert key_file.read_text().strip() == KEY_A
+    assert vault.decrypt(token) == "secret"
+    # The losing worker left no temp debris behind.
+    assert [p.name for p in key_file.parent.iterdir()] == [key_file.name]
+
+
+def test_loose_key_file_perms_are_tightened_on_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A key file left group/other-readable (e.g. written under a loose umask
+    # before this hardening, or by a careless operator) is a leaked-secret risk.
+    # Reading it repairs the permissions to owner-only rather than trusting a
+    # world-readable master key, while still using the key so boot is not broken.
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    key_file = tmp_path / "routstr_secret.key"
+    key_file.write_text(KEY_A)
+    key_file.chmod(0o644)
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(key_file))
+
+    token = vault.encrypt("secret")  # reads the loose file, repairs its perms
+
+    assert key_file.stat().st_mode & 0o077 == 0
+    assert vault.decrypt(token) == "secret"
 
 
 def test_env_key_takes_precedence_over_key_file(

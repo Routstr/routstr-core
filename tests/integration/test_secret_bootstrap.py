@@ -202,10 +202,11 @@ async def test_legacy_nsec_without_secret_key_generates_and_encrypts(
     assert settings.nsec == NSEC_HEX
     assert settings.npub == derive_npub_from_nsec(NSEC_HEX)
     # ...and the operator is loudly told a key was generated and must be backed up
-    # (path + value shown) so an upgrade cannot silently create an unbacked key.
+    # (path shown, but never the key value) so an upgrade cannot silently create
+    # an unbacked key nor leak the key into captured stdout / aggregated logs.
     out = capsys.readouterr().out
     assert str(key_file) in out
-    assert key_file.read_text().strip() in out
+    assert key_file.read_text().strip() not in out
     assert "BACK UP" in out.upper()
 
 

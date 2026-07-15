@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import tempfile
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -99,7 +100,27 @@ def _read_key_file(path: Path) -> str | None:
         stored = path.read_text().strip()
     except OSError:
         return None
-    return stored or None
+    if not stored:
+        return None
+    _repair_key_file_perms(path)
+    return stored
+
+
+def _repair_key_file_perms(path: Path) -> None:
+    # A master key must never be group/other-readable. On POSIX, tighten loose
+    # permissions to owner-only (0600) rather than trust — or hard-fail on — a
+    # world-readable key; a friendlier repair keeps an upgrading node booting.
+    if os.name != "posix":
+        return
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if mode & 0o077:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
 
 def _load_secret_key() -> str | None:
@@ -107,7 +128,7 @@ def _load_secret_key() -> str | None:
     return os.environ.get("ROUTSTR_SECRET_KEY") or _read_key_file(_key_file_path())
 
 
-def _warn_generated_key(path: Path, key: str) -> None:
+def _warn_generated_key(path: Path) -> None:
     # stdout, not the logger: the operator must see this once (e.g. in
     # ``docker compose logs``), but it must never be persisted into the on-disk
     # log files the logger also writes. Mirrors the generated-admin-password
@@ -117,29 +138,64 @@ def _warn_generated_key(path: Path, key: str) -> None:
         f"rest and saved it to {path}.\n"
         "!! BACK UP THIS FILE. If it is lost, the encrypted secrets cannot be "
         "recovered and will have to be re-entered.\n"
-        "To manage the key yourself (e.g. from a secrets manager) set it in the "
-        f"environment instead:\n    ROUTSTR_SECRET_KEY={key}",
+        "To manage the key yourself (e.g. from a secrets manager) set "
+        "ROUTSTR_SECRET_KEY in the environment instead; the value is in the file "
+        "above.",
         flush=True,
     )
 
 
 def _generate_and_persist_key(path: Path) -> str:
-    """Generate a Fernet key, persist it owner-only, and warn once."""
+    """Generate a Fernet key, persist it owner-only and atomically, warn once.
+
+    The key is written to a temp file in the same directory, flushed durably,
+    then ``os.link``-ed into place. ``os.link`` publishes the complete file in a
+    single atomic step — a crash mid-write leaves only the temp file (which is
+    removed), never a half-written or empty key at the final path that a later
+    boot would read as corrupt. It also refuses to overwrite an existing key, so
+    a racing worker that generated first keeps ownership (secrets may already be
+    encrypted under its key); the loser adopts that key instead of clobbering it.
+    """
     key = Fernet.generate_key().decode()
     path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=".routstr_secret.", suffix=".tmp"
+    )
+    tmp = Path(tmp_name)
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        # Another worker won the race and wrote the key first; adopt theirs
-        # rather than clobber a key that secrets may already be encrypted under.
-        existing = _read_key_file(path)
-        if existing:
-            return existing
-        raise
-    with os.fdopen(fd, "w") as handle:
-        handle.write(key)
-    _warn_generated_key(path, key)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(key)  # mkstemp already created it 0600
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            # A concurrent worker linked its key in first; adopt theirs rather
+            # than clobber a key that secrets may already be encrypted under.
+            existing = _read_key_file(path)
+            if existing:
+                return existing
+            raise
+        _fsync_dir(path.parent)
+    finally:
+        tmp.unlink(missing_ok=True)
+    _warn_generated_key(path)
     return key
+
+
+def _fsync_dir(directory: Path) -> None:
+    # Persist the new directory entry so the linked key survives a crash right
+    # after publish. Best-effort: not every platform lets you fsync a directory.
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 def ensure_secret_key() -> str:
