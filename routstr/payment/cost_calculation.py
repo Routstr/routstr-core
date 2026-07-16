@@ -264,13 +264,35 @@ def _coerce_usd(value: object) -> float:
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
     """Resolve USD cost with clear priority order.
 
-    Priority: cost_details.total_cost → total_cost → cost (in both usage and response).
+    Priority:
+
+    1. ``cost_details.total_cost``
+    2. ``cost_details.upstream_inference_cost`` (BYOK — see below)
+    3. ``total_cost`` → ``cost`` (in both usage and response)
+
+    **BYOK path (PPQ.AI):** when ``is_byok`` is true the ``usage.cost`` field
+    is only a small (~5 %) routing fee, not the inference cost.  The real cost
+    lives in ``cost_details.upstream_inference_cost`` and the provider's
+    balance is debited by ``upstream_inference_cost + byok_fee``.  Billing just
+    the fee under-charges by ~20×.
     """
     cost_details = usage_data.get("cost_details")
     if isinstance(cost_details, dict):
         cost = _coerce_usd(cost_details.get("total_cost"))
         if cost > 0:
             return cost
+
+        # PPQ.AI BYOK: upstream_inference_cost is the real inference cost;
+        # usage.cost is only a ~5 % BYOK routing fee.  Bill the sum — what PPQ
+        # actually deducts from the balance.  For non-BYOK providers (e.g.
+        # OpenRouter) usage.cost already equals upstream_inference_cost, so we
+        # fall through to the normal ``cost`` lookup below.
+        upstream_cost = _coerce_usd(
+            cost_details.get("upstream_inference_cost")
+        )
+        if upstream_cost > 0 and usage_data.get("is_byok"):
+            byok_fee = _coerce_usd(usage_data.get("cost"))
+            return upstream_cost + byok_fee
 
     for source in [usage_data, response_data]:
         if not isinstance(source, dict):

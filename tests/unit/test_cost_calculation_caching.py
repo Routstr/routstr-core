@@ -533,6 +533,72 @@ async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
 
 
 # ============================================================================
+# PPQ.AI BYOK: upstream_inference_cost + BYOK fee billing
+#
+# PPQ.AI (bring-your-own-key) returns a small ~5 % BYOK routing fee in
+# ``usage.cost`` and the real inference cost in
+# ``cost_details.upstream_inference_cost``.  The old code billed only the fee,
+# under-charging by ~20×.  The fix bills ``upstream_inference_cost + byok_fee``
+# — what PPQ actually deducts from the balance.
+# Payload numbers are from a live ``glm-5.2-fast`` request (GitHub issue #615).
+# ============================================================================
+@pytest.mark.asyncio
+async def test_ppq_byok_bills_upstream_inference_cost_plus_fee() -> None:
+    """PPQ.AI BYOK must bill upstream_inference_cost + byok_fee, not just the
+    fee.  Mirrors the live request from GitHub issue #615."""
+    response = {
+        "model": "glm-5.2-fast",
+        "usage": {
+            "prompt_tokens": 164371,  # includes 159301 cached
+            "completion_tokens": 99,
+            "cost": 0.002260057305,  # ~5% BYOK routing fee
+            "is_byok": True,
+            "prompt_tokens_details": {"cached_tokens": 159301},
+            "cost_details": {
+                "upstream_inference_cost": 0.04475361,
+                "upstream_inference_prompt_cost": 0.04410021,
+                "upstream_inference_completions_cost": 0.0006534,
+            },
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    # The fix bills upstream_inference_cost + byok_fee (~0.047 USD → ~940k
+    # msats), not the fee alone (~0.0023 USD → ~45k msats).  ~20× correction.
+    assert result.total_msats == 940274
+    assert result.input_msats + result.output_msats == result.total_msats
+    assert result.input_msats == 926546
+    assert result.output_msats == 13728
+    assert result.total_usd == pytest.approx(0.047013667305)
+    # Token normalisation (OpenAI dialect: cached included in prompt_tokens)
+    assert result.input_tokens == 5070  # 164371 - 159301
+    assert result.cache_read_input_tokens == 159301
+    assert result.output_tokens == 99
+
+
+@pytest.mark.asyncio
+async def test_ppq_byok_fee_only_would_undercharge() -> None:
+    """Sanity check: billing only usage.cost (the BYOK fee) under-charges by
+    ~20×.  This documents the regression the fix prevents."""
+    response = {
+        "model": "glm-5.2-fast",
+        "usage": {
+            "prompt_tokens": 164371,
+            "completion_tokens": 99,
+            "cost": 0.002260057305,  # BYOK fee only — no upstream_inference_cost
+            "is_byok": True,
+            "prompt_tokens_details": {"cached_tokens": 159301},
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    # Without upstream_inference_cost, only the fee is billed — the old bug.
+    assert result.total_msats == 45202
+
+
+# ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================
 @pytest.mark.asyncio
