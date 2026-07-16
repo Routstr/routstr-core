@@ -53,25 +53,22 @@ The actual EHBP forwarding logic does **not** live in `base.py`.
 
 ### `routstr/upstream/ehbp.py`
 
-Contains the shared opaque EHBP transport helpers:
+Contains the shared opaque EHBP transport and billing helpers:
 
 - `EHBPForwardingTarget` — provider-specific target URL plus extra headers
-- `forward_ehbp_request()` — forwards the raw encrypted body to an EHBP-capable
-  provider, streams the encrypted response back untouched, and finalizes bearer
-  billing at max cost because usage is encrypted
-- `forward_ehbp_x_cashu_request()` — redeems the Cashu token, forwards raw,
-  refunds the full token on upstream failure, and refunds any value above
-  `max_cost_for_model` on success
+- `forward_ehbp_request()` — forwards the encrypted body, captures Tinfoil
+  usage from a response header or streaming HTTP trailer, and finalizes bearer
+  billing at actual cost (falling back to max cost when usage is unavailable)
+- `forward_ehbp_x_cashu_request()` — redeems the Cashu token, refunds the full
+  token on upstream failure, and refunds the difference between the redeemed
+  amount and actual cost (or max cost when usage is unavailable)
 
-### `routstr/upstream/ppqai.py`
+### Provider support
 
-- Sets `supports_ehbp = True`.
-- Implements `get_ehbp_forwarding_target()` to forward to
-  `https://api.ppq.ai/private/v1/...` — the PPQ.AI enclave endpoint that
-  understands EHBP and returns the `Ehbp-Response-Nonce` header.
-- Adds `X-Private-Model` with the model's `forwarded_model_id` (e.g.
-  `private/kimi-k2-6`). PPQ.AI's billing layer needs this since it can't
-  decrypt the body.
+EHBP is currently enabled only for `TinfoilUpstreamProvider`. It forwards to
+Tinfoil's attested enclave and requests `X-Tinfoil-Usage-Metrics` for billing.
+PPQ.AI retains its private-target implementation, but `supports_ehbp = False`
+until it has a provider-specific trusted usage/model-binding strategy.
 
 ## Why it's done this way
 
@@ -84,10 +81,10 @@ The proxy is a **blind relay** for EHBP requests. It cannot decrypt the body
 4. Pass through EHBP protocol headers (`Ehbp-Encapsulated-Key` on request,
    `Ehbp-Response-Nonce` on response)
 
-Cost tracking happens at the proxy level using `max_cost_for_model` from the
-model registry. Because EHBP responses are encrypted, Routstr cannot reconcile
-against token usage. Bearer requests reserve and then finalize max-cost billing;
-X-Cashu requests redeem the token and refund any amount above max cost.
+Cost tracking happens at the proxy level. Routstr reserves or redeems up to
+`max_cost_for_model`, then Tinfoil's out-of-band usage header/trailer allows it
+to finalize at actual token cost. If trusted usage is missing or invalid, the
+proxy safely falls back to max-cost billing.
 
 ## End-to-end flow
 
@@ -125,7 +122,7 @@ Three parties see three different model IDs:
 | Party | Header/Body | Value | Source |
 |---|---|---|---|
 | Routstr proxy | `X-Routstr-Model` header | `tinfoil-kimi-k2-6` | SDK sends full caller-facing id |
-| PPQ.AI billing | `X-Private-Model` header | `private/kimi-k2-6` | Proxy sends `forwarded_model_id` |
+| Tinfoil usage metrics | `model` field | `kimi-k2-6` | Enclave reports the model actually served |
 | Tinfoil enclave | `body.model` (encrypted) | `kimi-k2-6` | SDK strips `tinfoil-` prefix before encryption |
 
 ## Implementation status
@@ -135,24 +132,19 @@ implements the direct blind-upstream pattern described above. The shared EHBP
 helpers in `routstr/upstream/ehbp.py` were extended to:
 
 - Request usage metrics via `X-Tinfoil-Request-Usage-Metrics: true`.
-- Parse `X-Tinfoil-Usage-Metrics` from the response header (non-streaming).
-- Override the forwarding URL with `X-Tinfoil-Enclave-Url` when the SDK sends it.
-- Finalize bearer billing with actual token cost via `adjust_payment_for_tokens`.
+- Parse `X-Tinfoil-Usage-Metrics` from the response header (non-streaming) or
+  HTTP trailer (streaming).
+- Override the forwarding URL with a validated `X-Tinfoil-Enclave-Url` when the
+  SDK sends it.
+- Finalize bearer billing with the dedicated EHBP actual-cost finalizer.
 - Compute X-Cashu refunds from actual cost instead of max cost.
 
 See `docs/tinfoil-direct-integration.md` for the full implementation notes.
 
-## Not yet tested
+## Verification status
 
-These changes were written without integration testing due to the complexity
-of the full stack (SDK + proxy + PPQ.AI enclave + Cashu mint). Needs end-to-end
-verification with a real `tinfoil-*` model request.
-
-Important assumptions to verify:
-
-- PPQ.AI accepts `/private/v1/...` with `X-Private-Model`.
-- PPQ.AI enforces consistency between `X-Private-Model` and the encrypted
-  `body.model`, otherwise a malicious client could understate
-  `X-Routstr-Model` for billing.
-- SDK behavior on non-2xx proxy-generated errors that do not carry
-  `Ehbp-Response-Nonce`.
+Unit coverage includes usage parsing, target validation, HTTP trailer capture,
+response-size limits, and bearer payment finalization. End-to-end requests have
+verified both non-streaming usage headers and streaming usage trailers against
+Tinfoil. SDK behavior on proxy-generated non-2xx responses without an
+`Ehbp-Response-Nonce` still merits explicit end-to-end coverage.

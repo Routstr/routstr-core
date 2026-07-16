@@ -27,6 +27,16 @@ _READ_BUFSIZE = 65536
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _DEFAULT_CLOSE_TIMEOUT_SECONDS = 1.0
 _DEFAULT_MAX_RESPONSE_BYTES = 25 * 1024 * 1024
+_HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 @dataclass
@@ -45,6 +55,19 @@ def _get_header(headers: list[tuple[str, str]], name: str) -> str | None:
         if k.lower() == name_lower:
             return v
     return None
+
+
+def _strip_hop_by_hop_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Remove connection-specific headers before serializing a new request."""
+    connection_tokens: set[str] = set()
+    for key, value in headers.items():
+        if key.lower() == "connection":
+            connection_tokens.update(
+                token.strip().lower() for token in value.split(",") if token.strip()
+            )
+
+    excluded = _HOP_BY_HOP_HEADERS | connection_tokens
+    return {key: value for key, value in headers.items() if key.lower() not in excluded}
 
 
 async def forward_with_trailer(
@@ -71,6 +94,11 @@ async def forward_with_trailer(
     if parsed.query:
         path = f"{path}?{parsed.query}"
 
+    # FastAPI has already decoded the incoming request body. Do not carry the
+    # original connection's framing or other hop-by-hop metadata into the new
+    # upstream connection.
+    headers = _strip_hop_by_hop_headers(headers)
+
     ssl_ctx = ssl.create_default_context()
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(host, port, ssl=ssl_ctx),
@@ -86,7 +114,7 @@ async def forward_with_trailer(
         header_lines.append("Connection: close")
 
         for key, value in headers.items():
-            if key.lower() in ("host", "connection"):
+            if key.lower() == "host":
                 continue
             header_lines.append(f"{key}: {value}")
 

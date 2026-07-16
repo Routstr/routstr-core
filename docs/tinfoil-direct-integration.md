@@ -485,9 +485,9 @@ back to the requested model's pricing.
 - ~~End-to-end test with a real Tinfoil SDK client against a Routstr node with
   `TINFOIL_API_KEY` set.~~ Verified: both non-streaming (header) and streaming
   (trailer) responses include `model=<name>`.
-- Streaming requests: usage is delivered as an HTTP trailer. Currently the
-  bearer path finalizes max-cost before streaming begins. Supporting streaming
-  usage would require buffering the response (for X-Cashu) or a deferred
-  finalization (for bearer).
+- Streaming trailer capture is implemented by buffering the encrypted response
+  in `forward_with_trailer()` and then using the dedicated EHBP payment
+  finalizers for bearer and X-Cashu requests. This provides actual-cost billing
+  today, at the cost of full time-to-last-byte latency for streaming responses.
 - Whether Tinfoil's `/v1/responses` endpoint also returns usage metrics
-  headers.
+  headers or trailers.

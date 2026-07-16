@@ -106,8 +106,13 @@ def get_unique_models() -> list[Model]:
 
 
 def _is_tinfoil_attestation_path(path: str) -> bool:
-    """Return True for Tinfoil attestation-bundle proxy paths."""
-    return path in {"attestation", "tee/attestation"}
+    """Return True for exact Tinfoil attestation routes, with optional slash."""
+    return path in {
+        "attestation",
+        "attestation/",
+        "tee/attestation",
+        "tee/attestation/",
+    }
 
 
 def _select_unauthenticated_get_upstreams(
@@ -234,13 +239,10 @@ async def proxy(
         else:
             model_id = request_body_dict.get("model", "unknown")
 
-    # /tee/* and /attestation GET requests don't map to models — forward
-    # without model/cost/auth lookups. Tinfoil attestation paths are routed
-    # only to Tinfoil providers so an unrelated upstream's 404 cannot
-    # short-circuit before the attestation proxy is tried.
-    if request.method == "GET" and (
-        path.startswith("tee/") or path.startswith("attestation")
-    ):
+    # Exact Tinfoil attestation GET routes don't map to models — forward
+    # without model/cost/auth lookups. Do not prefix-match here: paths such as
+    # /attestationjunk must continue through normal authentication.
+    if request.method == "GET" and _is_tinfoil_attestation_path(path):
         selected_upstreams = _select_unauthenticated_get_upstreams(path, _upstreams)
         if not selected_upstreams:
             return create_error_response(
@@ -255,7 +257,10 @@ async def proxy(
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
-                if response.status_code in [502, 429] and i < len(selected_upstreams) - 1:
+                if (
+                    response.status_code in [502, 429]
+                    and i < len(selected_upstreams) - 1
+                ):
                     logger.warning(
                         "Upstream %s returned %s for unauthenticated GET %s, trying next",
                         upstream.provider_type,

@@ -67,6 +67,54 @@ async def test_forward_with_trailer_captures_usage_trailer(
 
 
 @pytest.mark.asyncio
+async def test_forward_with_trailer_strips_hop_by_hop_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    reader = FakeReader([response])
+    writer = FakeWriter()
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection",
+        AsyncMock(return_value=(reader, writer)),
+    )
+
+    await forward_with_trailer(
+        method="POST",
+        url="https://enclave.tinfoil.sh/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer upstream",
+            "Connection": "keep-alive, X-Client-Hop",
+            "Keep-Alive": "timeout=5",
+            "Proxy-Authenticate": "Basic",
+            "Proxy-Authorization": "Basic secret",
+            "TE": "trailers",
+            "Trailer": "X-Usage",
+            "Transfer-Encoding": "chunked",
+            "Upgrade": "websocket",
+            "X-Client-Hop": "remove-me",
+            "X-End-To-End": "preserve-me",
+        },
+        body=b"opaque",
+    )
+
+    serialized_headers = writer.written.split(b"\r\n\r\n", 1)[0].lower()
+    for name in (
+        b"keep-alive",
+        b"proxy-authenticate",
+        b"proxy-authorization",
+        b"te:",
+        b"trailer:",
+        b"transfer-encoding",
+        b"upgrade:",
+        b"x-client-hop",
+    ):
+        assert name not in serialized_headers
+    assert b"connection: close" in serialized_headers
+    assert b"content-length: 6" in serialized_headers
+    assert b"x-end-to-end: preserve-me" in serialized_headers
+
+
+@pytest.mark.asyncio
 async def test_forward_with_trailer_enforces_response_size_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
