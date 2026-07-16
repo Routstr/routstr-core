@@ -1,6 +1,10 @@
 import asyncio
+import importlib.metadata
 import json
 import random
+import time
+from enum import StrEnum
+from typing import TypedDict
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +20,68 @@ from .price import sats_usd_price
 logger = get_logger(__name__)
 
 models_router = APIRouter()
+
+
+class PricingSource(StrEnum):
+    """Where a model's advertised price came from, in decreasing trust order.
+
+    ``native`` is the provider's own API (the only fully-trustworthy source);
+    ``litellm`` and ``openrouter`` are curated/resale estimates; ``manual`` is
+    an operator-entered price; ``unresolved`` means no source could price it
+    (imported disabled, fail-closed). Stored as plain text on ``ModelRow`` so a
+    future value never needs a schema change.
+    """
+
+    NATIVE = "native"
+    LITELLM = "litellm"
+    OPENROUTER = "openrouter"
+    MANUAL = "manual"
+    UNRESOLVED = "unresolved"
+
+
+class PricingProvenance(TypedDict):
+    """The three provenance fields stamped onto a ``Model`` at resolve time."""
+
+    pricing_source: PricingSource
+    pricing_checked_at: int
+    pricing_source_version: str | None
+
+
+def pricing_metadata(source: PricingSource | str) -> PricingProvenance:
+    """The three provenance fields for a freshly resolved price.
+
+    ``pricing_source_version`` anchors static sources only: litellm ships a
+    bundled cost map that can be a year stale even when resolved seconds ago, so
+    its dist version is recorded; live sources (native/openrouter) have no
+    version and rely on ``pricing_checked_at`` for freshness.
+    """
+    src = PricingSource(source)
+    version = (
+        importlib.metadata.version("litellm")
+        if src is PricingSource.LITELLM
+        else None
+    )
+    return {
+        "pricing_source": src,
+        "pricing_checked_at": int(time.time()),
+        "pricing_source_version": version,
+    }
+
+
+def _coerce_pricing_source(value: object) -> "PricingSource | None":
+    """Coerce a stored pricing-source string to the enum, tolerating junk.
+
+    Runs on every DB read via ``_row_to_model``; an unknown or empty value must
+    yield ``None`` rather than raise, or one malformed row would blank the whole
+    served catalog (the same failure class as a non-numeric stored price).
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return PricingSource(value)  # type: ignore[arg-type]
+    except ValueError:
+        logger.warning("Unknown pricing_source %r on model row; treating as None", value)
+        return None
 
 _MODEL_TEST_ENDPOINT_PATHS = {
     "chat-completions": "chat/completions",
@@ -42,6 +108,7 @@ class Architecture(BaseModel):
     output_modalities: list[str]
     tokenizer: str
     instruct_type: str | None
+    supports_function_calling: bool | None = None
 
 
 class Pricing(BaseModel):
@@ -80,6 +147,9 @@ class Model(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
+    pricing_source: PricingSource | None = None
+    pricing_checked_at: int | None = None
+    pricing_source_version: str | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -213,6 +283,11 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 if not _has_valid_pricing(model):
                     continue
 
+                # Every model from this feed is priced by OpenRouter; tag it so
+                # the provenance survives the ``Model(**model)`` spreads in the
+                # OR-fed providers. Pydantic ignores the extra keys until the
+                # ``Model`` fields exist.
+                model.update(pricing_metadata(PricingSource.OPENROUTER))
                 filtered_models.append(model)
 
             return filtered_models
@@ -272,6 +347,9 @@ def _row_to_model(
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None) or row.id,
+        pricing_source=_coerce_pricing_source(getattr(row, "pricing_source", None)),
+        pricing_checked_at=getattr(row, "pricing_checked_at", None),
+        pricing_source_version=getattr(row, "pricing_source_version", None),
     )
 
     if apply_provider_fee:
@@ -425,6 +503,9 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
             forwarded_model_id=model.forwarded_model_id,
+            pricing_source=model.pricing_source,
+            pricing_checked_at=model.pricing_checked_at,
+            pricing_source_version=model.pricing_source_version,
         )
     except Exception as e:
         logger.error(
