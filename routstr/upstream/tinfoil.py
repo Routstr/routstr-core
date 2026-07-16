@@ -116,7 +116,7 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
           EHBP-only header used for encrypted POST requests and is not honored
           for unencrypted GET requests.
         """
-        clean_path = path.removeprefix("tee/")
+        clean_path = path.removeprefix("tee/").rstrip("/")
         if clean_path == "attestation":
             return await self._proxy_attestation(headers)
         return await super().forward_get_request(request, path, headers)
