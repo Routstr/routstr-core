@@ -74,7 +74,14 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
 
     async def fetch_models(self) -> list[Model]:
         """Fetch models from Ollama API using /api/tags endpoint."""
-        from ..payment.models import Architecture, Model, Pricing, TopProvider
+        from ..payment.models import (
+            Architecture,
+            Model,
+            Pricing,
+            PricingSource,
+            TopProvider,
+            pricing_metadata,
+        )
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -148,6 +155,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                             enabled=True,
                             upstream_provider_id=None,
                             canonical_slug=None,
+                            **pricing_metadata(PricingSource.NATIVE),
                         )
                     )
 
@@ -244,6 +252,9 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            pricing_source=model.pricing_source,
+            pricing_checked_at=model.pricing_checked_at,
+            pricing_source_version=model.pricing_source_version,
         )
 
         (
@@ -266,4 +277,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            pricing_source=model.pricing_source,
+            pricing_checked_at=model.pricing_checked_at,
+            pricing_source_version=model.pricing_source_version,
         )
