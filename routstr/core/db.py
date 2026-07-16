@@ -209,6 +209,17 @@ class ModelRow(SQLModel, table=True):  # type: ignore
         default=None,
         description="Model ID to use when forwarding requests to upstream provider. Defaults to id if not set.",
     )
+    pricing_source: str | None = Field(
+        default=None,
+        description="Provenance of the price: native, litellm, openrouter, manual or unresolved. Plain text so a new source never needs a migration.",
+    )
+    pricing_checked_at: int | None = Field(
+        default=None, description="Unix timestamp when the price was last resolved"
+    )
+    pricing_source_version: str | None = Field(
+        default=None,
+        description="Freshness anchor for static sources (litellm dist version); NULL for live sources",
+    )
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
