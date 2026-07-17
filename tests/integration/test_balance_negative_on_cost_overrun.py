@@ -223,15 +223,18 @@ async def test_concurrent_cost_overruns_never_negative(
         async with create_session() as session:
             fresh_key = await session.get(ApiKey, key_hash)
             assert fresh_key is not None
-            with patch(
-                "routstr.auth.calculate_cost",
-                return_value=_cost_data(actual_token_cost),
-            ):
-                await adjust_payment_for_tokens(
-                    fresh_key, response_data, session, deducted_max_cost
-                )
+            await adjust_payment_for_tokens(
+                fresh_key, response_data, session, deducted_max_cost
+            )
 
-    await asyncio.gather(*[finalize() for _ in range(n_requests)])
+    # Patch once around the gather: entering the same patch target from
+    # concurrent tasks un-patches in the wrong order and leaks the mock into
+    # every later test in the session.
+    with patch(
+        "routstr.auth.calculate_cost",
+        return_value=_cost_data(actual_token_cost),
+    ):
+        await asyncio.gather(*[finalize() for _ in range(n_requests)])
 
     async with create_session() as session:
         final_key = await session.get(ApiKey, key_hash)
@@ -344,15 +347,18 @@ async def test_parallel_requests_no_free_inference(
         async with create_session() as session:
             fresh_key = await session.get(ApiKey, key_hash)
             assert fresh_key is not None
-            with patch(
-                "routstr.auth.calculate_cost",
-                return_value=_cost_data(actual_token_cost),
-            ):
-                await adjust_payment_for_tokens(
-                    fresh_key, response_data, session, deducted_max_cost
-                )
+            await adjust_payment_for_tokens(
+                fresh_key, response_data, session, deducted_max_cost
+            )
 
-    await asyncio.gather(finalize(), finalize())
+    # Patch once around the gather: entering the same patch target from two
+    # concurrent tasks un-patches in the wrong order and leaks the mock into
+    # every later test in the session.
+    with patch(
+        "routstr.auth.calculate_cost",
+        return_value=_cost_data(actual_token_cost),
+    ):
+        await asyncio.gather(finalize(), finalize())
 
     async with create_session() as session:
         final_key = await session.get(ApiKey, key_hash)
