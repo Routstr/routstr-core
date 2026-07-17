@@ -86,3 +86,28 @@ async def test_string_fallback_still_prices_without_model_obj() -> None:
 
     assert isinstance(result, CostData)
     assert result.total_msats == 2_000
+
+
+@pytest.mark.asyncio
+async def test_x_cashu_cost_uses_served_model_not_upstream_echo() -> None:
+    """``get_x_cashu_cost`` bills the routed model, not the raw model echo.
+
+    X-Cashu handlers do not rewrite the upstream's echoed model string, so
+    without the routed model the settle would look up whatever wire name the
+    upstream reported. With ``model_obj`` given, the echo must be irrelevant.
+    """
+    from routstr.upstream import GenericUpstreamProvider
+
+    provider = GenericUpstreamProvider("http://upstream.example", "key", 1.0)
+    response = dict(RESPONSE, model="totally-unknown-wire-name")
+
+    with patch(
+        "routstr.proxy.get_model_instance", return_value=WINNER
+    ) as alias_lookup:
+        cost = await provider.get_x_cashu_cost(
+            response, max_cost_for_model=100_000, model_obj=SERVED
+        )
+
+    assert cost is not None
+    assert cost.total_msats == 10_000
+    alias_lookup.assert_not_called()
