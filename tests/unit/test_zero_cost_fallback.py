@@ -12,9 +12,6 @@ Correct behavior required:
 
 import inspect
 
-import pytest
-
-
 # ===========================================================================
 # RED TESTS: No hardcoded zero-cost on billing error
 # ===========================================================================
@@ -153,11 +150,9 @@ def test_messages_streaming_no_silent_billing_failure() -> None:
 
     # The finalize_without_usage has except Exception: pass
     # This should either propagate or log failure
-    found_finalize = False
     for segment in source.split("except Exception:"):
         if "finalize_without_usage" in segment or "finalize" in segment:
             if "pass" in segment[:100]:
-                found_finalize = True
                 break
 
     # Check if the silent pass pattern exists

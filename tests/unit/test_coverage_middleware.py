@@ -7,7 +7,6 @@ ConcurrencyLimiterMiddleware + TimeoutMiddleware are on an unmerged branch.
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-
 # ---------------------------------------------------------------------------
 # LoggingMiddleware
 # ---------------------------------------------------------------------------

@@ -9,10 +9,9 @@ Correct behavior required:
 3. A retry wrapper must exist for critical money-path DB writes
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-
 
 # ===========================================================================
 # RED TESTS: store_cashu_transaction should RAISE on failure
@@ -132,6 +131,7 @@ def test_emergency_refund_no_try_except_pass() -> None:
     the caller can detect failure and at minimum log the token.
     """
     import inspect
+
     from routstr.upstream.base import BaseUpstreamProvider
 
     # Check chat emergency refund handler
@@ -146,7 +146,6 @@ def test_emergency_refund_no_try_except_pass() -> None:
     emergency_section = chat_src[emergency_start : emergency_start + 500]
 
     # The try/except/pass around store_cashu_transaction must NOT exist
-    has_try = "try:" in emergency_section
     has_except_pass = "except Exception:" in emergency_section and "pass" in emergency_section
 
     assert not has_except_pass, (
@@ -160,6 +159,7 @@ def test_emergency_refund_no_try_except_pass() -> None:
 def test_emergency_refund_responses_api_no_silent_failure() -> None:
     """FIX REQUIRED: Responses API emergency refund same fix as chat."""
     import inspect
+
     from routstr.upstream.base import BaseUpstreamProvider
 
     responses_src = inspect.getsource(
@@ -195,6 +195,7 @@ def test_fee_payout_has_crash_guard() -> None:
     3. Record payout in DB and reconcile on startup
     """
     import inspect
+
     from routstr import wallet
 
     source = inspect.getsource(wallet.periodic_routstr_fee_payout)
