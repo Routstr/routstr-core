@@ -130,7 +130,7 @@ function DialogContent({
         <DrawerPrimitive.Content
           data-slot='dialog-content'
           className={cn(
-            'border-border bg-card data-closed:animate-out data-open:animate-in data-closed:slide-out-to-bottom data-open:slide-in-from-bottom fixed inset-x-0 bottom-0 z-50 grid max-h-[90vh] w-full gap-4 rounded-t-xl border-t p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-lg',
+            'border-border bg-card data-closed:animate-out data-open:animate-in data-closed:slide-out-to-bottom data-open:slide-in-from-bottom fixed inset-x-0 bottom-0 z-50 grid max-h-[90dvh] w-full gap-4 rounded-t-xl border-t p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-lg',
             className
           )}
           {...(props as React.ComponentProps<typeof DrawerPrimitive.Content>)}

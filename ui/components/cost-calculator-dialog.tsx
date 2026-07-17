@@ -25,7 +25,7 @@ export function CostCalculatorDialog({
 }: CostCalculatorDialogProps) {
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[700px]'>
+      <DialogContent className='max-h-[90dvh] overflow-y-auto sm:max-w-[700px]'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'>
             <Calculator className='h-5 w-5' />

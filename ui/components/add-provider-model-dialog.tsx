@@ -438,7 +438,7 @@ export function AddProviderModelDialog({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[720px]'>
+      <DialogContent className='max-h-[90dvh] overflow-y-auto sm:max-w-[720px]'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'>
             <Plus className='h-4 w-4' />

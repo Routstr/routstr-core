@@ -86,7 +86,7 @@ export function AddModelForm({
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className='max-h-[90vh] overflow-y-auto sm:max-w-[600px]'>
+      <DialogContent className='max-h-[90dvh] overflow-y-auto sm:max-w-[600px]'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'>
             <Plus className='h-5 w-5' />
