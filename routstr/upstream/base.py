@@ -797,6 +797,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         background_tasks: BackgroundTasks,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -839,6 +840,7 @@ class BaseUpstreamProvider:
                             {"model": last_model_seen or "unknown", "usage": None},
                             new_session,
                             max_cost_for_model,
+                            model_obj,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1011,6 +1013,7 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                model_obj,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1107,6 +1110,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1153,6 +1157,7 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
+                model_obj,
             )
 
             await session.refresh(key)
@@ -1248,6 +1253,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1291,6 +1297,7 @@ class BaseUpstreamProvider:
                             {"model": last_model_seen or "unknown", "usage": None},
                             new_session,
                             max_cost_for_model,
+                            model_obj,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1420,6 +1427,7 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                model_obj,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1538,6 +1546,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1587,6 +1596,7 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
+                model_obj,
             )
 
             await session.refresh(key)
@@ -1720,6 +1730,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         async def stream_with_cost(
             max_cost_for_model: int,
@@ -1785,6 +1796,7 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
+                            model_obj,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1936,6 +1948,7 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
+                                    model_obj,
                                 )
 
                                 self.inject_cost_metadata(
@@ -1983,6 +1996,7 @@ class BaseUpstreamProvider:
         deducted_max_cost: int,
         path: str,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         try:
             content = await response.aread()
@@ -2007,6 +2021,7 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
+                model_obj,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2101,6 +2116,7 @@ class BaseUpstreamProvider:
                 key,
                 max_cost_for_model,
                 requested_model,
+                model_obj,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
@@ -2112,6 +2128,7 @@ class BaseUpstreamProvider:
             response_json,
             session,
             max_cost_for_model,
+            model_obj,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2203,6 +2220,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         requested_model: str | None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Re-emit a litellm Anthropic-event iterator as live SSE bytes
         with cost reconciliation appended at end of stream."""
@@ -2253,6 +2271,7 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
+                            model_obj,
                         )
                         usage_finalized = True
                         return (
@@ -2326,6 +2345,7 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
+                                    model_obj,
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -2671,6 +2691,7 @@ class BaseUpstreamProvider:
                             key,
                             max_cost_for_model,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
@@ -2687,6 +2708,7 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                                 path,
                                 requested_model=original_model_id,
+                                model_obj=model_obj,
                             )
                         finally:
                             await response.aclose()
@@ -2702,6 +2724,7 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                                 path,
                                 requested_model=original_model_id,
+                                model_obj=model_obj,
                             )
                         finally:
                             await response.aclose()
@@ -2751,6 +2774,7 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             background_tasks,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                         result.background = background_tasks
                         return result
@@ -2764,6 +2788,7 @@ class BaseUpstreamProvider:
                             session,
                             max_cost_for_model,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                     finally:
                         await response.aclose()
@@ -3016,6 +3041,7 @@ class BaseUpstreamProvider:
                         key,
                         max_cost_for_model,
                         requested_model=original_model_id,
+                        model_obj=model_obj,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -3031,6 +3057,7 @@ class BaseUpstreamProvider:
                             session,
                             max_cost_for_model,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                     finally:
                         await response.aclose()

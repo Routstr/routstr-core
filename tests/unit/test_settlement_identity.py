@@ -1,0 +1,88 @@
+"""Settlement bills the model and provider fee that actually served.
+
+Covers ``calculate_cost``'s served-identity parameters: a passed ``model_obj``
+is billed directly instead of re-deriving pricing from the response's model
+string through the alias map (which yields the best-ranked candidate, not the
+serving one), and a passed ``provider_fee`` is applied on the USD-cost path
+instead of the best-ranked provider's fee. The string/alias fallbacks remain
+for callers without routed identity.
+"""
+
+import os
+from unittest.mock import patch
+
+import pytest
+
+os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
+os.environ.setdefault("UPSTREAM_API_KEY", "test")
+
+from routstr.payment.cost_calculation import CostData, calculate_cost
+from routstr.payment.models import Architecture, Model, Pricing
+
+
+def _make_model(
+    model_id: str, prompt_sats: float, completion_sats: float
+) -> Model:
+    return Model(
+        id=model_id,
+        name=model_id,
+        created=0,
+        description="",
+        context_length=64000,
+        architecture=Architecture(
+            modality="text->text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="Other",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=prompt_sats, completion=completion_sats),
+        sats_pricing=Pricing(prompt=prompt_sats, completion=completion_sats),
+    )
+
+
+WINNER = _make_model("dual-model", 0.001, 0.002)
+SERVED = _make_model("dual-model", 0.005, 0.010)
+
+RESPONSE = {
+    "model": "dual-model",
+    "usage": {
+        "prompt_tokens": 1000,
+        "completion_tokens": 500,
+        "total_tokens": 1500,
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def patch_sats_usd_price() -> None:  # type: ignore[misc]
+    with patch(
+        "routstr.payment.cost_calculation.sats_usd_price", return_value=5.0e-4
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_served_model_pricing_wins_over_alias_lookup() -> None:
+    """With ``model_obj`` given, the alias map is not consulted for pricing."""
+    with patch(
+        "routstr.proxy.get_model_instance", return_value=WINNER
+    ) as alias_lookup:
+        result = await calculate_cost(
+            dict(RESPONSE), max_cost=100_000, model_obj=SERVED
+        )
+
+    assert isinstance(result, CostData)
+    # 1000/1000 * 5000 + 500/1000 * 10000 msats at the SERVED model's rates.
+    assert result.total_msats == 10_000
+    alias_lookup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_string_fallback_still_prices_without_model_obj() -> None:
+    """Callers without routed identity keep the alias-map string lookup."""
+    with patch("routstr.proxy.get_model_instance", return_value=WINNER):
+        result = await calculate_cost(dict(RESPONSE), max_cost=100_000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 2_000

@@ -1,4 +1,5 @@
 import math
+from typing import TYPE_CHECKING
 
 from pydantic.v1 import BaseModel
 
@@ -6,6 +7,9 @@ from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
 from .usage import normalize_usage, parse_token_count
+
+if TYPE_CHECKING:
+    from .models import Model
 
 __all__ = [
     "CostData",
@@ -66,12 +70,17 @@ def _empty_cost(cls: type[CostData] = CostData) -> CostData:
 async def calculate_cost(
     response_data: dict,
     max_cost: int,
+    model_obj: "Model | None" = None,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
 
     Args:
         response_data: Response data containing usage information
         max_cost: Maximum cost in millisats
+        model_obj: The model that actually served the request. When given,
+            its pricing is billed directly; without it, pricing is re-derived
+            from the response's model string via the alias map, which resolves
+            to the best-ranked candidate — not necessarily the serving one.
 
     Returns:
         Cost data or error information
@@ -190,7 +199,7 @@ async def calculate_cost(
 
     # Fall back to token-based pricing
     try:
-        pricing_rates = _get_pricing_rates(response_data)
+        pricing_rates = _get_pricing_rates(response_data, model_obj)
     except ValueError as e:
         return CostDataError(message=str(e), code="pricing_error")
 
@@ -307,8 +316,13 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
 
 def _get_pricing_rates(
     response_data: dict,
+    model_obj: "Model | None" = None,
 ) -> tuple[float, float, float, float] | None:
     """Get configured rates, falling back to LiteLLM's model cost map.
+
+    The served ``model_obj`` (when the caller has it) is billed directly;
+    otherwise the response's model string is resolved through the alias map,
+    which yields the best-ranked candidate rather than the serving one.
 
     Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate).
     ``None`` means configured fixed pricing should be used by the caller.
@@ -323,7 +337,13 @@ def _get_pricing_rates(
     from .models import litellm_cost_entry
 
     response_model = response_data.get("model", "")
-    model_obj = get_model_instance(response_model)
+    if model_obj is None:
+        logger.warning(
+            "Settling without routed model identity — re-deriving pricing "
+            "from the response's model string via the alias map",
+            extra={"response_model": response_model},
+        )
+        model_obj = get_model_instance(response_model)
 
     if model_obj and model_obj.sats_pricing:
         try:
