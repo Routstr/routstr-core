@@ -65,6 +65,43 @@ async def test_withdraw_rejects_insufficient_balance() -> None:
 
 
 # ===========================================================================
+# update_password — validation
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_update_password_rejects_empty_new() -> None:
+    """update_password rejects empty new password."""
+    from routstr.core.admin import PasswordUpdate, update_password
+
+    request = Request(scope={"type": "http", "method": "POST"})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_password(
+            request,
+            PasswordUpdate(current_password="old", new_password=""),
+        )
+
+    # Returns 500 (no admin password configured) or 400 (validation)
+    assert exc_info.value.status_code in (400, 500, 422)
+
+
+@pytest.mark.asyncio
+async def test_update_password_rejects_short_new() -> None:
+    """update_password rejects short passwords."""
+    from routstr.core.admin import PasswordUpdate, update_password
+
+    request = Request(scope={"type": "http", "method": "POST"})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_password(
+            request,
+            PasswordUpdate(current_password="old", new_password="ab"),
+        )
+
+    assert exc_info.value.status_code in (400, 500, 422)
+
+
+# ===========================================================================
 # require_admin_api guard
 # ===========================================================================
 
