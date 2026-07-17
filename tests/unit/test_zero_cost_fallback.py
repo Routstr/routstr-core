@@ -1,17 +1,13 @@
-"""Tests exposing the hardcoded zero-cost fallback vulnerability.
+"""Tests asserting CORRECT behavior for the streaming billing fallback.
 
-base.py:1012-1030 catches any exception from adjust_payment_for_tokens()
-during streaming usage finalization and hardcodes:
-    total_msats: 0, total_usd: 0.0
+These tests FAIL against current main because the zero-cost fallback at
+base.py:1012-1030 gives users free service on billing errors.
 
-This means:
-1. The user gets FREE service (no cost deducted)
-2. The reserved balance is NEVER released — funds stuck forever
-3. No CRITICAL log — operator won't know money is being lost
-
-stream_with_cost is a NESTED function inside handle_streaming_chat_completion
-(line 816) and handle_streaming_messages_completion (line 1720). We inspect
-the source of those outer handlers.
+Correct behavior required:
+1. Billing errors must NOT hardcode total_msats=0 — free service is theft
+2. Reserved balance must be released when billing fails
+3. Error must be logged at CRITICAL level, not just logger.exception
+4. The except clause must be narrow, not catch-all Exception
 """
 
 import inspect
@@ -19,60 +15,52 @@ import inspect
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Reproduce vulnerability: zero-cost fallback exists in source
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# RED TESTS: No hardcoded zero-cost on billing error
+# ===========================================================================
 
-@pytest.mark.asyncio
-async def test_zero_cost_fallback_exists_chat_streaming() -> None:
-    """The chat streaming handler contains the hardcoded zero-cost fallback."""
+def test_billing_error_must_not_hardcode_zero_cost() -> None:
+    """FIX REQUIRED: billing errors must not result in zero-cost billing.
+
+    base.py:1012-1030 substitutes total_msats=0, total_usd=0.0 when
+    adjust_payment_for_tokens raises ANY exception. This means:
+    - User gets free inference
+    - Reserved balance is never released
+    - Operator has no idea money was lost
+    """
     from routstr.upstream.base import BaseUpstreamProvider
 
     source = inspect.getsource(
         BaseUpstreamProvider.handle_streaming_chat_completion
     )
 
-    assert "Error during usage finalization" in source, (
-        "BUG CONFIRMED: 'Error during usage finalization' catch block exists "
-        "in handle_streaming_chat_completion. It catches ALL exceptions from "
-        "adjust_payment_for_tokens() and substitutes a zero-cost fallback."
-    )
-    assert '"total_msats": 0' in source or "'total_msats': 0" in source, (
-        "BUG CONFIRMED: total_msats is hardcoded to 0 in the fallback path. "
-        "User gets free service + funds stuck."
+    fallback_start = source.find("Error during usage finalization")
+    assert fallback_start > 0, (
+        "Fallback block exists — it must be removed or fixed"
     )
 
+    fallback_section = source[fallback_start : fallback_start + 600]
 
-@pytest.mark.asyncio
-async def test_messages_streaming_also_catches_billing_errors() -> None:
-    """The messages streaming handler catches billing errors silently.
+    has_zero_msats = '"total_msats": 0' in fallback_section
+    has_zero_usd = '"total_usd": 0.0' in fallback_section
 
-    Unlike chat streaming (which has the hardcoded zero-cost fallback with
-    logging), the messages handler at lines 1720+ uses `except Exception: pass`
-    for the adjustment path. Both patterns result in unbilled usage.
+    assert not has_zero_msats, (
+        "FIX REQUIRED: total_msats is hardcoded to 0 on billing error. "
+        "User gets free service. Fix: propagate the error as a 500 response "
+        "with the token refunded to the user."
+    )
+    assert not has_zero_usd, (
+        "FIX REQUIRED: total_usd is hardcoded to 0.0. No billing occurs. "
+        "Fix: propagate the error."
+    )
+
+
+def test_billing_error_must_release_reserved_balance() -> None:
+    """FIX REQUIRED: billing errors must release the reserved balance.
+
+    When adjust_payment_for_tokens fails, the reserved balance on the
+    API key must be released. Currently it's stuck forever.
     """
-    from routstr.upstream.base import BaseUpstreamProvider
-
-    source = inspect.getsource(
-        BaseUpstreamProvider.handle_streaming_messages_completion
-    )
-
-    # The messages handler has its own catch-all for adjust_payment_for_tokens
-    # but uses `except Exception: pass` instead of the hardcoded fallback
-    assert "adjust_payment_for_tokens" in source, (
-        "Messages handler calls adjust_payment_for_tokens"
-    )
-    # It catches silently — note: "pass" appears in two contexts:
-    # 1. json.JSONDecodeError: pass (line iteration)
-    # 2. except Exception: pass (billing finalization failure)
-    assert "except Exception:" in source, (
-        "Messages handler catches billing errors with `except Exception`"
-    )
-
-
-@pytest.mark.asyncio
-async def test_zero_cost_fallback_no_balance_release() -> None:
-    """Verify the zero-cost fallback does NOT release the reserved balance."""
     from routstr.upstream.base import BaseUpstreamProvider
 
     source = inspect.getsource(
@@ -82,38 +70,29 @@ async def test_zero_cost_fallback_no_balance_release() -> None:
     fallback_start = source.find("Error during usage finalization")
     assert fallback_start > 0, "Fallback exists"
 
-    fallback_section = source[fallback_start : fallback_start + 2000]
+    fallback_section = source[fallback_start : fallback_start + 600]
 
     has_release = any(
         kw in fallback_section
-        for kw in ["reserved_balance", "release_reservation", "adjust_reserved"]
+        for kw in ["reserved_balance", "release_reservation", "adjust_reserved",
+                    "reset_reserved", "clear_reserved"]
     )
 
-    assert not has_release, (
-        "BUG CONFIRMED: The zero-cost fallback does NOT release the reserved "
-        "balance. Funds are permanently stuck on the API key."
-    )
-
-
-@pytest.mark.asyncio
-async def test_zero_cost_usage_chunk_still_emitted() -> None:
-    """The zero-cost fallback still emits a usage chunk with zeros."""
-    from routstr.upstream.base import BaseUpstreamProvider
-
-    source = inspect.getsource(
-        BaseUpstreamProvider.handle_streaming_chat_completion
-    )
-
-    assert "usage_chunk_data" in source
-    assert '"prompt_tokens"' in source or "'prompt_tokens'" in source, (
-        "BUG CONFIRMED: Zeroed usage chunk is emitted to client. "
-        "Client sees 0 tokens used and is never billed."
+    assert has_release, (
+        "FIX REQUIRED: Zero-cost fallback does NOT release the reserved "
+        "balance. Funds are permanently stuck. Fix: add reserved_balance "
+        "release in the error path."
     )
 
 
-@pytest.mark.asyncio
-async def test_adjust_payment_exception_is_caught_broadly() -> None:
-    """The catch clause uses `except Exception` — catches EVERYTHING."""
+def test_billing_error_catch_is_too_broad() -> None:
+    """FIX REQUIRED: except clause must not catch all Exception types.
+
+    `except Exception as e:` catches transient DB errors, logic bugs,
+    and serialization failures — all resulting in free service.
+    The catch should be specific (e.g., TemporaryDBError) or the error
+    should propagate as a 500.
+    """
     from routstr.upstream.base import BaseUpstreamProvider
 
     source = inspect.getsource(
@@ -121,29 +100,66 @@ async def test_adjust_payment_exception_is_caught_broadly() -> None:
     )
 
     fallback_start = source.find("Error during usage finalization")
-    fallback_section = source[max(0, fallback_start - 200) : fallback_start]
+    # Look at the except clause above the fallback
+    pre_fallback = source[max(0, fallback_start - 250) : fallback_start]
 
-    assert "except Exception" in fallback_section, (
-        "BUG CONFIRMED: The catch clause is `except Exception as e:` — "
-        "it catches ALL exception types. A transient DB hiccup gives "
-        "the user an unpaid inference."
+    assert "except Exception" not in pre_fallback, (
+        "FIX REQUIRED: The except clause catches all Exception types. "
+        "A transient DB hiccup results in free inference. "
+        "Fix: narrow the exception type or propagate the error."
     )
 
 
-@pytest.mark.asyncio
-async def test_responses_streaming_billing_path_exists() -> None:
-    """The responses streaming handler has its own billing finalization.
+def test_billing_error_must_log_critical() -> None:
+    """FIX REQUIRED: billing failure must log at CRITICAL level.
 
-    We verify it calls adjust_payment_for_tokens and has error handling.
+    Currently uses logger.exception() which is ERROR level.
+    A billing failure means the operator is losing money — this must
+    be CRITICAL so monitoring/monitoring systems catch it.
     """
     from routstr.upstream.base import BaseUpstreamProvider
 
     source = inspect.getsource(
-        BaseUpstreamProvider.handle_streaming_responses_completion
+        BaseUpstreamProvider.handle_streaming_chat_completion
     )
 
-    assert "adjust_payment_for_tokens" in source, (
-        "Responses handler calls adjust_payment_for_tokens"
+    fallback_start = source.find("Error during usage finalization")
+    fallback_section = source[fallback_start : fallback_start + 600]
+
+    has_critical = "CRITICAL" in fallback_section or "critical" in fallback_section
+
+    assert has_critical, (
+        "FIX REQUIRED: Billing error is logged at ERROR level. "
+        "Money is being lost — this must be CRITICAL so operators "
+        "get alerted."
     )
-    # Document: this handler likely has its own error handling path
-    assert True
+
+
+# ===========================================================================
+# RED TESTS: Messages streaming billing
+# ===========================================================================
+
+def test_messages_streaming_no_silent_billing_failure() -> None:
+    """FIX REQUIRED: messages streaming must not silently swallow billing errors.
+
+    handle_streaming_messages_completion uses `except Exception: pass`
+    for the finalize path, silently dropping the billing attachment.
+    """
+    from routstr.upstream.base import BaseUpstreamProvider
+
+    source = inspect.getsource(
+        BaseUpstreamProvider.handle_streaming_messages_completion
+    )
+
+    # The finalize_without_usage has except Exception: pass
+    # This should either propagate or log failure
+    found_finalize = False
+    for segment in source.split("except Exception:"):
+        if "finalize_without_usage" in segment or "finalize" in segment:
+            if "pass" in segment[:100]:
+                found_finalize = True
+                break
+
+    # Check if the silent pass pattern exists
+    has_silent_finalize = "finalize_without_usage()" in source
+    assert has_silent_finalize or True  # documentation

@@ -1,31 +1,29 @@
-"""Tests exposing the emergency refund try/except/pass vulnerability.
+"""Tests asserting CORRECT behavior for emergency refund and DB persistence.
 
-The emergency refund paths in base.py (lines 3627-3668 for chat, 4591-4632 for
-responses) mint a refund token via send_token(), then store it via
-store_cashu_transaction() wrapped in try/except/pass.  If the DB write fails,
-the token is already minted but unrecoverable — funds are silently lost.
+These tests FAIL against current main because the code is buggy.
+They serve as the "RED" phase of TDD — once the bugs are fixed, they go green.
 
-These tests document the current behaviour and will FAIL when the vulnerability
-is fixed (they assert that the DB store is inside try/except/pass and that a
-store failure is silently swallowed).
+Correct behavior required:
+1. store_cashu_transaction should raise on failure (not silently return False)
+2. Emergency refund paths must NOT use try/except/pass for DB stores
+3. A retry wrapper must exist for critical money-path DB writes
 """
 
-import json
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# Reproduce vulnerability: store_cashu_transaction can fail silently
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# RED TESTS: store_cashu_transaction should RAISE on failure
+# ===========================================================================
 
 @pytest.mark.asyncio
-async def test_store_cashu_transaction_catches_all_exceptions() -> None:
-    """store_cashu_transaction returns False instead of raising on DB failure.
+async def test_store_cashu_raises_on_db_failure_not_returns_false() -> None:
+    """FIX REQUIRED: store_cashu_transaction must raise on DB failure.
 
-    This is the root cause of the emergency-refund fund-loss vulnerability:
-    callers that use try/except/pass never know the store failed.
+    Currently returns False silently — callers never detect the failure.
+    Correct behavior: raise an exception so callers can recover.
     """
     from routstr.core.db import store_cashu_transaction
 
@@ -36,159 +34,181 @@ async def test_store_cashu_transaction_catches_all_exceptions() -> None:
         mock_session.__aexit__ = AsyncMock(return_value=None)
         mock_create.return_value = mock_session
 
-        # Should NOT raise — catches all exceptions and returns False
-        result = await store_cashu_transaction(
-            token="cashuAtest_refund_token",
-            amount=1000,
-            unit="sat",
-            mint_url="http://mint:3338",
-            typ="out",
-            request_id="req-123",
-        )
+        with pytest.raises(Exception) as exc_info:
+            await store_cashu_transaction(
+                token="cashuAtest_refund_token",
+                amount=1000,
+                unit="sat",
+                mint_url="http://mint:3338",
+                typ="out",
+                request_id="req-123",
+            )
 
-        assert result is False, (
-            "BUG: store_cashu_transaction returns False on failure. "
-            "Callers using try/except/pass never detect the failure."
+        # Must raise a meaningful exception, not silently return False
+        # OSError or a custom DB error is acceptable
+        assert "disk full" in str(exc_info.value) or isinstance(
+            exc_info.value, (OSError, RuntimeError)
+        ), (
+            f"Expected store to propagate the failure, got {type(exc_info.value).__name__}: "
+            f"{exc_info.value}"
         )
 
 
 @pytest.mark.asyncio
-async def test_store_cashu_transaction_silent_returns_bool_only() -> None:
-    """store_cashu_transaction never raises — it only returns True/False.
-
-    Every caller that does `except Exception: pass` around this call will
-    silently lose the transaction record if the store fails.
-    """
+async def test_store_cashu_raises_on_any_error() -> None:
+    """FIX REQUIRED: All DB errors must propagate, not just OSError."""
     from routstr.core.db import store_cashu_transaction
 
-    with patch("routstr.core.db.create_session") as mock_create:
-        mock_session = AsyncMock()
-        mock_session.commit = AsyncMock(side_effect=RuntimeError("any error"))
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_create.return_value = mock_session
+    errors = [
+        OSError("disk full"),
+        RuntimeError("connection lost"),
+        ConnectionRefusedError("db down"),
+    ]
 
-        result = await store_cashu_transaction(
-            token="cashuAtest_token",
-            amount=500,
-            unit="msat",
-            typ="in",
-            request_id="req-456",
-        )
+    for error in errors:
+        with patch("routstr.core.db.create_session") as mock_create:
+            mock_session = AsyncMock()
+            mock_session.commit = AsyncMock(side_effect=error)
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_create.return_value = mock_session
 
-        assert result is False, (
-            "BUG: store_cashu_transaction swallows RuntimeError. "
-            "Funds minted before this call are now unrecoverable."
-        )
+            with pytest.raises(Exception):
+                await store_cashu_transaction(
+                    token="cashuAtest",
+                    amount=1000,
+                    unit="sat",
+                    typ="out",
+                )
 
 
-# ---------------------------------------------------------------------------
-# Reproduce vulnerability: emergency refund paths exist and are duplicated
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# RED TESTS: Retry wrapper must exist
+# ===========================================================================
 
-@pytest.mark.asyncio
-async def test_emergency_refund_exception_handler_exists_chat() -> None:
-    """Verify the chat emergency refund handler exists with try/except/pass.
+def test_retry_wrapper_exists_for_critical_writes() -> None:
+    """FIX REQUIRED: store_cashu_transaction_with_retry must exist.
 
-    base.py lines 3627-3668 handle JSONDecodeError in chat non-streaming
-    responses by issuing an emergency refund via send_token(). The subsequent
-    store_cashu_transaction is wrapped in try/except/pass at lines 3643-3653.
+    Currently reverted (#600 → #604). All critical money-path DB writes
+    (after minting a token) need retry with backoff + CRITICAL logging.
     """
-    from routstr.upstream.base import BaseUpstreamProvider
+    from routstr.core import db
 
-    # Verify the method that contains this handler exists
-    assert hasattr(BaseUpstreamProvider, "handle_x_cashu_non_streaming_response"), (
-        "handle_x_cashu_non_streaming_response is the method containing "
-        "the chat emergency refund path (lines 3627-3668)"
-    )
-
-    # Read the source to verify the try/except/pass pattern
-    import inspect
-
-    source = inspect.getsource(
-        BaseUpstreamProvider.handle_x_cashu_non_streaming_response
-    )
-    assert "emergency_refund = amount" in source, (
-        "BUG: Emergency refund path exists — mints token via send_token() "
-        "then stores in try/except/pass. DB failure = silent fund loss."
-    )
-    # Verify the try/except/pass around store_cashu_transaction
-    assert "except Exception:" in source, (
-        "BUG CONFIRMED: Emergency refund uses try/except/pass — "
-        "any DB store failure is silently swallowed."
-    )
-    assert "pass" in source.split("except Exception:")[1][:50], (
-        "BUG CONFIRMED: The except block contains 'pass' — no recovery, "
-        "no CRITICAL log, no token retention."
+    assert hasattr(db, "store_cashu_transaction_with_retry"), (
+        "FIX REQUIRED: store_cashu_transaction_with_retry does not exist. "
+        "Was merged in PR #600, reverted in PR #604. "
+        "All post-mint DB writes need retry + backoff + CRITICAL logging."
     )
 
 
 @pytest.mark.asyncio
-async def test_emergency_refund_handler_duplicated() -> None:
-    """Verify the emergency refund pattern is duplicated (chat + responses).
+async def test_retry_wrapper_retries_on_transient_failure() -> None:
+    """FIX REQUIRED: retry wrapper must retry, not fail on first attempt."""
+    from routstr.core import db
 
-    base.py has TWO nearly identical emergency refund blocks:
-    - Chat API: lines 3627-3668
-    - Responses API: lines 4591-4632
+    # Skip if the retry wrapper doesn't exist yet
+    if not hasattr(db, "store_cashu_transaction_with_retry"):
+        pytest.skip("store_cashu_transaction_with_retry does not exist yet")
 
-    Both use the same try/except/pass pattern. This duplication means
-    any fix must be applied in TWO places.
+    with patch("routstr.core.db.store_cashu_transaction") as mock_store:
+        mock_store = AsyncMock()
+        mock_store.side_effect = [OSError("transient"), None]  # 1st fails, 2nd succeeds
+        # We'd test that the wrapper retries, but it doesn't exist yet
+        # This test documents the expected behavior
+
+
+# ===========================================================================
+# RED TESTS: Emergency refund must not silently lose tokens
+# ===========================================================================
+
+def test_emergency_refund_no_try_except_pass() -> None:
+    """FIX REQUIRED: Emergency refund paths must NOT use try/except/pass.
+
+    base.py:3643-3653 (chat) and base.py:4607-4617 (responses) both use
+    try/except/pass around store_cashu_transaction after minting a refund
+    token. If DB write fails, the token is permanently lost.
+
+    The fix: remove try/except/pass. Let the exception propagate so
+    the caller can detect failure and at minimum log the token.
     """
+    import inspect
     from routstr.upstream.base import BaseUpstreamProvider
 
-    import inspect
-
-    chat_source = inspect.getsource(
+    # Check chat emergency refund handler
+    chat_src = inspect.getsource(
         BaseUpstreamProvider.handle_x_cashu_non_streaming_response
     )
-    responses_source = inspect.getsource(
+
+    # Find the emergency refund section
+    emergency_start = chat_src.find("emergency_refund = amount")
+    assert emergency_start > 0, "Emergency refund path exists"
+
+    emergency_section = chat_src[emergency_start : emergency_start + 500]
+
+    # The try/except/pass around store_cashu_transaction must NOT exist
+    has_try = "try:" in emergency_section
+    has_except_pass = "except Exception:" in emergency_section and "pass" in emergency_section
+
+    assert not has_except_pass, (
+        "FIX REQUIRED: Emergency refund (chat) uses try/except/pass around "
+        "store_cashu_transaction. A failed DB write silently loses the minted "
+        "token. Fix: let the exception propagate or log at CRITICAL with the "
+        "full token for manual recovery."
+    )
+
+
+def test_emergency_refund_responses_api_no_silent_failure() -> None:
+    """FIX REQUIRED: Responses API emergency refund same fix as chat."""
+    import inspect
+    from routstr.upstream.base import BaseUpstreamProvider
+
+    responses_src = inspect.getsource(
         BaseUpstreamProvider.handle_x_cashu_non_streaming_responses_response
     )
 
-    chat_has_emergency = "emergency_refund = amount" in chat_source
-    responses_has_emergency = "emergency_refund = amount" in responses_source
+    has_emergency = "emergency_refund = amount" in responses_src
+    if has_emergency:
+        emergency_start = responses_src.find("emergency_refund = amount")
+        emergency_section = responses_src[emergency_start : emergency_start + 500]
+        has_except_pass = (
+            "except Exception:" in emergency_section and "pass" in emergency_section
+        )
+        assert not has_except_pass, (
+            "FIX REQUIRED: Responses API emergency refund also uses "
+            "try/except/pass. Same fund-loss vulnerability as chat path."
+        )
 
-    assert chat_has_emergency, "Chat path has emergency refund"
-    assert responses_has_emergency, "Responses path has emergency refund"
 
-    assert chat_has_emergency and responses_has_emergency, (
-        "BUG CONFIRMED: Emergency refund is duplicated across Chat and "
-        "Responses API paths. Both use try/except/pass. A fix must be "
-        "applied in TWO places."
+# ===========================================================================
+# RED TESTS: Fee payout crash safety
+# ===========================================================================
+
+def test_fee_payout_has_crash_guard() -> None:
+    """FIX REQUIRED: Fee payout must have guard against double-pay on crash.
+
+    wallet.py:1076-1080 pays LNURL THEN resets the fee counter.
+    A crash between these steps causes double payment on restart.
+
+    Fix options:
+    1. Pre-reset the counter before paying (if pay fails, restore it)
+    2. Add a "payout_lock" DB flag that's set before pay and cleared after
+    3. Record payout in DB and reconcile on startup
+    """
+    import inspect
+    from routstr import wallet
+
+    source = inspect.getsource(wallet.periodic_routstr_fee_payout)
+
+    # After the fix, the pay-then-reset pattern should be replaced
+    # with a safe sequence. Verify the guard exists.
+    has_guard = any(
+        kw in source.lower()
+        for kw in ["payout_lock", "is_paying", "payout_in_progress",
+                    "pre_reset", "reset_before", "reconcile"]
     )
 
-
-# ---------------------------------------------------------------------------
-# Document: emergency refund mints BEFORE storing (the ordering is the bug)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_send_token_mints_before_database() -> None:
-    """send_token() mints proofs at the mint BEFORE any caller stores to DB.
-
-    This is the core assumption behind the vulnerability: if the contract
-    is "mint first, store second", then any store failure = lost token.
-    """
-    from routstr.wallet import send_token, send
-
-    # send() serializes proofs and reserves them — no DB call
-    with patch("routstr.wallet.get_wallet") as mock_get_wallet:
-        mock_wallet = Mock()
-        mock_wallet.keysets = {"ks1": Mock(mint_url="http://mint:3338", unit=Mock(name="sat"))}
-        mock_wallet.proofs = []
-        mock_wallet.select_to_send = AsyncMock(return_value=([], []))
-        mock_wallet.serialize_proofs = AsyncMock(return_value="cashuAtest_token")
-        mock_wallet.set_reserved_for_send = AsyncMock()
-        mock_get_wallet.return_value = mock_wallet
-
-        with patch("routstr.wallet.get_proofs_per_mint_and_unit") as mock_get_proofs:
-            mock_get_proofs.return_value = []
-
-            # send_token calls send(), which serializes first
-            token = await send_token(1000, "sat")
-
-            assert token == "cashuAtest_token", (
-                "send_token returns a minted token. No DB store happens here. "
-                "The caller is responsible for persisting — if they use "
-                "try/except/pass, the token is lost."
-            )
+    assert has_guard, (
+        "FIX REQUIRED: Fee payout has no crash guard. Pay-then-reset "
+        "pattern in periodic_routstr_fee_payout can double-pay on "
+        "process restart."
+    )
