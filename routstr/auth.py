@@ -775,6 +775,7 @@ async def adjust_payment_for_tokens(
     session: AsyncSession,
     deducted_max_cost: int,
     model_obj: "Model | None" = None,
+    provider_fee: float | None = None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -869,7 +870,9 @@ async def adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    match await calculate_cost(response_data, deducted_max_cost, model_obj):
+    match await calculate_cost(
+        response_data, deducted_max_cost, model_obj, provider_fee
+    ):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",

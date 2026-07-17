@@ -89,6 +89,45 @@ async def test_string_fallback_still_prices_without_model_obj() -> None:
 
 
 @pytest.mark.asyncio
+async def test_usd_cost_path_applies_given_provider_fee() -> None:
+    """The USD-cost path bills the serving provider's fee when supplied."""
+    from unittest.mock import Mock
+
+    response = dict(RESPONSE)
+    response["usage"] = dict(RESPONSE["usage"], cost=0.001)  # type: ignore[arg-type]
+
+    best_ranked = Mock(provider_fee=1.0)
+    with patch(
+        "routstr.proxy.get_provider_for_model", return_value=[best_ranked]
+    ):
+        result = await calculate_cost(
+            response, max_cost=100_000, model_obj=SERVED, provider_fee=1.5
+        )
+
+    assert isinstance(result, CostData)
+    # 0.001 USD * fee 1.5 / 0.0005 USD-per-sat = 3 sats = 3000 msats.
+    assert result.total_msats == 3_000
+
+
+@pytest.mark.asyncio
+async def test_usd_cost_path_falls_back_to_best_ranked_fee() -> None:
+    """Without a supplied fee, the alias-map provider lookup still applies."""
+    from unittest.mock import Mock
+
+    response = dict(RESPONSE)
+    response["usage"] = dict(RESPONSE["usage"], cost=0.001)  # type: ignore[arg-type]
+
+    best_ranked = Mock(provider_fee=2.0)
+    with patch(
+        "routstr.proxy.get_provider_for_model", return_value=[best_ranked]
+    ):
+        result = await calculate_cost(response, max_cost=100_000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == 4_000
+
+
+@pytest.mark.asyncio
 async def test_x_cashu_cost_uses_served_model_not_upstream_echo() -> None:
     """``get_x_cashu_cost`` bills the routed model, not the raw model echo.
 

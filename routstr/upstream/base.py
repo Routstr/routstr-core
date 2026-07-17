@@ -841,6 +841,7 @@ class BaseUpstreamProvider:
                             new_session,
                             max_cost_for_model,
                             model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1014,6 +1015,7 @@ class BaseUpstreamProvider:
                                 session,
                                 max_cost_for_model,
                                 model_obj,
+                                self.provider_fee,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1158,6 +1160,7 @@ class BaseUpstreamProvider:
                 session,
                 deducted_max_cost,
                 model_obj,
+                self.provider_fee,
             )
 
             await session.refresh(key)
@@ -1298,6 +1301,7 @@ class BaseUpstreamProvider:
                             new_session,
                             max_cost_for_model,
                             model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1428,6 +1432,7 @@ class BaseUpstreamProvider:
                                 session,
                                 max_cost_for_model,
                                 model_obj,
+                                self.provider_fee,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1597,6 +1602,7 @@ class BaseUpstreamProvider:
                 session,
                 deducted_max_cost,
                 model_obj,
+                self.provider_fee,
             )
 
             await session.refresh(key)
@@ -1797,6 +1803,7 @@ class BaseUpstreamProvider:
                             new_session,
                             max_cost_for_model,
                             model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1949,6 +1956,7 @@ class BaseUpstreamProvider:
                                     new_session,
                                     max_cost_for_model,
                                     model_obj,
+                                    self.provider_fee,
                                 )
 
                                 self.inject_cost_metadata(
@@ -2022,6 +2030,7 @@ class BaseUpstreamProvider:
                 session,
                 deducted_max_cost,
                 model_obj,
+                self.provider_fee,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2129,6 +2138,7 @@ class BaseUpstreamProvider:
             session,
             max_cost_for_model,
             model_obj,
+            self.provider_fee,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2275,6 +2285,7 @@ class BaseUpstreamProvider:
                             new_session,
                             max_cost_for_model,
                             model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                         return (
@@ -2349,6 +2360,7 @@ class BaseUpstreamProvider:
                                     new_session,
                                     max_cost_for_model,
                                     model_obj,
+                                    self.provider_fee,
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -3265,6 +3277,7 @@ class BaseUpstreamProvider:
             response_data,
             max_cost_for_model,
             model_obj,
+            self.provider_fee,
         ):
             case MaxCostData() as cost:
                 logger.debug(
