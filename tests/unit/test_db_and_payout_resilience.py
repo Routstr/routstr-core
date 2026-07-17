@@ -5,9 +5,6 @@ RED tests — FAIL against current main until bugs are fixed.
 
 import inspect
 
-import pytest
-
-
 # ===========================================================================
 # RED TESTS: Fee payout crash safety
 # ===========================================================================

@@ -3,12 +3,11 @@
 Tests preparers, builders, accessors, and model cache methods.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 from routstr.upstream.base import BaseUpstreamProvider
-
 
 # ===========================================================================
 # prepare_headers

@@ -4,12 +4,10 @@ Tests admin endpoints that are testable without full app setup:
 withdraw validation, password update, CLI token lifecycle.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
-from fastapi import HTTPException
-from fastapi import Request
-
+from fastapi import HTTPException, Request
 
 # ===========================================================================
 # withdraw — validation and edge cases
@@ -141,6 +139,7 @@ def test_validate_slug_accepts_valid() -> None:
 def test_validate_slug_rejects_spaces() -> None:
     """Slugs with spaces are rejected."""
     from fastapi import HTTPException
+
     from routstr.core.admin import _validate_slug
 
     with pytest.raises(HTTPException):
@@ -150,6 +149,7 @@ def test_validate_slug_rejects_spaces() -> None:
 def test_validate_slug_rejects_too_short() -> None:
     """Slugs shorter than 3 chars are rejected."""
     from fastapi import HTTPException
+
     from routstr.core.admin import _validate_slug
 
     with pytest.raises(HTTPException):
@@ -163,10 +163,10 @@ def test_validate_slug_rejects_too_short() -> None:
 @pytest.mark.asyncio
 async def test_admin_login_requires_payload() -> None:
     """admin_login requires a payload — verify it exists."""
-    from routstr.core.admin import admin_login
-
     # Verify the function signature
     import inspect
+
+    from routstr.core.admin import admin_login
     sig = inspect.signature(admin_login)
     params = list(sig.parameters.keys())
     assert "request" in params

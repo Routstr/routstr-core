@@ -4,10 +4,8 @@ Only LoggingMiddleware and request_id_context exist on main.
 ConcurrencyLimiterMiddleware + TimeoutMiddleware are on an unmerged branch.
 """
 
-import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # LoggingMiddleware

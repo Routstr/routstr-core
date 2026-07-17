@@ -4,10 +4,9 @@ Tests the real public API: check_token_balance, get_max_cost_for_model,
 estimate_tokens, create_error_response, etc.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # check_token_balance
