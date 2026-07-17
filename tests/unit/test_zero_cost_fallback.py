@@ -141,6 +141,10 @@ def test_messages_streaming_no_silent_billing_failure() -> None:
 
     handle_streaming_messages_completion uses `except Exception: pass`
     for the finalize path, silently dropping the billing attachment.
+    After the fix, this catch block must either:
+    - Log at CRITICAL level with the error details
+    - Propagate the error to surface an HTTP 500
+    - Release reserved balance and refund the token
     """
     from routstr.upstream.base import BaseUpstreamProvider
 
@@ -148,13 +152,20 @@ def test_messages_streaming_no_silent_billing_failure() -> None:
         BaseUpstreamProvider.handle_streaming_messages_completion
     )
 
-    # The finalize_without_usage has except Exception: pass
-    # This should either propagate or log failure
+    # After fix: the silent pass in finalize_without_usage must be replaced
+    # The fix must include at least one of: CRITICAL logging, error propagation,
+    # or balance release in the error path.
+
+    # The silent pass must NOT exist around billing finalization
+    silent_pass_exists = False
     for segment in source.split("except Exception:"):
-        if "finalize_without_usage" in segment or "finalize" in segment:
-            if "pass" in segment[:100]:
+        if "adjust_payment_for_tokens" in segment:
+            if "pass" in segment[:150]:
+                silent_pass_exists = True
                 break
 
-    # Check if the silent pass pattern exists
-    has_silent_finalize = "finalize_without_usage()" in source
-    assert has_silent_finalize or True  # documentation
+    assert not silent_pass_exists, (
+        "FIX REQUIRED: finalize_without_usage in messages streaming "
+        "silently swallows billing errors with `except Exception: pass`. "
+        "User gets unbilled inference with no log record."
+    )
