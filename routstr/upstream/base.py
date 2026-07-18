@@ -1707,11 +1707,15 @@ class BaseUpstreamProvider:
 
             try:
                 # Finalize with "unknown" model and no usage to release reservation/charge max cost
+                # (no routed identity here by design: the None usage settles at
+                # MaxCostData before any pricing lookup can happen).
                 await adjust_payment_for_tokens(
                     key,
                     {"model": "unknown", "usage": None},
                     session,
                     max_cost,
+                    model_obj=None,
+                    provider_fee=None,
                 )
                 logger.debug(
                     "Finalized generic streaming payment in background",
@@ -3253,7 +3257,7 @@ class BaseUpstreamProvider:
         self,
         response_data: dict,
         max_cost_for_model: int,
-        model_obj: Model | None = None,
+        model_obj: Model | None,
     ) -> MaxCostData | CostData | None:
         """Calculate cost for X-Cashu payment based on response data.
 

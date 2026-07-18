@@ -774,8 +774,8 @@ async def adjust_payment_for_tokens(
     response_data: dict,
     session: AsyncSession,
     deducted_max_cost: int,
-    model_obj: "Model | None" = None,
-    provider_fee: float | None = None,
+    model_obj: "Model | None",
+    provider_fee: float | None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.

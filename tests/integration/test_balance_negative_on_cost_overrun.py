@@ -82,7 +82,9 @@ async def test_balance_never_negative_when_cost_exceeds_reservation(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost, None, None
+        )
 
     await _refresh(integration_session, key)
 
@@ -116,7 +118,9 @@ async def test_balance_floor_at_zero_on_overrun(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost, None, None
+        )
 
     await _refresh(integration_session, key)
 
@@ -155,7 +159,9 @@ async def test_full_cost_charged_when_balance_sufficient_for_overrun(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost, None, None
+        )
 
     await _refresh(integration_session, key)
 
@@ -224,7 +230,7 @@ async def test_concurrent_cost_overruns_never_negative(
             fresh_key = await session.get(ApiKey, key_hash)
             assert fresh_key is not None
             await adjust_payment_for_tokens(
-                fresh_key, response_data, session, deducted_max_cost
+                fresh_key, response_data, session, deducted_max_cost, None, None
             )
 
     # Patch once around the gather: entering the same patch target from
@@ -282,7 +288,9 @@ async def test_zero_free_balance_overrun_is_safe(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(key, response_data, integration_session, deducted_max_cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, deducted_max_cost, None, None
+        )
 
     await _refresh(integration_session, key)
 
@@ -348,7 +356,7 @@ async def test_parallel_requests_no_free_inference(
             fresh_key = await session.get(ApiKey, key_hash)
             assert fresh_key is not None
             await adjust_payment_for_tokens(
-                fresh_key, response_data, session, deducted_max_cost
+                fresh_key, response_data, session, deducted_max_cost, None, None
             )
 
     # Patch once around the gather: entering the same patch target from two

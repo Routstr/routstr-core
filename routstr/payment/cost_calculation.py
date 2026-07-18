@@ -323,8 +323,8 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
 
 def _get_pricing_rates(
     response_data: dict,
-    model_obj: "Model | None" = None,
-    provider_fee: float | None = None,
+    model_obj: "Model | None",
+    provider_fee: float | None,
 ) -> tuple[float, float, float, float] | None:
     """Get configured rates, falling back to LiteLLM's model cost map.
 
@@ -450,7 +450,7 @@ def _calculate_from_usd_cost(
     cache_creation_tokens: int,
     output_tokens: int,
     response_data: dict,
-    provider_fee: float | None = None,
+    provider_fee: float | None,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     if provider_fee is None:
