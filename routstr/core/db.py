@@ -1,3 +1,4 @@
+import asyncio
 import os
 import pathlib
 import sqlite3
@@ -312,6 +313,66 @@ async def store_cashu_transaction(
         )
         raise
     return True
+
+
+async def store_cashu_transaction_with_retry(
+    token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    typ: str = "out",
+    request_id: str | None = None,
+    collected: bool = False,
+    created_at: int | None = None,
+    source: str = "x-cashu",
+    api_key_hashed_key: str | None = None,
+    max_attempts: int = 3,
+) -> bool:
+    """Retry a critical Cashu transaction write with bounded backoff."""
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await store_cashu_transaction(
+                token=token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint_url,
+                typ=typ,
+                request_id=request_id,
+                collected=collected,
+                created_at=created_at,
+                source=source,
+                api_key_hashed_key=api_key_hashed_key,
+            )
+        except Exception as error:
+            last_error = error
+            if attempt == max_attempts:
+                break
+            delay = 0.25 * (2 ** (attempt - 1))
+            logger.warning(
+                "Cashu transaction storage failed; retrying",
+                extra={
+                    "type": typ,
+                    "request_id": request_id,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "retry_delay_seconds": delay,
+                },
+            )
+            await asyncio.sleep(delay)
+
+    logger.critical(
+        "Cashu transaction storage failed after bounded retries",
+        extra={
+            "type": typ,
+            "request_id": request_id,
+            "attempts": max_attempts,
+            "error": str(last_error),
+        },
+    )
+    if last_error is None:
+        raise RuntimeError("Cashu transaction storage failed without an exception")
+    raise last_error
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
