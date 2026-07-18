@@ -14,7 +14,11 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
 
-from ..auth import adjust_payment_for_tokens, release_reservation
+from ..auth import (
+    adjust_payment_for_tokens,
+    get_reservation_snapshot,
+    release_reservation,
+)
 from ..core import get_logger
 from ..core.db import (
     ApiKey,
@@ -996,6 +1000,9 @@ class BaseUpstreamProvider:
                 async with create_session() as session:
                     fresh_key = await session.get(key.__class__, key.hashed_key)
                     if fresh_key:
+                        reservation_snapshot = await get_reservation_snapshot(
+                            fresh_key, session
+                        )
                         cost_data: dict
                         try:
                             adjustment_input = (
@@ -1025,7 +1032,9 @@ class BaseUpstreamProvider:
                             try:
                                 await session.rollback()
                                 released = await release_reservation(
-                                    fresh_key, session, max_cost_for_model
+                                    reservation_snapshot,
+                                    session,
+                                    max_cost_for_model,
                                 )
                                 if not released:
                                     logger.critical(

@@ -3,12 +3,14 @@ import hashlib
 import math
 import random
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy import case
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.dml import Update
 from sqlmodel import col, select, update
 
 from .core import get_logger
@@ -766,40 +768,88 @@ async def revert_pay_for_request(
     return True
 
 
+@dataclass(frozen=True)
+class ReservationSnapshot:
+    key_hash: str
+    key_reserved_balance: int
+    key_reserved_at: int | None
+    billing_key_hash: str
+    billing_reserved_balance: int
+    billing_reserved_at: int | None
+
+
+async def get_reservation_snapshot(
+    key: ApiKey, session: AsyncSession
+) -> ReservationSnapshot:
+    """Capture the reservation state used for idempotent cleanup."""
+    billing_key = await get_billing_key(key, session)
+    return ReservationSnapshot(
+        key_hash=key.hashed_key,
+        key_reserved_balance=key.reserved_balance,
+        key_reserved_at=key.reserved_at,
+        billing_key_hash=billing_key.hashed_key,
+        billing_reserved_balance=billing_key.reserved_balance,
+        billing_reserved_at=billing_key.reserved_at,
+    )
+
+
+def _reservation_release_statement(
+    key_hash: str,
+    expected_balance: int,
+    expected_reserved_at: int | None,
+    reserved_msats: int,
+) -> Update:
+    stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key_hash)
+        .where(col(ApiKey.reserved_balance) == expected_balance)
+    )
+    if expected_reserved_at is None:
+        stmt = stmt.where(col(ApiKey.reserved_at).is_(None))
+    else:
+        stmt = stmt.where(col(ApiKey.reserved_at) == expected_reserved_at)
+
+    remaining_balance = expected_balance - reserved_msats
+    next_reserved_at = (
+        None
+        if remaining_balance == 0
+        else (expected_reserved_at or int(time.time())) + 1
+    )
+    return stmt.values(
+        reserved_balance=remaining_balance,
+        reserved_at=next_reserved_at,
+    )
+
+
 async def release_reservation(
-    key: ApiKey,
+    snapshot: ReservationSnapshot,
     session: AsyncSession,
     reserved_msats: int,
 ) -> bool:
-    """Release a request reservation without charging the key."""
-    billing_key = await get_billing_key(key, session)
-    cleared_reserved_at = case(
-        (col(ApiKey.reserved_balance) - reserved_msats > 0, col(ApiKey.reserved_at)),
-        else_=None,
-    )
-    release_stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .where(col(ApiKey.reserved_balance) == reserved_msats)
-        .values(
-            reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
-            reserved_at=cleared_reserved_at,
-        )
+    """Release one snapshotted reservation exactly once without charging."""
+    if reserved_msats <= 0 or snapshot.billing_reserved_balance < reserved_msats:
+        return False
+
+    release_stmt = _reservation_release_statement(
+        snapshot.billing_key_hash,
+        snapshot.billing_reserved_balance,
+        snapshot.billing_reserved_at,
+        reserved_msats,
     )
     result = await session.exec(release_stmt)  # type: ignore[call-overload]
     if result.rowcount != 1:
         await session.rollback()
         return False
 
-    if billing_key.hashed_key != key.hashed_key:
-        child_release_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .where(col(ApiKey.reserved_balance) == reserved_msats)
-            .values(
-                reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
-                reserved_at=cleared_reserved_at,
-            )
+    if snapshot.billing_key_hash != snapshot.key_hash:
+        if snapshot.key_reserved_balance < reserved_msats:
+            await session.rollback()
+            return False
+        child_release_stmt = _reservation_release_statement(
+            snapshot.key_hash,
+            snapshot.key_reserved_balance,
+            snapshot.key_reserved_at,
+            reserved_msats,
         )
         child_result = await session.exec(  # type: ignore[call-overload]
             child_release_stmt

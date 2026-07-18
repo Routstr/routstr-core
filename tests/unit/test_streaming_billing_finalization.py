@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.auth import release_reservation
+from routstr.auth import get_reservation_snapshot, release_reservation
 from routstr.core.db import ApiKey
 from routstr.upstream.base import BaseUpstreamProvider
 
@@ -25,11 +25,35 @@ async def test_release_reservation_clears_reserved_balance() -> None:
         session.add(key)
         await session.commit()
 
-        assert await release_reservation(key, session, 500) is True
+        snapshot = await get_reservation_snapshot(key, session)
+        assert await release_reservation(snapshot, session, 500) is True
         await session.refresh(key)
         assert key.reserved_balance == 0
         assert key.reserved_at is None
-        assert await release_reservation(key, session, 500) is False
+        assert await release_reservation(snapshot, session, 500) is False
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_preserves_other_concurrent_reservations() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    key = ApiKey(
+        hashed_key="key", balance=1_000, reserved_balance=800, reserved_at=123
+    )
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        session.add(key)
+        await session.commit()
+
+        snapshot = await get_reservation_snapshot(key, session)
+        assert await release_reservation(snapshot, session, 500) is True
+        await session.refresh(key)
+        assert key.reserved_balance == 300
+        assert key.reserved_at == 124
+        assert await release_reservation(snapshot, session, 500) is False
 
     await engine.dispose()
 
@@ -54,7 +78,8 @@ async def test_release_reservation_updates_parent_and_child_atomically() -> None
         session.add_all([parent, child])
         await session.commit()
 
-        assert await release_reservation(child, session, 500) is True
+        snapshot = await get_reservation_snapshot(child, session)
+        assert await release_reservation(snapshot, session, 500) is True
         await session.refresh(parent)
         await session.refresh(child)
         assert (parent.reserved_balance, child.reserved_balance) == (0, 0)
@@ -80,7 +105,8 @@ async def test_release_reservation_rolls_back_partial_parent_child_update() -> N
         session.add_all([parent, child])
         await session.commit()
 
-        assert await release_reservation(child, session, 500) is False
+        snapshot = await get_reservation_snapshot(child, session)
+        assert await release_reservation(snapshot, session, 500) is False
         await session.refresh(parent)
         await session.refresh(child)
         assert (parent.reserved_balance, child.reserved_balance) == (500, 100)
@@ -111,11 +137,16 @@ async def test_streaming_billing_error_releases_reservation_and_propagates() -> 
     session_context.__aenter__ = AsyncMock(return_value=session)
     session_context.__aexit__ = AsyncMock(return_value=None)
     release = AsyncMock(return_value=True)
+    reservation_snapshot = MagicMock()
 
     with (
         patch(
             "routstr.upstream.base.adjust_payment_for_tokens",
             AsyncMock(side_effect=SQLAlchemyError("database unavailable")),
+        ),
+        patch(
+            "routstr.upstream.base.get_reservation_snapshot",
+            AsyncMock(return_value=reservation_snapshot),
         ),
         patch("routstr.upstream.base.release_reservation", release),
         patch("routstr.upstream.base.create_session", return_value=session_context),
@@ -132,4 +163,4 @@ async def test_streaming_billing_error_releases_reservation_and_propagates() -> 
                 pass
 
     session.rollback.assert_awaited_once()
-    release.assert_awaited_once_with(key, session, 500)
+    release.assert_awaited_once_with(reservation_snapshot, session, 500)
