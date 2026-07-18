@@ -348,6 +348,16 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     )
 
 
+class ReservationRelease(SQLModel, table=True):  # type: ignore
+    __tablename__ = "reservation_releases"
+
+    id: str = Field(primary_key=True)
+    key_hash: str = Field(index=True)
+    billing_key_hash: str = Field(index=True)
+    reserved_msats: int
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+
+
 class RoutstrFee(SQLModel, table=True):  # type: ignore
     __tablename__ = "routstr_fees"
     id: int = Field(default=1, primary_key=True)

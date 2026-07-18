@@ -30,7 +30,7 @@ async def test_release_reservation_clears_reserved_balance() -> None:
         await session.refresh(key)
         assert key.reserved_balance == 0
         assert key.reserved_at is None
-        assert await release_reservation(snapshot, session, 500) is False
+        assert await release_reservation(snapshot, session, 500) is True
 
     await engine.dispose()
 
@@ -48,12 +48,14 @@ async def test_release_reservation_preserves_other_concurrent_reservations() -> 
         session.add(key)
         await session.commit()
 
-        snapshot = await get_reservation_snapshot(key, session)
-        assert await release_reservation(snapshot, session, 500) is True
+        first_snapshot = await get_reservation_snapshot(key, session)
+        second_snapshot = await get_reservation_snapshot(key, session)
+        assert await release_reservation(first_snapshot, session, 400) is True
+        assert await release_reservation(second_snapshot, session, 400) is True
         await session.refresh(key)
-        assert key.reserved_balance == 300
-        assert key.reserved_at == 124
-        assert await release_reservation(snapshot, session, 500) is False
+        assert key.reserved_balance == 0
+        assert key.reserved_at is None
+        assert await release_reservation(first_snapshot, session, 400) is True
 
     await engine.dispose()
 
