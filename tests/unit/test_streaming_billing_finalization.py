@@ -18,7 +18,9 @@ async def test_release_reservation_clears_reserved_balance() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
 
-    key = ApiKey(hashed_key="key", balance=1_000, reserved_balance=500)
+    key = ApiKey(
+        hashed_key="key", balance=1_000, reserved_balance=500, reserved_at=123
+    )
     async with AsyncSession(engine, expire_on_commit=False) as session:
         session.add(key)
         await session.commit()
@@ -26,6 +28,62 @@ async def test_release_reservation_clears_reserved_balance() -> None:
         assert await release_reservation(key, session, 500) is True
         await session.refresh(key)
         assert key.reserved_balance == 0
+        assert key.reserved_at is None
+        assert await release_reservation(key, session, 500) is False
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_updates_parent_and_child_atomically() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    parent = ApiKey(
+        hashed_key="parent", balance=1_000, reserved_balance=500, reserved_at=123
+    )
+    child = ApiKey(
+        hashed_key="child",
+        parent_key_hash="parent",
+        balance=0,
+        reserved_balance=500,
+        reserved_at=123,
+    )
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        session.add_all([parent, child])
+        await session.commit()
+
+        assert await release_reservation(child, session, 500) is True
+        await session.refresh(parent)
+        await session.refresh(child)
+        assert (parent.reserved_balance, child.reserved_balance) == (0, 0)
+        assert (parent.reserved_at, child.reserved_at) == (None, None)
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_rolls_back_partial_parent_child_update() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    parent = ApiKey(hashed_key="parent", balance=1_000, reserved_balance=500)
+    child = ApiKey(
+        hashed_key="child",
+        parent_key_hash="parent",
+        balance=0,
+        reserved_balance=100,
+    )
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        session.add_all([parent, child])
+        await session.commit()
+
+        assert await release_reservation(child, session, 500) is False
+        await session.refresh(parent)
+        await session.refresh(child)
+        assert (parent.reserved_balance, child.reserved_balance) == (500, 100)
 
     await engine.dispose()
 

@@ -773,25 +773,43 @@ async def release_reservation(
 ) -> bool:
     """Release a request reservation without charging the key."""
     billing_key = await get_billing_key(key, session)
+    cleared_reserved_at = case(
+        (col(ApiKey.reserved_balance) - reserved_msats > 0, col(ApiKey.reserved_at)),
+        else_=None,
+    )
     release_stmt = (
         update(ApiKey)
         .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .where(col(ApiKey.reserved_balance) >= reserved_msats)
-        .values(reserved_balance=col(ApiKey.reserved_balance) - reserved_msats)
+        .where(col(ApiKey.reserved_balance) == reserved_msats)
+        .values(
+            reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
+            reserved_at=cleared_reserved_at,
+        )
     )
     result = await session.exec(release_stmt)  # type: ignore[call-overload]
+    if result.rowcount != 1:
+        await session.rollback()
+        return False
 
     if billing_key.hashed_key != key.hashed_key:
         child_release_stmt = (
             update(ApiKey)
             .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .where(col(ApiKey.reserved_balance) >= reserved_msats)
-            .values(reserved_balance=col(ApiKey.reserved_balance) - reserved_msats)
+            .where(col(ApiKey.reserved_balance) == reserved_msats)
+            .values(
+                reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
+                reserved_at=cleared_reserved_at,
+            )
         )
-        await session.exec(child_release_stmt)  # type: ignore[call-overload]
+        child_result = await session.exec(  # type: ignore[call-overload]
+            child_release_stmt
+        )
+        if child_result.rowcount != 1:
+            await session.rollback()
+            return False
 
     await session.commit()
-    return result.rowcount == 1
+    return True
 
 
 async def adjust_payment_for_tokens(

@@ -13,7 +13,6 @@ import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
-from sqlalchemy.exc import SQLAlchemyError
 
 from ..auth import adjust_payment_for_tokens, release_reservation
 from ..core import get_logger
@@ -1014,7 +1013,7 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                             )
                             usage_finalized = True
-                        except (HTTPException, SQLAlchemyError) as e:
+                        except BaseException as e:
                             logger.critical(
                                 "Error during usage finalization — CRITICAL",
                                 extra={
