@@ -37,7 +37,6 @@ logger = get_logger(__name__)
 proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
-_model_instances: dict[str, Model] = {}  # All aliases -> Model
 _provider_map: dict[
     str, list[tuple[Model, BaseUpstreamProvider]]
 ] = {}  # All aliases -> sorted [(candidate Model, its Provider)]
@@ -149,7 +148,7 @@ async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
 
-    global _model_instances, _provider_map, _unique_models
+    global _provider_map, _unique_models
 
     async with create_session() as session:
         # Fetch all providers with their models in a single logical operation
@@ -172,7 +171,7 @@ async def refresh_model_maps() -> None:
             else:
                 disabled_model_keys.add(model_key)
 
-    _model_instances, _provider_map, _unique_models = create_model_mappings(
+    _, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,
         overrides_by_key=overrides_by_key,
         disabled_model_keys=disabled_model_keys,
