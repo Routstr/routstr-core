@@ -2133,8 +2133,6 @@ async def test_lightning_fallback_on_429_no_in_place_retry() -> None:
 # _is_mint_rate_limited — strict HTTP 429 only (no substring matching)
 # ---------------------------------------------------------------------------
 
-import time as _time_module
-
 
 def _http_429_error(message: str = "") -> httpx.HTTPStatusError:
     """Create an HTTP 429 error with optional message in the response body."""
@@ -2266,7 +2264,7 @@ def test_classify_500_with_rate_limit_text_is_not_mint_rate_limited() -> None:
 async def test_probe_does_not_escalate_consecutive_rate_limits() -> None:
     """When a probe fails with a rate limit, _consecutive_rate_limits should
     NOT increment — the probe is a recovery check, not a new request."""
-    from routstr.wallet import _MintRateGuard, _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS
+    from routstr.wallet import _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, _MintRateGuard
 
     guard = _MintRateGuard("http://mint", max_concurrency=0)
 
