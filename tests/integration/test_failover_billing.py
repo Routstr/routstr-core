@@ -24,7 +24,10 @@ EXPENSIVE_BASE_URL = "https://expensive.example.com/v1"
 
 
 def _make_model(
-    model_id: str, prompt_sats: float, completion_sats: float
+    model_id: str,
+    prompt_sats: float,
+    completion_sats: float,
+    max_cost: float = 50.0,
 ) -> Model:
     """Build a model whose USD and sats pricing rank consistently."""
     return Model(
@@ -41,10 +44,10 @@ def _make_model(
             instruct_type=None,
         ),
         pricing=Pricing(
-            prompt=prompt_sats, completion=completion_sats, max_cost=50.0
+            prompt=prompt_sats, completion=completion_sats, max_cost=max_cost
         ),
         sats_pricing=Pricing(
-            prompt=prompt_sats, completion=completion_sats, max_cost=50.0
+            prompt=prompt_sats, completion=completion_sats, max_cost=max_cost
         ),
     )
 
@@ -406,3 +409,138 @@ async def test_usd_cost_serve_carries_serving_providers_fee(
         "expensive.example.com",
     ]
     assert response.json()["cost"]["total_msats"] == 3_000
+
+
+@pytest.fixture
+async def envelope_split_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Same-id providers where the fallback's max cost dwarfs the key balance."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.0,
+        _make_model("dual-model", 0.005, 0.010, max_cost=20_000.0),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failover_beyond_balance_envelope_is_rejected(
+    authenticated_client: AsyncClient,
+    envelope_split_provider_maps: None,
+) -> None:
+    """A fallback whose max-cost envelope exceeds the balance is not served.
+
+    Admission and reservation are sized to the best-ranked candidate's max
+    cost. When that candidate fails and the next one's envelope exceeds the
+    key's balance, serving it could settle far beyond what admission allowed,
+    so the request must be rejected (as it would be if the pricier candidate
+    were ranked first) instead of forwarded.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    # The 20_000-sat envelope exceeds the key's 10_000-sat balance: the
+    # fallback must be rejected before its upstream is ever contacted.
+    assert response.status_code == 402
+    assert [r.url.host for r in sent_requests] == ["cheap.example.com"]
+
+
+@pytest.fixture
+async def raised_envelope_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Same-id providers where the fallback needs a larger, affordable reserve."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.0,
+        _make_model("dual-model", 0.005, 0.010, max_cost=100.0),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failover_reserves_serving_candidates_envelope(
+    authenticated_client: AsyncClient,
+    raised_envelope_provider_maps: None,
+) -> None:
+    """An affordable pricier fallback is re-reserved, served, and billed.
+
+    The fallback's max cost (100 sats) exceeds the winner's (50 sats) but fits
+    the key's balance, so the reservation is raised to the serving candidate's
+    envelope and the request completes, billed at the serving rate with the
+    unused reserve refunded.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "expensive.example.com",
+    ]
+    assert response.json()["cost"]["total_msats"] == 10_000

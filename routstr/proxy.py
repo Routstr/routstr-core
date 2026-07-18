@@ -450,6 +450,30 @@ async def proxy(
     already_stripped: set[str] = set()
 
     for i, (model_obj, upstream) in enumerate(candidates):
+        if i > 0 and request_body_dict:
+            # The reservation was sized to the previous candidate's envelope;
+            # settlement bills the serving candidate, so a pricier fallback
+            # must be re-reserved at its own max cost before it is tried. A
+            # candidate whose envelope the key cannot cover is rejected, just
+            # as it would be had it been ranked first.
+            candidate_max = await get_max_cost_for_model(
+                model=model_id, session=session, model_obj=model_obj
+            )
+            candidate_max = await calculate_discounted_max_cost(
+                candidate_max, request_body_dict, model_obj=model_obj
+            )
+            candidate_max = max(candidate_max, settings.min_request_msat)
+            if candidate_max > max_cost_for_model:
+                await revert_pay_for_request(key, session, max_cost_for_model)
+                try:
+                    await pay_for_request(key, candidate_max, session)
+                except HTTPException:
+                    if i == len(candidates) - 1:
+                        raise
+                    await pay_for_request(key, max_cost_for_model, session)
+                    continue
+                max_cost_for_model = candidate_max
+
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
