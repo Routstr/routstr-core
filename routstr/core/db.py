@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import pathlib
 import sqlite3
@@ -11,7 +12,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, delete
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -288,10 +289,13 @@ async def store_cashu_transaction(
     created_at: int | None = None,
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
+    transaction_id: str | None = None,
+    log_failure: bool = True,
 ) -> bool:
     try:
         async with create_session() as session:
             tx = CashuTransaction(
+                id=transaction_id or uuid.uuid4().hex,
                 token=token,
                 amount=amount,
                 unit=unit,
@@ -306,13 +310,19 @@ async def store_cashu_transaction(
             session.add(tx)
             await session.commit()
     except Exception:
-        logger.critical(
-            "Failed to store Cashu transaction",
-            extra={"type": typ, "request_id": request_id, "source": source},
-            exc_info=True,
-        )
+        if log_failure:
+            logger.critical(
+                "Failed to store Cashu transaction",
+                extra={"type": typ, "request_id": request_id, "source": source},
+                exc_info=True,
+            )
         raise
     return True
+
+
+async def _cashu_transaction_exists(transaction_id: str) -> bool:
+    async with create_session() as session:
+        return await session.get(CashuTransaction, transaction_id) is not None
 
 
 async def store_cashu_transaction_with_retry(
@@ -329,6 +339,7 @@ async def store_cashu_transaction_with_retry(
     max_attempts: int = 3,
 ) -> bool:
     """Retry a critical Cashu transaction write with bounded backoff."""
+    transaction_id = hashlib.sha256(f"{typ}\0{token}".encode()).hexdigest()
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
@@ -343,9 +354,21 @@ async def store_cashu_transaction_with_retry(
                 created_at=created_at,
                 source=source,
                 api_key_hashed_key=api_key_hashed_key,
+                transaction_id=transaction_id,
+                log_failure=False,
             )
+        except IntegrityError as error:
+            try:
+                if await _cashu_transaction_exists(transaction_id):
+                    return True
+            except Exception as lookup_error:
+                last_error = lookup_error
+            else:
+                last_error = error
         except Exception as error:
             last_error = error
+
+        if last_error is not None:
             if attempt == max_attempts:
                 break
             delay = 0.25 * (2 ** (attempt - 1))
