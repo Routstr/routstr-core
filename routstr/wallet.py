@@ -154,14 +154,20 @@ class _MintRateGuard:
         try:
             result = await factory()
         except Exception as error:
-            # Keep queued callers behind the probe. Handle rate limits here so
-            # the next exponential step is recorded before another waiter can
-            # acquire the probe lock.
+            # Keep queued callers behind the probe.  On a rate-limit,
+            # re-apply the *same* cooldown the caller already set rather
+            # than calling apply_rate_limit_cooldown() — the probe is a
+            # recovery check, not a new request that should escalate the
+            # exponential backoff counter.
             if _is_mint_rate_limited(error):
                 retry_after = None
                 if isinstance(error, httpx.HTTPStatusError):
                     retry_after = _parse_retry_after(error.response.headers)
-                self.apply_rate_limit_cooldown(retry_after)
+                delay = max(
+                    _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS,
+                    retry_after or 0.0,
+                )
+                self.apply_cooldown(delay, reason="rate_limited")
             else:
                 self.apply_cooldown(1.0)
             logger.warning(
@@ -217,7 +223,15 @@ def _mint_cooldown_reason(mint_url: str) -> str | None:
 
 
 def _is_mint_rate_limited(error: BaseException) -> bool:
-    """True if the mint returned a 429 or rate-limit indication."""
+    """True if the mint returned an HTTP 429 (Too Many Requests).
+
+    Only matches ``httpx.HTTPStatusError`` with status code 429 — never
+    classifies based on the exception's message text.  Substring matching
+    on ``"rate limit"`` / ``"too many requests"`` was removed because it
+    catches unrelated errors (e.g. a 503 whose body happens to mention
+    "database rate exceeded"), which triggers unnecessary exponential
+    backoff and can block state recovery indefinitely.
+    """
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
@@ -225,9 +239,6 @@ def _is_mint_rate_limited(error: BaseException) -> bool:
         if isinstance(current, httpx.HTTPStatusError):
             if current.response.status_code == 429:
                 return True
-        lowered = str(current).lower()
-        if "rate limit" in lowered or "too many requests" in lowered:
-            return True
         current = current.__cause__ or current.__context__
     return False
 
@@ -423,7 +434,14 @@ def classify_redemption_error(
             "The mint that issued this Cashu token is unreachable; the token cannot be redeemed at another mint",
             "cashu_source_mint_unreachable",
         )
-    if _is_mint_rate_limited(error) or is_mint_connection_error(error):
+    if _is_mint_rate_limited(error):
+        return (
+            "mint_rate_limited",
+            503,
+            "Cashu mint rate-limited; retry after cooldown",
+            "cashu_mint_rate_limited",
+        )
+    if is_mint_connection_error(error):
         return (
             "mint_unreachable",
             503,

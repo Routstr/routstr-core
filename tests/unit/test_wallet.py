@@ -12,6 +12,7 @@ from routstr.core.db import ApiKey
 from routstr.wallet import (
     MintConnectionError,
     TokenConsumedError,
+    _is_mint_rate_limited,
     classify_redemption_error,
     credit_balance,
     get_balance,
@@ -1237,10 +1238,10 @@ def test_rate_limited_mint_is_classified_as_unreachable() -> None:
     error = httpx.HTTPStatusError("rate limited", request=request, response=response)
 
     assert classify_redemption_error(error) == (
-        "mint_unreachable",
+        "mint_rate_limited",
         503,
-        "Cashu mint is unreachable",
-        "cashu_mint_unreachable",
+        "Cashu mint rate-limited; retry after cooldown",
+        "cashu_mint_rate_limited",
     )
 
 
@@ -2126,3 +2127,189 @@ async def test_lightning_fallback_on_429_no_in_place_retry() -> None:
     assert primary_call_count == 1
     assert mock_secondary_wallet.request_mint.await_count == 2
     mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _is_mint_rate_limited — strict HTTP 429 only (no substring matching)
+# ---------------------------------------------------------------------------
+
+import time as _time_module
+
+
+def _http_429_error(message: str = "") -> httpx.HTTPStatusError:
+    """Create an HTTP 429 error with optional message in the response body."""
+    body = json.dumps({"error": message}) if message else "{}"
+    return httpx.HTTPStatusError(
+        message or "Too Many Requests",
+        request=httpx.Request("POST", "http://m"),
+        response=httpx.Response(429, content=body.encode()),
+    )
+
+
+def _http_500_error(message: str = "") -> httpx.HTTPStatusError:
+    """Create an HTTP 500 error with optional message in the response body."""
+    body = json.dumps({"error": message}) if message else "{}"
+    return httpx.HTTPStatusError(
+        message or "Internal Server Error",
+        request=httpx.Request("POST", "http://m"),
+        response=httpx.Response(500, content=body.encode()),
+    )
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        # True: HTTP 429 is always a rate limit, regardless of message.
+        (_http_429_error(""), True),
+        (_http_429_error("Too Many Requests"), True),
+        (_http_429_error("completely unrelated message"), True),
+        # False: HTTP 500 is NOT a rate limit, even if the message says "rate limit".
+        (_http_500_error(""), False),
+        (_http_500_error("rate limit exceeded"), False),
+        (_http_500_error("too many requests"), False),
+        # False: non-HTTP errors with "rate limit" in message.
+        (ValueError("rate limit exceeded"), False),
+        (ValueError("too many requests try again"), False),
+        (RuntimeError("internal rate limit hit"), False),
+        # False: generic transport errors.
+        (httpx.ConnectError("connection refused"), False),
+        (httpx.ReadTimeout("timed out"), False),
+        (MintConnectionError("mint down"), False),
+        # Wrapped: HTTP 429 in the cause chain IS detected.
+        (_chain(ValueError("wrapped"), _http_429_error()), True),
+        # Wrapped: HTTP 500 with "rate limit" text in cause is NOT detected.
+        (
+            _chain(ValueError("wrapped"), _http_500_error("rate limit exceeded")),
+            False,
+        ),
+    ],
+)
+def test_is_mint_rate_limited_strictness(
+    error: BaseException, expected: bool
+) -> None:
+    assert _is_mint_rate_limited(error) is expected
+
+
+def test_is_mint_rate_limited_survives_cycle() -> None:
+    """A pathological cause/context cycle must not hang the classifier."""
+    a = ValueError("a")
+    b = _http_429_error()
+    a.__cause__ = b
+    b.__context__ = a
+    assert _is_mint_rate_limited(a) is True
+
+
+# ---------------------------------------------------------------------------
+# classify_redemption_error — mint_rate_limited vs mint_unreachable
+# ---------------------------------------------------------------------------
+
+
+def test_classify_rate_limit_returns_mint_rate_limited() -> None:
+    """HTTP 429 from a mint is classified as mint_rate_limited, not
+    mint_unreachable, so callers can distinguish temporary back-off from
+    permanent mint outages."""
+    classified = classify_redemption_error(_http_429_error("Too Many Requests"))
+    assert classified is not None
+    type_, status, _msg, code = classified
+    assert type_ == "mint_rate_limited"
+    assert status == 503
+    assert code == "cashu_mint_rate_limited"
+
+
+def test_classify_rate_limit_takes_priority_over_connection_error() -> None:
+    """When a 429 is wrapped in a chain that also contains a transport error,
+    mint_rate_limited wins because it is checked first."""
+    inner = _http_429_error()
+    outer = MintConnectionError("outer")
+    outer.__cause__ = inner
+
+    classified = classify_redemption_error(outer)
+    assert classified is not None
+    type_, status, _msg, code = classified
+    assert type_ == "mint_rate_limited"
+    assert code == "cashu_mint_rate_limited"
+
+
+def test_classify_connection_error_still_returns_mint_unreachable() -> None:
+    """Transport failures without a 429 in the chain are still
+    classified as mint_unreachable."""
+    classified = classify_redemption_error(
+        httpx.ConnectError("connection refused")
+    )
+    assert classified is not None
+    type_, status, _msg, code = classified
+    assert type_ == "mint_unreachable"
+    assert status == 503
+    assert code == "cashu_mint_unreachable"
+
+
+def test_classify_500_with_rate_limit_text_is_not_mint_rate_limited() -> None:
+    """An HTTP 500 whose body happens to mention 'rate limit' is NOT
+    classified as mint_rate_limited — it falls through to the generic
+    error handler."""
+    classified = classify_redemption_error(
+        _http_500_error("database rate limit exceeded")
+    )
+    # Should NOT be mint_rate_limited or mint_unreachable.
+    if classified is not None:
+        type_, _status, _msg, code = classified
+        assert type_ != "mint_rate_limited"
+        assert code != "cashu_mint_rate_limited"
+
+
+# ---------------------------------------------------------------------------
+# _MintRateGuard — probe does NOT escalate cooldown counter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_does_not_escalate_consecutive_rate_limits() -> None:
+    """When a probe fails with a rate limit, _consecutive_rate_limits should
+    NOT increment — the probe is a recovery check, not a new request."""
+    from routstr.wallet import _MintRateGuard, _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS
+
+    guard = _MintRateGuard("http://mint", max_concurrency=0)
+
+    # Simulate initial rate limit: apply_rate_limit_cooldown increments counter
+    guard.apply_rate_limit_cooldown()
+    assert guard._consecutive_rate_limits == 1
+    cooldown_before = guard._cooldown_until
+    assert cooldown_before > 0
+
+    # Simulate probe failure: _run_probe uses apply_cooldown, NOT
+    # apply_rate_limit_cooldown, so the counter stays at 1.
+    guard.apply_cooldown(
+        _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, reason="rate_limited"
+    )
+    assert guard._consecutive_rate_limits == 1  # unchanged!
+    assert guard._needs_probe is True
+
+
+@pytest.mark.asyncio
+async def test_probe_recovery_resets_consecutive_rate_limits() -> None:
+    """A successful probe resets _consecutive_rate_limits to 0."""
+    from routstr.wallet import _MintRateGuard
+
+    guard = _MintRateGuard("http://mint", max_concurrency=0)
+
+    # First rate limit: increments to 1, sets 60s cooldown.
+    guard.apply_rate_limit_cooldown()
+    assert guard._consecutive_rate_limits == 1
+
+    # Manually expire the cooldown so the next call creates a fresh one.
+    guard._cooldown_until = 0.0
+    guard._cooldown_reason = None
+
+    # Second rate limit (after cooldown expired): increments to 2.
+    guard.apply_rate_limit_cooldown()
+    assert guard._consecutive_rate_limits == 2
+
+    # Simulate a successful probe by resetting (as _run_probe does)
+    guard._needs_probe = False
+    guard._cooldown_until = 0.0
+    guard._cooldown_reason = None
+    guard._consecutive_rate_limits = 0
+
+    assert guard._consecutive_rate_limits == 0
+    assert guard._needs_probe is False
+    assert guard.cooldown_remaining() == 0.0
