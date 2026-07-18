@@ -13,8 +13,9 @@ import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 
-from ..auth import adjust_payment_for_tokens
+from ..auth import adjust_payment_for_tokens, release_reservation
 from ..core import get_logger
 from ..core.db import (
     ApiKey,
@@ -1013,25 +1014,38 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                             )
                             usage_finalized = True
-                        except Exception as e:
-                            logger.exception(
-                                "Error during usage finalization",
+                        except (HTTPException, SQLAlchemyError) as e:
+                            logger.critical(
+                                "Error during usage finalization — CRITICAL",
                                 extra={
                                     "key_hash": key.hashed_key[:8] + "...",
                                     "error": str(e),
                                 },
+                                exc_info=True,
                             )
-
-                            # Fall back so we still emit a non-zero sats cost downstream.
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            try:
+                                await session.rollback()
+                                released = await release_reservation(
+                                    fresh_key, session, max_cost_for_model
+                                )
+                                if not released:
+                                    logger.critical(
+                                        "Billing reservation could not be released",
+                                        extra={
+                                            "key_hash": key.hashed_key[:8] + "...",
+                                            "reserved_balance": fresh_key.reserved_balance,
+                                        },
+                                    )
+                            except Exception as release_error:
+                                logger.critical(
+                                    "Billing reservation release failed",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(release_error),
+                                    },
+                                    exc_info=True,
+                                )
+                            raise
 
                         if usage_chunk_data is None:
                             if not hasattr(self, "_current_stream_id"):

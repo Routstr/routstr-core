@@ -766,6 +766,34 @@ async def revert_pay_for_request(
     return True
 
 
+async def release_reservation(
+    key: ApiKey,
+    session: AsyncSession,
+    reserved_msats: int,
+) -> bool:
+    """Release a request reservation without charging the key."""
+    billing_key = await get_billing_key(key, session)
+    release_stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
+        .where(col(ApiKey.reserved_balance) >= reserved_msats)
+        .values(reserved_balance=col(ApiKey.reserved_balance) - reserved_msats)
+    )
+    result = await session.exec(release_stmt)  # type: ignore[call-overload]
+
+    if billing_key.hashed_key != key.hashed_key:
+        child_release_stmt = (
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key.hashed_key)
+            .where(col(ApiKey.reserved_balance) >= reserved_msats)
+            .values(reserved_balance=col(ApiKey.reserved_balance) - reserved_msats)
+        )
+        await session.exec(child_release_stmt)  # type: ignore[call-overload]
+
+    await session.commit()
+    return result.rowcount == 1
+
+
 async def adjust_payment_for_tokens(
     key: ApiKey,
     response_data: dict,
