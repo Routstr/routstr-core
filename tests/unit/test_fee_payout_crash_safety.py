@@ -92,6 +92,38 @@ async def test_fee_payout_checkpoints_before_sending() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fee_payout_does_not_retry_an_unresolved_checkpoint() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=10_000,
+        payout_in_progress_msats=5_000,
+        payout_started_at=123,
+    )
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch("routstr.wallet.db.create_session", return_value=_session_context(session)),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", AsyncMock()) as checkpoint,
+        patch("routstr.wallet.get_wallet", AsyncMock()) as get_wallet,
+        patch("routstr.wallet.raw_send_to_lnurl", AsyncMock()) as send,
+        patch("routstr.wallet.logger.critical") as critical,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    checkpoint.assert_not_awaited()
+    get_wallet.assert_not_awaited()
+    send.assert_not_awaited()
+    critical.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> None:
     session = Mock()
     fee = SimpleNamespace(
