@@ -288,21 +288,29 @@ async def store_cashu_transaction(
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
 ) -> bool:
-    async with create_session() as session:
-        tx = CashuTransaction(
-            token=token,
-            amount=amount,
-            unit=unit,
-            mint_url=mint_url,
-            type=typ,
-            request_id=request_id,
-            collected=collected,
-            created_at=created_at or int(time.time()),
-            source=source,
-            api_key_hashed_key=api_key_hashed_key,
+    try:
+        async with create_session() as session:
+            tx = CashuTransaction(
+                token=token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint_url,
+                type=typ,
+                request_id=request_id,
+                collected=collected,
+                created_at=created_at or int(time.time()),
+                source=source,
+                api_key_hashed_key=api_key_hashed_key,
+            )
+            session.add(tx)
+            await session.commit()
+    except Exception:
+        logger.critical(
+            "Failed to store Cashu transaction",
+            extra={"type": typ, "request_id": request_id, "source": source},
+            exc_info=True,
         )
-        session.add(tx)
-        await session.commit()
+        raise
     return True
 
 

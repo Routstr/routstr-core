@@ -142,16 +142,17 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
-    stored = await store_cashu_transaction(
-        token=token,
-        amount=amount,
-        unit="sat",
-        mint_url=mint_url,
-        typ="out",
-        collected=False,
-        source="auto_topup",
-    )
-    if not stored:
+    try:
+        await store_cashu_transaction(
+            token=token,
+            amount=amount,
+            unit="sat",
+            mint_url=mint_url,
+            typ="out",
+            collected=False,
+            source="auto_topup",
+        )
+    except Exception:
         logger.critical(
             "Aborting auto top-up because its cashu token could not be persisted",
             extra={"provider_id": row.id, "mint_url": mint_url},

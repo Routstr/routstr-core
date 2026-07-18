@@ -745,11 +745,11 @@ async def credit_balance(
             )
         except Exception:
             pass
-
-        logger.debug(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
+        else:
+            logger.debug(
+                "Cashu token successfully redeemed and stored",
+                extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+            )
         return amount
     except Exception as e:
         logger.error(

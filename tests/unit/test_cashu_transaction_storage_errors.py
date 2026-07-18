@@ -22,7 +22,10 @@ async def test_store_cashu_transaction_propagates_commit_errors(
     session.__aenter__.return_value = session
     session.__aexit__.return_value = None
 
-    with patch("routstr.core.db.create_session", return_value=session):
+    with (
+        patch("routstr.core.db.create_session", return_value=session),
+        patch("routstr.core.db.logger.critical") as critical,
+    ):
         with pytest.raises(type(error), match=str(error)):
             await store_cashu_transaction(
                 token="cashuAtest",
@@ -32,6 +35,8 @@ async def test_store_cashu_transaction_propagates_commit_errors(
                 typ="out",
                 request_id="request-1",
             )
+
+    critical.assert_called_once()
 
 
 @pytest.mark.asyncio
