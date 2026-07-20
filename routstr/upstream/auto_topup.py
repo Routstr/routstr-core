@@ -8,7 +8,9 @@ from ..core.db import (
     CashuTransaction,
     UpstreamProviderRow,
     create_session,
-    store_cashu_transaction,
+)
+from ..core.db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from ..wallet import send_token
 from .routstr import RoutstrUpstreamProvider
