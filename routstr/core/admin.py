@@ -434,15 +434,25 @@ async def withdraw(
     token = await send_token(
         withdraw_request.amount, withdraw_request.unit, effective_mint
     )
-    await store_cashu_transaction(
-        token=token,
-        amount=withdraw_request.amount,
-        unit=withdraw_request.unit,
-        mint_url=effective_mint,
-        typ="out",
-        collected=False,
-        source="admin",
-    )
+    try:
+        await store_cashu_transaction(
+            token=token,
+            amount=withdraw_request.amount,
+            unit=withdraw_request.unit,
+            mint_url=effective_mint,
+            typ="out",
+            collected=False,
+            source="admin",
+        )
+    except Exception:
+        logger.critical(
+            "Admin withdrawal token issued without a persisted audit record",
+            extra={
+                "amount": withdraw_request.amount,
+                "unit": withdraw_request.unit,
+                "mint_url": effective_mint,
+            },
+        )
     return {"token": token}
 
 

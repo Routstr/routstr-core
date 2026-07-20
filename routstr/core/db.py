@@ -304,13 +304,14 @@ async def store_cashu_transaction(
             )
             session.add(tx)
             await session.commit()
-        return True
-    except Exception as e:
-        logger.warning(
-            f"Failed to store cashu transaction: {e} (type={typ})",
-            extra={"error": str(e), "type": typ},
+    except Exception:
+        logger.critical(
+            "Failed to store Cashu transaction",
+            extra={"type": typ, "request_id": request_id, "source": source},
+            exc_info=True,
         )
-        return False
+        raise
+    return True
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore

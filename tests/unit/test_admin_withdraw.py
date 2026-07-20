@@ -49,3 +49,34 @@ async def test_withdraw_uses_effective_mint_and_records_outgoing_transaction(
         collected=False,
         source="admin",
     )
+
+
+@pytest.mark.asyncio
+async def test_withdraw_returns_issued_token_when_audit_storage_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mint = "https://primary.example"
+    proofs = [SimpleNamespace(amount=100)]
+    token = "cashuBrecoverable"
+
+    monkeypatch.setattr(admin, "get_wallet", AsyncMock(return_value=object()))
+    monkeypatch.setattr(
+        admin, "get_proofs_per_mint_and_unit", Mock(return_value=proofs)
+    )
+    monkeypatch.setattr(
+        admin, "slow_filter_spend_proofs", AsyncMock(return_value=proofs)
+    )
+    monkeypatch.setattr(admin, "send_token", AsyncMock(return_value=token))
+    monkeypatch.setattr(
+        admin,
+        "store_cashu_transaction",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+    critical = Mock()
+    monkeypatch.setattr(admin.logger, "critical", critical)
+    monkeypatch.setattr(admin.settings, "primary_mint", mint)
+
+    result = await admin.withdraw(Mock(), admin.WithdrawRequest(amount=75))
+
+    assert result == {"token": token}
+    critical.assert_called_once()
