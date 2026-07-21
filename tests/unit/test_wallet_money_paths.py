@@ -113,10 +113,7 @@ async def test_get_balance_returns_integer() -> None:
     mock_wallet.load_mint = AsyncMock()
     mock_wallet.load_proofs = AsyncMock()
 
-    with (
-        patch("routstr.wallet._wallets", {}),
-        patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet),
-    ):
+    with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
         balance = await get_balance("sat")
         assert isinstance(balance, int)
         assert balance == 50000

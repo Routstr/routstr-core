@@ -13,15 +13,18 @@ import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 
-from ..auth import adjust_payment_for_tokens
+from ..auth import adjust_payment_for_tokens, get_billing_key
 from ..core import get_logger
 from ..core.db import (
     ApiKey,
     AsyncSession,
     UpstreamProviderRow,
     create_session,
-    store_cashu_transaction,
+)
+from ..core.db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
@@ -790,6 +793,97 @@ class BaseUpstreamProvider:
             media_type="application/json",
         )
 
+    async def _safe_finalize_billing(
+        self,
+        key: ApiKey,
+        billing_key: ApiKey,
+        session: AsyncSession,
+        deducted_max_cost: int,
+        error: Exception,
+        context: str,
+    ) -> dict:
+        """Fallback used when ``adjust_payment_for_tokens`` raises during a
+        streaming finalize.
+
+        Previously the caller hardcoded ``total_msats=0`` which gave users free
+        inference and leaked the reserved balance (it was never released).  Now
+        we:
+
+        1. Log at **CRITICAL** so operators are alerted to the money leak.
+        2. Release the reserved balance so funds are not permanently stuck.
+        3. Return a cost dict using the already-reserved ``max_cost`` as the
+           charge estimate instead of a bogus zero cost.
+
+        The original exception is not re-raised: by the time we reach here the
+        streamed response has already been sent to the client, so we cannot
+        surface an HTTP 500.  We do the best we can: prevent the leak, log
+        loudly, and record the best-effort charge.
+        """
+        logger.critical(
+            "Billing finalization failed — releasing reservation to prevent "
+            "balance leak (free inference prevented)",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                "context": context,
+                "error": str(error),
+                "error_type": type(error).__name__,
+                "reserved_to_release": deducted_max_cost,
+            },
+        )
+        # Best-effort reservation release.  Uses the same atomic
+        # clamp-to-zero pattern as auth.py so it is safe even if the
+        # stale-reservation sweeper already released the funds.
+        from sqlmodel import col, update
+
+        async def _release(target_key: ApiKey) -> None:
+            stmt = (
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == target_key.hashed_key)
+                .where(col(ApiKey.reserved_balance) >= deducted_max_cost)
+                .values(
+                    reserved_balance=col(ApiKey.reserved_balance)
+                    - deducted_max_cost
+                )
+            )
+            await session.exec(stmt)  # type: ignore[call-overload]
+
+        try:
+            await _release(billing_key)
+            if billing_key.hashed_key != key.hashed_key:
+                await _release(key)
+            await session.commit()
+        except Exception as release_err:
+            logger.critical(
+                "FAILED to release reserved balance after billing error — "
+                "funds may be permanently stuck",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                    "release_error": str(release_err),
+                    "deducted_max_cost": deducted_max_cost,
+                },
+            )
+
+        # Use the reserved max cost as the best-effort charge so the
+        # response carries a non-zero cost rather than reporting free
+        # service.
+        total_msats = max(deducted_max_cost, 0)
+        total_usd = 0.0
+        try:
+            total_usd = (total_msats / 1000) * float(sats_usd_price() or 0)
+        except Exception:
+            pass
+        return {
+            "base_msats": 0,
+            "input_msats": 0,
+            "output_msats": total_msats,
+            "total_msats": total_msats,
+            "total_usd": total_usd,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+
     async def handle_streaming_chat_completion(
         self,
         response: httpx.Response,
@@ -841,8 +935,23 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                         )
                         usage_finalized = True
-                    except Exception:
-                        pass
+                    except (SQLAlchemyError, UpstreamError, OSError) as e:
+                        # Never silently swallow — release the reservation and
+                        # log at CRITICAL.  This path runs when the stream was
+                        # consumed but no usage chunk was emitted (e.g. client
+                        # disconnected early); we still must not leak the balance.
+                        billing_key = await get_billing_key(
+                            fresh_key, new_session
+                        )
+                        await self._safe_finalize_billing(
+                            fresh_key,
+                            billing_key,
+                            new_session,
+                            max_cost_for_model,
+                            e,
+                            "handle_streaming_chat_completion.finalize_db_only",
+                        )
+                        usage_finalized = True
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1013,25 +1122,35 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                             )
                             usage_finalized = True
-                        except Exception as e:
-                            logger.exception(
-                                "Error during usage finalization",
+                        except (SQLAlchemyError, UpstreamError, OSError) as e:
+                            # Error during usage finalization: log at CRITICAL
+                            # (money is being lost), release the reserved_balance
+                            # so funds are not permanently stuck, and charge the
+                            # reserved max cost — NEVER hardcode total_msats=0.
+                            logger.critical(
+                                "Error during usage finalization — releasing "
+                                "reserved_balance to prevent leak",
                                 extra={
                                     "key_hash": key.hashed_key[:8] + "...",
+                                    "billing_key_hash": (
+                                        fresh_key.hashed_key[:8] + "..."
+                                    ),
                                     "error": str(e),
+                                    "error_type": type(e).__name__,
                                 },
                             )
-
-                            # Fall back so we still emit a non-zero sats cost downstream.
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            billing_key = await get_billing_key(
+                                fresh_key, session
+                            )
+                            cost_data = await self._safe_finalize_billing(
+                                fresh_key,
+                                billing_key,
+                                session,
+                                max_cost_for_model,
+                                e,
+                                "handle_streaming_chat_completion",
+                            )
+                            usage_finalized = True
 
                         if usage_chunk_data is None:
                             if not hasattr(self, "_current_stream_id"):
@@ -1293,8 +1412,21 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                         )
                         usage_finalized = True
-                    except Exception:
-                        pass
+                    except (SQLAlchemyError, UpstreamError, OSError) as e:
+                        # Never silently swallow — release the reservation and
+                        # log at CRITICAL.
+                        billing_key = await get_billing_key(
+                            fresh_key, new_session
+                        )
+                        await self._safe_finalize_billing(
+                            fresh_key,
+                            billing_key,
+                            new_session,
+                            max_cost_for_model,
+                            e,
+                            "handle_streaming_messages_completion.finalize_db_only",
+                        )
+                        usage_finalized = True
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1422,23 +1554,35 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                             )
                             usage_finalized = True
-                        except Exception as e:
-                            logger.exception(
-                                "Error during Responses API usage finalization",
+                        except (SQLAlchemyError, UpstreamError, OSError) as e:
+                            # Error during usage finalization: log at CRITICAL
+                            # (money is being lost), release the reserved_balance
+                            # so funds are not permanently stuck, and charge the
+                            # reserved max cost — NEVER hardcode total_msats=0.
+                            logger.critical(
+                                "Error during usage finalization — releasing "
+                                "reserved_balance to prevent leak",
                                 extra={
                                     "key_hash": key.hashed_key[:8] + "...",
+                                    "billing_key_hash": (
+                                        fresh_key.hashed_key[:8] + "..."
+                                    ),
                                     "error": str(e),
+                                    "error_type": type(e).__name__,
                                 },
                             )
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            billing_key = await get_billing_key(
+                                fresh_key, session
+                            )
+                            cost_data = await self._safe_finalize_billing(
+                                fresh_key,
+                                billing_key,
+                                session,
+                                max_cost_for_model,
+                                e,
+                                "handle_streaming_messages_completion",
+                            )
+                            usage_finalized = True
 
                         if usage_chunk_data is None:
                             usage_chunk_data = {
@@ -1788,7 +1932,30 @@ class BaseUpstreamProvider:
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
-                    except Exception:
+                    except (SQLAlchemyError, UpstreamError, OSError) as e:
+                        logger.critical(
+                            "Error during usage finalization — releasing "
+                            "reserved_balance to prevent leak",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "billing_key_hash": (
+                                    fresh_key.hashed_key[:8] + "..."
+                                ),
+                                "error": str(e),
+                                "error_type": type(e).__name__,
+                            },
+                        )
+                        billing_key = await get_billing_key(
+                            fresh_key, new_session
+                        )
+                        await self._safe_finalize_billing(
+                            fresh_key,
+                            billing_key,
+                            new_session,
+                            max_cost_for_model,
+                            e,
+                            "handle_streaming_messages_completion.finalize_without_usage",
+                        )
                         usage_finalized = True
                         return None
 
@@ -2259,7 +2426,30 @@ class BaseUpstreamProvider:
                             f"event: cost\ndata: "
                             f"{json.dumps({'cost': cost_data})}\n\n"
                         ).encode()
-                    except Exception:
+                    except (SQLAlchemyError, UpstreamError, OSError) as e:
+                        logger.critical(
+                            "Error during usage finalization — releasing "
+                            "reserved_balance to prevent leak",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "billing_key_hash": (
+                                    fresh_key.hashed_key[:8] + "..."
+                                ),
+                                "error": str(e),
+                                "error_type": type(e).__name__,
+                            },
+                        )
+                        billing_key = await get_billing_key(
+                            fresh_key, new_session
+                        )
+                        await self._safe_finalize_billing(
+                            fresh_key,
+                            billing_key,
+                            new_session,
+                            max_cost_for_model,
+                            e,
+                            "handle_streaming_chat_completion.finalize_without_usage",
+                        )
                         usage_finalized = True
                         return None
 

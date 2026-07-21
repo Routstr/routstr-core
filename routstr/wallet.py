@@ -14,7 +14,7 @@ from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
-from .core.db import store_cashu_transaction
+from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 
@@ -745,11 +745,11 @@ async def credit_balance(
             )
         except Exception:
             pass
-
-        logger.debug(
-            "Cashu token successfully redeemed and stored",
-            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-        )
+        else:
+            logger.debug(
+                "Cashu token successfully redeemed and stored",
+                extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+            )
         return amount
     except Exception as e:
         logger.error(
@@ -1067,17 +1067,56 @@ async def periodic_routstr_fee_payout() -> None:
         try:
             async with db.create_session() as session:
                 fee = await db.get_routstr_fee(session)
+                if fee.payout_in_progress_msats:
+                    logger.critical(
+                        "Routstr fee payout requires manual reconciliation",
+                        extra={
+                            "payout_in_progress_msats": fee.payout_in_progress_msats,
+                            "payout_started_at": fee.payout_started_at,
+                        },
+                    )
+                    continue
+
                 accumulated_sats = fee.accumulated_msats // 1000
                 if accumulated_sats >= ROUTSTR_FEE_DEFAULT_PAYOUT:
                     wallet = await get_wallet(settings.primary_mint, "sat")
                     proofs = get_proofs_per_mint_and_unit(
                         wallet, settings.primary_mint, "sat", not_reserved=True
                     )
-                    amount_received = await raw_send_to_lnurl(
-                        wallet, proofs, ROUTSTR_LN_ADDRESS, "sat", amount=accumulated_sats
-                    )
                     paid_msats = accumulated_sats * 1000
-                    await db.reset_routstr_fee(session, paid_msats)
+                    payout_checkpointed = await db.reset_routstr_fee(
+                        session, paid_msats
+                    )
+                    if not payout_checkpointed:
+                        logger.warning("Routstr fee payout was already claimed")
+                        continue
+
+                    try:
+                        amount_received = await raw_send_to_lnurl(
+                            wallet,
+                            proofs,
+                            ROUTSTR_LN_ADDRESS,
+                            "sat",
+                            amount=accumulated_sats,
+                        )
+                    except Exception:
+                        logger.critical(
+                            "Routstr fee payout outcome is unknown; manual reconciliation required",
+                            extra={"payout_in_progress_msats": paid_msats},
+                            exc_info=True,
+                        )
+                        continue
+
+                    payout_completed = await db.complete_routstr_fee_payout(
+                        session, paid_msats
+                    )
+                    if not payout_completed:
+                        logger.critical(
+                            "Routstr fee payout sent but checkpoint was not completed",
+                            extra={"payout_in_progress_msats": paid_msats},
+                        )
+                        continue
+
                     logger.info(
                         "Routstr fee payout sent",
                         extra={
