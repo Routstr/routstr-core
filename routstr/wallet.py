@@ -14,7 +14,7 @@ from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
-from .core.db import store_cashu_transaction
+from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
 from .payment.lnurl import raw_send_to_lnurl
 

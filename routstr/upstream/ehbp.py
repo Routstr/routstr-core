@@ -23,7 +23,9 @@ from ..core.db import (
     ApiKey,
     AsyncSession,
     accumulate_routstr_fee,
-    store_cashu_transaction,
+)
+from ..core.db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from ..core.exceptions import UpstreamError
 from ..core.settings import settings

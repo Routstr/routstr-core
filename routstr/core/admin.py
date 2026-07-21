@@ -28,7 +28,9 @@ from .db import (
     ModelRow,
     UpstreamProviderRow,
     create_session,
-    store_cashu_transaction,
+)
+from .db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from .log_manager import log_manager
 from .logging import get_logger
