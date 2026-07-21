@@ -354,6 +354,8 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     accumulated_msats: int = Field(default=0)
     total_paid_msats: int = Field(default=0)
     last_paid_at: int | None = Field(default=None)
+    payout_in_progress_msats: int = Field(default=0)
+    payout_started_at: int | None = Field(default=None)
 
 
 class CliToken(SQLModel, table=True):  # type: ignore
@@ -394,18 +396,42 @@ async def get_routstr_fee(session: AsyncSession) -> RoutstrFee:
     return fee
 
 
-async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> None:
+async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
+    """Checkpoint a fee payout before making the external payment."""
     stmt = (
         update(RoutstrFee)
         .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == 0)
+        .where(col(RoutstrFee.accumulated_msats) >= paid_msats)
         .values(
             accumulated_msats=RoutstrFee.accumulated_msats - paid_msats,
+            payout_in_progress_msats=paid_msats,
+            payout_started_at=int(time.time()),
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def complete_routstr_fee_payout(
+    session: AsyncSession, paid_msats: int
+) -> bool:
+    """Mark a checkpointed payout complete after the external payment succeeds."""
+    stmt = (
+        update(RoutstrFee)
+        .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == paid_msats)
+        .values(
+            payout_in_progress_msats=0,
+            payout_started_at=None,
             total_paid_msats=RoutstrFee.total_paid_msats + paid_msats,
             last_paid_at=int(time.time()),
         )
     )
-    await session.exec(stmt)  # type: ignore[call-overload]
+    result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
+    return result.rowcount == 1
 
 
 async def balances_for_mint_and_unit(
