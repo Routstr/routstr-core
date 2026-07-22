@@ -19,6 +19,7 @@ from .core.db import (
 )
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
+from .core.settings import settings
 from .payment.helpers import (
     apply_mint_fee_allowance,
     calculate_discounted_max_cost,
