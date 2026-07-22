@@ -356,6 +356,58 @@ async def test_ppqai_two_ids_matching_one_openrouter_entry_keep_distinct_prices(
 
 
 # ---------------------------------------------------------------------------
+# ollama — no native price; resolve through the shared fallback or unresolved
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_ollama(
+    tags: dict[str, Any], or_feed: list[dict]
+) -> list[Model]:
+    from routstr.upstream.ollama import OllamaUpstreamProvider
+
+    provider = OllamaUpstreamProvider(base_url="http://ollama")
+    with patch(
+        "routstr.upstream.ollama.httpx.AsyncClient",
+        lambda *a, **k: _FakeAsyncClient(tags),
+    ):
+        with patch(
+            "routstr.payment.models.async_fetch_openrouter_models",
+            AsyncMock(return_value=or_feed),
+        ):
+            return await provider.fetch_models()
+
+
+@pytest.mark.asyncio
+async def test_ollama_resolvable_model_uses_source_price_not_native() -> None:
+    """Ollama's ``/api/tags`` carries no pricing, so a model must be priced by
+    the shared resolver and wear that source — never a hard-coded ``native``
+    rate that misreports where the price came from."""
+    tags = {"models": [{"name": "exotic-ollama-zzz", "details": {}}]}
+    or_feed = [
+        {
+            "id": "exotic-ollama-zzz",
+            "context_length": 8192,
+            "pricing": {"prompt": "0.000004", "completion": "0.000008"},
+        }
+    ]
+    models = await _fetch_ollama(tags, or_feed)
+    model = _model_by_id(models, "exotic-ollama-zzz")
+    assert model.pricing_source == PricingSource.OPENROUTER
+    assert model.pricing.prompt == 0.000004
+
+
+@pytest.mark.asyncio
+async def test_ollama_unresolvable_model_is_unresolved_and_disabled() -> None:
+    """A model no source can price must import disabled as ``unresolved``, not
+    enabled at a fabricated flat rate."""
+    tags = {"models": [{"name": "nobody-prices-this-ollama-qqq", "details": {}}]}
+    models = await _fetch_ollama(tags, [])
+    model = _model_by_id(models, "nobody-prices-this-ollama-qqq")
+    assert model.pricing_source == PricingSource.UNRESOLVED
+    assert model.enabled is False
+
+
+# ---------------------------------------------------------------------------
 # homeless field — supports_function_calling from litellm
 # ---------------------------------------------------------------------------
 
