@@ -22,6 +22,7 @@ from routstr.payment.models import (
     PricingSource,
     TopProvider,
     _update_model_sats_pricing,
+    has_chargeable_price,
     pricing_metadata,
 )
 from routstr.upstream.generic import GenericUpstreamProvider
@@ -125,6 +126,23 @@ async def test_generic_unresolvable_tagged_unresolved_and_disabled() -> None:
     model = _model_by_id(models, "nobody-has-priced-this-xyz")
     assert model.enabled is False
     assert model.pricing_source == PricingSource.UNRESOLVED
+
+
+# ---------------------------------------------------------------------------
+# has_chargeable_price — the money-safety invariant over every billable field
+# ---------------------------------------------------------------------------
+
+
+def test_has_chargeable_price_true_when_any_billable_rate_positive() -> None:
+    assert has_chargeable_price(Pricing(prompt=1e-06, completion=0.0)) is True
+    assert has_chargeable_price(Pricing(prompt=0.0, completion=1e-06)) is True
+    # A per-request charge alone makes a model chargeable even at zero per-token
+    # rates — the reason the guard can't look at prompt+completion only.
+    assert has_chargeable_price(Pricing(prompt=0.0, completion=0.0, request=0.5)) is True
+
+
+def test_has_chargeable_price_false_when_all_billable_rates_zero() -> None:
+    assert has_chargeable_price(Pricing(prompt=0.0, completion=0.0)) is False
 
 
 # ---------------------------------------------------------------------------

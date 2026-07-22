@@ -555,3 +555,88 @@ async def test_invalid_pricing_source_is_rejected(
         json=_payload(provider_id, model_id="bad-src", pricing_source="lite-llm"),
     )
     assert resp.status_code == 422
+
+
+async def _insert_row(
+    session: AsyncSession,
+    provider_id: int,
+    *,
+    model_id: str,
+    prompt: float,
+    completion: float,
+    enabled: bool,
+    pricing_source: str,
+) -> None:
+    session.add(
+        ModelRow(
+            id=model_id,
+            name=model_id,
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": prompt, "completion": completion}),
+            upstream_provider_id=provider_id,
+            enabled=enabled,
+            forwarded_model_id=model_id,
+            pricing_source=pricing_source,
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_served_map_excludes_enabled_unchargeable_non_manual_rows(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """The served-map backstop for legacy/foreign writers: an ``enabled`` row
+    priced at nothing whose source isn't ``manual`` is never served (it would
+    bill every request at zero), while a deliberately-free ``manual`` row and an
+    ordinary priced row are."""
+    from routstr.payment.models import list_models
+
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="legacy-free",
+        prompt=0.0,
+        completion=0.0,
+        enabled=True,
+        pricing_source="unresolved",
+    )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="free-by-choice",
+        prompt=0.0,
+        completion=0.0,
+        enabled=True,
+        pricing_source="manual",
+    )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="priced",
+        prompt=1e-06,
+        completion=2e-06,
+        enabled=True,
+        pricing_source="litellm",
+    )
+
+    served = {
+        m.id for m in await list_models(integration_session, provider_id)
+    }
+    assert "legacy-free" not in served  # unchargeable + not manual → not served
+    assert "free-by-choice" in served  # operator vouched → served free
+    assert "priced" in served

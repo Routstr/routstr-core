@@ -51,3 +51,45 @@ def test_backfill_assigns_unresolved_and_preserves_existing() -> None:
         ).all()
 
     assert rows == [("a", "unresolved"), ("b", "manual")]
+
+
+def test_disables_enabled_unchargeable_rows_only() -> None:
+    """Legacy rows that motivated the change — enabled but priced at nothing —
+    are fail-closed by the migration itself, not only when re-saved through the
+    admin endpoint. Chargeable rows (including per-request-billed ones) and
+    already-disabled rows are left untouched."""
+    engine = sa.create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE TABLE models ("
+                "id VARCHAR, upstream_provider_id INTEGER, "
+                "pricing VARCHAR, enabled BOOLEAN, "
+                "PRIMARY KEY (id, upstream_provider_id))"
+            )
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO models "
+                "(id, upstream_provider_id, pricing, enabled) VALUES "
+                "('free-enabled', 1, '{\"prompt\": 0, \"completion\": 0}', 1), "
+                "('priced-enabled', 1, "
+                "'{\"prompt\": 0.000001, \"completion\": 0}', 1), "
+                "('request-priced', 1, "
+                "'{\"prompt\": 0, \"completion\": 0, \"request\": 0.5}', 1), "
+                "('free-disabled', 1, '{\"prompt\": 0, \"completion\": 0}', 0), "
+                "('junk-pricing', 1, 'not-json', 1)"
+            )
+        )
+
+        migration._disable_unchargeable_enabled_rows(conn)
+
+        rows = dict(
+            conn.execute(sa.text("SELECT id, enabled FROM models")).all()
+        )
+
+    assert rows["free-enabled"] == 0  # unchargeable + enabled → disabled
+    assert rows["priced-enabled"] == 1  # chargeable → untouched
+    assert rows["request-priced"] == 1  # per-request billed is chargeable
+    assert rows["free-disabled"] == 0  # already disabled → stays
+    assert rows["junk-pricing"] == 0  # unparseable price fails closed
