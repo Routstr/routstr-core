@@ -25,7 +25,9 @@ from ..core.db import (
     AsyncSession,
     UpstreamProviderRow,
     create_session,
-    store_cashu_transaction,
+)
+from ..core.db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
