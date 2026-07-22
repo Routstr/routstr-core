@@ -223,6 +223,60 @@ async def test_unchanged_price_preserves_source_despite_cache_backfill(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_partial_payload_dropping_a_rate_flips_to_manual(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A replacement payload that OMITS a priced field really changes the stored
+    price (the reparse defaults it to 0), so it must be treated as an edit — the
+    trusted tag can't survive while the stored rate silently drops to zero."""
+    provider_id = await _make_provider(integration_session)
+    # Seed a request-priced row from a trusted source (not litellm-known, so the
+    # read view has no cache backfill to muddy the comparison).
+    row = ModelRow(
+        id="req-priced-xyz",
+        name="Req Priced",
+        description="d",
+        created=0,
+        context_length=8192,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps(
+            {"prompt": 1e-7, "completion": 2e-7, "request": 0.5}
+        ),
+        upstream_provider_id=provider_id,
+        enabled=True,
+        forwarded_model_id="req-priced-xyz",
+        pricing_source="openrouter",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    # Post prompt/completion unchanged but WITHOUT request → request drops to 0.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="req-priced-xyz",
+            pricing={"prompt": 1e-7, "completion": 2e-7},
+        ),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    stored = _row_to_model(row, apply_provider_fee=False)
+    assert stored.pricing.request == 0.0  # the rate really dropped
+    assert row.pricing_source == "manual"  # so the trusted tag must not survive
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_batch_override_create_and_price_edit(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:
