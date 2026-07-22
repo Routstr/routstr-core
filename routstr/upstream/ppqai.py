@@ -189,10 +189,11 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             if output_price is not None:
                                 or_model.pricing.completion = output_price / 1_000_000
 
-                            # When PPQ published its own price we overwrote the
-                            # OpenRouter number, so the price is now native;
-                            # otherwise the OR feed's price (and its tag) stand.
-                            if input_price is not None or output_price is not None:
+                            # Only a model PPQ priced on *both* sides is fully
+                            # native; if PPQ supplied one side, the other is
+                            # still OpenRouter-derived, so the whole-Pricing tag
+                            # stays whatever the OR feed carried (openrouter).
+                            if input_price is not None and output_price is not None:
                                 for key, value in pricing_metadata(
                                     PricingSource.NATIVE
                                 ).items():
@@ -218,13 +219,17 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
 
-                            # PPQ's catalog price is native USD when it publishes
-                            # one; a model it prices at nothing (the 0.0 default)
-                            # has no known price → unresolved.
-                            has_ppq_price = bool(input_price) or bool(output_price)
+                            # PPQ's catalog price is native USD only when it
+                            # prices *both* sides; a partial price (one side at
+                            # the 0.0 default) would bill the zero side at
+                            # nothing, so it — like a fully-unpriced model — is
+                            # unresolved and imported disabled.
+                            has_complete_ppq_price = bool(input_price) and bool(
+                                output_price
+                            )
                             source = (
                                 PricingSource.NATIVE
-                                if has_ppq_price
+                                if has_complete_ppq_price
                                 else PricingSource.UNRESOLVED
                             )
 
@@ -250,6 +255,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                         web_search=0.0,
                                         internal_reasoning=0.0,
                                     ),
+                                    enabled=has_complete_ppq_price,
                                     **pricing_metadata(source),
                                 )
                             )
