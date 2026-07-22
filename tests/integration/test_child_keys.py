@@ -77,7 +77,7 @@ async def test_child_key_flow(integration_session: AsyncSession) -> None:
 
     try:
         adjustment = await adjust_payment_for_tokens(
-            child_key_db, response_data, integration_session, 500
+            child_key_db, response_data, integration_session, 500, None, None
         )
         assert adjustment["total_msats"] == 400
 

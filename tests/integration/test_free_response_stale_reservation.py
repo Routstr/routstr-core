@@ -58,7 +58,7 @@ async def test_overrun_charges_after_reservation_swept(
         return_value=_cost_data(actual_token_cost),
     ):
         await adjust_payment_for_tokens(
-            key, response_data, integration_session, deducted_max_cost
+            key, response_data, integration_session, deducted_max_cost, None, None
         )
 
     await integration_session.refresh(key)
@@ -129,7 +129,7 @@ async def test_free_response_path_closed_end_to_end(
             return_value=_cost_data(actual_token_cost),
         ):
             await adjust_payment_for_tokens(
-                key, response_data, session, deducted_max_cost
+                key, response_data, session, deducted_max_cost, None, None
             )
 
     async with create_session() as session:

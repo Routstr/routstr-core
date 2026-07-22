@@ -4,7 +4,7 @@ import math
 import random
 import time
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import case
@@ -25,6 +25,9 @@ from .wallet import (
     credit_balance,
     deserialize_token_from_string,
 )
+
+if TYPE_CHECKING:
+    from .payment.models import Model
 
 logger = get_logger(__name__)
 payments_logger = get_logger("routstr.payments")
@@ -778,11 +781,17 @@ async def adjust_payment_for_tokens(
     response_data: dict,
     session: AsyncSession,
     deducted_max_cost: int,
+    model_obj: "Model | None",
+    provider_fee: float | None,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
     This is called after the initial payment and the upstream request is complete.
     Returns cost data to be included in the response.
+
+    ``model_obj`` is the model that actually served the request; it is passed
+    through to ``calculate_cost`` so billing uses the serving candidate's
+    pricing instead of re-deriving it from the response's model string.
 
     The response's usage object is normalized with the default union parser in
     ``calculate_cost``.
@@ -868,7 +877,9 @@ async def adjust_payment_for_tokens(
                     extra={"error": str(e), "fee_msats": fee_msats},
                 )
 
-    match await calculate_cost(response_data, deducted_max_cost):
+    match await calculate_cost(
+        response_data, deducted_max_cost, model_obj, provider_fee
+    ):
         case MaxCostData() as cost:
             logger.debug(
                 "Using max cost data (no token adjustment)",

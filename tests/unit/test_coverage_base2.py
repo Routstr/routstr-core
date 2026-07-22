@@ -146,7 +146,7 @@ def test_get_x_cashu_cost_with_usage() -> None:
         "usage": {"prompt_tokens": 100, "completion_tokens": 50},
     }
 
-    result = p.get_x_cashu_cost(response_data, 100000)
+    result = p.get_x_cashu_cost(response_data, 100000, None)
 
     # Either returns None (needs more data) or a cost object
     assert result is not None
@@ -157,7 +157,7 @@ def test_get_x_cashu_cost_no_usage() -> None:
     p = BaseUpstreamProvider("https://api.test.com", "sk-test")
     response_data = {"model": "gpt-4"}
 
-    result = p.get_x_cashu_cost(response_data, 100000)
+    result = p.get_x_cashu_cost(response_data, 100000, None)
 
     # Without usage, uses max_cost
     assert result is not None

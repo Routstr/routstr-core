@@ -263,8 +263,10 @@ async def test_http_402_response_shape_on_insufficient_balance(
     mock_upstream.prepare_headers = MagicMock(return_value={})
 
     with (
-        patch("routstr.proxy.get_model_instance", return_value=mock_model),
-        patch("routstr.proxy.get_provider_for_model", return_value=[mock_upstream]),
+        patch(
+            "routstr.proxy.get_candidates",
+            return_value=[(mock_model, mock_upstream)],
+        ),
         # Patch where it is used (proxy imports it at module level)
         patch(
             "routstr.proxy.get_max_cost_for_model",

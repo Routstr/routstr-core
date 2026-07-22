@@ -120,7 +120,9 @@ async def test_finalise_releases_reservation_and_charges_balance(
     response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 50}}
 
     with patch("routstr.auth.calculate_cost", return_value=cost_data):
-        await adjust_payment_for_tokens(key, response_data, integration_session, cost)
+        await adjust_payment_for_tokens(
+            key, response_data, integration_session, cost, None, None
+        )
 
     await integration_session.refresh(key)
 
