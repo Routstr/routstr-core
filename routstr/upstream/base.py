@@ -799,6 +799,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         background_tasks: BackgroundTasks,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -841,6 +842,8 @@ class BaseUpstreamProvider:
                             {"model": last_model_seen or "unknown", "usage": None},
                             new_session,
                             max_cost_for_model,
+                            model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1013,6 +1016,8 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                model_obj,
+                                self.provider_fee,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1109,6 +1114,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1155,6 +1161,8 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
+                model_obj,
+                self.provider_fee,
             )
 
             await session.refresh(key)
@@ -1250,6 +1258,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1293,6 +1302,8 @@ class BaseUpstreamProvider:
                             {"model": last_model_seen or "unknown", "usage": None},
                             new_session,
                             max_cost_for_model,
+                            model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1422,6 +1433,8 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                model_obj,
+                                self.provider_fee,
                             )
                             usage_finalized = True
                         except Exception as e:
@@ -1540,6 +1553,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1589,6 +1603,8 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
+                model_obj,
+                self.provider_fee,
             )
 
             await session.refresh(key)
@@ -1693,11 +1709,15 @@ class BaseUpstreamProvider:
 
             try:
                 # Finalize with "unknown" model and no usage to release reservation/charge max cost
+                # (no routed identity here by design: the None usage settles at
+                # MaxCostData before any pricing lookup can happen).
                 await adjust_payment_for_tokens(
                     key,
                     {"model": "unknown", "usage": None},
                     session,
                     max_cost,
+                    model_obj=None,
+                    provider_fee=None,
                 )
                 logger.debug(
                     "Finalized generic streaming payment in background",
@@ -1722,6 +1742,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         async def stream_with_cost(
             max_cost_for_model: int,
@@ -1787,6 +1808,8 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
+                            model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -1938,6 +1961,8 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
+                                    model_obj,
+                                    self.provider_fee,
                                 )
 
                                 self.inject_cost_metadata(
@@ -1985,6 +2010,7 @@ class BaseUpstreamProvider:
         deducted_max_cost: int,
         path: str,
         requested_model: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         try:
             content = await response.aread()
@@ -2009,6 +2035,8 @@ class BaseUpstreamProvider:
                 response_json,
                 session,
                 deducted_max_cost,
+                model_obj,
+                self.provider_fee,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2103,6 +2131,7 @@ class BaseUpstreamProvider:
                 key,
                 max_cost_for_model,
                 requested_model,
+                model_obj,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
@@ -2114,6 +2143,8 @@ class BaseUpstreamProvider:
             response_json,
             session,
             max_cost_for_model,
+            model_obj,
+            self.provider_fee,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2153,6 +2184,7 @@ class BaseUpstreamProvider:
                 requested_model,
                 mint,
                 request_id,
+                model_obj,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
@@ -2160,7 +2192,9 @@ class BaseUpstreamProvider:
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
 
-        cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+        cost_data = await self.get_x_cashu_cost(
+            response_json, max_cost_for_model, model_obj
+        )
 
         if cost_data and "usage" in response_json and isinstance(
             response_json["usage"], dict
@@ -2205,6 +2239,7 @@ class BaseUpstreamProvider:
         key: ApiKey,
         max_cost_for_model: int,
         requested_model: str | None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Re-emit a litellm Anthropic-event iterator as live SSE bytes
         with cost reconciliation appended at end of stream."""
@@ -2255,6 +2290,8 @@ class BaseUpstreamProvider:
                             fallback,
                             new_session,
                             max_cost_for_model,
+                            model_obj,
+                            self.provider_fee,
                         )
                         usage_finalized = True
                         return (
@@ -2328,6 +2365,8 @@ class BaseUpstreamProvider:
                                     combined_data,
                                     new_session,
                                     max_cost_for_model,
+                                    model_obj,
+                                    self.provider_fee,
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -2365,6 +2404,7 @@ class BaseUpstreamProvider:
         requested_model: str | None,
         mint: str | None,
         request_id: str | None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Buffer a litellm stream end-to-end, compute cost, then replay.
 
@@ -2456,7 +2496,7 @@ class BaseUpstreamProvider:
             }
             try:
                 cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model
+                    response_data, max_cost_for_model, model_obj
                 )
                 if cost_data:
                     refund_amount = messages_dispatch.compute_refund(
@@ -2673,6 +2713,7 @@ class BaseUpstreamProvider:
                             key,
                             max_cost_for_model,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
@@ -2689,6 +2730,7 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                                 path,
                                 requested_model=original_model_id,
+                                model_obj=model_obj,
                             )
                         finally:
                             await response.aclose()
@@ -2704,6 +2746,7 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                                 path,
                                 requested_model=original_model_id,
+                                model_obj=model_obj,
                             )
                         finally:
                             await response.aclose()
@@ -2753,6 +2796,7 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             background_tasks,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                         result.background = background_tasks
                         return result
@@ -2766,6 +2810,7 @@ class BaseUpstreamProvider:
                             session,
                             max_cost_for_model,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                     finally:
                         await response.aclose()
@@ -3018,6 +3063,7 @@ class BaseUpstreamProvider:
                         key,
                         max_cost_for_model,
                         requested_model=original_model_id,
+                        model_obj=model_obj,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -3033,6 +3079,7 @@ class BaseUpstreamProvider:
                             session,
                             max_cost_for_model,
                             requested_model=original_model_id,
+                            model_obj=model_obj,
                         )
                     finally:
                         await response.aclose()
@@ -3209,13 +3256,19 @@ class BaseUpstreamProvider:
                 )
 
     async def get_x_cashu_cost(
-        self, response_data: dict, max_cost_for_model: int
+        self,
+        response_data: dict,
+        max_cost_for_model: int,
+        model_obj: Model | None,
     ) -> MaxCostData | CostData | None:
         """Calculate cost for X-Cashu payment based on response data.
 
         Args:
             response_data: Response data containing model and usage information
             max_cost_for_model: Maximum cost for the model
+            model_obj: The model that actually served the request; billed
+                directly instead of re-deriving pricing from the upstream's
+                echoed model string
 
         Returns:
             Cost data object (MaxCostData or CostData) or None if calculation fails
@@ -3229,6 +3282,8 @@ class BaseUpstreamProvider:
         match await calculate_cost(
             response_data,
             max_cost_for_model,
+            model_obj,
+            self.provider_fee,
         ):
             case MaxCostData() as cost:
                 logger.debug(
@@ -3373,6 +3428,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         request_id: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -3446,7 +3502,7 @@ class BaseUpstreamProvider:
             response_data = {"usage": usage_data, "model": model}
             try:
                 cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model
+                    response_data, max_cost_for_model, model_obj
                 )
                 if cost_data:
                     if unit == "msat":
@@ -3551,6 +3607,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         request_id: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -3572,7 +3629,9 @@ class BaseUpstreamProvider:
         try:
             response_json = json.loads(content_str)
             self._apply_provider_field(response_json)
-            cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+            cost_data = await self.get_x_cashu_cost(
+                response_json, max_cost_for_model, model_obj
+            )
 
             if cost_data and "usage" in response_json:
                 response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
@@ -3701,6 +3760,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         request_id: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -3744,6 +3804,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     request_id=request_id,
+                    model_obj=model_obj,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
@@ -3754,6 +3815,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     request_id=request_id,
+                    model_obj=model_obj,
                 )
 
         except Exception as e:
@@ -3939,6 +4001,7 @@ class BaseUpstreamProvider:
                         max_cost_for_model,
                         mint,
                         request_id=getattr(request.state, "request_id", None),
+                        model_obj=model_obj,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -4231,6 +4294,7 @@ class BaseUpstreamProvider:
                         max_cost_for_model,
                         mint,
                         request_id=getattr(request.state, "request_id", None),
+                        model_obj=model_obj,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -4281,6 +4345,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         request_id: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse | Response:
         """Handle Responses API completion response for X-Cashu payment.
 
@@ -4325,6 +4390,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     request_id=request_id,
+                    model_obj=model_obj,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_responses_response(
@@ -4335,6 +4401,7 @@ class BaseUpstreamProvider:
                     max_cost_for_model,
                     mint,
                     request_id=request_id,
+                    model_obj=model_obj,
                 )
 
         except Exception as e:
@@ -4362,6 +4429,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         request_id: str | None = None,
+        model_obj: Model | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API response for X-Cashu payment.
 
@@ -4420,7 +4488,7 @@ class BaseUpstreamProvider:
             response_data = {"usage": usage_data, "model": model}
             try:
                 cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model
+                    response_data, max_cost_for_model, model_obj
                 )
                 if cost_data:
                     if unit == "msat":
@@ -4526,6 +4594,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         mint: str | None = None,
         request_id: str | None = None,
+        model_obj: Model | None = None,
     ) -> Response:
         """Handle non-streaming Responses API response for X-Cashu payment."""
         logger.debug(
@@ -4536,7 +4605,9 @@ class BaseUpstreamProvider:
         try:
             response_json = json.loads(content_str)
             self._apply_provider_field(response_json)
-            cost_data = await self.get_x_cashu_cost(response_json, max_cost_for_model)
+            cost_data = await self.get_x_cashu_cost(
+                response_json, max_cost_for_model, model_obj
+            )
 
             if cost_data and "usage" in response_json:
                 response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000

@@ -142,7 +142,7 @@ def test_create_model_mappings_includes_db_override_for_missing_cached_model(
     )
 
     assert "azure/gpt-4o" in model_instances
-    assert provider_map["azure/gpt-4o"] == [provider]
+    assert [p for _, p in provider_map["azure/gpt-4o"]] == [provider]
     assert "gpt-4o" in unique_models
 
 
@@ -186,7 +186,7 @@ def test_create_model_mappings_dedupes_with_provider_identity_not_provider_type(
         disabled_model_keys=set(),
     )
 
-    providers_for_alias = provider_map["azure/gpt-4o"]
+    providers_for_alias = [p for _, p in provider_map["azure/gpt-4o"]]
     assert provider_a in providers_for_alias
     assert provider_b in providers_for_alias
     assert len(providers_for_alias) == 2
@@ -226,8 +226,8 @@ def test_create_model_mappings_applies_override_only_to_matching_provider(
         disabled_model_keys=set(),
     )
 
-    assert provider_map["provider-b-only"] == [provider_b]
-    assert set(provider_map["same-id"]) == {provider_a, provider_b}
+    assert [p for _, p in provider_map["provider-b-only"]] == [provider_b]
+    assert {p for _, p in provider_map["same-id"]} == {provider_a, provider_b}
 
 
 def test_create_model_mappings_disables_only_matching_provider() -> None:
@@ -251,4 +251,4 @@ def test_create_model_mappings_disables_only_matching_provider() -> None:
         disabled_model_keys={("same-id", 2)},
     )
 
-    assert provider_map["same-id"] == [provider_a]
+    assert [p for _, p in provider_map["same-id"]] == [provider_a]
