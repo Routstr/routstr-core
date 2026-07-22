@@ -38,7 +38,6 @@ services:
       - routstr-data:/app/data
     environment:
       DATABASE_URL: "sqlite:////app/data/routstr.db"
-      ADMIN_KEY: "your-secure-admin-key"
       LOG_LEVEL: "info"
 
 volumes:
@@ -127,8 +126,8 @@ services:
       - UPSTREAM_BASE_URL=https://api.openai.com/v1
       - UPSTREAM_API_KEY=sk-proj-...
       
-      # Secure the dashboard (recommended)
-      - ADMIN_PASSWORD=your-secure-password
+      # The admin password is generated and logged once on first start; set
+      # ADMIN_PASSWORD here only as a legacy seed for an existing deployment.
       
       # Node identity
       - NAME=My Provider Node
@@ -160,7 +159,6 @@ Example `.env`:
 ```bash
 UPSTREAM_BASE_URL=https://api.openai.com/v1
 UPSTREAM_API_KEY=sk-proj-...
-ADMIN_PASSWORD=change-me
 # Keep the database (and the key file generated beside it) on the mounted volume.
 DATABASE_URL=sqlite:////app/data/routstr.db
 # Encrypts node secrets at rest. Optional — if unset, a key is generated next to

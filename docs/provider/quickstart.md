@@ -29,9 +29,6 @@ In future versions, you'll be able to run a node that connects to other Routstr 
 Create a `.env` file in the root of the project to store your secrets:
 
 ```bash
-# Initial Admin Password
-ADMIN_PASSWORD=mysecretpassword
-
 # Encrypts node secrets at rest. Optional — if unset, the node generates a key on
 # first start and prints it once (back it up).
 ROUTSTR_SECRET_KEY=
@@ -39,12 +36,17 @@ ROUTSTR_SECRET_KEY=
 # Node Identity
 NAME="My AI Node"
 DESCRIPTION="Fast access to models"
-NSEC=yournsec
 
 # Lightning Payouts
 RECEIVE_LN_ADDRESS=yourname@wallet.com
 
 ```
+
+The admin password is generated and logged once on first start (read it from the
+logs to sign in), and your Nostr identity (`nsec`) is configured afterwards from
+the admin UI — both are stored encrypted in the database, not in `.env`.
+(`ADMIN_PASSWORD` / `NSEC` are still read once as a legacy seed for existing
+deployments.)
 
 ## 2. Start the Node
 
@@ -76,7 +78,7 @@ docker compose up -d
 Open the **Admin Dashboard** at [http://localhost:8000/admin/](http://localhost:8000/admin/).
 
 !!! note "Login"
-Use the `ADMIN_PASSWORD` you defined in your `.env` file to log in. If you didn't set one, the dashboard will prompt you to set one on first visit.
+On first start the node generates an admin password and logs it once — read it from the container logs to sign in. You can change it afterwards from **Settings** → **Security**.
 
 ### Connect Your AI Providers
 

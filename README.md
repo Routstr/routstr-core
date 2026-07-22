@@ -62,9 +62,12 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
    ROUTSTR_SECRET_KEY=<generated-key>
    NAME="My AI Node"
    DESCRIPTION="Fast access to models"
-   NSEC=yournsec
    RECEIVE_LN_ADDRESS=yourname@wallet.com
    ```
+
+   Your Nostr identity (`nsec`) is not set in `.env` — configure it from the admin
+   UI after first start, where it's stored encrypted in the database. (`NSEC` in
+   `.env` is still read once as a legacy seed for existing deployments.)
 
    If you don't set one, a key is generated and printed on first start — save it
    somewhere safe (losing it makes previously encrypted secrets unreadable). To
