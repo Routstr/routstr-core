@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import os
 import pathlib
 import sqlite3
@@ -10,7 +12,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, delete
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -290,10 +292,13 @@ async def store_cashu_transaction(
     created_at: int | None = None,
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
+    transaction_id: str | None = None,
+    log_failure: bool = True,
 ) -> bool:
     try:
         async with create_session() as session:
             tx = CashuTransaction(
+                id=transaction_id or uuid.uuid4().hex,
                 token=token,
                 amount=amount,
                 unit=unit,
@@ -307,13 +312,93 @@ async def store_cashu_transaction(
             )
             session.add(tx)
             await session.commit()
-        return True
-    except Exception as e:
-        logger.warning(
-            f"Failed to store cashu transaction: {e} (type={typ})",
-            extra={"error": str(e), "type": typ},
-        )
-        return False
+    except Exception:
+        if log_failure:
+            logger.critical(
+                "Failed to store Cashu transaction",
+                extra={"type": typ, "request_id": request_id, "source": source},
+                exc_info=True,
+            )
+        raise
+    return True
+
+
+async def _cashu_transaction_exists(transaction_id: str) -> bool:
+    async with create_session() as session:
+        return await session.get(CashuTransaction, transaction_id) is not None
+
+
+async def store_cashu_transaction_with_retry(
+    token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    typ: str = "out",
+    request_id: str | None = None,
+    collected: bool = False,
+    created_at: int | None = None,
+    source: str = "x-cashu",
+    api_key_hashed_key: str | None = None,
+    max_attempts: int = 3,
+) -> bool:
+    """Retry a critical Cashu transaction write with bounded backoff."""
+    transaction_id = hashlib.sha256(f"{typ}\0{token}".encode()).hexdigest()
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await store_cashu_transaction(
+                token=token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint_url,
+                typ=typ,
+                request_id=request_id,
+                collected=collected,
+                created_at=created_at,
+                source=source,
+                api_key_hashed_key=api_key_hashed_key,
+                transaction_id=transaction_id,
+                log_failure=False,
+            )
+        except IntegrityError as error:
+            try:
+                if await _cashu_transaction_exists(transaction_id):
+                    return True
+            except Exception as lookup_error:
+                last_error = lookup_error
+            else:
+                last_error = error
+        except Exception as error:
+            last_error = error
+
+        if last_error is not None:
+            if attempt == max_attempts:
+                break
+            delay = 0.25 * (2 ** (attempt - 1))
+            logger.warning(
+                "Cashu transaction storage failed; retrying",
+                extra={
+                    "type": typ,
+                    "request_id": request_id,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "retry_delay_seconds": delay,
+                },
+            )
+            await asyncio.sleep(delay)
+
+    logger.critical(
+        "Cashu transaction storage failed after bounded retries",
+        extra={
+            "type": typ,
+            "request_id": request_id,
+            "attempts": max_attempts,
+            "error": str(last_error),
+        },
+    )
+    if last_error is None:
+        raise RuntimeError("Cashu transaction storage failed without an exception")
+    raise last_error
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
@@ -357,6 +442,8 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     accumulated_msats: int = Field(default=0)
     total_paid_msats: int = Field(default=0)
     last_paid_at: int | None = Field(default=None)
+    payout_in_progress_msats: int = Field(default=0)
+    payout_started_at: int | None = Field(default=None)
 
 
 class CliToken(SQLModel, table=True):  # type: ignore
@@ -397,18 +484,42 @@ async def get_routstr_fee(session: AsyncSession) -> RoutstrFee:
     return fee
 
 
-async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> None:
+async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
+    """Checkpoint a fee payout before making the external payment."""
     stmt = (
         update(RoutstrFee)
         .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == 0)
+        .where(col(RoutstrFee.accumulated_msats) >= paid_msats)
         .values(
             accumulated_msats=RoutstrFee.accumulated_msats - paid_msats,
+            payout_in_progress_msats=paid_msats,
+            payout_started_at=int(time.time()),
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def complete_routstr_fee_payout(
+    session: AsyncSession, paid_msats: int
+) -> bool:
+    """Mark a checkpointed payout complete after the external payment succeeds."""
+    stmt = (
+        update(RoutstrFee)
+        .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == paid_msats)
+        .values(
+            payout_in_progress_msats=0,
+            payout_started_at=None,
             total_paid_msats=RoutstrFee.total_paid_msats + paid_msats,
             last_paid_at=int(time.time()),
         )
     )
-    await session.exec(stmt)  # type: ignore[call-overload]
+    result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
+    return result.rowcount == 1
 
 
 async def balances_for_mint_and_unit(

@@ -29,6 +29,7 @@ from .payment.helpers import (
 )
 from .payment.models import Model
 from .upstream import BaseUpstreamProvider
+from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
 from .upstream.request_correction import correct_request, extract_error_message
 
@@ -104,6 +105,34 @@ def get_unique_models() -> list[Model]:
     return list(_unique_models.values())
 
 
+def _is_tinfoil_attestation_path(path: str) -> bool:
+    """Return True for exact Tinfoil attestation routes, with optional slash."""
+    return path in {
+        "attestation",
+        "attestation/",
+        "tee/attestation",
+        "tee/attestation/",
+    }
+
+
+def _select_unauthenticated_get_upstreams(
+    path: str, upstreams: list[BaseUpstreamProvider]
+) -> list[BaseUpstreamProvider]:
+    """Select upstream candidates for unauthenticated GET bypass paths.
+
+    Tinfoil attestation endpoints are provider-specific. Trying every enabled
+    upstream can return an unrelated provider's 404 before Tinfoil is reached,
+    so route those paths only to Tinfoil providers.
+    """
+    if _is_tinfoil_attestation_path(path):
+        return [
+            upstream
+            for upstream in upstreams
+            if getattr(upstream, "provider_type", None) == "tinfoil"
+        ]
+    return upstreams
+
+
 async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
@@ -167,6 +196,7 @@ _API_PATH_PREFIXES = (
     "moderations",
     "providers",
     "tee/",
+    "attestation",
 )
 
 
@@ -185,20 +215,54 @@ async def proxy(
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
-    request_body_dict = parse_request_body_json(request_body, path)
 
-    # /tee/* GET requests (e.g. attestation) don't map to models — just
-    # forward to all enabled upstreams without model/cost/auth lookups.
-    if request.method == "GET" and path.startswith("tee/"):
-        all_upstreams = _upstreams
+    # EHBP (Encrypted HTTP Body Protocol) requests carry an Ehbp-Encapsulated-Key
+    # header and a binary HPKE-sealed body. The proxy cannot parse the body to
+    # extract the model id, so the SDK sends it in X-Routstr-Model. Forward the
+    # raw encrypted body to the upstream's /private/ endpoint and stream the
+    # encrypted response back untouched — the SDK's SecureClient decrypts it.
+    is_ehbp = "ehbp-encapsulated-key" in headers
+    if is_ehbp:
+        request_body_dict = {}
+        model_id = headers.get("x-routstr-model", "")
+        if not model_id:
+            return create_error_response(
+                "invalid_request",
+                "EHBP request missing X-Routstr-Model header",
+                400,
+                request=request,
+            )
+    else:
+        request_body_dict = parse_request_body_json(request_body, path)
+        if is_responses_api:
+            model_id = extract_model_from_responses_request(request_body_dict)
+        else:
+            model_id = request_body_dict.get("model", "unknown")
+
+    # Exact Tinfoil attestation GET routes don't map to models — forward
+    # without model/cost/auth lookups. Do not prefix-match here: paths such as
+    # /attestationjunk must continue through normal authentication.
+    if request.method == "GET" and _is_tinfoil_attestation_path(path):
+        selected_upstreams = _select_unauthenticated_get_upstreams(path, _upstreams)
+        if not selected_upstreams:
+            return create_error_response(
+                "upstream_error",
+                "No upstream available for unauthenticated GET path",
+                502,
+                request=request,
+            )
+
         last_error_response = None
-        for i, upstream in enumerate(all_upstreams):
+        for i, upstream in enumerate(selected_upstreams):
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
-                if response.status_code in [502, 429] and i < len(all_upstreams) - 1:
+                if (
+                    response.status_code in [502, 429]
+                    and i < len(selected_upstreams) - 1
+                ):
                     logger.warning(
-                        "Upstream %s returned %s for tee GET %s, trying next",
+                        "Upstream %s returned %s for unauthenticated GET %s, trying next",
                         upstream.provider_type,
                         response.status_code,
                         path,
@@ -207,22 +271,17 @@ async def proxy(
                 return response
             except UpstreamError as e:
                 logger.warning(
-                    "Upstream %s failed for tee GET %s: %s",
+                    "Upstream %s failed for unauthenticated GET %s: %s",
                     upstream.provider_type,
                     path,
                     e,
                 )
-                if i == len(all_upstreams) - 1:
+                if i == len(selected_upstreams) - 1:
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
             "upstream_error", "All upstreams failed", 502, request=request
         )
-
-    if is_responses_api:
-        model_id = extract_model_from_responses_request(request_body_dict)
-    else:
-        model_id = request_body_dict.get("model", "unknown")
 
     model_obj = get_model_instance(model_id)
 
@@ -239,6 +298,16 @@ async def proxy(
             400,
             request=request,
         )
+
+    if is_ehbp:
+        upstreams = [upstream for upstream in upstreams if upstream.supports_ehbp]
+        if not upstreams:
+            return create_error_response(
+                "unsupported_request",
+                f"No EHBP-capable provider found for model '{model_id}'",
+                400,
+                request=request,
+            )
 
     # todo figure out cost calculation since fallback provider is usually not the same price
     # Use first provider for initial checks/cost calculation
@@ -258,7 +327,23 @@ async def proxy(
         last_error = None
         for i, upstream in enumerate(upstreams):
             try:
-                if is_responses_api:
+                if is_ehbp:
+                    if not upstream.supports_ehbp:
+                        logger.warning(
+                            "Upstream %s does not support EHBP for model=%s",
+                            upstream.provider_type,
+                            model_id,
+                        )
+                        continue
+                    return await forward_ehbp_x_cashu_request(
+                        request=request,
+                        x_cashu_token=x_cashu,
+                        path=path,
+                        max_cost_for_model=max_cost_for_model,
+                        model_obj=model_obj,
+                        upstream=upstream,
+                    )
+                elif is_responses_api:
                     return await upstream.handle_x_cashu_responses(
                         request, x_cashu, path, max_cost_for_model, model_obj
                     )
@@ -347,7 +432,7 @@ async def proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
-    if request_body_dict:
+    if is_ehbp or request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
 
     # Tracks request params already removed in response to upstream rejections,
@@ -361,7 +446,29 @@ async def proxy(
         try:
             while True:
                 try:
-                    if is_responses_api:
+                    if is_ehbp:
+                        if not upstream.supports_ehbp:
+                            logger.warning(
+                                "Upstream %s does not support EHBP for model=%s",
+                                upstream.provider_type,
+                                model_id,
+                            )
+                            raise UpstreamError(
+                                f"Provider {upstream.provider_type} does not support EHBP",
+                                status_code=400,
+                            )
+                        response = await forward_ehbp_request(
+                            request=request,
+                            path=path,
+                            headers=headers,
+                            request_body=request_body,
+                            upstream=upstream,
+                            key=key,
+                            max_cost_for_model=max_cost_for_model,
+                            session=session,
+                            model_obj=model_obj,
+                        )
+                    elif is_responses_api:
                         response = await upstream.forward_responses_request(
                             request,
                             path,
@@ -406,7 +513,7 @@ async def proxy(
                 # When the upstream 400s naming such a param, strip it from the
                 # body and retry the SAME upstream. ``already_stripped`` bounds
                 # this to one retry per distinct param so it always terminates.
-                if response.status_code == 400:
+                if response.status_code == 400 and not is_ehbp:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),

@@ -257,7 +257,20 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["x-routstr-request-id", "x-cashu"],
+    expose_headers=[
+        "x-routstr-request-id",
+        "x-cashu",
+        "x-routstr-cost-msats",
+        "x-routstr-cost-usd",
+        "x-routstr-input-cost-msats",
+        "x-routstr-output-cost-msats",
+        # EHBP (Tinfoil) protocol headers must be exposed so browser clients
+        # can detect and decrypt encrypted responses. Without these, the
+        # browser hides them via CORS and the SDK treats the response as a
+        # plaintext proxy error, returning raw ciphertext.
+        "Ehbp-Response-Nonce",
+        "Ehbp-Encapsulated-Key",
+    ],
 )
 
 # Add logging middleware

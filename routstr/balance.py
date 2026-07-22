@@ -15,7 +15,9 @@ from .core.db import (
     AsyncSession,
     CashuTransaction,
     get_session,
-    store_cashu_transaction,
+)
+from .core.db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
 )
 from .core.logging import get_logger
 from .core.settings import settings

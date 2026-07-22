@@ -29,6 +29,9 @@ from .db import (
     UpstreamProviderRow,
     create_session,
 )
+from .db import (
+    store_cashu_transaction_with_retry as store_cashu_transaction,
+)
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
@@ -411,12 +414,11 @@ async def withdraw(
     # Get wallet and check balance
     from .settings import settings as global_settings
 
-    wallet = await get_wallet(
-        withdraw_request.mint_url or global_settings.primary_mint, withdraw_request.unit
-    )
+    effective_mint = withdraw_request.mint_url or global_settings.primary_mint
+    wallet = await get_wallet(effective_mint, withdraw_request.unit)
     proofs = get_proofs_per_mint_and_unit(
         wallet,
-        withdraw_request.mint_url or global_settings.primary_mint,
+        effective_mint,
         withdraw_request.unit,
         not_reserved=True,
     )
@@ -432,8 +434,27 @@ async def withdraw(
         raise HTTPException(status_code=400, detail="Insufficient wallet balance")
 
     token = await send_token(
-        withdraw_request.amount, withdraw_request.unit, withdraw_request.mint_url
+        withdraw_request.amount, withdraw_request.unit, effective_mint
     )
+    try:
+        await store_cashu_transaction(
+            token=token,
+            amount=withdraw_request.amount,
+            unit=withdraw_request.unit,
+            mint_url=effective_mint,
+            typ="out",
+            collected=False,
+            source="admin",
+        )
+    except Exception:
+        logger.critical(
+            "Admin withdrawal token issued without a persisted audit record",
+            extra={
+                "amount": withdraw_request.amount,
+                "unit": withdraw_request.unit,
+                "mint_url": effective_mint,
+            },
+        )
     return {"token": token}
 
 
