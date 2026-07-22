@@ -106,13 +106,15 @@ async def run(args: argparse.Namespace) -> int:
     for row in rows:
         grouped[(row["mint_url"], row["unit"])].append(row)
 
+    mint_reports: dict[str, object] = {}
+    errors: dict[str, str] = {}
     report: dict[str, object] = {
         "mode": "apply" if args.apply else "dry-run",
         "root": str(root),
         "started_at": int(time.time()),
         "pending_refund_secrets": len(pending_secrets),
-        "mints": {},
-        "errors": {},
+        "mints": mint_reports,
+        "errors": errors,
     }
     state_by_secret: dict[str, str] = {}
 
@@ -122,7 +124,7 @@ async def run(args: argparse.Namespace) -> int:
             try:
                 states = await fetch_states(client, mint_url, proofs, args.batch_size)
             except Exception as exc:
-                report["errors"][f"{mint_url}|{unit}"] = f"{type(exc).__name__}: {exc}"
+                errors[f"{mint_url}|{unit}"] = f"{type(exc).__name__}: {exc}"
                 continue
 
             summary: dict[str, dict[str, int]] = defaultdict(lambda: {"proofs": 0, "amount": 0})
@@ -161,7 +163,7 @@ async def run(args: argparse.Namespace) -> int:
                 else:
                     actions["preserve_unknown"] += 1
 
-            report["mints"][f"{mint_url}|{unit}"] = {
+            mint_reports[f"{mint_url}|{unit}"] = {
                 "states": dict(summary),
                 "actions": actions,
             }
