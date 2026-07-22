@@ -84,9 +84,10 @@ def test_disables_enabled_unchargeable_rows_only() -> None:
 
         migration._disable_unchargeable_enabled_rows(conn)
 
-        rows = dict(
-            conn.execute(sa.text("SELECT id, enabled FROM models")).all()
-        )
+        rows: dict[str, int] = {
+            r[0]: r[1]
+            for r in conn.execute(sa.text("SELECT id, enabled FROM models")).all()
+        }
 
     assert rows["free-enabled"] == 0  # unchargeable + enabled → disabled
     assert rows["priced-enabled"] == 1  # chargeable → untouched
