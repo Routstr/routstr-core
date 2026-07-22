@@ -7,7 +7,13 @@ from fastapi.responses import Response, StreamingResponse
 from sqlmodel import select
 
 from .algorithm import create_model_mappings
-from .auth import pay_for_request, revert_pay_for_request, validate_bearer_key
+from .auth import (
+    ReservationSnapshot,
+    get_reservation_snapshot,
+    pay_for_request,
+    revert_pay_for_request,
+    validate_bearer_key,
+)
 from .core import get_logger
 from .core.db import (
     ApiKey,
@@ -433,8 +439,10 @@ async def proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
+    reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
+        reservation_snapshot = await get_reservation_snapshot(key, session)
 
     # Tracks request params already removed in response to upstream rejections,
     # shared across providers so a stripped param stays stripped on failover and
@@ -468,6 +476,7 @@ async def proxy(
                             max_cost_for_model=max_cost_for_model,
                             session=session,
                             model_obj=model_obj,
+                            reservation_snapshot=reservation_snapshot,
                         )
                     elif is_responses_api:
                         response = await upstream.forward_responses_request(
@@ -490,6 +499,7 @@ async def proxy(
                             max_cost_for_model,
                             session,
                             model_obj,
+                            reservation_snapshot,
                         )
                 except UpstreamError:
                     # Let the outer UpstreamError handler manage retry/revert
@@ -506,7 +516,9 @@ async def proxy(
                             "max_cost_for_model": max_cost_for_model,
                         },
                     )
-                    await revert_pay_for_request(key, session, max_cost_for_model)
+                    await revert_pay_for_request(
+                        key, session, max_cost_for_model, reservation_snapshot
+                    )
                     raise
 
                 # Reactive recovery: some models reject one specific request
@@ -575,7 +587,9 @@ async def proxy(
                     continue
 
                 # 4xx error (user error), or other non-retryable error, or last provider failed
-                await revert_pay_for_request(key, session, max_cost_for_model)
+                await revert_pay_for_request(
+                    key, session, max_cost_for_model, reservation_snapshot
+                )
                 logger.warning(
                     "Upstream request failed, revert payment "
                     "(provider=%s model=%s status=%s path=%s)",
@@ -607,8 +621,10 @@ async def proxy(
                     "max_cost_for_model": max_cost_for_model,
                 },
             )
-            await asyncio.shield(
-                revert_pay_for_request(key, session, max_cost_for_model)
+            # The cancellation has been caught, so complete exact cleanup in
+            # this task before the request-scoped session can be torn down.
+            await revert_pay_for_request(
+                key, session, max_cost_for_model, reservation_snapshot
             )
             raise
 
@@ -628,7 +644,9 @@ async def proxy(
 
             # If this was the last provider
             if i == len(upstreams) - 1:
-                await revert_pay_for_request(key, session, max_cost_for_model)
+                await revert_pay_for_request(
+                    key, session, max_cost_for_model, reservation_snapshot
+                )
                 return create_upstream_error_response(e, request)
 
             # Otherwise loop continues to next provider

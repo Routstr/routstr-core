@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
 from routstr.upstream import base
 from routstr.upstream.base import BaseUpstreamProvider
@@ -67,6 +68,12 @@ async def _drive(chunks: list[bytes], requested_model: str | None = None) -> lis
         max_cost_for_model=100,
         background_tasks=MagicMock(),
         requested_model=requested_model,
+        reservation_snapshot=ReservationSnapshot(
+            release_id="test-release",
+            key_hash="test_hash",
+            billing_key_hash="test_hash",
+            reserved_msats=100,
+        ),
     )
 
     out: list[bytes] = []

@@ -15,7 +15,11 @@ from sqlmodel import col, update
 
 from ..auth import (
     ROUTSTR_FEE_PERCENT,
+    ReservationSnapshot,
+    _claim_reservation_for_charge,
+    _validate_reservation_snapshot,
     get_billing_key,
+    get_reservation_snapshot,
     payments_logger,
 )
 from ..core import get_logger
@@ -502,8 +506,14 @@ async def finalize_ehbp_actual_cost_payment(
     reserved_cost_for_model: int,
     model_id: str,
     cost_info: dict,
+    reservation_snapshot: ReservationSnapshot | None = None,
 ) -> None:
     """Finalize an EHBP bearer request using clamped provider usage metrics."""
+    reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
+    await _validate_reservation_snapshot(key, reservation, session)
+    if not await _claim_reservation_for_charge(reservation, session):
+        return
+    reserved_cost_for_model = reservation.reserved_msats
     billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
     billing_key_hash = billing_key.hashed_key
@@ -606,6 +616,7 @@ async def finalize_ehbp_max_cost_payment(
     session: AsyncSession,
     max_cost_for_model: int,
     model_id: str,
+    reservation_snapshot: ReservationSnapshot | None = None,
 ) -> None:
     """Finalize an EHBP bearer request by charging the reserved max cost.
 
@@ -613,6 +624,11 @@ async def finalize_ehbp_max_cost_payment(
     normal completion handlers, this intentionally charges the pre-reserved max
     cost and releases the reservation.
     """
+    reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
+    await _validate_reservation_snapshot(key, reservation, session)
+    if not await _claim_reservation_for_charge(reservation, session):
+        return
+    max_cost_for_model = reservation.reserved_msats
     billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
     billing_key_hash = billing_key.hashed_key
@@ -766,6 +782,7 @@ async def forward_ehbp_request(
     max_cost_for_model: int,
     session: AsyncSession,
     model_obj: Model,
+    reservation_snapshot: ReservationSnapshot | None = None,
 ) -> Response | StreamingResponse:
     """Forward an EHBP bearer-auth request and finalize billing.
 
@@ -883,7 +900,12 @@ async def forward_ehbp_request(
             # the requested model.
             billing_model = cost_info.pop("actual_model", None) or model_obj.id
             await finalize_ehbp_actual_cost_payment(
-                key, session, max_cost_for_model, billing_model, cost_info
+                key,
+                session,
+                max_cost_for_model,
+                billing_model,
+                cost_info,
+                reservation_snapshot,
             )
             cost_data = {**cost_info, "total_usd": 0.0}
         else:
@@ -897,7 +919,11 @@ async def forward_ehbp_request(
                 },
             )
             await finalize_ehbp_max_cost_payment(
-                key, session, max_cost_for_model, model_obj.id
+                key,
+                session,
+                max_cost_for_model,
+                model_obj.id,
+                reservation_snapshot,
             )
             cost_data = {
                 "total_msats": max_cost_for_model,

@@ -15,6 +15,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
 
 from ..auth import (
+    ReservationSnapshot,
     adjust_payment_for_tokens,
     get_reservation_snapshot,
     release_reservation,
@@ -803,6 +804,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         background_tasks: BackgroundTasks,
         requested_model: str | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -814,6 +816,17 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        if reservation_snapshot is None:
+            async with create_session() as snapshot_session:
+                snapshot_key = await snapshot_session.get(
+                    key.__class__, key.hashed_key
+                )
+                if snapshot_key is None:
+                    raise RuntimeError("Billing key disappeared before streaming")
+                reservation_snapshot = await get_reservation_snapshot(
+                    snapshot_key, snapshot_session
+                )
+
         logger.debug(
             "Processing streaming chat completion",
             extra={
@@ -845,6 +858,7 @@ class BaseUpstreamProvider:
                             {"model": last_model_seen or "unknown", "usage": None},
                             new_session,
                             max_cost_for_model,
+                            reservation_snapshot,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1002,9 +1016,6 @@ class BaseUpstreamProvider:
                 async with create_session() as session:
                     fresh_key = await session.get(key.__class__, key.hashed_key)
                     if fresh_key:
-                        reservation_snapshot = await get_reservation_snapshot(
-                            fresh_key, session
-                        )
                         cost_data: dict
                         try:
                             adjustment_input = (
@@ -1020,6 +1031,7 @@ class BaseUpstreamProvider:
                                 adjustment_input,
                                 session,
                                 max_cost_for_model,
+                                reservation_snapshot,
                             )
                             usage_finalized = True
                         except BaseException as e:
@@ -1038,7 +1050,12 @@ class BaseUpstreamProvider:
                                     session,
                                     max_cost_for_model,
                                 )
-                                if not released:
+                                if released:
+                                    # Release is a terminal billing state. Do not
+                                    # enqueue finalize_db_only from the generator's
+                                    # finally block and charge this request later.
+                                    usage_finalized = True
+                                else:
                                     logger.critical(
                                         "Billing reservation could not be released",
                                         extra={
@@ -1131,6 +1148,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         deducted_max_cost: int,
         requested_model: str | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -2532,6 +2550,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         session: AsyncSession,
         model_obj: Model,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response | StreamingResponse:
         """Forward authenticated request to upstream service with cost tracking.
 
@@ -2775,6 +2794,7 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             background_tasks,
                             requested_model=original_model_id,
+                            reservation_snapshot=reservation_snapshot,
                         )
                         result.background = background_tasks
                         return result

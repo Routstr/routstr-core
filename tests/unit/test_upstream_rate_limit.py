@@ -331,6 +331,7 @@ async def test_5xx_wrapped_rate_limit_is_classified(
 @pytest.mark.asyncio
 async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
     from routstr import proxy as proxy_module
+    from routstr.auth import ReservationSnapshot
     from routstr.core.db import ApiKey
     from routstr.core.exceptions import UpstreamError
 
@@ -359,6 +360,12 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
     )
 
     session = MagicMock()
+    reservation = ReservationSnapshot(
+        release_id="rate-limit-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=1_000,
+    )
     revert_mock = AsyncMock(return_value=True)
 
     with (
@@ -377,6 +384,11 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
             proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)
         ),
         patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
+        patch.object(
+            proxy_module,
+            "get_reservation_snapshot",
+            AsyncMock(return_value=reservation),
+        ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),
     ):
         response = await proxy_module.proxy(
@@ -393,4 +405,4 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
     assert RAW_ORG_ID not in serialized
     assert "org-[REDACTED]" in serialized
     # Single upstream failed -> reservation reverted exactly once (no double-charge).
-    revert_mock.assert_awaited_once_with(key, session, 1_000)
+    revert_mock.assert_awaited_once_with(key, session, 1_000, reservation)
