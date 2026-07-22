@@ -355,6 +355,93 @@ async def test_ppqai_two_ids_matching_one_openrouter_entry_keep_distinct_prices(
     assert {round(m.pricing.prompt * 1_000_000, 6) for m in models} == {5.0, 3.0}
 
 
+@pytest.mark.asyncio
+async def test_ppqai_matched_partial_price_keeps_openrouter_provenance() -> None:
+    """When PPQ prices only one side of a model that matched OpenRouter, the
+    other side is still OpenRouter-derived — so the whole-Pricing tag must stay
+    ``openrouter``, not claim the model is fully ``native``."""
+    from routstr.upstream.ppqai import PPQAIUpstreamProvider
+
+    payload = {
+        "data": [
+            {
+                "id": "gpt-4o",
+                "name": "GPT-4o",
+                "created_at": 0,
+                "context_length": 8192,
+                "pricing": {"api": {"input_per_1M": 5.0}},  # no output_per_1M
+            }
+        ]
+    }
+    or_feed = [
+        {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "created": 0,
+            "description": "d",
+            "context_length": 8192,
+            "architecture": {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": 0.000001, "completion": 0.000002},
+            "pricing_source": "openrouter",
+        }
+    ]
+
+    provider = PPQAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.ppqai.httpx.AsyncClient",
+        lambda *a, **k: _PPQClient(payload),
+    ):
+        with patch(
+            "routstr.upstream.ppqai.async_fetch_openrouter_models",
+            AsyncMock(return_value=or_feed),
+        ):
+            models = await provider.fetch_models()
+
+    model = _model_by_id(models, "gpt-4o")
+    assert model.pricing_source == PricingSource.OPENROUTER
+
+
+@pytest.mark.asyncio
+async def test_ppqai_unmatched_partial_price_is_unresolved_and_disabled() -> None:
+    """An unmatched PPQ model priced on only one side has no trustworthy full
+    price: billing the zero side at nothing, so it imports ``unresolved`` and
+    disabled rather than a confidently-``native`` half price."""
+    from routstr.upstream.ppqai import PPQAIUpstreamProvider
+
+    payload = {
+        "data": [
+            {
+                "id": "ppq-input-only",
+                "name": "PPQ Input Only",
+                "created_at": 0,
+                "context_length": 8192,
+                "pricing": {"api": {"input_per_1M": 1.0}},  # no output_per_1M
+            }
+        ]
+    }
+
+    provider = PPQAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.ppqai.httpx.AsyncClient",
+        lambda *a, **k: _PPQClient(payload),
+    ):
+        with patch(
+            "routstr.upstream.ppqai.async_fetch_openrouter_models",
+            AsyncMock(return_value=[]),
+        ):
+            models = await provider.fetch_models()
+
+    model = _model_by_id(models, "ppq-input-only")
+    assert model.pricing_source == PricingSource.UNRESOLVED
+    assert model.enabled is False
+
+
 # ---------------------------------------------------------------------------
 # ollama — no native price; resolve through the shared fallback or unresolved
 # ---------------------------------------------------------------------------
