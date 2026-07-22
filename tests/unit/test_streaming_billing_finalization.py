@@ -3,12 +3,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
-
-import routstr.auth as auth_module
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+import routstr.auth as auth_module
 from routstr.auth import (
     adjust_payment_for_tokens,
     get_reservation_snapshot,
