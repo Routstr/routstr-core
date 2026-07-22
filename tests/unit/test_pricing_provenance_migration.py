@@ -32,9 +32,7 @@ def test_backfill_assigns_unresolved_and_preserves_existing() -> None:
             sa.text(
                 "CREATE TABLE models ("
                 "id VARCHAR PRIMARY KEY, "
-                "pricing_source VARCHAR NULL, "
-                "pricing_checked_at INTEGER NULL, "
-                "pricing_source_version VARCHAR NULL"
+                "pricing_source VARCHAR NULL"
                 ")"
             )
         )

@@ -3,7 +3,6 @@ import json
 import math
 import re
 import secrets
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -481,8 +480,6 @@ class ModelCreate(BaseModel):
     enabled: bool = True
     forwarded_model_id: str | None = None
     pricing_source: str | None = None
-    pricing_checked_at: int | None = None
-    pricing_source_version: str | None = None
 
     @field_validator("pricing_source")
     @classmethod
@@ -565,51 +562,30 @@ def _pricing_edited(payload: "ModelCreate", existing: Model) -> bool:
     return False
 
 
-def _adopt_payload_provenance(
-    payload: "ModelCreate", now: int
-) -> tuple[str | None, int | None, str | None]:
-    """The provenance triple to persist when a write carries its own source.
+def _resolve_provenance(payload: "ModelCreate", existing: Model | None) -> str | None:
+    """The ``pricing_source`` to persist for a write.
 
-    A "save as fetched" refreshes the stored provenance from what the payload
-    declares; a missing ``pricing_checked_at`` is stamped now.
-    """
-    checked = (
-        payload.pricing_checked_at if payload.pricing_checked_at is not None else now
-    )
-    return (payload.pricing_source, checked, payload.pricing_source_version)
-
-
-def _resolve_provenance(
-    payload: "ModelCreate", existing: Model | None
-) -> tuple[str | None, int | None, str | None]:
-    """The ``(source, checked_at, version)`` triple to persist for a write.
-
-    - Update, price edited → ``manual`` now (the operator owns this price).
-    - Update, price unchanged → adopt the payload's provenance if it carries one
+    - Update, price edited → ``manual`` (the operator owns this price).
+    - Update, price unchanged → adopt the payload's source if it carries one
       (a "save as fetched" refreshes it), else preserve the existing row's.
-    - Create → adopt the payload's provenance if present; else a real price is
-      ``manual`` now (a hand-added model is operator-owned), but a zero price is
+    - Create → adopt the payload's source if present; else a real price is
+      ``manual`` (a hand-added model is operator-owned), but a zero price is
       ``unresolved`` — a client that omits the field (today's UI) can't tell a
       deliberate free import from an unpriced one, so it must not be laundered
       into a billable ``manual`` $0.
     """
-    now = int(time.time())
     if existing is not None:
         if _pricing_edited(payload, existing):
-            return (PricingSource.MANUAL.value, now, None)
+            return PricingSource.MANUAL.value
         if payload.pricing_source is not None:
-            return _adopt_payload_provenance(payload, now)
+            return payload.pricing_source
         source = existing.pricing_source
-        return (
-            source.value if source is not None else None,
-            existing.pricing_checked_at,
-            existing.pricing_source_version,
-        )
+        return source.value if source is not None else None
     if payload.pricing_source is not None:
-        return _adopt_payload_provenance(payload, now)
+        return payload.pricing_source
     if _both_prices_zero(payload):
-        return (PricingSource.UNRESOLVED.value, now, None)
-    return (PricingSource.MANUAL.value, now, None)
+        return PricingSource.UNRESOLVED.value
+    return PricingSource.MANUAL.value
 
 
 def _both_prices_zero(payload: "ModelCreate") -> bool:
@@ -663,11 +639,7 @@ async def upsert_provider_model(
             # Snapshot provenance from the fee-free view before mutating so a
             # price edit can be detected against what the UI was shown.
             existing_model = _row_to_model(existing_row, apply_provider_fee=False)
-            (
-                source,
-                checked_at,
-                source_version,
-            ) = _resolve_provenance(payload, existing_model)
+            source = _resolve_provenance(payload, existing_model)
             existing_row.name = payload.name
             existing_row.description = payload.description
             existing_row.created = int(payload.created)
@@ -690,8 +662,6 @@ async def upsert_provider_model(
             existing_row.enabled = _effective_enabled(payload, source)
             existing_row.forwarded_model_id = payload.forwarded_model_id or payload.id
             existing_row.pricing_source = source
-            existing_row.pricing_checked_at = checked_at
-            existing_row.pricing_source_version = source_version
 
             session.add(existing_row)
             await session.commit()
@@ -701,7 +671,7 @@ async def upsert_provider_model(
         else:
             # Create new model
             logger.info(f"Creating new model: {payload.id}")
-            source, checked_at, source_version = _resolve_provenance(payload, None)
+            source = _resolve_provenance(payload, None)
             row = ModelRow(
                 id=payload.id,
                 name=payload.name,
@@ -727,8 +697,6 @@ async def upsert_provider_model(
                 enabled=_effective_enabled(payload, source),
                 forwarded_model_id=payload.forwarded_model_id or payload.id,
                 pricing_source=source,
-                pricing_checked_at=checked_at,
-                pricing_source_version=source_version,
             )
             session.add(row)
             await session.commit()
@@ -840,11 +808,7 @@ async def batch_override_provider_models(
             if existing_row:
                 # Update existing
                 existing_model = _row_to_model(existing_row, apply_provider_fee=False)
-                (
-                    source,
-                    checked_at,
-                    source_version,
-                ) = _resolve_provenance(model_data, existing_model)
+                source = _resolve_provenance(model_data, existing_model)
                 existing_row.name = model_data.name
                 existing_row.description = model_data.description
                 existing_row.created = int(model_data.created)
@@ -868,14 +832,10 @@ async def batch_override_provider_models(
                 )
                 existing_row.enabled = _effective_enabled(model_data, source)
                 existing_row.pricing_source = source
-                existing_row.pricing_checked_at = checked_at
-                existing_row.pricing_source_version = source_version
                 session.add(existing_row)
             else:
                 # Create new
-                source, checked_at, source_version = _resolve_provenance(
-                    model_data, None
-                )
+                source = _resolve_provenance(model_data, None)
                 row = ModelRow(
                     id=model_data.id,
                     name=model_data.name,
@@ -904,8 +864,6 @@ async def batch_override_provider_models(
                     upstream_provider_id=provider_pk,
                     enabled=_effective_enabled(model_data, source),
                     pricing_source=source,
-                    pricing_checked_at=checked_at,
-                    pricing_source_version=source_version,
                 )
                 session.add(row)
 

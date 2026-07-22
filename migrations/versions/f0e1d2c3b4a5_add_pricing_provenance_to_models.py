@@ -40,16 +40,6 @@ def upgrade() -> None:
             "models",
             sa.Column("pricing_source", sa.String(), nullable=True),
         )
-    if "pricing_checked_at" not in columns:
-        op.add_column(
-            "models",
-            sa.Column("pricing_checked_at", sa.Integer(), nullable=True),
-        )
-    if "pricing_source_version" not in columns:
-        op.add_column(
-            "models",
-            sa.Column("pricing_source_version", sa.String(), nullable=True),
-        )
 
     _backfill_pricing_source(conn)
 
@@ -59,10 +49,5 @@ def downgrade() -> None:
     inspector = sa.inspect(conn)
     columns = {c["name"] for c in inspector.get_columns("models")}
 
-    for column in (
-        "pricing_source_version",
-        "pricing_checked_at",
-        "pricing_source",
-    ):
-        if column in columns:
-            op.drop_column("models", column)
+    if "pricing_source" in columns:
+        op.drop_column("models", "pricing_source")

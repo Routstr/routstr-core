@@ -4886,8 +4886,6 @@ class BaseUpstreamProvider:
             alias_ids=model.alias_ids,
             forwarded_model_id=model.forwarded_model_id,
             pricing_source=model.pricing_source,
-            pricing_checked_at=model.pricing_checked_at,
-            pricing_source_version=model.pricing_source_version,
         )
 
         (
@@ -4913,8 +4911,6 @@ class BaseUpstreamProvider:
             alias_ids=model.alias_ids,
             forwarded_model_id=model.forwarded_model_id,
             pricing_source=model.pricing_source,
-            pricing_checked_at=model.pricing_checked_at,
-            pricing_source_version=model.pricing_source_version,
         )
 
     async def fetch_models(self) -> list[Model]:
