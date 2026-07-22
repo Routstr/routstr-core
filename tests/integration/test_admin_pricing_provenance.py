@@ -117,8 +117,6 @@ async def test_hand_created_model_is_manual(
     row = await integration_session.get(ModelRow, ("hand-made", provider_id))
     assert row is not None
     assert row.pricing_source == "manual"
-    assert row.pricing_checked_at is not None
-    assert row.pricing_source_version is None
 
 
 @pytest.mark.integration
@@ -134,16 +132,12 @@ async def test_create_adopts_payload_provenance(
             provider_id,
             model_id="as-fetched",
             pricing_source="litellm",
-            pricing_checked_at=1700000000,
-            pricing_source_version="1.83.0",
         ),
     )
     assert resp.status_code == 200
     row = await integration_session.get(ModelRow, ("as-fetched", provider_id))
     assert row is not None
     assert row.pricing_source == "litellm"
-    assert row.pricing_checked_at == 1700000000
-    assert row.pricing_source_version == "1.83.0"
 
 
 @pytest.mark.integration
@@ -171,7 +165,6 @@ async def test_price_edit_flips_to_manual(
     row = await integration_session.get(ModelRow, ("edit-me", provider_id))
     assert row is not None
     assert row.pricing_source == "manual"
-    assert row.pricing_source_version is None
 
 
 @pytest.mark.integration
@@ -205,8 +198,6 @@ async def test_unchanged_price_preserves_source_despite_cache_backfill(
         enabled=True,
         forwarded_model_id="deepseek-chat",
         pricing_source="litellm",
-        pricing_checked_at=1700000000,
-        pricing_source_version="1.83.0",
     )
     integration_session.add(row)
     await integration_session.commit()
@@ -421,7 +412,6 @@ async def test_operator_zeroing_price_keeps_enabled_state(
         enabled=True,
         forwarded_model_id="going-free",
         pricing_source="litellm",
-        pricing_source_version="1.83.0",
     )
     integration_session.add(row)
     await integration_session.commit()

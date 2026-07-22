@@ -1,16 +1,15 @@
-"""Tests for pricing provenance — ``pricing_source`` and freshness on ``Model``.
+"""Tests for pricing provenance — ``pricing_source`` on ``Model``.
 
 Provenance makes a price's origin a first-class, queryable fact: ``native`` is
 the provider's own (trustworthy) price, ``litellm``/``openrouter`` are curated/
 resale estimates, ``manual`` is operator-entered, and ``unresolved`` marks a
 model no source could price (imported disabled). These tests drive the tag
-through the public provider ``fetch_models`` API and assert the three fields
-survive the fee/sats carrier rebuilds that ``refresh`` performs.
+through the public provider ``fetch_models`` API and assert it survives the
+fee/sats carrier rebuilds that ``refresh`` performs.
 """
 
 from __future__ import annotations
 
-import importlib.metadata
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -94,21 +93,14 @@ async def test_generic_native_price_tagged_native() -> None:
     models = await _fetch(payload, [])
     model = _model_by_id(models, "venice-llama")
     assert model.pricing_source == PricingSource.NATIVE
-    assert model.pricing_checked_at is not None
-    # A live source carries no version anchor; freshness is checked_at.
-    assert model.pricing_source_version is None
 
 
 @pytest.mark.asyncio
-async def test_generic_bare_deepseek_tagged_litellm_with_version() -> None:
+async def test_generic_bare_deepseek_tagged_litellm() -> None:
     payload = {"data": [{"id": "deepseek-chat", "owned_by": "deepseek"}]}
     models = await _fetch(payload, [])
     model = _model_by_id(models, "deepseek-chat")
     assert model.pricing_source == PricingSource.LITELLM
-    assert model.pricing_checked_at is not None
-    # A static source records its dist version so staleness can be checked
-    # out-of-band; derive the expectation, never hard-code the version.
-    assert model.pricing_source_version == importlib.metadata.version("litellm")
 
 
 @pytest.mark.asyncio
@@ -124,8 +116,6 @@ async def test_generic_openrouter_fallback_tagged_openrouter() -> None:
     models = await _fetch(payload, or_feed)
     model = _model_by_id(models, "exotic/model-9000")
     assert model.pricing_source == PricingSource.OPENROUTER
-    assert model.pricing_checked_at is not None
-    assert model.pricing_source_version is None
 
 
 @pytest.mark.asyncio
@@ -135,7 +125,6 @@ async def test_generic_unresolvable_tagged_unresolved_and_disabled() -> None:
     model = _model_by_id(models, "nobody-has-priced-this-xyz")
     assert model.enabled is False
     assert model.pricing_source == PricingSource.UNRESOLVED
-    assert model.pricing_checked_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +157,6 @@ def test_sats_pricing_rebuild_preserves_provenance() -> None:
     rebuilt = _update_model_sats_pricing(model, sats_to_usd=0.0005)
     assert rebuilt.sats_pricing is not None
     assert rebuilt.pricing_source == PricingSource.LITELLM
-    assert rebuilt.pricing_checked_at == model.pricing_checked_at
-    assert rebuilt.pricing_source_version == model.pricing_source_version
 
 
 def test_provider_fee_rebuild_preserves_provenance() -> None:
@@ -177,8 +164,6 @@ def test_provider_fee_rebuild_preserves_provenance() -> None:
     provider = GenericUpstreamProvider(base_url="http://x")
     rebuilt = provider._apply_provider_fee_to_model(model)
     assert rebuilt.pricing_source == PricingSource.NATIVE
-    assert rebuilt.pricing_checked_at == model.pricing_checked_at
-    assert rebuilt.pricing_source_version is None
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +208,6 @@ async def test_openrouter_feed_stamps_openrouter_provenance() -> None:
     assert feed
     entry = feed[0]
     assert entry["pricing_source"] == PricingSource.OPENROUTER
-    assert entry["pricing_source_version"] is None
 
 
 # ---------------------------------------------------------------------------

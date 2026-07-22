@@ -253,8 +253,6 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
             pricing_source=model.pricing_source,
-            pricing_checked_at=model.pricing_checked_at,
-            pricing_source_version=model.pricing_source_version,
         )
 
         (
@@ -278,6 +276,4 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
             pricing_source=model.pricing_source,
-            pricing_checked_at=model.pricing_checked_at,
-            pricing_source_version=model.pricing_source_version,
         )
