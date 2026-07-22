@@ -136,7 +136,7 @@ async def test_auto_topup_does_not_send_untracked_token() -> None:
         ),
         patch(
             "routstr.upstream.auto_topup.store_cashu_transaction",
-            AsyncMock(return_value=False),
+            AsyncMock(side_effect=RuntimeError("database unavailable")),
         ),
     ):
         await _check_and_topup(_row())
