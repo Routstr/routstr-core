@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
+
+import routstr.auth as auth_module
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -153,6 +155,59 @@ async def test_post_commit_failure_cannot_release_charged_reservation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generic_background_settlement_uses_explicit_reservation() -> None:
+    engine = await _engine()
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key", provider_fee=1.0
+    )
+    key = ApiKey(hashed_key="generic-key", balance=1_000)
+    cost = MaxCostData(
+        base_msats=500,
+        input_msats=0,
+        output_msats=0,
+        total_msats=500,
+    )
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        session.add(key)
+        await session.commit()
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
+
+    context_token = auth_module._current_reservation.set(None)
+    try:
+        with (
+            patch(
+                "routstr.upstream.base.create_session",
+                side_effect=lambda: AsyncSession(engine, expire_on_commit=False),
+            ),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+            patch("routstr.auth.calculate_cost", AsyncMock(return_value=cost)),
+        ):
+            await provider._finalize_generic_streaming_payment(
+                key.hashed_key,
+                500,
+                "audio/speech",
+                model_obj=None,
+                provider_fee=provider.provider_fee,
+                reservation_snapshot=snapshot,
+            )
+    finally:
+        auth_module._current_reservation.reset(context_token)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        settled_key = await session.get(ApiKey, key.hashed_key)
+        record = await session.get(ReservationRelease, snapshot.release_id)
+        assert settled_key is not None
+        assert (settled_key.balance, settled_key.reserved_balance) == (500, 0)
+        assert record is not None and record.status == "charged"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_streaming_release_is_terminal_and_suppresses_background_charge() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"
@@ -224,7 +279,7 @@ async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> 
                 {"model": "test", "usage": None},
                 session,
                 500,
-                snapshot,
+                reservation_snapshot=snapshot,
             )
 
         await session.refresh(first)

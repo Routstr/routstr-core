@@ -43,10 +43,9 @@ logger = get_logger(__name__)
 proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
-_model_instances: dict[str, Model] = {}  # All aliases -> Model
 _provider_map: dict[
-    str, list[BaseUpstreamProvider]
-] = {}  # All aliases -> List[Provider]
+    str, list[tuple[Model, BaseUpstreamProvider]]
+] = {}  # All aliases -> sorted [(candidate Model, its Provider)]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
@@ -78,32 +77,44 @@ def get_upstreams() -> list[BaseUpstreamProvider]:
     return _upstreams
 
 
-def get_model_instance(model_id: str) -> Model | None:
-    """Get Model instance by ID from global cache."""
+def get_candidates(
+    model_id: str,
+) -> list[tuple[Model, BaseUpstreamProvider]] | None:
+    """Get the sorted (model, provider) candidate list for a model ID.
+
+    Each provider is paired with its own model for the alias, so routing can
+    forward and bill the candidate that actually serves. Version suffixes
+    (e.g. ``-20251222``) are stripped as a retry when the exact ID is
+    unknown, since upstreams may return a specific version of a base model
+    we track.
+    """
     if not model_id:
         return None
 
     model_id_lower = model_id.lower()
-    # Try exact match first
-    if model := _model_instances.get(model_id_lower):
-        return model
+    if candidates := _provider_map.get(model_id_lower):
+        return candidates
 
-    # Try stripping common version suffixes (e.g., -20251222)
-    # This handles cases where upstream returns a specific version
-    # but we only track the base model name.
     import re
 
     base_model_id = re.sub(r"-\d{8}$", "", model_id_lower)
     if base_model_id != model_id_lower:
-        if model := _model_instances.get(base_model_id):
-            return model
+        if candidates := _provider_map.get(base_model_id):
+            return candidates
 
     return None
 
 
+def get_model_instance(model_id: str) -> Model | None:
+    """Get the best-ranked Model instance for a model ID."""
+    candidates = get_candidates(model_id)
+    return candidates[0][0] if candidates else None
+
+
 def get_provider_for_model(model_id: str) -> list[BaseUpstreamProvider] | None:
-    """Get UpstreamProvider list for model ID from global cache."""
-    return _provider_map.get(model_id.lower())
+    """Get the sorted UpstreamProvider list for a model ID."""
+    candidates = get_candidates(model_id)
+    return [provider for _, provider in candidates] if candidates else None
 
 
 def get_unique_models() -> list[Model]:
@@ -143,7 +154,7 @@ async def refresh_model_maps() -> None:
     """Refresh global model and provider maps using the cost-based algorithm."""
     from sqlalchemy.orm import selectinload
 
-    global _model_instances, _provider_map, _unique_models
+    global _provider_map, _unique_models
 
     async with create_session() as session:
         # Fetch all providers with their models in a single logical operation
@@ -166,7 +177,7 @@ async def refresh_model_maps() -> None:
             else:
                 disabled_model_keys.add(model_key)
 
-    _model_instances, _provider_map, _unique_models = create_model_mappings(
+    _, _provider_map, _unique_models = create_model_mappings(
         upstreams=_upstreams,
         overrides_by_key=overrides_by_key,
         disabled_model_keys=disabled_model_keys,
@@ -289,25 +300,20 @@ async def proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
-    model_obj = get_model_instance(model_id)
+    candidates = get_candidates(model_id)
 
-    if not model_obj:
+    if not candidates:
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
 
-    upstreams = get_provider_for_model(model_id)
-    if not upstreams:
-        return create_error_response(
-            "invalid_model",
-            f"No provider found for model '{model_id}'",
-            400,
-            request=request,
-        )
-
     if is_ehbp:
-        upstreams = [upstream for upstream in upstreams if upstream.supports_ehbp]
-        if not upstreams:
+        candidates = [
+            (model, upstream)
+            for model, upstream in candidates
+            if upstream.supports_ehbp
+        ]
+        if not candidates:
             return create_error_response(
                 "unsupported_request",
                 f"No EHBP-capable provider found for model '{model_id}'",
@@ -315,9 +321,10 @@ async def proxy(
                 request=request,
             )
 
-    # todo figure out cost calculation since fallback provider is usually not the same price
-    # Use first provider for initial checks/cost calculation
-    # primary_upstream = upstreams[0]
+    # Reserve/max-cost checks use the best-ranked candidate; the failover loop
+    # below rebinds (model_obj, upstream) per candidate so forwarding and
+    # settlement always use the model of the provider actually being tried.
+    model_obj = candidates[0][0]
 
     _max_cost_for_model = await get_max_cost_for_model(
         model=model_id, session=session, model_obj=model_obj
@@ -332,7 +339,7 @@ async def proxy(
 
     if x_cashu := headers.get("x-cashu", None):
         last_error = None
-        for i, upstream in enumerate(upstreams):
+        for i, (model_obj, upstream) in enumerate(candidates):
             try:
                 if is_ehbp:
                     if not upstream.supports_ehbp:
@@ -370,7 +377,7 @@ async def proxy(
                         "status_code": e.status_code,
                     },
                 )
-                if i == len(upstreams) - 1:
+                if i == len(candidates) - 1:
                     last_error = e
                 continue
 
@@ -397,12 +404,12 @@ async def proxy(
         logger.debug("Processing unauthenticated GET request", extra={"path": path})
 
         last_error_response = None
-        for i, upstream in enumerate(upstreams):
+        for i, (_, upstream) in enumerate(candidates):
             try:
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
 
-                if response.status_code in [502, 429] and i < len(upstreams) - 1:
+                if response.status_code in [502, 429] and i < len(candidates) - 1:
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -432,7 +439,7 @@ async def proxy(
                 return response
             except UpstreamError as e:
                 logger.warning(f"Upstream {upstream.provider_type} failed (GET): {e}")
-                if i == len(upstreams) - 1:
+                if i == len(candidates) - 1:
                     last_error_response = create_upstream_error_response(e, request)
                 continue
         return last_error_response or create_error_response(
@@ -449,7 +456,35 @@ async def proxy(
     # the reactive retry can never loop unboundedly.
     already_stripped: set[str] = set()
 
-    for i, upstream in enumerate(upstreams):
+    for i, (model_obj, upstream) in enumerate(candidates):
+        if i > 0 and request_body_dict:
+            # The reservation was sized to the previous candidate's envelope;
+            # settlement bills the serving candidate, so a pricier fallback
+            # must be re-reserved at its own max cost before it is tried. A
+            # candidate whose envelope the key cannot cover is rejected, just
+            # as it would be had it been ranked first.
+            candidate_max = await get_max_cost_for_model(
+                model=model_id, session=session, model_obj=model_obj
+            )
+            candidate_max = await calculate_discounted_max_cost(
+                candidate_max, request_body_dict, model_obj=model_obj
+            )
+            candidate_max = max(candidate_max, settings.min_request_msat)
+            if candidate_max > max_cost_for_model:
+                await revert_pay_for_request(
+                    key, session, max_cost_for_model, reservation_snapshot
+                )
+                try:
+                    await pay_for_request(key, candidate_max, session)
+                except HTTPException:
+                    if i == len(candidates) - 1:
+                        raise
+                    await pay_for_request(key, max_cost_for_model, session)
+                    reservation_snapshot = await get_reservation_snapshot(key, session)
+                    continue
+                reservation_snapshot = await get_reservation_snapshot(key, session)
+                max_cost_for_model = candidate_max
+
         headers = upstream.prepare_headers(dict(request.headers))
 
         try:
@@ -488,6 +523,7 @@ async def proxy(
                             max_cost_for_model,
                             session,
                             model_obj,
+                            reservation_snapshot,
                         )
                     else:
                         response = await upstream.forward_request(
@@ -554,7 +590,7 @@ async def proxy(
             if response.status_code != 200:
                 # Check if we should retry (502 Upstream Error or 429 Rate Limit)
                 should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
-                if should_retry and i < len(upstreams) - 1:
+                if should_retry and i < len(candidates) - 1:
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -638,12 +674,12 @@ async def proxy(
                     "provider": upstream.provider_type,
                     "model": model_id,
                     "status_code": e.status_code,
-                    "retry": i < len(upstreams) - 1,
+                    "retry": i < len(candidates) - 1,
                 },
             )
 
             # If this was the last provider
-            if i == len(upstreams) - 1:
+            if i == len(candidates) - 1:
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
