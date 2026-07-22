@@ -396,4 +396,4 @@ async def test_proxy_loop_surfaces_rate_limit_and_reverts_once() -> None:
     assert RAW_ORG_ID not in serialized
     assert "org-[REDACTED]" in serialized
     # Single upstream failed -> reservation reverted exactly once (no double-charge).
-    revert_mock.assert_awaited_once_with(key, session, 1_000)
+    revert_mock.assert_awaited_once_with(key, session, 900)

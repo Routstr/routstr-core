@@ -3,10 +3,10 @@ import re
 import socket
 import time
 import typing
-from typing import TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
 
 import httpx
-from cashu.core.base import Proof, Token
+from cashu.core.base import MintQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
@@ -40,6 +40,10 @@ class MintConnectionError(Exception):
     """
 
 
+class SourceMintConnectionError(MintConnectionError):
+    """The mint that issued the incoming proofs cannot be reached."""
+
+
 class TokenConsumedError(Exception):
     """A failure that happened AFTER the token's proofs were spent (melt
     succeeded, or redemption already returned) — e.g. minting on the primary
@@ -53,6 +57,10 @@ class TokenConsumedError(Exception):
 
 # httpx base classes cover their subclasses. HTTPStatusError is excluded on
 # purpose — that means the mint answered, just with an error status.
+_MINT_TRANSPORT_COOLDOWN_SECONDS = 30.0
+_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS = 60.0
+_MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 7 * 60 * 60
+
 _TRANSPORT_EXC_TYPES: tuple[type[BaseException], ...] = (
     httpx.NetworkError,
     httpx.TimeoutException,
@@ -60,6 +68,311 @@ _TRANSPORT_EXC_TYPES: tuple[type[BaseException], ...] = (
     socket.gaierror,  # DNS failure
     asyncio.TimeoutError,
 )
+
+
+class _MintRateGuard:
+    """Limit concurrency and remember per-mint rate-limit cooldowns."""
+
+    _guards: dict[str, "_MintRateGuard"] = {}
+
+    @classmethod
+    def get(cls, mint_url: str) -> "_MintRateGuard":
+        concurrency = settings.mint_max_concurrency
+        guard = cls._guards.get(mint_url)
+        if guard is None or guard._max_concurrency != concurrency:
+            guard = cls(mint_url, concurrency)
+            cls._guards[mint_url] = guard
+        return guard
+
+    def __init__(self, mint_url: str, max_concurrency: int):
+        self._mint_url = mint_url
+        self._max_concurrency = max_concurrency
+        self._semaphore = (
+            asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+        )
+        self._cooldown_until = 0.0
+        self._cooldown_reason: str | None = None
+        self._consecutive_rate_limits = 0
+        self._needs_probe = False
+        self._probe_lock = asyncio.Lock()
+
+    def apply_cooldown(self, delay: float, *, reason: str | None = None) -> None:
+        deadline = time.monotonic() + max(0.0, delay)
+        if deadline >= self._cooldown_until:
+            self._cooldown_until = deadline
+            if reason is not None:
+                self._cooldown_reason = reason
+        elif self._cooldown_reason is None and reason is not None:
+            self._cooldown_reason = reason
+        self._needs_probe = True
+
+    def apply_rate_limit_cooldown(self, retry_after: float | None = None) -> float:
+        remaining = self.cooldown_remaining()
+        if remaining > 0 and self._cooldown_reason == "rate_limited":
+            minimum = min(
+                _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS,
+                max(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, retry_after or 0.0),
+            )
+            if minimum > remaining:
+                self.apply_cooldown(minimum, reason="rate_limited")
+                return minimum
+            return remaining
+
+        self._consecutive_rate_limits += 1
+        base = max(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, retry_after or 0.0)
+        multiplier = 2 ** min(self._consecutive_rate_limits - 1, 10)
+        delay = min(_MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS, base * multiplier)
+        self.apply_cooldown(delay, reason="rate_limited")
+        return delay
+
+    def cooldown_remaining(self) -> float:
+        return max(0.0, self._cooldown_until - time.monotonic())
+
+    def cooldown_reason(self) -> str | None:
+        return self._cooldown_reason if self.cooldown_remaining() > 0 else None
+
+    async def _wait_for_cooldown(self) -> None:
+        while True:
+            deadline = self._cooldown_until
+            wait = max(0.0, deadline - time.monotonic())
+            if wait <= 0:
+                return
+            logger.debug(
+                "Mint rate guard: cooling down",
+                extra={"mint_url": self._mint_url, "wait_seconds": round(wait, 2)},
+            )
+            await asyncio.sleep(wait)
+            if self._cooldown_until <= deadline:
+                return
+
+    async def _run_probe(self, factory: Callable[[], Awaitable[Any]]) -> Any:
+        await self._wait_for_cooldown()
+        logger.warning(
+            "Mint cooldown ended; sending one probe request",
+            extra={"event": "mint_cooldown_probe_started", "mint_url": self._mint_url},
+        )
+        try:
+            result = await factory()
+        except Exception as error:
+            # Keep queued callers behind the probe.  On a rate-limit,
+            # re-apply the *same* cooldown the caller already set rather
+            # than calling apply_rate_limit_cooldown() — the probe is a
+            # recovery check, not a new request that should escalate the
+            # exponential backoff counter.
+            if _is_mint_rate_limited(error):
+                retry_after = None
+                if isinstance(error, httpx.HTTPStatusError):
+                    retry_after = _parse_retry_after(error.response.headers)
+                delay = max(
+                    _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS,
+                    retry_after or 0.0,
+                )
+                self.apply_cooldown(delay, reason="rate_limited")
+            else:
+                self.apply_cooldown(1.0)
+            logger.warning(
+                "Mint cooldown probe failed",
+                extra={
+                    "event": "mint_cooldown_probe_failed",
+                    "mint_url": self._mint_url,
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                    "cooldown_seconds": round(self.cooldown_remaining(), 2),
+                    "consecutive_rate_limits": self._consecutive_rate_limits,
+                },
+            )
+            raise
+
+        self._needs_probe = False
+        self._cooldown_until = 0.0
+        self._cooldown_reason = None
+        self._consecutive_rate_limits = 0
+        logger.warning(
+            "Mint cooldown probe succeeded; restoring normal concurrency",
+            extra={
+                "event": "mint_cooldown_probe_succeeded",
+                "mint_url": self._mint_url,
+            },
+        )
+        return result
+
+    async def run(self, factory: Callable[[], Awaitable[Any]]) -> Any:
+        while True:
+            if self._needs_probe or self.cooldown_remaining() > 0:
+                async with self._probe_lock:
+                    if self.cooldown_remaining() > 0:
+                        self._needs_probe = True
+                    if self._needs_probe:
+                        return await self._run_probe(factory)
+                continue
+
+            if self._semaphore is None:
+                return await factory()
+            async with self._semaphore:
+                if self._needs_probe:
+                    continue
+                return await factory()
+
+
+def _mint_cooldown_remaining(mint_url: str) -> float:
+    return _MintRateGuard.get(mint_url).cooldown_remaining()
+
+
+def _mint_cooldown_reason(mint_url: str) -> str | None:
+    return _MintRateGuard.get(mint_url).cooldown_reason()
+
+
+def _is_mint_rate_limited(error: BaseException) -> bool:
+    """True if the mint returned an HTTP 429 (Too Many Requests).
+
+    Only matches ``httpx.HTTPStatusError`` with status code 429 — never
+    classifies based on the exception's message text.  Substring matching
+    on ``"rate limit"`` / ``"too many requests"`` was removed because it
+    catches unrelated errors (e.g. a 503 whose body happens to mention
+    "database rate exceeded"), which triggers unnecessary exponential
+    backoff and can block state recovery indefinitely.
+    """
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.HTTPStatusError):
+            if current.response.status_code == 429:
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+async def _mint_operation(
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    op_name: str = "mint_operation",
+    mint_url: str = "",
+    retry_timeouts: bool = True,
+    retry_on_rate_limit: bool = True,
+) -> Any:
+    """Run a mint operation with bounded concurrency and adaptive cooldown.
+
+    The timeout covers concurrency queueing, 429 cooldown, backoff, and network
+    work together.  ``factory`` must return a fresh coroutine for every retry.
+
+    When ``retry_on_rate_limit`` is False a 429 is not retried in-place — the
+    cooldown is still applied to the per-mint guard (so subsequent operations on
+    that mint wait), but the exception is re-raised so the caller (typically
+    ``_request_mint_with_fallback``) can immediately try a different mint.
+    """
+    guard = _MintRateGuard.get(mint_url) if mint_url else None
+    timeout = settings.mint_operation_timeout_seconds
+    max_attempts = settings.mint_retry_max_attempts + 1
+
+    async def invoke() -> Any:
+        if guard is not None:
+            return await guard.run(factory)
+        return await factory()
+
+    async def run_with_retries() -> Any:
+        for attempt in range(max_attempts):
+            try:
+                return await invoke()
+            except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+                if retry_timeouts and attempt < max_attempts - 1:
+                    backoff = (2**attempt) + (time.monotonic() % 1.0)
+                    logger.warning(
+                        "Mint operation timed out, retrying",
+                        extra={
+                            "op_name": op_name,
+                            "mint_url": mint_url,
+                            "attempt": attempt + 1,
+                            "backoff_seconds": round(backoff, 2),
+                        },
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise httpx.TimeoutException(
+                    f"{op_name} timed out (attempts: {attempt + 1})"
+                ) from exc
+            except Exception as exc:
+                if not _is_mint_rate_limited(exc):
+                    raise
+
+                # Apply cooldown to the guard regardless — even when we're
+                # about to re-raise for fallback, the guard must remember that
+                # this mint is rate-limited for future operations.
+                backoff = (2**attempt) + (time.monotonic() % 1.0)
+                if isinstance(exc, httpx.HTTPStatusError):
+                    retry_after = _parse_retry_after(exc.response.headers)
+                    if retry_after is not None:
+                        backoff = max(retry_after, backoff)
+                cooldown = backoff
+                if guard is not None:
+                    cooldown = guard.apply_rate_limit_cooldown(backoff)
+
+                # When the caller has a fallback strategy (trusted-mint
+                # list), re-raise immediately so the caller can try the next
+                # mint instead of waiting through this mint's cooldown.
+                if not retry_on_rate_limit:
+                    logger.warning(
+                        "Mint rate-limited, skipping retries for fallback",
+                        extra={
+                            "op_name": op_name,
+                            "mint_url": mint_url,
+                            "cooldown_seconds": round(cooldown, 2),
+                            "consecutive_rate_limits": guard._consecutive_rate_limits
+                            if guard is not None
+                            else attempt + 1,
+                        },
+                    )
+                    raise
+
+                if attempt >= max_attempts - 1:
+                    raise
+                logger.warning(
+                    "Mint rate-limited, applying cooldown",
+                    extra={
+                        "op_name": op_name,
+                        "mint_url": mint_url,
+                        "attempt": attempt + 1,
+                        "cooldown_seconds": round(cooldown, 2),
+                        "consecutive_rate_limits": guard._consecutive_rate_limits
+                        if guard is not None
+                        else attempt + 1,
+                    },
+                )
+                if guard is None:
+                    await asyncio.sleep(cooldown)
+
+        raise RuntimeError(f"{op_name}: exhausted retries unexpectedly")
+
+    try:
+        if timeout > 0:
+            return await asyncio.wait_for(run_with_retries(), timeout=timeout)
+        return await run_with_retries()
+    except asyncio.TimeoutError as exc:
+        raise httpx.TimeoutException(
+            f"{op_name} exceeded its {timeout}s total timeout"
+        ) from exc
+
+
+def _parse_retry_after(headers: Any) -> float | None:
+    """Parse a Retry-After header (delta-seconds form) into seconds."""
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def is_source_mint_connection_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, SourceMintConnectionError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def is_mint_connection_error(error: BaseException) -> bool:
@@ -113,6 +426,20 @@ def classify_redemption_error(
             500,
             "Token was redeemed but could not be credited; do not retry",
             "cashu_token_consumed",
+        )
+    if is_source_mint_connection_error(error):
+        return (
+            "mint_unreachable",
+            503,
+            "The mint that issued this Cashu token is unreachable; the token cannot be redeemed at another mint",
+            "cashu_source_mint_unreachable",
+        )
+    if _is_mint_rate_limited(error):
+        return (
+            "mint_rate_limited",
+            503,
+            "Cashu mint rate-limited; retry after cooldown",
+            "cashu_mint_rate_limited",
         )
     if is_mint_connection_error(error):
         return (
@@ -192,10 +519,40 @@ async def _redeem_same_mint(
     that, not the face value, or routstr over-credits the user and its wallet
     drifts insolvent.
     """
-    await wallet.load_mint(keyset_id=token_obj.keysets[0])
-    wallet.verify_proofs_dleq(token_obj.proofs)
-    input_fees = wallet.get_fees_for_proofs(token_obj.proofs)
-    await wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True)
+    try:
+        await _mint_operation(
+            lambda: wallet.load_mint(keyset_id=token_obj.keysets[0]),
+            op_name="redeem_load_mint",
+            mint_url=token_obj.mint,
+        )
+        wallet.verify_proofs_dleq(token_obj.proofs)
+        input_fees = wallet.get_fees_for_proofs(token_obj.proofs)
+        await _mint_operation(
+            lambda: wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True),
+            op_name="redeem_split",
+            mint_url=token_obj.mint,
+            retry_timeouts=False,
+        )
+    except Exception as error:
+        if is_mint_connection_error(error):
+            logger.warning(
+                "Same-mint redemption failed; client must use a different token",
+                extra={
+                    "event": "cashu_same_mint_redemption_failed",
+                    "source_mint": token_obj.mint,
+                    "source_unit": token_obj.unit,
+                    "source_amount": token_obj.amount,
+                    "cross_mint_fallback_attempted": False,
+                    "action": "retry_with_token_from_another_mint",
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                },
+            )
+            raise SourceMintConnectionError(
+                "Issuing Cashu mint is unreachable"
+            ) from error
+        raise
+
     return int(token_obj.amount) - input_fees, token_obj.unit, token_obj.mint
 
 
@@ -210,34 +567,48 @@ async def recieve_token(
     wallet.keyset_id = token_obj.keysets[0]
 
     if token_obj.mint not in settings.cashu_mints:
-        return await swap_to_primary_mint(token_obj, wallet)
+        destinations = list(
+            dict.fromkeys([settings.primary_mint, *settings.cashu_mints])
+        )
+        logger.warning(
+            "Cashu cross-mint swap required",
+            extra={
+                "event": "cashu_swap_started",
+                "source_mint": token_obj.mint,
+                "source_unit": token_obj.unit,
+                "source_amount": token_obj.amount,
+                "destination_candidates": destinations,
+            },
+        )
+        return await swap_to_trusted_mint(token_obj, wallet)
 
+    logger.warning(
+        "Trying same-mint Cashu redemption",
+        extra={
+            "event": "cashu_same_mint_redemption",
+            "source_mint": token_obj.mint,
+            "source_unit": token_obj.unit,
+            "source_amount": token_obj.amount,
+            "cross_mint_fallback_on_connection_failure": False,
+        },
+    )
     return await _redeem_same_mint(wallet, token_obj)
 
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
-    """Internal send function - returns amount and serialized token"""
-    effective_mint_url = mint_url or settings.primary_mint
-    wallet: Wallet = await get_wallet(effective_mint_url, unit)
-    proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
-    proofs_for_mint = sum(p.amount for p in proofs)
-
-    # Fallback: proofs from untrusted source mints are swapped to primary_mint
-    # during receive, so the user's preferred refund_mint_url may have no proofs
-    # even though the global wallet has the balance.
-    if proofs_for_mint < amount and effective_mint_url != settings.primary_mint:
-        logger.info(
-            f"send: insufficient proofs at {effective_mint_url} "
-            f"(have {proofs_for_mint}, need {amount}), falling back to primary_mint={settings.primary_mint}"
-        )
-        effective_mint_url = settings.primary_mint
-        wallet = await get_wallet(effective_mint_url, unit)
-        proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
-        proofs_for_mint = sum(p.amount for p in proofs)
+    """Create a token from the preferred mint or another funded trusted mint."""
+    effective_mint_url = await find_trusted_mint_with_funds(amount, unit, mint_url)
+    wallet = await get_wallet(effective_mint_url, unit)
+    proofs = get_proofs_per_mint_and_unit(
+        wallet, effective_mint_url, unit, not_reserved=True
+    )
+    proofs_for_mint = sum(proof.amount for proof in proofs)
 
     all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
     proof_summary = {
-        f"{k.mint_url}/{k.unit.name}": sum(p.amount for p in wallet.proofs if p.id == k.id)
+        f"{k.mint_url}/{k.unit.name}": sum(
+            p.amount for p in wallet.proofs if p.id == k.id
+        )
         for k in wallet.keysets.values()
     }
     # Show ALL proofs in DB by keyset_id, regardless of whether the loaded wallet
@@ -273,6 +644,61 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str:
     _, token = await send(amount, unit, mint_url)
     return token
+
+
+async def release_token_reservation(token: str) -> None:
+    """Release a token that was created locally but never handed off."""
+    token_obj = deserialize_token_from_string(token)
+    wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
+    await wallet.set_reserved_for_send(token_obj.proofs, reserved=False)
+
+    secrets = {proof.secret for proof in token_obj.proofs}
+    for proof in token_obj.proofs:
+        proof.reserved = False
+    for proof in wallet.proofs:
+        if proof.secret in secrets:
+            proof.reserved = False
+
+
+def token_mint_url(token: str, fallback: str | None = None) -> str:
+    try:
+        return str(deserialize_token_from_string(token).mint)
+    except Exception:
+        if fallback is None:
+            raise
+        return fallback
+
+
+async def find_trusted_mint_with_funds(
+    amount: int, unit: str, preferred_mint: str | None = None
+) -> str:
+    """Choose a trusted mint that can cover a refund without waiting on cooldown."""
+    trusted = list(dict.fromkeys([settings.primary_mint, *settings.cashu_mints]))
+    candidates: list[str] = []
+    if preferred_mint in trusted:
+        candidates.append(preferred_mint)
+    candidates.extend(mint for mint in trusted if mint not in candidates)
+
+    balances: dict[str, int] = {}
+    for mint_url in candidates:
+        if _mint_cooldown_remaining(mint_url) > 0:
+            continue
+        try:
+            wallet = await get_wallet(mint_url, unit, retry_on_rate_limit=False)
+        except Exception as error:
+            if is_mint_connection_error(error) or _is_mint_rate_limited(error):
+                balances[mint_url] = 0
+                continue
+            raise
+
+        proofs = get_proofs_per_mint_and_unit(wallet, mint_url, unit, not_reserved=True)
+        balances[mint_url] = sum(proof.amount for proof in proofs)
+        if balances[mint_url] >= amount:
+            return mint_url
+
+    raise ValueError(
+        f"No trusted mint has {amount} {unit} available; balances={balances}"
+    )
 
 
 # A foreign mint's fee_reserve is a non-binding estimate (NUT-05): the mint may
@@ -341,12 +767,131 @@ def _melt_insufficient_shortfall(error: Exception) -> int | None:
     return 1
 
 
+async def _request_mint_with_fallback(
+    amount: int, *, op_name: str, primary_wallet: Wallet | None = None
+) -> tuple[Wallet, str, MintQuote]:
+    """Try request_mint on the primary mint, fall back to other trusted mints
+    on transport or rate-limit failure. Returns the wallet, mint_url, and quote.
+
+    Guards against amount <= 0: the cashu library's PostMintQuoteRequest
+    enforces ``amount > 0`` (Pydantic Field(gt=0)), so passing 0 raises a
+    cryptic validation error deep in the stack.  Fail fast with context.
+    """
+    if amount <= 0:
+        raise ValueError(
+            f"_request_mint_with_fallback({op_name}): amount must be > 0, got {amount}. "
+            f"Token value is too small after fee deduction or unit conversion."
+        )
+    candidates = list(dict.fromkeys([settings.primary_mint, *settings.cashu_mints]))
+    logger.warning(
+        "Trying trusted destination mints",
+        extra={
+            "event": "cashu_destination_candidates",
+            "op_name": op_name,
+            "amount": amount,
+            "unit": settings.primary_mint_unit,
+            "candidates": candidates,
+        },
+    )
+    tried: list[str] = []
+    for candidate_index, mint_url in enumerate(candidates, start=1):
+        cooldown = _mint_cooldown_remaining(mint_url)
+        if cooldown > 0:
+            tried.append(f"{mint_url}: cooling down")
+            logger.warning(
+                "Skipping unavailable destination mint",
+                extra={
+                    "event": "cashu_destination_skipped",
+                    "mint_url": mint_url,
+                    "cooldown_seconds": round(cooldown, 2),
+                    "op_name": op_name,
+                    "candidate_index": candidate_index,
+                    "candidate_count": len(candidates),
+                },
+            )
+            continue
+        logger.warning(
+            "Trying destination mint",
+            extra={
+                "event": "cashu_destination_attempt",
+                "mint_url": mint_url,
+                "op_name": op_name,
+                "candidate_index": candidate_index,
+                "candidate_count": len(candidates),
+            },
+        )
+        try:
+            if mint_url == settings.primary_mint and primary_wallet is not None:
+                wallet = primary_wallet
+            else:
+                wallet = await get_wallet(
+                    mint_url,
+                    settings.primary_mint_unit,
+                    retry_on_rate_limit=False,
+                )
+            quote = await _mint_operation(
+                lambda: wallet.request_mint(amount),
+                op_name=op_name,
+                mint_url=mint_url,
+                retry_on_rate_limit=False,
+            )
+            logger.warning(
+                "Destination mint selected",
+                extra={
+                    "event": "cashu_destination_selected",
+                    "mint_url": mint_url,
+                    "op_name": op_name,
+                    "candidate_index": candidate_index,
+                    "fallback_used": candidate_index > 1,
+                },
+            )
+            return wallet, mint_url, quote
+        except Exception as error:
+            tried.append(f"{mint_url}: {type(error).__name__}")
+            connection_failure = is_mint_connection_error(error)
+            rate_limited = _is_mint_rate_limited(error)
+            if not connection_failure and not rate_limited:
+                raise
+            if connection_failure:
+                _MintRateGuard.get(mint_url).apply_cooldown(
+                    _MINT_TRANSPORT_COOLDOWN_SECONDS, reason="unreachable"
+                )
+            logger.warning(
+                "Destination mint failed",
+                extra={
+                    "event": "cashu_destination_failed",
+                    "failed_mint": mint_url,
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                    "connection_failure": connection_failure,
+                    "rate_limited": rate_limited,
+                    "tried": tried,
+                    "op_name": op_name,
+                    "candidate_index": candidate_index,
+                    "candidate_count": len(candidates),
+                },
+            )
+            continue
+    logger.error(
+        "All trusted destination mints failed",
+        extra={
+            "event": "cashu_destination_exhausted",
+            "op_name": op_name,
+            "amount": amount,
+            "unit": settings.primary_mint_unit,
+            "candidates": candidates,
+            "tried": tried,
+        },
+    )
+    raise MintConnectionError(f"All mints failed for {op_name}: {tried}")
+
+
 async def _calculate_swap_amount(
     amount_msat: int,
     token_unit: str,
     token_mint_url: str,
     token_wallet: Wallet,
-    primary_wallet: Wallet,
+    primary_wallet: Wallet | None,
     proofs: list,
 ) -> int:
     """
@@ -365,17 +910,53 @@ async def _calculate_swap_amount(
         )
         return int(receive_amount)
 
+    # The cashu library's PostMintQuoteRequest enforces amount > 0 (Pydantic
+    # Field(gt=0)).  When the token's face value in the primary mint's unit
+    # truncates to 0 (e.g. < 1000 msat with a "sat" primary unit), calling
+    # request_mint(0) raises a validation error that is cryptic in production
+    # logs.  Guard early with full diagnostic context instead.
+    if receive_amount <= 0:
+        logger.error(
+            "swap_to_primary_mint: receive_amount is zero or negative, cannot estimate fees",
+            extra={
+                "amount_msat": amount_msat,
+                "token_unit": token_unit,
+                "token_mint_url": token_mint_url,
+                "primary_mint": settings.primary_mint,
+                "primary_mint_unit": settings.primary_mint_unit,
+                "receive_amount": receive_amount,
+            },
+        )
+        raise ValueError(
+            f"Token amount ({amount_msat} msat, unit={token_unit}) is too small to "
+            f"swap to primary mint ({settings.primary_mint}, unit={settings.primary_mint_unit}): "
+            f"receive_amount={receive_amount}. Minimum 1 {settings.primary_mint_unit} required."
+        )
+
     logger.info(
         "swap_to_primary_mint: estimating fees",
         extra={
             "dummy_amount": receive_amount,
             "unit": settings.primary_mint_unit,
+            "token_mint_url": token_mint_url,
+            "primary_mint": settings.primary_mint,
+            "amount_msat": amount_msat,
         },
     )
 
+    stage = "destination_fee_quote"
     try:
-        dummy_mint_quote = await primary_wallet.request_mint(receive_amount)
-        dummy_melt_quote = await token_wallet.melt_quote(dummy_mint_quote.request)
+        _, _, dummy_mint_quote = await _request_mint_with_fallback(
+            receive_amount,
+            op_name="swap_fee_est_mint_quote",
+            primary_wallet=primary_wallet,
+        )
+        stage = "source_fee_quote"
+        dummy_melt_quote = await _mint_operation(
+            lambda: token_wallet.melt_quote(dummy_mint_quote.request),
+            op_name="swap_fee_est_melt_quote",
+            mint_url=token_mint_url,
+        )
 
         fee_reserve = dummy_melt_quote.fee_reserve
         input_fees = token_wallet.get_fees_for_proofs(proofs)
@@ -394,27 +975,56 @@ async def _calculate_swap_amount(
                 "input_fees": input_fees,
                 "minted_amount": minted_amount,
                 "minted_unit": settings.primary_mint_unit,
+                "fee_reserve": fee_reserve,
+                "token_mint_url": token_mint_url,
+                "primary_mint": settings.primary_mint,
             },
         )
         return minted_amount
 
     except Exception as e:
         logger.error(
-            "swap_to_primary_mint: fee estimation failed",
-            extra={"error": str(e)},
+            "Cashu swap fee estimation failed",
+            extra={
+                "event": "cashu_swap_fee_estimation_failed",
+                "stage": stage,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "amount_msat": amount_msat,
+                "token_unit": token_unit,
+                "token_mint_url": token_mint_url,
+                "primary_mint": settings.primary_mint,
+                "primary_mint_unit": settings.primary_mint_unit,
+                "receive_amount": receive_amount,
+            },
         )
         if is_mint_connection_error(e):
+            if stage == "source_fee_quote":
+                logger.error(
+                    "Source mint is unreachable; destination fallback cannot spend its proofs",
+                    extra={
+                        "event": "cashu_source_mint_unreachable",
+                        "source_mint": token_mint_url,
+                        "stage": stage,
+                        "fallback_possible": False,
+                        "reason": "cashu_proofs_are_bound_to_the_issuing_mint",
+                    },
+                )
+                raise SourceMintConnectionError(
+                    "Issuing Cashu mint is unreachable"
+                ) from e
             raise MintConnectionError("Cashu mint is unreachable") from e
         raise ValueError(f"Failed to estimate fees: {e}") from e
 
 
-async def swap_to_primary_mint(
+async def swap_to_trusted_mint(
     token_obj: Token, token_wallet: Wallet
 ) -> tuple[int, str, str]:
-    logger.info(
-        "swap_to_primary_mint: starting",
+    logger.warning(
+        "Starting Cashu cross-mint swap",
         extra={
-            "foreign_mint": token_obj.mint,
+            "event": "cashu_swap_started",
+            "source_mint": token_obj.mint,
             "token_amount": token_obj.amount,
             "unit": token_obj.unit,
             "primary_mint": settings.primary_mint,
@@ -446,7 +1056,7 @@ async def swap_to_primary_mint(
         )
         return await _redeem_same_mint(token_wallet, token_obj)
 
-    primary_wallet = await get_wallet(settings.primary_mint, settings.primary_mint_unit)
+    primary_wallet: Wallet | None = None
 
     minted_amount = await _calculate_swap_amount(
         amount_msat,
@@ -462,15 +1072,75 @@ async def swap_to_primary_mint(
     # amount recomputed from the fees the mint actually demands.
     observed_extra_fee = 0
     attempt = 0
+    dest_wallet = primary_wallet
+    dest_mint_url = settings.primary_mint
     while True:
         attempt += 1
-        mint_quote = await primary_wallet.request_mint(minted_amount)
+        if minted_amount <= 0:
+            logger.error(
+                "swap_to_primary_mint: minted_amount is zero or negative before requesting quote",
+                extra={
+                    "minted_amount": minted_amount,
+                    "attempt": attempt,
+                    "foreign_mint": token_obj.mint,
+                    "token_amount": token_amount,
+                    "token_unit": token_obj.unit,
+                    "amount_msat": amount_msat,
+                    "observed_extra_fee": observed_extra_fee,
+                    "primary_mint": settings.primary_mint,
+                },
+            )
+            raise ValueError(
+                f"Cannot swap token ({token_amount} {token_obj.unit}) from {token_obj.mint}: "
+                f"minted_amount={minted_amount} after fee deduction (attempt {attempt})"
+            )
+        dest_wallet, dest_mint_url, mint_quote = await _request_mint_with_fallback(
+            minted_amount,
+            op_name="swap_request_mint",
+            primary_wallet=primary_wallet,
+        )
         logger.info(
             "swap_to_primary_mint: mint quote received",
-            extra={"mint_quote_id": mint_quote.quote, "attempt": attempt},
+            extra={
+                "mint_quote_id": mint_quote.quote,
+                "attempt": attempt,
+                "dest_mint": dest_mint_url,
+            },
         )
 
-        melt_quote = await token_wallet.melt_quote(mint_quote.request)
+        logger.warning(
+            "Requesting melt quote from source mint",
+            extra={
+                "event": "cashu_source_melt_quote_attempt",
+                "source_mint": token_obj.mint,
+                "destination_mint": dest_mint_url,
+                "attempt": attempt,
+            },
+        )
+        try:
+            melt_quote = await _mint_operation(
+                lambda: token_wallet.melt_quote(mint_quote.request),
+                op_name="swap_melt_quote",
+                mint_url=token_obj.mint,
+            )
+        except Exception as error:
+            if is_mint_connection_error(error):
+                logger.error(
+                    "Source mint is unreachable; destination fallback cannot spend its proofs",
+                    extra={
+                        "event": "cashu_source_mint_unreachable",
+                        "source_mint": token_obj.mint,
+                        "destination_mint": dest_mint_url,
+                        "stage": "source_melt_quote",
+                        "error": str(error),
+                        "error_type": type(error).__name__,
+                        "attempt": attempt,
+                    },
+                )
+                raise SourceMintConnectionError(
+                    "Issuing Cashu mint is unreachable"
+                ) from error
+            raise
         input_fees = token_wallet.get_fees_for_proofs(token_obj.proofs)
         total_needed = melt_quote.amount + melt_quote.fee_reserve + input_fees
         logger.info(
@@ -523,20 +1193,35 @@ async def swap_to_primary_mint(
             continue
 
         try:
-            _ = await token_wallet.melt(
-                proofs=token_obj.proofs,
-                invoice=mint_quote.request,
-                fee_reserve_sat=melt_quote.fee_reserve,
-                quote_id=melt_quote.quote,
+            _ = await _mint_operation(
+                lambda: token_wallet.melt(
+                    proofs=token_obj.proofs,
+                    invoice=mint_quote.request,
+                    fee_reserve_sat=melt_quote.fee_reserve,
+                    quote_id=melt_quote.quote,
+                ),
+                op_name="swap_melt",
+                mint_url=token_obj.mint,
+                retry_timeouts=False,
             )
         except Exception as e:
             # A down mint won't fix itself by retrying with a smaller amount.
             if is_mint_connection_error(e):
                 logger.error(
-                    "swap_to_primary_mint: melt failed — mint unreachable",
-                    extra={"error": str(e), "foreign_mint": token_obj.mint},
+                    "Source mint became unreachable during melt",
+                    extra={
+                        "event": "cashu_source_mint_unreachable",
+                        "stage": "source_melt",
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "source_mint": token_obj.mint,
+                        "destination_mint": dest_mint_url,
+                        "attempt": attempt,
+                    },
                 )
-                raise MintConnectionError("Cashu mint is unreachable") from e
+                raise SourceMintConnectionError(
+                    "Issuing Cashu mint is unreachable"
+                ) from e
             shortfall = _melt_insufficient_shortfall(e)
             recomputed = 0
             if shortfall is not None:
@@ -575,15 +1260,25 @@ async def swap_to_primary_mint(
 
         break
 
-    logger.info(
-        "swap_to_primary_mint: melt succeeded, minting on primary",
-        extra={"minted_amount": minted_amount, "mint_quote_id": mint_quote.quote},
+    logger.warning(
+        "Source melt succeeded; minting on destination",
+        extra={
+            "event": "cashu_destination_mint_attempt",
+            "minted_amount": minted_amount,
+            "mint_quote_id": mint_quote.quote,
+            "dest_mint": dest_mint_url,
+        },
     )
 
-    await primary_wallet.load_proofs(reload=True)
-    pre_mint_balance = primary_wallet.available_balance.amount
+    await dest_wallet.load_proofs(reload=True)
+    pre_mint_balance = dest_wallet.available_balance.amount
     try:
-        _ = await primary_wallet.mint(minted_amount, quote_id=mint_quote.quote)
+        _ = await _mint_operation(
+            lambda: dest_wallet.mint(minted_amount, quote_id=mint_quote.quote),
+            op_name="swap_mint_on_primary",
+            mint_url=dest_mint_url,
+            retry_timeouts=False,
+        )
     except Exception as e:
         if "11003" in str(e) or "outputs already signed" in str(e).lower():
             # Previous mint call signed outputs at the mint but failed before
@@ -591,13 +1286,18 @@ async def swap_to_primary_mint(
             # advance the counter so the next request derives fresh secrets.
             logger.warning(
                 "swap_to_primary_mint: outputs already signed — recovering orphaned proofs",
-                extra={"mint_quote_id": mint_quote.quote, "minted_amount": minted_amount},
+                extra={
+                    "mint_quote_id": mint_quote.quote,
+                    "minted_amount": minted_amount,
+                },
             )
             try:
-                for keyset_id in primary_wallet.keysets:
-                    await primary_wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
-                await primary_wallet.load_proofs(reload=True)
-                post_recovery_balance = primary_wallet.available_balance.amount
+                for keyset_id in dest_wallet.keysets:
+                    await dest_wallet.restore_tokens_for_keyset(
+                        keyset_id, to=1, batch=25
+                    )
+                await dest_wallet.load_proofs(reload=True)
+                post_recovery_balance = dest_wallet.available_balance.amount
                 balance_gained = post_recovery_balance - pre_mint_balance
                 logger.info(
                     "swap_to_primary_mint: recovery scan completed",
@@ -644,26 +1344,37 @@ async def swap_to_primary_mint(
                 "Mint on primary failed after successful melt"
             ) from e
 
-    logger.info(
-        "swap_to_primary_mint: completed successfully",
+    logger.warning(
+        "Cashu cross-mint swap completed",
         extra={
-            "foreign_mint": token_obj.mint,
-            "primary_mint": settings.primary_mint,
+            "event": "cashu_swap_completed",
+            "source_mint": token_obj.mint,
+            "dest_mint": dest_mint_url,
             "original_amount": token_amount,
             "minted_amount": minted_amount,
             "unit": settings.primary_mint_unit,
         },
     )
 
-    return int(minted_amount), settings.primary_mint_unit, settings.primary_mint
+    return int(minted_amount), settings.primary_mint_unit, dest_mint_url
+
+
+async def swap_to_primary_mint(
+    token_obj: Token, token_wallet: Wallet
+) -> tuple[int, str, str]:
+    """Backward-compatible alias for callers using the old function name."""
+    return await swap_to_trusted_mint(token_obj, token_wallet)
 
 
 async def credit_balance(
     cashu_token: str, key: db.ApiKey, session: db.AsyncSession
 ) -> int:
     logger.info(
-        "credit_balance: Starting token redemption",
-        extra={"token_preview": cashu_token[:50]},
+        "Starting Cashu balance credit",
+        extra={
+            "event": "cashu_credit_started",
+            "key_hash": key.hashed_key[:8],
+        },
     )
 
     try:
@@ -760,18 +1471,46 @@ async def credit_balance(
 
 
 _wallets: dict[str, Wallet] = {}
+_wallet_last_load: dict[str, float] = {}
+_wallet_load_locks: dict[str, asyncio.Lock] = {}
+# Minimum seconds between full mint info + proof reloads for the same
+# wallet. Prevents redundant mint API calls when get_wallet(load=True)
+# is called rapidly by multiple background tasks (balance fetch, payout,
+# auto-topup all hitting get_wallet within the same cycle).
+_WALLOAD_RELOAD_MIN_INTERVAL_SECONDS = 30
 
 
-async def get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Wallet:
-    global _wallets
+async def get_wallet(
+    mint_url: str,
+    unit: str = "sat",
+    load: bool = True,
+    retry_on_rate_limit: bool = True,
+) -> Wallet:
+    global _wallets, _wallet_last_load, _wallet_load_locks
     id = f"{mint_url}_{unit}"
-    if id not in _wallets:
-        _wallets[id] = await Wallet.with_db(mint_url, db=".wallet", unit=unit)
+    lock = _wallet_load_locks.setdefault(id, asyncio.Lock())
+    async with lock:
+        if id not in _wallets:
+            _wallets[id] = await Wallet.with_db(mint_url, db=".wallet", unit=unit)
 
-    if load:
-        await _wallets[id].load_mint()
-        await _wallets[id].load_proofs(reload=True)
-    return _wallets[id]
+        if load:
+            now = time.monotonic()
+            last = _wallet_last_load.get(id)
+            if last is None or now - last >= _WALLOAD_RELOAD_MIN_INTERVAL_SECONDS:
+                await _mint_operation(
+                    lambda: _wallets[id].load_mint(),
+                    op_name="load_mint",
+                    mint_url=mint_url,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                )
+                await _mint_operation(
+                    lambda: _wallets[id].load_proofs(reload=True),
+                    op_name="load_proofs",
+                    mint_url=mint_url,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                )
+                _wallet_last_load[id] = time.monotonic()
+        return _wallets[id]
 
 
 def get_proofs_per_mint_and_unit(
@@ -788,20 +1527,39 @@ def get_proofs_per_mint_and_unit(
     return proofs
 
 
-async def slow_filter_spend_proofs(proofs: list[Proof], wallet: Wallet) -> list[Proof]:
+async def slow_filter_spend_proofs(
+    proofs: list[Proof],
+    wallet: Wallet,
+    *,
+    retry_on_rate_limit: bool = True,
+) -> list[Proof]:
     if not proofs:
         return []
     _proofs = []
     _spent_proofs = []
-    for i in range(0, len(proofs), 1000):
-        pb = proofs[i : i + 1000]
-        proof_states = await wallet.check_proof_state(pb)
+    # Keep proof-state checks in large batches. Mint quotas count HTTP requests,
+    # so smaller batches make balance reads slower and more likely to hit 429s.
+    batch_size = 1000
+    for i in range(0, len(proofs), batch_size):
+        pb = proofs[i : i + batch_size]
+        proof_states = await _mint_operation(
+            lambda: wallet.check_proof_state(pb),
+            op_name="check_proof_state",
+            mint_url=str(wallet.url),
+            retry_on_rate_limit=retry_on_rate_limit,
+        )
         for proof, state in zip(pb, proof_states.states):
             if str(state.state) != "spent":
                 _proofs.append(proof)
             else:
                 _spent_proofs.append(proof)
-    await wallet.set_reserved_for_send(_spent_proofs, reserved=True)
+    if _spent_proofs:
+        await _mint_operation(
+            lambda: wallet.set_reserved_for_send(_spent_proofs, reserved=True),
+            op_name="set_reserved_spent_proofs",
+            mint_url=str(wallet.url),
+            retry_timeouts=False,
+        )
     return _proofs
 
 
@@ -812,6 +1570,70 @@ class BalanceDetail(TypedDict, total=False):
     user_balance: int
     owner_balance: int
     error: str
+    error_code: str
+    retry_after_seconds: float
+
+
+_BALANCE_FETCH_RETRY_SECONDS = 60.0
+_MINT_UNITS_CACHE_SECONDS = 300.0
+_balance_fetch_failures: dict[tuple[str, str], tuple[float, str, str]] = {}
+_balance_fetch_locks: dict[str, asyncio.Lock] = {}
+_mint_supported_units: dict[str, tuple[float, list[str]]] = {}
+
+
+async def _get_supported_mint_units(mint_url: str) -> list[str]:
+    now = time.monotonic()
+    cached = _mint_supported_units.get(mint_url)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+
+    wallet = await get_wallet(mint_url, settings.primary_mint_unit, load=False)
+    keysets = await _mint_operation(
+        lambda: wallet._get_keysets(),
+        op_name="get_mint_keysets",
+        mint_url=mint_url,
+        retry_on_rate_limit=False,
+    )
+    units: list[str] = []
+    for keyset in keysets:
+        if not keyset.active or keyset.unit is None:
+            continue
+        unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
+        if unit and unit not in units:
+            units.append(unit)
+    if not units:
+        units = [settings.primary_mint_unit]
+    elif settings.primary_mint_unit in units:
+        units.remove(settings.primary_mint_unit)
+        units.insert(0, settings.primary_mint_unit)
+
+    _mint_supported_units[mint_url] = (
+        time.monotonic() + _MINT_UNITS_CACHE_SECONDS,
+        units,
+    )
+    return units
+
+
+def _balance_error(
+    mint_url: str,
+    unit: str,
+    error: str,
+    *,
+    error_code: str,
+    retry_after_seconds: float | None = None,
+) -> BalanceDetail:
+    detail: BalanceDetail = {
+        "mint_url": mint_url,
+        "unit": unit,
+        "wallet_balance": 0,
+        "user_balance": 0,
+        "owner_balance": 0,
+        "error": error,
+        "error_code": error_code,
+    }
+    if retry_after_seconds is not None:
+        detail["retry_after_seconds"] = round(max(0.0, retry_after_seconds), 2)
+    return detail
 
 
 async def fetch_all_balances(
@@ -826,42 +1648,112 @@ async def fetch_all_balances(
         - Total user balance in sats
         - Owner balance in sats (wallet - user)
     """
-    if units is None:
-        units = ["sat", "msat"]
 
     async def fetch_balance(
         session: db.AsyncSession, mint_url: str, unit: str
     ) -> BalanceDetail:
-        try:
-            wallet = await get_wallet(mint_url, unit)
-            proofs = get_proofs_per_mint_and_unit(
-                wallet, mint_url, unit, not_reserved=True
-            )
-            proofs = await slow_filter_spend_proofs(proofs, wallet)
-            user_balance = await db.balances_for_mint_and_unit(session, mint_url, unit)
+        key = (mint_url, unit)
+        lock = _balance_fetch_locks.setdefault(mint_url, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            failure = _balance_fetch_failures.get(key)
+            if failure is not None and now < failure[0]:
+                return _balance_error(
+                    mint_url,
+                    unit,
+                    failure[1],
+                    error_code=failure[2],
+                    retry_after_seconds=failure[0] - now,
+                )
+
+            cooldown = _mint_cooldown_remaining(mint_url)
+            if cooldown > 0:
+                error_code = _mint_cooldown_reason(mint_url) or "cooldown"
+                error = {
+                    "rate_limited": "Mint is rate limited",
+                    "unreachable": "Mint is unreachable",
+                }.get(error_code, "Mint cooldown is active")
+                _balance_fetch_failures[key] = (
+                    now + cooldown,
+                    error,
+                    error_code,
+                )
+                return _balance_error(
+                    mint_url,
+                    unit,
+                    error,
+                    error_code=error_code,
+                    retry_after_seconds=cooldown,
+                )
+
+            try:
+                wallet = await get_wallet(mint_url, unit, retry_on_rate_limit=False)
+                proofs = get_proofs_per_mint_and_unit(
+                    wallet, mint_url, unit, not_reserved=True
+                )
+                proofs = await slow_filter_spend_proofs(
+                    proofs, wallet, retry_on_rate_limit=False
+                )
+                user_balance = await db.balances_for_mint_and_unit(
+                    session, mint_url, unit
+                )
+            except Exception as error:
+                connection_failure = is_mint_connection_error(error)
+                rate_limited = _is_mint_rate_limited(error)
+                error_code = (
+                    "rate_limited"
+                    if rate_limited
+                    else "unreachable"
+                    if connection_failure
+                    else "mint_error"
+                )
+                if rate_limited:
+                    _MintRateGuard.get(mint_url).apply_rate_limit_cooldown(
+                        _BALANCE_FETCH_RETRY_SECONDS
+                    )
+                elif connection_failure:
+                    _MintRateGuard.get(mint_url).apply_cooldown(
+                        _BALANCE_FETCH_RETRY_SECONDS, reason=error_code
+                    )
+                retry_delay = max(
+                    _BALANCE_FETCH_RETRY_SECONDS,
+                    _mint_cooldown_remaining(mint_url),
+                )
+                retry_at = time.monotonic() + retry_delay
+                _balance_fetch_failures[key] = (retry_at, str(error), error_code)
+                logger.warning(
+                    "Unable to refresh mint balance",
+                    extra={
+                        "mint_url": mint_url,
+                        "unit": unit,
+                        "error": str(error),
+                        "connection_failure": connection_failure,
+                        "rate_limited": rate_limited,
+                        "mint_cooldown_applied": connection_failure or rate_limited,
+                        "retry_seconds": round(retry_delay, 2),
+                    },
+                )
+                return _balance_error(
+                    mint_url,
+                    unit,
+                    str(error),
+                    error_code=error_code,
+                    retry_after_seconds=retry_delay,
+                )
+
+            _balance_fetch_failures.pop(key, None)
             if unit == "sat":
                 user_balance = user_balance // 1000
             proofs_balance = sum(proof.amount for proof in proofs)
-
-            result: BalanceDetail = {
+            return {
                 "mint_url": mint_url,
                 "unit": unit,
                 "wallet_balance": proofs_balance,
                 "user_balance": user_balance,
-                "owner_balance": proofs_balance - user_balance if proofs_balance != 0 else 0,
+                "owner_balance": proofs_balance - user_balance
+                if proofs_balance != 0
+                else 0,
             }
-            return result
-        except Exception as e:
-            logger.error(f"Error getting balance for {mint_url} {unit}: {e}")
-            error_result: BalanceDetail = {
-                "mint_url": mint_url,
-                "unit": unit,
-                "wallet_balance": 0,
-                "user_balance": 0,
-                "owner_balance": 0,
-                "error": str(e),
-            }
-            return error_result
 
     # Build the set of mints to inspect. Received tokens are stored against
     # ``primary_mint`` (which defaults to a real mint even when ``cashu_mints``
@@ -871,16 +1763,45 @@ async def fetch_all_balances(
     if settings.primary_mint and settings.primary_mint not in mint_urls:
         mint_urls.append(settings.primary_mint)
 
-    # Create tasks for all mint/unit combinations
     async with db.create_session() as session:
-        tasks = [
-            fetch_balance(session, mint_url, unit)
-            for mint_url in mint_urls
-            for unit in units
-        ]
 
-        # Run all tasks concurrently
-        balance_details = list(await asyncio.gather(*tasks))
+        async def fetch_mint_balances(mint_url: str) -> list[BalanceDetail]:
+            mint_units = units
+            if mint_units is None:
+                try:
+                    mint_units = await _get_supported_mint_units(mint_url)
+                except Exception as error:
+                    connection_failure = is_mint_connection_error(error)
+                    rate_limited = _is_mint_rate_limited(error)
+                    if connection_failure:
+                        _MintRateGuard.get(mint_url).apply_cooldown(
+                            _BALANCE_FETCH_RETRY_SECONDS, reason="unreachable"
+                        )
+                    # _mint_operation already records rate-limit cooldowns.
+                    # Fetching the configured unit turns a known cooldown into
+                    # a structured error without another mint request.
+                    mint_units = [settings.primary_mint_unit]
+                    if not connection_failure and not rate_limited:
+                        logger.warning(
+                            "Unable to discover mint units",
+                            extra={
+                                "mint_url": mint_url,
+                                "error": str(error),
+                                "error_type": type(error).__name__,
+                            },
+                        )
+            return list(
+                await asyncio.gather(
+                    *(fetch_balance(session, mint_url, unit) for unit in mint_units)
+                )
+            )
+
+        grouped_details = await asyncio.gather(
+            *(fetch_mint_balances(mint_url) for mint_url in mint_urls)
+        )
+        balance_details = [
+            detail for mint_details in grouped_details for detail in mint_details
+        ]
 
     # Calculate totals
     total_wallet_balance_sats = 0
@@ -1132,9 +2053,10 @@ async def periodic_routstr_fee_payout() -> None:
 
 
 async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
+    mint = await find_trusted_mint_with_funds(amount, unit, mint)
     wallet = await get_wallet(mint, unit)
-    proofs = wallet._get_proofs_per_keyset(wallet.proofs)[wallet.keyset_id]
-    proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
+    available = get_proofs_per_mint_and_unit(wallet, mint, unit, not_reserved=True)
+    proofs, _ = await wallet.select_to_send(available, amount, set_reserved=True)
     return await raw_send_to_lnurl(wallet, proofs, address, unit)
 
 

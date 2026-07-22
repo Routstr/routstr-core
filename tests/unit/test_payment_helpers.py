@@ -7,7 +7,19 @@ os.environ["UPSTREAM_BASE_URL"] = "http://test"
 os.environ["UPSTREAM_API_KEY"] = "test"
 
 from routstr.core.settings import settings  # noqa: E402
-from routstr.payment.helpers import get_max_cost_for_model  # noqa: E402
+from routstr.payment.helpers import (  # noqa: E402
+    apply_mint_fee_allowance,
+    get_max_cost_for_model,
+)
+
+
+def test_mint_fee_allowance_reduces_admission_cost_by_ten_percent() -> None:
+    assert apply_mint_fee_allowance(124_886) == 112_398
+
+
+def test_mint_fee_allowance_never_drops_below_minimum() -> None:
+    with patch.object(settings, "min_request_msat", 100):
+        assert apply_mint_fee_allowance(50) == 100
 
 
 async def test_get_max_cost_for_model_known() -> None:

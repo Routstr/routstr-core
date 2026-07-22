@@ -9,7 +9,8 @@ from cashu.wallet.wallet import Proof, Wallet
 
 # The Cashu library issues POST /v1/melt/bolt11 with timeout=None, so a hung or
 # very slow mint can block a melt (and any caller, e.g. the payout loop)
-# indefinitely. Bound it here so callers fail instead of hanging forever.
+# indefinitely. _mint_operation (imported lazily in raw_send_to_lnurl to avoid
+# a circular import with wallet.py) bounds it via MINT_OPERATION_TIMEOUT_SECONDS.
 MELT_TIMEOUT_SECONDS = 60
 
 try:
@@ -221,22 +222,33 @@ async def raw_send_to_lnurl(
         lnurl_data["callback_url"], final_amount
     )
 
-    melt_quote_resp = await wallet.melt_quote(invoice=bolt11_invoice)
+    from ..wallet import _mint_operation
+
+    melt_quote_resp = await _mint_operation(
+        lambda: wallet.melt_quote(invoice=bolt11_invoice),
+        op_name="lnurl_melt_quote",
+        mint_url=str(wallet.url),
+    )
 
     if amount:
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
     try:
         _ = await asyncio.wait_for(
-            wallet.melt(
-                proofs=proofs,
-                invoice=bolt11_invoice,
-                fee_reserve_sat=melt_quote_resp.fee_reserve,
-                quote_id=melt_quote_resp.quote,
+            _mint_operation(
+                lambda: wallet.melt(
+                    proofs=proofs,
+                    invoice=bolt11_invoice,
+                    fee_reserve_sat=melt_quote_resp.fee_reserve,
+                    quote_id=melt_quote_resp.quote,
+                ),
+                op_name="lnurl_melt",
+                mint_url=str(wallet.url),
+                retry_timeouts=False,
             ),
             timeout=MELT_TIMEOUT_SECONDS,
         )
-    except asyncio.TimeoutError as e:
+    except (httpx.TimeoutException, asyncio.TimeoutError) as e:
         raise LNURLError(
             f"Melt timed out after {MELT_TIMEOUT_SECONDS}s (mint unresponsive)"
         ) from e

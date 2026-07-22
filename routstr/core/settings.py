@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     payout_interval_seconds: int = Field(
         default=900, gt=0, env="PAYOUT_INTERVAL_SECONDS"
     )
+    # Timeout (seconds) for individual mint API operations (melt, mint, swap,
+    # checkstate). When a mint is slow or rate-limiting, operations are
+    # cancelled after this delay instead of hanging indefinitely.
+    mint_operation_timeout_seconds: int = Field(
+        default=30, gt=0, env="MINT_OPERATION_TIMEOUT_SECONDS"
+    )
+    # Maximum concurrent API operations per mint. Actual mint quotas vary by
+    # endpoint, so 429 responses drive adaptive cooldown instead of fixed RPM
+    # pacing. 0 = unlimited concurrency.
+    mint_max_concurrency: int = Field(default=4, ge=0, env="MINT_MAX_CONCURRENCY")
+    # Max retries when a mint returns 429 or times out (exponential backoff).
+    mint_retry_max_attempts: int = Field(default=3, ge=0, env="MINT_RETRY_MAX_ATTEMPTS")
 
     # Pricing
     # Default behavior: derive pricing from MODELS
@@ -97,7 +109,9 @@ class Settings(BaseSettings):
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
-    refund_sweep_ttl_seconds: int = Field(default=604800, env="REFUND_SWEEP_TTL_SECONDS")
+    refund_sweep_ttl_seconds: int = Field(
+        default=604800, env="REFUND_SWEEP_TTL_SECONDS"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
@@ -116,9 +130,8 @@ class Settings(BaseSettings):
 
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
-    enable_analytics_sharing: bool = Field(
-        default=True, env="ENABLE_ANALYTICS_SHARING"
-    )
+    enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+
 
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
     """Discard unknown keys from persisted settings."""
@@ -281,7 +294,11 @@ class SettingsService:
             valid_fields = set(env_resolved.dict().keys())
             merged_dict: dict[str, Any] = dict(env_resolved.dict())
             merged_dict.update(
-                {k: v for k, v in db_json.items() if v not in (None, "", [], {}) and k in valid_fields}
+                {
+                    k: v
+                    for k, v in db_json.items()
+                    if v not in (None, "", [], {}) and k in valid_fields
+                }
             )
             merged_dict = Settings(**merged_dict).dict()
 

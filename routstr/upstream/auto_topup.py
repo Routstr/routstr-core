@@ -12,7 +12,7 @@ from ..core.db import (
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
-from ..wallet import send_token
+from ..wallet import release_token_reservation, send_token, token_mint_url
 from .routstr import RoutstrUpstreamProvider
 
 logger = get_logger(__name__)
@@ -144,12 +144,13 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
+    actual_mint_url = token_mint_url(token, mint_url)
     try:
         await store_cashu_transaction(
             token=token,
             amount=amount,
             unit="sat",
-            mint_url=mint_url,
+            mint_url=actual_mint_url,
             typ="out",
             collected=False,
             source="auto_topup",
@@ -157,8 +158,24 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
     except Exception:
         logger.critical(
             "Aborting auto top-up because its cashu token could not be persisted",
-            extra={"provider_id": row.id, "mint_url": mint_url},
+            extra={"provider_id": row.id, "mint_url": actual_mint_url},
         )
+        try:
+            await release_token_reservation(token)
+        except Exception as error:
+            logger.critical(
+                "Failed to release untracked auto-topup token",
+                extra={
+                    "provider_id": row.id,
+                    "mint_url": actual_mint_url,
+                    "error": str(error),
+                },
+            )
+        else:
+            logger.warning(
+                "Auto-topup token was released after persistence failed",
+                extra={"provider_id": row.id, "mint_url": actual_mint_url},
+            )
         return
 
     result = await provider.topup(token)

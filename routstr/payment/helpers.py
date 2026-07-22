@@ -18,6 +18,14 @@ from ..wallet import deserialize_token_from_string
 
 logger = get_logger(__name__)
 
+_MINT_FEE_ALLOWANCE = 0.10
+
+
+def apply_mint_fee_allowance(cost_msat: int) -> int:
+    """Reduce the admission reservation to account for mint fallback fees."""
+    adjusted = math.ceil(cost_msat * (1 - _MINT_FEE_ALLOWANCE))
+    return max(settings.min_request_msat, adjusted)
+
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
     if x_cashu := headers.get("x-cashu", None):

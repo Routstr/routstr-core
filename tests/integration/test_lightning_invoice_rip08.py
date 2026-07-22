@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey
+from routstr.core.settings import settings
 
 RIP08_PATH = "/lightning/invoice"
 LEGACY_PATH = "/v1/balance/lightning/invoice"
@@ -26,11 +27,17 @@ async def patch_invoice_generation() -> Any:
     """Stub out `generate_lightning_invoice` so no mint round-trip is needed."""
     counter = {"n": 0}
 
-    async def fake_generate(amount_sats: int, description: str) -> tuple[str, str]:
+    async def fake_generate(
+        amount_sats: int,
+        description: str,
+        *,
+        allowed_mints: list[str] | None = None,
+    ) -> tuple[str, str, str]:
         counter["n"] += 1
         return (
             f"lnbc{amount_sats}n1pfakeinvoice{counter['n']}",
             f"payment_hash_{counter['n']}",
+            "http://localhost:3338",
         )
 
     with patch(
@@ -95,6 +102,10 @@ async def test_topup_with_authorization_header(
     body = resp.json()
     assert body["amount_sats"] == 500
     assert body["bolt11"].startswith("lnbc")
+    expected_mints = [settings.primary_mint, *settings.cashu_mints]
+    allowed_mints = patch_invoice_generation.call_args.kwargs["allowed_mints"]
+    assert allowed_mints == list(dict.fromkeys(mint for mint in expected_mints if mint))
+    assert allowed_mints[0] == settings.primary_mint
 
 
 @pytest.mark.integration

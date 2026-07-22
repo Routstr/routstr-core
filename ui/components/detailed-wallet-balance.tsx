@@ -105,6 +105,23 @@ export function DetailedWalletBalance({
   const formatMintLabel = (detail: BalanceDetail) =>
     `${detail.mint_url.replace('https://', '').replace('http://', '')} • ${detail.unit.toUpperCase()}`;
 
+  const formatBalanceError = (detail: BalanceDetail) => {
+    const labels: Record<string, string> = {
+      rate_limited: 'rate limited',
+      unreachable: 'unreachable',
+      cooldown: 'cooling down',
+      mint_error: 'mint error',
+    };
+    const label =
+      (detail.error_code ? labels[detail.error_code] : undefined) ??
+      detail.error ??
+      'error';
+    const retryAfter = detail.retry_after_seconds;
+    return retryAfter && retryAfter > 0
+      ? `${label} (retry in ${Math.ceil(retryAfter)}s)`
+      : label;
+  };
+
   return (
     <>
       <Card>
@@ -262,9 +279,12 @@ export function DetailedWalletBalance({
                               <TableCell className='max-w-md font-mono text-xs break-all whitespace-normal'>
                                 {formatMintLabel(detail)}
                               </TableCell>
-                              <TableCell className='text-right font-mono'>
+                              <TableCell
+                                className='text-right font-mono'
+                                title={detail.error}
+                              >
                                 {detail.error
-                                  ? 'error'
+                                  ? formatBalanceError(detail)
                                   : formatAmount(walletMsat)}
                               </TableCell>
                               <TableCell className='text-right font-mono'>
@@ -306,9 +326,12 @@ export function DetailedWalletBalance({
                               <p className='text-muted-foreground text-xs'>
                                 Wallet
                               </p>
-                              <p className='font-mono text-sm'>
+                              <p
+                                className='font-mono text-sm'
+                                title={detail.error}
+                              >
                                 {detail.error
-                                  ? 'error'
+                                  ? formatBalanceError(detail)
                                   : formatAmount(walletMsat)}
                               </p>
                             </div>

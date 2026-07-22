@@ -89,7 +89,12 @@ def _make_swap_mocks(
 def _wallet_router(primary_wallet: Mock, token_wallet: Mock) -> Callable[..., Mock]:
     """Route get_wallet calls to the primary or foreign wallet mock by URL."""
 
-    def fake_get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Mock:
+    def fake_get_wallet(
+        mint_url: str,
+        unit: str = "sat",
+        load: bool = True,
+        **kwargs: object,
+    ) -> Mock:
         return primary_wallet if mint_url == PRIMARY_MINT else token_wallet
 
     return fake_get_wallet

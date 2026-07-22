@@ -227,6 +227,9 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
         default=None, description="Associated API key hash for topup operations"
     )
     purpose: str = Field(description="create or topup")
+    mint_url: str | None = Field(
+        default=None, description="Mint URL where the quote was created (fallback tracking)"
+    )
     created_at: int = Field(
         default_factory=lambda: int(time.time()), description="Unix timestamp"
     )
