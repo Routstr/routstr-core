@@ -110,6 +110,33 @@ class Pricing(BaseModel):
     max_cost: float = 0.0  # in sats not msats
 
 
+# The rates whose positive value makes a request bill something. Derived fields
+# (max_*_cost) are excluded — they are computed carriers, not charged rates.
+# One definition, shared by the write guard, the served-map filter, and (as a
+# frozen copy) the provenance migration.
+BILLABLE_PRICING_FIELDS = (
+    "prompt",
+    "completion",
+    "request",
+    "image",
+    "web_search",
+    "internal_reasoning",
+    "input_cache_read",
+    "input_cache_write",
+)
+
+
+def has_chargeable_price(pricing: Pricing) -> bool:
+    """True if any billable rate is positive — i.e. a request can bill > 0.
+
+    The money-safety invariant: an enabled model must be chargeable unless an
+    operator has explicitly vouched for it as free (``manual``). Checking every
+    billable field (not just prompt/completion) means a per-request-billed model
+    is correctly recognised as chargeable.
+    """
+    return any(getattr(pricing, field) > 0 for field in BILLABLE_PRICING_FIELDS)
+
+
 class TopProvider(BaseModel):
     context_length: int | None = None
     max_completion_tokens: int | None = None
@@ -368,21 +395,32 @@ async def list_models(
     rows = (await session.exec(query)).all()  # type: ignore
     provider_result = await session.exec(select(UpstreamProviderRow))
     providers_by_id = {p.id: p for p in provider_result.all()}
-    return [
-        _row_to_model(
+
+    models: list[Model] = []
+    for r in rows:
+        if not include_disabled and not (
+            r.upstream_provider_id in providers_by_id
+            and providers_by_id[r.upstream_provider_id].enabled
+        ):
+            continue
+        model = _row_to_model(
             r,
             apply_provider_fee=apply_fees,
             provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
             if r.upstream_provider_id in providers_by_id
             else 1.01,
         )
-        for r in rows
-        if include_disabled
-        or (
-            r.upstream_provider_id in providers_by_id
-            and providers_by_id[r.upstream_provider_id].enabled
-        )
-    ]
+        # Served-map money-safety backstop for legacy rows and writers that
+        # bypass the admin upsert: never serve an unchargeable price unless an
+        # operator vouched for it as free (``manual``); it would bill at nothing.
+        if (
+            not include_disabled
+            and model.pricing_source != PricingSource.MANUAL
+            and not has_chargeable_price(model.pricing)
+        ):
+            continue
+        models.append(model)
+    return models
 
 
 def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
