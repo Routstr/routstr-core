@@ -18,6 +18,7 @@ from ..payment.models import (
     Pricing,
     PricingSource,
     _row_to_model,
+    backfill_cache_pricing,
     has_chargeable_price,
     list_models,
 )
@@ -542,19 +543,26 @@ def _canonical_pricing(payload: "ModelCreate") -> Pricing:
     return Pricing(**values)
 
 
-def _pricing_edited(canonical: Pricing, existing: Model) -> bool:
+def _pricing_edited(canonical: Pricing, existing: Model, model_id: str) -> bool:
     """True if the canonical price differs from ``existing`` on any billable rate.
 
     ``existing`` is the fee-free ``_row_to_model`` view the admin UI was shown
     (not the raw stored JSON): that view backfills litellm cache rates on read
     and the UI round-trips per-1M ↔ per-token, so a faithful "save as fetched"
     can legitimately differ from the stored JSON by cache rates or float noise.
-    Comparing the canonical object against that view with ``isclose`` avoids
-    false ``manual`` flips; only a genuine change to a stored rate trips it.
+    Comparing with ``isclose`` avoids false ``manual`` flips.
+
+    The comparison backfills the canonical the *same* way ``existing`` was, so a
+    client that omits a backfill-derived cache rate is compared like-for-like
+    (persisting 0 for it is re-backfilled on read, so the effective price is
+    unchanged). A genuinely stored rate that backfill never supplies (e.g.
+    ``request``) has no backfilled twin, so dropping it still trips as the real
+    change it is.
     """
+    compare = backfill_cache_pricing(model_id, canonical)
     return any(
         not math.isclose(
-            getattr(canonical, field),
+            getattr(compare, field),
             getattr(existing.pricing, field),
             rel_tol=1e-9,
             abs_tol=0.0,
@@ -578,7 +586,8 @@ def _resolve_provenance(
       into a billable ``manual`` $0.
     """
     if existing is not None:
-        if _pricing_edited(canonical, existing):
+        model_id = existing.forwarded_model_id or existing.id
+        if _pricing_edited(canonical, existing, model_id):
             return PricingSource.MANUAL.value
         if payload.pricing_source is not None:
             return payload.pricing_source
