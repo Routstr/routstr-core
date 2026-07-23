@@ -223,6 +223,58 @@ async def test_unchanged_price_preserves_source_despite_cache_backfill(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_omitting_backfilled_cache_rate_preserves_source(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A client that saves an unchanged price but OMITS the cache rates (which
+    exist only via read-time litellm backfill, never in the stored JSON) must
+    NOT flip to manual: persisting 0 for those fields is re-backfilled on read,
+    so the effective price is unchanged. The edit check backfills the payload
+    the same way, so an absent backfill-derived rate reads like-for-like."""
+    provider_id = await _make_provider(integration_session)
+    # Seed deepseek-chat (litellm-known) with NO cache rates in stored pricing.
+    row = ModelRow(
+        id="deepseek-chat",
+        name="DeepSeek",
+        description="d",
+        created=0,
+        context_length=131072,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 2.8e-7, "completion": 4.2e-7}),
+        upstream_provider_id=provider_id,
+        enabled=True,
+        forwarded_model_id="deepseek-chat",
+        pricing_source="litellm",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    # A non-UI client re-saves the unchanged prompt/completion but sends NO
+    # cache rates (unlike the UI, which round-trips the full backfilled view).
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="deepseek-chat",
+            pricing={"prompt": 2.8e-7, "completion": 4.2e-7},
+        ),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "litellm"  # not falsely flipped to manual
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_partial_payload_dropping_a_rate_flips_to_manual(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:
