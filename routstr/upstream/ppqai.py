@@ -175,7 +175,12 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.input_per_1M_tokens:
                                 input_price = ppqai_model.pricing.input_per_1M_tokens
 
-                            if input_price is not None:
+                            # A price of 0 means PPQ did not really price this
+                            # side (absent-as-zero), not that the tokens are
+                            # free: overlaying it would zero the matched
+                            # OpenRouter rate and bill those tokens at nothing.
+                            # Only a positive PPQ price overrides OpenRouter's.
+                            if input_price:
                                 or_model.pricing.prompt = input_price / 1_000_000
 
                             output_price = None
@@ -186,14 +191,14 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
 
-                            if output_price is not None:
+                            if output_price:
                                 or_model.pricing.completion = output_price / 1_000_000
 
                             # Only a model PPQ priced on *both* sides is fully
                             # native; if PPQ supplied one side, the other is
                             # still OpenRouter-derived, so the whole-Pricing tag
                             # stays whatever the OR feed carried (openrouter).
-                            if input_price is not None and output_price is not None:
+                            if input_price and output_price:
                                 for key, value in pricing_metadata(
                                     PricingSource.NATIVE
                                 ).items():
