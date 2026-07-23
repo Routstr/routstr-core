@@ -408,6 +408,63 @@ async def test_ppqai_matched_partial_price_keeps_openrouter_provenance() -> None
 
 
 @pytest.mark.asyncio
+async def test_ppqai_matched_zero_side_does_not_zero_openrouter_price() -> None:
+    """A PPQ price of 0 on one side means PPQ did not really price that side, not
+    that the tokens are free: overwriting the matched OpenRouter rate with $0
+    would bill those tokens at nothing. The OpenRouter price must stand (and the
+    tag stay ``openrouter``); only the truly-priced side is overlaid."""
+    from routstr.upstream.ppqai import PPQAIUpstreamProvider
+
+    payload = {
+        "data": [
+            {
+                "id": "gpt-4o",
+                "name": "GPT-4o",
+                "created_at": 0,
+                "context_length": 8192,
+                # PPQ prices output but reports input as 0 (absent-as-zero).
+                "pricing": {"api": {"input_per_1M": 0, "output_per_1M": 15.0}},
+            }
+        ]
+    }
+    or_feed = [
+        {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "created": 0,
+            "description": "d",
+            "context_length": 8192,
+            "architecture": {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": 0.000001, "completion": 0.000002},
+            "pricing_source": "openrouter",
+        }
+    ]
+
+    provider = PPQAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.ppqai.httpx.AsyncClient",
+        lambda *a, **k: _PPQClient(payload),
+    ):
+        with patch(
+            "routstr.upstream.ppqai.async_fetch_openrouter_models",
+            AsyncMock(return_value=or_feed),
+        ):
+            models = await provider.fetch_models()
+
+    model = _model_by_id(models, "gpt-4o")
+    # OpenRouter's input price survives PPQ's zero; the real output side overlays.
+    assert model.pricing.prompt == pytest.approx(0.000001)
+    assert model.pricing.completion == pytest.approx(15.0 / 1_000_000)
+    assert model.pricing_source == PricingSource.OPENROUTER
+
+
+@pytest.mark.asyncio
 async def test_ppqai_unmatched_partial_price_is_unresolved_and_disabled() -> None:
     """An unmatched PPQ model priced on only one side has no trustworthy full
     price: billing the zero side at nothing, so it imports ``unresolved`` and
