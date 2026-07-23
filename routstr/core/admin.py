@@ -808,6 +808,7 @@ async def batch_override_provider_models(
         provider_pk = _provider_pk(provider)
 
         overridden_count = 0
+        force_disabled: list[str] = []
 
         for model_data in payload.models:
             # Try to get existing model regardless of whether it's enabled or not
@@ -841,14 +842,18 @@ async def batch_override_provider_models(
                 existing_row.alias_ids = (
                     json.dumps(model_data.alias_ids) if model_data.alias_ids else None
                 )
-                existing_row.enabled = _effective_enabled(
+                effective_enabled = _effective_enabled(
                     canonical, model_data.enabled, source
                 )
+                existing_row.enabled = effective_enabled
                 existing_row.pricing_source = source
                 session.add(existing_row)
             else:
                 # Create new
                 source = _resolve_provenance(canonical, model_data, None)
+                effective_enabled = _effective_enabled(
+                    canonical, model_data.enabled, source
+                )
                 row = ModelRow(
                     id=model_data.id,
                     name=model_data.name,
@@ -875,13 +880,13 @@ async def batch_override_provider_models(
                         else None
                     ),
                     upstream_provider_id=provider_pk,
-                    enabled=_effective_enabled(
-                        canonical, model_data.enabled, source
-                    ),
+                    enabled=effective_enabled,
                     pricing_source=source,
                 )
                 session.add(row)
 
+            if model_data.enabled and not effective_enabled:
+                force_disabled.append(model_data.id)
             overridden_count += 1
 
         await session.commit()
@@ -890,6 +895,7 @@ async def batch_override_provider_models(
     return {
         "ok": True,
         "count": overridden_count,
+        "force_disabled": force_disabled,
         "message": f"Successfully batch overridden {overridden_count} models",
     }
 

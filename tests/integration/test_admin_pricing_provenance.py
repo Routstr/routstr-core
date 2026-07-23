@@ -600,6 +600,36 @@ async def test_batch_zero_price_entry_disabled_without_blocking_siblings(
     assert paid_row.enabled is True
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_batch_reports_force_disabled_ids(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The batch response names the entries it silently force-disabled, so a
+    caller that asked for ``enabled=True`` can tell which models did not land
+    enabled instead of the override looking wholly successful."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                _payload(
+                    provider_id,
+                    model_id="batch-free",
+                    prompt=0.0,
+                    completion=0.0,
+                    enabled=True,
+                ),
+                _payload(provider_id, model_id="batch-paid", enabled=True),
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["force_disabled"] == ["batch-free"]
+
+
 # ---------------------------------------------------------------------------
 # edge cases — string-typed prices and invalid provenance
 # ---------------------------------------------------------------------------
