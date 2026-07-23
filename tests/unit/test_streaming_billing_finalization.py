@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.auth as auth_module
 from routstr.auth import (
+    ReservationSnapshot,
     adjust_payment_for_tokens,
     get_reservation_snapshot,
     pay_for_request,
@@ -230,6 +232,7 @@ async def test_streaming_release_is_terminal_and_suppresses_background_charge() 
     session_context.__aexit__ = AsyncMock(return_value=None)
     release = AsyncMock(return_value=True)
     reservation_snapshot = MagicMock()
+    reservation_snapshot.reserved_msats = 500
     background_tasks = MagicMock()
 
     with (
@@ -258,6 +261,162 @@ async def test_streaming_release_is_terminal_and_suppresses_background_charge() 
     session.rollback.assert_awaited_once()
     release.assert_awaited_once_with(reservation_snapshot, session, 500)
     background_tasks.add_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "release_outcome",
+    [True, False, RuntimeError("release failed"), asyncio.CancelledError()],
+)
+async def test_responses_streaming_releases_and_raises_on_billing_failure(
+    release_outcome: bool | BaseException,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'data: {"type":"response.completed","response":{"model":"test",'
+            b'"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "responses-key"
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.rollback = AsyncMock()
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    snapshot = ReservationSnapshot(
+        release_id="responses-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    release = (
+        AsyncMock(side_effect=release_outcome)
+        if isinstance(release_outcome, BaseException)
+        else AsyncMock(return_value=release_outcome)
+    )
+    adjust = AsyncMock(side_effect=SQLAlchemyError("database unavailable"))
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.release_reservation", release),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_responses_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+            reservation_snapshot=snapshot,
+        )
+        emitted = bytearray()
+        with pytest.raises(SQLAlchemyError, match="database unavailable"):
+            async for chunk in response.body_iterator:
+                if isinstance(chunk, str):
+                    emitted.extend(chunk.encode())
+                else:
+                    emitted.extend(bytes(chunk))
+
+    assert b'"total_msats": 0' not in emitted
+    adjust.assert_awaited_once()
+    session.rollback.assert_awaited_once()
+    release.assert_awaited_once_with(snapshot, session, 500)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_litellm", [False, True])
+@pytest.mark.parametrize(
+    "release_outcome",
+    [True, False, RuntimeError("release failed"), asyncio.CancelledError()],
+)
+async def test_messages_streaming_releases_and_raises_on_billing_failure(
+    via_litellm: bool,
+    release_outcome: bool | BaseException,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "messages-key"
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.rollback = AsyncMock()
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    snapshot = ReservationSnapshot(
+        release_id=f"messages-{'litellm' if via_litellm else 'native'}",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    release = (
+        AsyncMock(side_effect=release_outcome)
+        if isinstance(release_outcome, BaseException)
+        else AsyncMock(return_value=release_outcome)
+    )
+    adjust = AsyncMock(side_effect=SQLAlchemyError("database unavailable"))
+
+    async def native_chunks() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'event: message_start\ndata: {"type":"message_start","message":'
+            b'{"model":"test","usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+        )
+        yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+    async def litellm_chunks() -> AsyncGenerator[dict, None]:
+        yield {
+            "type": "message_start",
+            "message": {
+                "model": "test",
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        }
+        yield {"type": "message_stop"}
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.release_reservation", release),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        if via_litellm:
+            response = provider._stream_litellm_messages(
+                iterator=litellm_chunks(),
+                key=key,
+                max_cost_for_model=500,
+                requested_model=None,
+                reservation_snapshot=snapshot,
+            )
+        else:
+            upstream_response = MagicMock(
+                status_code=200,
+                headers={"content-type": "text/event-stream"},
+            )
+            upstream_response.aiter_bytes = native_chunks
+            response = await provider.handle_streaming_messages_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                reservation_snapshot=snapshot,
+            )
+
+        with pytest.raises(SQLAlchemyError, match="database unavailable"):
+            async for _ in response.body_iterator:
+                pass
+
+    adjust.assert_awaited_once()
+    session.rollback.assert_awaited_once()
+    release.assert_awaited_once_with(snapshot, session, 500)
 
 
 @pytest.mark.asyncio

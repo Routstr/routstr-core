@@ -1,8 +1,8 @@
 """add reservation release idempotency records
 
-Revision ID: ac10fd366795
+Revision ID: a9bc1d633fa0
 Revises: d7e8f9a0b1c2
-Create Date: 2026-07-22 22:24:09.482339
+Create Date: 2026-07-24 00:20:27.967658
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "ac10fd366795"
+revision = "a9bc1d633fa0"
 down_revision = "d7e8f9a0b1c2"
 branch_labels = None
 depends_on = None

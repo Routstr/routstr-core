@@ -796,6 +796,56 @@ class BaseUpstreamProvider:
             media_type="application/json",
         )
 
+    async def _release_failed_streaming_reservation(
+        self,
+        key: ApiKey,
+        session: AsyncSession,
+        reservation_snapshot: ReservationSnapshot | None,
+    ) -> bool:
+        """Attempt exact release and suppress unsafe settlement retries."""
+        try:
+            await session.rollback()
+            snapshot = reservation_snapshot
+            if snapshot is None:
+                snapshot = await get_reservation_snapshot(key, session)
+            released = await release_reservation(
+                snapshot,
+                session,
+                snapshot.reserved_msats,
+            )
+            if not released:
+                logger.critical(
+                    "Billing reservation could not be released",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "reserved_balance": snapshot.reserved_msats,
+                    },
+                )
+            # A failed release remains recoverable by the stale-reservation
+            # sweep. Retrying settlement here could charge after an ambiguous
+            # database failure or replace the original stream exception.
+            return True
+        except asyncio.CancelledError:
+            # Preserve the exception that triggered billing cleanup. The stream
+            # propagates it immediately after this helper returns, and stale
+            # reservation cleanup can recover an interrupted release.
+            logger.critical(
+                "Billing reservation release was cancelled",
+                extra={"key_hash": key.hashed_key[:8] + "..."},
+                exc_info=True,
+            )
+            return True
+        except Exception as release_error:
+            logger.critical(
+                "Billing reservation release failed",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "error": str(release_error),
+                },
+                exc_info=True,
+            )
+            return True
+
     async def handle_streaming_chat_completion(
         self,
         response: httpx.Response,
@@ -1043,35 +1093,16 @@ class BaseUpstreamProvider:
                                 },
                                 exc_info=True,
                             )
-                            try:
-                                await session.rollback()
-                                released = await release_reservation(
-                                    reservation_snapshot,
+                            # Release is a terminal billing state. Do not enqueue
+                            # finalize_db_only from the generator's finally block
+                            # and charge this request later.
+                            usage_finalized = (
+                                await self._release_failed_streaming_reservation(
+                                    fresh_key,
                                     session,
-                                    max_cost_for_model,
+                                    reservation_snapshot,
                                 )
-                                if released:
-                                    # Release is a terminal billing state. Do not
-                                    # enqueue finalize_db_only from the generator's
-                                    # finally block and charge this request later.
-                                    usage_finalized = True
-                                else:
-                                    logger.critical(
-                                        "Billing reservation could not be released",
-                                        extra={
-                                            "key_hash": key.hashed_key[:8] + "...",
-                                            "reserved_balance": fresh_key.reserved_balance,
-                                        },
-                                    )
-                            except Exception as release_error:
-                                logger.critical(
-                                    "Billing reservation release failed",
-                                    extra={
-                                        "key_hash": key.hashed_key[:8] + "...",
-                                        "error": str(release_error),
-                                    },
-                                    exc_info=True,
-                                )
+                            )
                             raise
 
                         if usage_chunk_data is None:
@@ -1468,23 +1499,23 @@ class BaseUpstreamProvider:
                                 reservation_snapshot,
                             )
                             usage_finalized = True
-                        except Exception as e:
-                            logger.exception(
-                                "Error during Responses API usage finalization",
+                        except BaseException as e:
+                            logger.critical(
+                                "Error during Responses API usage finalization — CRITICAL",
                                 extra={
                                     "key_hash": key.hashed_key[:8] + "...",
                                     "error": str(e),
                                 },
+                                exc_info=True,
                             )
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            usage_finalized = (
+                                await self._release_failed_streaming_reservation(
+                                    fresh_key,
+                                    session,
+                                    reservation_snapshot,
+                                )
+                            )
+                            raise
 
                         if usage_chunk_data is None:
                             usage_chunk_data = {
@@ -1845,9 +1876,23 @@ class BaseUpstreamProvider:
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
-                    except Exception:
-                        usage_finalized = True
-                        return None
+                    except BaseException as e:
+                        logger.critical(
+                            "Error during Messages API usage finalization — CRITICAL",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "error": str(e),
+                            },
+                            exc_info=True,
+                        )
+                        usage_finalized = (
+                            await self._release_failed_streaming_reservation(
+                                fresh_key,
+                                new_session,
+                                reservation_snapshot,
+                            )
+                        )
+                        raise
 
             try:
                 async for chunk in response.aiter_bytes():
@@ -2003,8 +2048,23 @@ class BaseUpstreamProvider:
                                 usage_finalized = True
                                 # Emit the full combined_data as the cost
                                 yield f"event: cost\ndata: {json.dumps(combined_data)}\n\n".encode()
-                            except Exception:
-                                pass
+                            except BaseException as e:
+                                logger.critical(
+                                    "Error during Messages API usage finalization — CRITICAL",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(e),
+                                    },
+                                    exc_info=True,
+                                )
+                                usage_finalized = (
+                                    await self._release_failed_streaming_reservation(
+                                        fresh_key,
+                                        new_session,
+                                        reservation_snapshot,
+                                    )
+                                )
+                                raise
 
                 if not usage_finalized:
                     maybe_cost_event = await finalize_without_usage()
@@ -2333,9 +2393,23 @@ class BaseUpstreamProvider:
                         return (
                             f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n"
                         ).encode()
-                    except Exception:
-                        usage_finalized = True
-                        return None
+                    except BaseException as e:
+                        logger.critical(
+                            "Error during LiteLLM Messages usage finalization — CRITICAL",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "error": str(e),
+                            },
+                            exc_info=True,
+                        )
+                        usage_finalized = (
+                            await self._release_failed_streaming_reservation(
+                                fresh_key,
+                                new_session,
+                                reservation_snapshot,
+                            )
+                        )
+                        raise
 
             try:
                 async for annotated in messages_dispatch.stream_annotated_events(
@@ -2410,8 +2484,23 @@ class BaseUpstreamProvider:
                                     f"event: cost\ndata: "
                                     f"{json.dumps({'cost': cost_data})}\n\n"
                                 ).encode()
-                            except Exception:
-                                pass
+                            except BaseException as e:
+                                logger.critical(
+                                    "Error during LiteLLM Messages usage finalization — CRITICAL",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(e),
+                                    },
+                                    exc_info=True,
+                                )
+                                usage_finalized = (
+                                    await self._release_failed_streaming_reservation(
+                                        fresh_key,
+                                        new_session,
+                                        reservation_snapshot,
+                                    )
+                                )
+                                raise
 
                 if not usage_finalized:
                     cost_event = await finalize_without_usage()
@@ -2422,6 +2511,9 @@ class BaseUpstreamProvider:
                 if not usage_finalized:
                     await finalize_without_usage()
                 raise
+            finally:
+                if not usage_finalized:
+                    await finalize_without_usage()
 
         return StreamingResponse(
             stream_with_cost(),
