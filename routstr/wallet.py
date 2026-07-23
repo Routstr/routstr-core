@@ -221,6 +221,8 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
     wallet: Wallet = await get_wallet(effective_mint_url, unit)
     all_proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
     proofs = [proof for proof in all_proofs if not proof.reserved]
+    # Fallback must compare the requested amount with liquid proofs only. Counting
+    # reserved proofs here can suppress fallback even though they cannot be sent.
     proofs_for_mint = sum(p.amount for p in proofs)
     reserved_for_mint = sum(p.amount for p in all_proofs if p.reserved)
 
