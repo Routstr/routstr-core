@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from .base import BaseUpstreamProvider
+from .pricing_resolver import FallbackPricingResolver, ResolvedPricing
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -74,7 +75,13 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
 
     async def fetch_models(self) -> list[Model]:
         """Fetch models from Ollama API using /api/tags endpoint."""
-        from ..payment.models import Architecture, Model, Pricing, TopProvider
+        from ..payment.models import (
+            Architecture,
+            Model,
+            Pricing,
+            TopProvider,
+            pricing_metadata,
+        )
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -82,6 +89,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                 response.raise_for_status()
                 data = response.json()
 
+                resolver = FallbackPricingResolver()
                 models_list = []
                 for model_data in data.get("models", []):
                     model_name = model_data.get("name", "")
@@ -113,6 +121,30 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                     if parameter_size:
                         description += f" ({parameter_size})"
 
+                    # Ollama's /api/tags carries no pricing, so we never claim
+                    # `native`: resolve through the shared litellm→OpenRouter
+                    # chain and wear that source, or fail closed as `unresolved`
+                    # (imported disabled) when nothing can price the model.
+                    resolved = await resolver.resolve(model_name)
+                    if resolved is None:
+                        logger.warning(
+                            f"No pricing source resolved for Ollama model "
+                            f"'{model_name}'; importing it disabled",
+                            extra={
+                                "model_id": model_name,
+                                "base_url": self.base_url,
+                            },
+                        )
+                        resolved = ResolvedPricing(
+                            prompt=0.0,
+                            completion=0.0,
+                            context_length=None,
+                            source="unresolved",
+                        )
+                        enabled = False
+                    else:
+                        enabled = True
+
                     models_list.append(
                         Model(
                             id=model_name,
@@ -128,15 +160,14 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                                 instruct_type=None,
                             ),
                             pricing=Pricing(
-                                prompt=0.000003,
-                                completion=0.000003,
+                                prompt=resolved.prompt,
+                                completion=resolved.completion,
                                 request=0.0,
                                 image=0.0,
                                 web_search=0.0,
                                 internal_reasoning=0.0,
-                                max_prompt_cost=0.001,
-                                max_completion_cost=0.001,
-                                max_cost=0.001,
+                                input_cache_read=resolved.input_cache_read,
+                                input_cache_write=resolved.input_cache_write,
                             ),
                             sats_pricing=None,
                             per_request_limits=None,
@@ -145,9 +176,10 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
                                 max_completion_tokens=context_length // 2,
                                 is_moderated=False,
                             ),
-                            enabled=True,
+                            enabled=enabled,
                             upstream_provider_id=None,
                             canonical_slug=None,
+                            **pricing_metadata(resolved.source),
                         )
                     )
 
@@ -244,6 +276,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            pricing_source=model.pricing_source,
         )
 
         (
@@ -266,4 +299,5 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             enabled=model.enabled,
             upstream_provider_id=model.upstream_provider_id,
             canonical_slug=model.canonical_slug,
+            pricing_source=model.pricing_source,
         )

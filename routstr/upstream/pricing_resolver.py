@@ -40,6 +40,7 @@ class ResolvedPricing:
     tokenizer: str = "unknown"
     instruct_type: str | None = None
     is_moderated: bool | None = None
+    supports_function_calling: bool | None = None
 
 
 def estimate_context_length(model_id: str) -> int:
@@ -114,6 +115,7 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
         input_cache_read=float(info.get("cache_read_input_token_cost") or 0.0),
         input_cache_write=float(info.get("cache_creation_input_token_cost") or 0.0),
         input_modalities=input_modalities,
+        supports_function_calling=info.get("supports_function_calling"),
     )
 
 

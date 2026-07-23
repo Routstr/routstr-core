@@ -6,7 +6,14 @@ import httpx
 from pydantic.v1 import BaseModel, Field
 
 from ..core.logging import get_logger
-from ..payment.models import Architecture, Model, Pricing, async_fetch_openrouter_models
+from ..payment.models import (
+    Architecture,
+    Model,
+    Pricing,
+    PricingSource,
+    async_fetch_openrouter_models,
+    pricing_metadata,
+)
 from .base import BaseUpstreamProvider, TopupData
 from .ehbp import EHBPForwardingTarget
 
@@ -155,6 +162,11 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                         )
 
                         if or_model:
+                            # Two PPQ ids can tail-match the same OpenRouter
+                            # entry; copy before mutating so each keeps its own
+                            # price/provenance instead of aliasing one shared row
+                            # where the last writer clobbers the rest.
+                            or_model = or_model.copy(deep=True)
                             input_price = None
                             if ppqai_model.pricing.api:
                                 input_price = ppqai_model.pricing.api.get(
@@ -163,7 +175,12 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.input_per_1M_tokens:
                                 input_price = ppqai_model.pricing.input_per_1M_tokens
 
-                            if input_price is not None:
+                            # A price of 0 means PPQ did not really price this
+                            # side (absent-as-zero), not that the tokens are
+                            # free: overlaying it would zero the matched
+                            # OpenRouter rate and bill those tokens at nothing.
+                            # Only a positive PPQ price overrides OpenRouter's.
+                            if input_price:
                                 or_model.pricing.prompt = input_price / 1_000_000
 
                             output_price = None
@@ -174,8 +191,18 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
 
-                            if output_price is not None:
+                            if output_price:
                                 or_model.pricing.completion = output_price / 1_000_000
+
+                            # Only a model PPQ priced on *both* sides is fully
+                            # native; if PPQ supplied one side, the other is
+                            # still OpenRouter-derived, so the whole-Pricing tag
+                            # stays whatever the OR feed carried (openrouter).
+                            if input_price and output_price:
+                                for key, value in pricing_metadata(
+                                    PricingSource.NATIVE
+                                ).items():
+                                    setattr(or_model, key, value)
 
                             if cl := ppqai_model.context_length:
                                 or_model.context_length = cl
@@ -196,6 +223,20 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                 )
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
+
+                            # PPQ's catalog price is native USD only when it
+                            # prices *both* sides; a partial price (one side at
+                            # the 0.0 default) would bill the zero side at
+                            # nothing, so it — like a fully-unpriced model — is
+                            # unresolved and imported disabled.
+                            has_complete_ppq_price = bool(input_price) and bool(
+                                output_price
+                            )
+                            source = (
+                                PricingSource.NATIVE
+                                if has_complete_ppq_price
+                                else PricingSource.UNRESOLVED
+                            )
 
                             models.append(
                                 Model(
@@ -219,6 +260,8 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                         web_search=0.0,
                                         internal_reasoning=0.0,
                                     ),
+                                    enabled=has_complete_ppq_price,
+                                    **pricing_metadata(source),
                                 )
                             )
                     except Exception as e:
