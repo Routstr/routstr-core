@@ -15,6 +15,7 @@ from alembic.util.exc import CommandError
 from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -27,58 +28,43 @@ logger = get_logger(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name} must be a boolean")
+def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
+    """Build an async engine from validated, environment-only pool settings."""
+    from .settings import settings
 
-
-def _engine_options(database_url: str) -> dict[str, int | float | bool]:
-    """Build a bounded pool configuration, preserving SQLite memory semantics."""
-    options: dict[str, int | float | bool] = {
-        "pool_pre_ping": _env_bool("DATABASE_POOL_PRE_PING", True)
-    }
     url = make_url(database_url)
     is_memory_sqlite = url.get_backend_name() == "sqlite" and url.database in {
         None,
         "",
         ":memory:",
     }
-    if is_memory_sqlite:
-        return options
+    options: dict[str, int | float | bool] = {
+        "pool_pre_ping": settings.database_pool_pre_ping,
+    }
+    if not is_memory_sqlite:
+        options.update(
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_max_overflow,
+            pool_timeout=settings.database_pool_timeout,
+            pool_recycle=settings.database_pool_recycle,
+        )
 
-    pool_size = int(os.environ.get("DATABASE_POOL_SIZE", "5"))
-    max_overflow = int(os.environ.get("DATABASE_MAX_OVERFLOW", "0"))
-    pool_timeout = float(os.environ.get("DATABASE_POOL_TIMEOUT", "5"))
-    pool_recycle = int(os.environ.get("DATABASE_POOL_RECYCLE", "1800"))
-    if pool_size < 1:
-        raise ValueError("DATABASE_POOL_SIZE must be at least 1")
-    if max_overflow < 0:
-        raise ValueError("DATABASE_MAX_OVERFLOW cannot be negative")
-    if pool_timeout <= 0:
-        raise ValueError("DATABASE_POOL_TIMEOUT must be positive")
-    if pool_recycle < 0:
-        raise ValueError("DATABASE_POOL_RECYCLE cannot be negative")
-    options.update(
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout=pool_timeout,
-        pool_recycle=pool_recycle,
+    logger.info(
+        "Database pool configured",
+        extra={
+            "database_url_backend": url.get_backend_name(),
+            "in_memory_sqlite": is_memory_sqlite,
+            **options,
+        },
     )
-    return options
+    return create_async_engine(database_url, echo=False, **options)
 
 
-engine = create_async_engine(DATABASE_URL, echo=False, **_engine_options(DATABASE_URL))
+engine = create_db_engine()
 
-_POOL_HOLD_WARN_SECONDS = float(os.environ.get("DATABASE_POOL_HOLD_WARN_SECONDS", "10"))
-if _POOL_HOLD_WARN_SECONDS <= 0:
-    raise ValueError("DATABASE_POOL_HOLD_WARN_SECONDS must be positive")
+from .settings import settings as _runtime_settings  # noqa: E402
+
+_POOL_HOLD_WARN_SECONDS = _runtime_settings.database_pool_hold_warn_seconds
 
 
 @event.listens_for(engine.sync_engine, "checkout")
@@ -441,6 +427,10 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
     )
     collected: bool = Field(default=False)
     swept: bool = Field(default=False)
+    sweep_started_at: int | None = Field(
+        default=None,
+        description="Unix timestamp for a recoverable refund-sweep claim",
+    )
     source: str = Field(
         default="x-cashu",
         description="Payment source: x-cashu or apikey",
@@ -793,20 +783,12 @@ async def complete_routstr_fee_payout(
     return result.rowcount == 1
 
 
-async def balances_for_mint_and_unit(
-    db_session: AsyncSession, mint_url: str, unit: str
-) -> int:
-    query = select(func.sum(ApiKey.balance)).where(
-        ApiKey.refund_mint_url == mint_url, ApiKey.refund_currency == unit
-    )
-    result = await db_session.exec(query)
-    return result.one() or 0
-
-
 async def balances_by_mint_and_unit(
-    db_session: AsyncSession,
+    db_session: AsyncSession, mint_urls: list[str], units: list[str]
 ) -> dict[tuple[str, str], int]:
-    """Return all user liabilities in one query, grouped by mint and unit."""
+    """Return requested user liabilities grouped by mint and unit."""
+    if not mint_urls or not units:
+        return {}
     query = (
         select(
             col(ApiKey.refund_mint_url),
@@ -814,8 +796,8 @@ async def balances_by_mint_and_unit(
             func.sum(ApiKey.balance),
         )
         .where(
-            col(ApiKey.refund_mint_url).is_not(None),
-            col(ApiKey.refund_currency).is_not(None),
+            col(ApiKey.refund_mint_url).in_(mint_urls),
+            col(ApiKey.refund_currency).in_(units),
         )
         .group_by(col(ApiKey.refund_mint_url), col(ApiKey.refund_currency))
     )

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -154,3 +155,73 @@ async def test_refund_sweep_records_terminal_but_not_transient_failures(
     refund = (await _load(session_factory))["refund"]
     assert refund.collected is collected
     assert refund.swept is False
+    assert refund.sweep_started_at is None
+
+
+@pytest.mark.asyncio
+async def test_refund_sweep_releases_claim_on_cancellation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="cancelled", amount=1, unit="sat", type="out", created_at=800
+        ),
+    )
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch(
+            "routstr.wallet.recieve_token",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await refund_sweep_once()
+
+    refund = (await _load(session_factory))["cancelled"]
+    assert refund.swept is False
+    assert refund.sweep_started_at is None
+
+
+@pytest.mark.asyncio
+async def test_refund_sweep_recovers_stale_claim_without_misreporting_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="stale",
+            amount=1,
+            unit="sat",
+            type="out",
+            created_at=800,
+            sweep_started_at=100,
+        ),
+        CashuTransaction(
+            token="active",
+            amount=1,
+            unit="sat",
+            type="out",
+            created_at=800,
+            sweep_started_at=950,
+        ),
+    )
+    receive = AsyncMock(side_effect=RuntimeError("token already spent"))
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.settings.refund_sweep_claim_timeout_seconds", 200),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch("routstr.wallet.recieve_token", receive),
+    ):
+        await refund_sweep_once()
+
+    receive.assert_awaited_once_with("stale")
+    loaded = await _load(session_factory)
+    assert loaded["stale"].swept is True
+    assert loaded["stale"].collected is False
+    assert loaded["stale"].sweep_started_at is None
+    assert loaded["active"].swept is False
+    assert loaded["active"].sweep_started_at == 950

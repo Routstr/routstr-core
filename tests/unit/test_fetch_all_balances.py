@@ -254,3 +254,58 @@ async def test_fetch_all_balances_no_duplicate_primary_mint() -> None:
 
     assert [d["mint_url"] for d in details] == ["http://primary:3338"]
     assert total_wallet == 1000
+
+
+@pytest.mark.asyncio
+async def test_fetch_all_balances_degrades_when_liability_read_fails() -> None:
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", []),
+        patch.object(settings, "primary_mint", "http://primary:3338"),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet.db.balances_by_mint_and_unit",
+            AsyncMock(side_effect=RuntimeError("db pool exhausted")),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            MagicMock(return_value=[MagicMock(amount=1000)]),
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+        ),
+    ):
+        details, total_wallet, total_user, owner = await fetch_all_balances(
+            units=["sat"]
+        )
+
+    assert details[0]["error"] == "db pool exhausted"
+    assert details[0]["wallet_balance"] == 1000
+    assert details[0]["user_balance"] == 0
+    assert details[0]["owner_balance"] == 0
+    assert (total_wallet, total_user, owner) == (1000, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_liability_error_keeps_more_specific_mint_error() -> None:
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", []),
+        patch.object(settings, "primary_mint", "http://primary:3338"),
+        patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet.db.balances_by_mint_and_unit",
+            AsyncMock(side_effect=RuntimeError("db pool exhausted")),
+        ),
+        patch(
+            "routstr.wallet.get_wallet",
+            AsyncMock(side_effect=RuntimeError("mint down")),
+        ),
+    ):
+        details, *_ = await fetch_all_balances(units=["sat"])
+
+    assert details[0]["error"] == "mint down"

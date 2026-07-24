@@ -57,7 +57,7 @@ async def test_fee_payout_checkpoint_is_atomic_and_durable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fee_payout_checkpoints_before_sending() -> None:
+async def test_fee_payout_prepares_wallet_then_checkpoints_before_sending() -> None:
     session = Mock()
     fee = SimpleNamespace(
         accumulated_msats=5_000,
@@ -66,6 +66,10 @@ async def test_fee_payout_checkpoints_before_sending() -> None:
     )
     payout_wallet = Mock()
     events: list[str] = []
+
+    async def prepare(*_args: object) -> Mock:
+        events.append("prepare")
+        return payout_wallet
 
     async def checkpoint(*_args: object) -> bool:
         events.append("checkpoint")
@@ -93,14 +97,86 @@ async def test_fee_payout_checkpoints_before_sending() -> None:
         patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
         patch("routstr.wallet.db.reset_routstr_fee", side_effect=checkpoint),
         patch("routstr.wallet.db.complete_routstr_fee_payout", side_effect=complete),
-        patch("routstr.wallet.get_wallet", AsyncMock(return_value=payout_wallet)),
+        patch("routstr.wallet.get_wallet", AsyncMock(side_effect=prepare)),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
         patch("routstr.wallet.raw_send_to_lnurl", side_effect=send),
     ):
         with pytest.raises(asyncio.CancelledError):
             await wallet.periodic_routstr_fee_payout()
 
-    assert events == ["checkpoint", "send", "complete"]
+    assert events == ["prepare", "checkpoint", "send", "complete"]
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_preparation_failure_does_not_checkpoint() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=5_000,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+    checkpoint = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", checkpoint),
+        patch(
+            "routstr.wallet.get_wallet",
+            AsyncMock(side_effect=RuntimeError("wallet unavailable")),
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_lost_checkpoint_race_does_not_send() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=5_000,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+    send = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch(
+            "routstr.wallet.db.reset_routstr_fee",
+            AsyncMock(return_value=False),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch("routstr.wallet.raw_send_to_lnurl", send),
+        patch("routstr.wallet.logger.warning") as warning,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    send.assert_not_awaited()
+    warning.assert_called_once_with("Routstr fee payout was already claimed")
 
 
 @pytest.mark.asyncio

@@ -2,63 +2,45 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.pool import StaticPool
 
 from routstr.core import db
-from routstr.core.db import _engine_options
+from routstr.core.db import create_db_engine
+from routstr.core.settings import settings
 
 
-def test_engine_options_use_bounded_fail_fast_pool(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.delenv("DATABASE_POOL_SIZE", raising=False)
-    monkeypatch.delenv("DATABASE_MAX_OVERFLOW", raising=False)
-    monkeypatch.delenv("DATABASE_POOL_TIMEOUT", raising=False)
-    monkeypatch.delenv("DATABASE_POOL_RECYCLE", raising=False)
-    monkeypatch.delenv("DATABASE_POOL_PRE_PING", raising=False)
-
-    options = _engine_options("postgresql+asyncpg://db/routstr")
-
-    assert options == {
-        "pool_size": 5,
-        "max_overflow": 0,
-        "pool_timeout": 5.0,
-        "pool_recycle": 1800,
-        "pool_pre_ping": True,
-    }
-
-
-def test_engine_options_are_operator_configurable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("DATABASE_POOL_SIZE", "12")
-    monkeypatch.setenv("DATABASE_MAX_OVERFLOW", "3")
-    monkeypatch.setenv("DATABASE_POOL_TIMEOUT", "2.5")
-    monkeypatch.setenv("DATABASE_POOL_RECYCLE", "900")
-    monkeypatch.setenv("DATABASE_POOL_PRE_PING", "false")
-
-    assert _engine_options("sqlite+aiosqlite:///keys.db") == {
-        "pool_size": 12,
-        "max_overflow": 3,
-        "pool_timeout": 2.5,
-        "pool_recycle": 900,
-        "pool_pre_ping": False,
-    }
-
-
-@pytest.mark.parametrize(
-    ("name", "value"),
-    [
-        ("DATABASE_POOL_SIZE", "0"),
-        ("DATABASE_MAX_OVERFLOW", "-1"),
-        ("DATABASE_POOL_TIMEOUT", "0"),
-        ("DATABASE_POOL_RECYCLE", "-1"),
-        ("DATABASE_POOL_PRE_PING", "maybe"),
-    ],
-)
-def test_engine_options_reject_invalid_values(
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    value: str,
+@pytest.mark.asyncio
+async def test_engine_uses_validated_bounded_pool_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
 ) -> None:
-    monkeypatch.setenv(name, value)
-    with pytest.raises(ValueError):
-        _engine_options("postgresql+asyncpg://db/routstr")
+    monkeypatch.setattr(settings, "database_pool_size", 12)
+    monkeypatch.setattr(settings, "database_max_overflow", 3)
+    monkeypatch.setattr(settings, "database_pool_timeout", 2.5)
+    monkeypatch.setattr(settings, "database_pool_recycle", 900)
+    monkeypatch.setattr(settings, "database_pool_pre_ping", False)
+
+    engine = create_db_engine(f"sqlite+aiosqlite:///{tmp_path}/pool.db")
+    try:
+        assert engine.pool.size() == 12  # type: ignore[attr-defined]
+        assert engine.pool._max_overflow == 3  # type: ignore[attr-defined]
+        assert engine.pool._timeout == 2.5  # type: ignore[attr-defined]
+        assert engine.pool._recycle == 900
+        assert engine.pool._pre_ping is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_memory_sqlite_keeps_static_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "database_pool_pre_ping", True)
+    engine = create_db_engine("sqlite+aiosqlite://")
+    try:
+        assert isinstance(engine.pool, StaticPool)
+        assert engine.pool._pre_ping is True
+    finally:
+        await engine.dispose()
 
 
 def test_pool_observer_warns_when_connection_is_held_too_long(
@@ -75,9 +57,3 @@ def test_pool_observer_warns_when_connection_is_held_too_long(
 
     warning.assert_called_once()
     assert warning.call_args.kwargs["extra"]["held_seconds"] == 12.5
-
-
-def test_memory_sqlite_keeps_dialect_static_pool(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.delenv("DATABASE_POOL_PRE_PING", raising=False)
-
-    assert _engine_options("sqlite+aiosqlite://") == {"pool_pre_ping": True}
