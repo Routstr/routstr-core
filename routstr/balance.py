@@ -109,13 +109,19 @@ async def account_info(
 # Note: validate_bearer_key already supports refund_address and key_expiry_time params
 
 
-@router.get("/create")
-async def create_balance(
+class BalanceCreateRequest(BaseModel):
+    initial_balance_token: str
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
+
+
+async def _create_balance(
     initial_balance_token: str,
-    balance_limit: int | None = None,
-    balance_limit_reset: str | None = None,
-    validity_date: int | None = None,
-    session: AsyncSession = Depends(get_session),
+    balance_limit: int | None,
+    balance_limit_reset: str | None,
+    validity_date: int | None,
+    session: AsyncSession,
 ) -> dict:
     key = await validate_bearer_key(initial_balance_token, session)
 
@@ -133,6 +139,37 @@ async def create_balance(
         "api_key": "sk-" + key.hashed_key,
         "balance": key.balance,
     }
+
+
+@router.post("/create")
+async def create_balance_from_body(
+    payload: BalanceCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _create_balance(
+        payload.initial_balance_token,
+        payload.balance_limit,
+        payload.balance_limit_reset,
+        payload.validity_date,
+        session,
+    )
+
+
+@router.get("/create")
+async def create_balance(
+    initial_balance_token: str,
+    balance_limit: int | None = None,
+    balance_limit_reset: str | None = None,
+    validity_date: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _create_balance(
+        initial_balance_token,
+        balance_limit,
+        balance_limit_reset,
+        validity_date,
+        session,
+    )
 
 
 @router.get("/info")
