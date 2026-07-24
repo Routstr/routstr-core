@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -21,6 +22,21 @@ if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
 logger = get_logger(__name__)
+
+
+def _positive_rate(value: object) -> float | None:
+    """A PPQ per-1M rate only if it is a finite, positive number, else ``None``.
+
+    PPQ's feed can carry ``0`` (absent-as-zero), negatives, or non-finite junk;
+    all of those are *not* a real price. Treating only a finite ``> 0`` value as
+    priced stops a negative/``NaN`` rate from overwriting a matched OpenRouter
+    price or mislabelling a model ``native``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    rate = float(value)
+    if not math.isfinite(rate) or rate <= 0:
+        return None
+    return rate
 
 
 class PPQAIModelPricing(BaseModel):
@@ -176,11 +192,13 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                 input_price = ppqai_model.pricing.input_per_1M_tokens
 
                             # A price of 0 means PPQ did not really price this
-                            # side (absent-as-zero), not that the tokens are
-                            # free: overlaying it would zero the matched
-                            # OpenRouter rate and bill those tokens at nothing.
-                            # Only a positive PPQ price overrides OpenRouter's.
-                            if input_price:
+                            # side (absent-as-zero), and a negative/non-finite
+                            # value is malformed — neither is a real price.
+                            # Overlaying one would corrupt the matched OpenRouter
+                            # rate (zeroing or negating it) and bill wrongly, so
+                            # only a finite, positive PPQ price overrides it.
+                            input_price = _positive_rate(input_price)
+                            if input_price is not None:
                                 or_model.pricing.prompt = input_price / 1_000_000
 
                             output_price = None
@@ -191,14 +209,15 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
 
-                            if output_price:
+                            output_price = _positive_rate(output_price)
+                            if output_price is not None:
                                 or_model.pricing.completion = output_price / 1_000_000
 
                             # Only a model PPQ priced on *both* sides is fully
                             # native; if PPQ supplied one side, the other is
                             # still OpenRouter-derived, so the whole-Pricing tag
                             # stays whatever the OR feed carried (openrouter).
-                            if input_price and output_price:
+                            if input_price is not None and output_price is not None:
                                 for key, value in pricing_metadata(
                                     PricingSource.NATIVE
                                 ).items():
@@ -208,29 +227,32 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                 or_model.context_length = cl
                             models.append(or_model)
                         else:
-                            input_price = 0.0
+                            input_price = None
                             if ppqai_model.pricing.api:
                                 input_price = ppqai_model.pricing.api.get(
-                                    "input_per_1M", 0.0
+                                    "input_per_1M"
                                 )
                             elif ppqai_model.pricing.input_per_1M_tokens:
                                 input_price = ppqai_model.pricing.input_per_1M_tokens
 
-                            output_price = 0.0
+                            output_price = None
                             if ppqai_model.pricing.api:
                                 output_price = ppqai_model.pricing.api.get(
-                                    "output_per_1M", 0.0
+                                    "output_per_1M"
                                 )
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
 
                             # PPQ's catalog price is native USD only when it
-                            # prices *both* sides; a partial price (one side at
-                            # the 0.0 default) would bill the zero side at
-                            # nothing, so it — like a fully-unpriced model — is
-                            # unresolved and imported disabled.
-                            has_complete_ppq_price = bool(input_price) and bool(
-                                output_price
+                            # prices *both* sides with a finite, positive rate; a
+                            # partial, zero, or malformed (negative/non-finite)
+                            # side would bill at nothing or a nonsensical amount,
+                            # so it — like a fully-unpriced model — is unresolved
+                            # and imported disabled.
+                            input_price = _positive_rate(input_price)
+                            output_price = _positive_rate(output_price)
+                            has_complete_ppq_price = (
+                                input_price is not None and output_price is not None
                             )
                             source = (
                                 PricingSource.NATIVE
@@ -253,8 +275,8 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                         instruct_type=None,
                                     ),
                                     pricing=Pricing(
-                                        prompt=input_price / 1_000_000,
-                                        completion=output_price / 1_000_000,
+                                        prompt=(input_price or 0.0) / 1_000_000,
+                                        completion=(output_price or 0.0) / 1_000_000,
                                         request=0.0,
                                         image=0.0,
                                         web_search=0.0,

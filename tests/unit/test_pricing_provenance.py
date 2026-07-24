@@ -499,6 +499,98 @@ async def test_ppqai_unmatched_partial_price_is_unresolved_and_disabled() -> Non
     assert model.enabled is False
 
 
+@pytest.mark.asyncio
+async def test_ppqai_matched_negative_price_does_not_overwrite_openrouter() -> None:
+    """A negative PPQ rate is malformed upstream data, not a real price: it is
+    truthy, so overlaying it would replace the matched OpenRouter rate with a
+    negative value and then mislabel the model ``native``. Only a finite,
+    positive PPQ price may override OpenRouter's."""
+    from routstr.upstream.ppqai import PPQAIUpstreamProvider
+
+    payload = {
+        "data": [
+            {
+                "id": "gpt-4o",
+                "name": "GPT-4o",
+                "created_at": 0,
+                "context_length": 8192,
+                "pricing": {"api": {"input_per_1M": -5.0, "output_per_1M": -15.0}},
+            }
+        ]
+    }
+    or_feed = [
+        {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "created": 0,
+            "description": "d",
+            "context_length": 8192,
+            "architecture": {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": 0.000001, "completion": 0.000002},
+            "pricing_source": "openrouter",
+        }
+    ]
+
+    provider = PPQAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.ppqai.httpx.AsyncClient",
+        lambda *a, **k: _PPQClient(payload),
+    ):
+        with patch(
+            "routstr.upstream.ppqai.async_fetch_openrouter_models",
+            AsyncMock(return_value=or_feed),
+        ):
+            models = await provider.fetch_models()
+
+    model = _model_by_id(models, "gpt-4o")
+    assert model.pricing.prompt == pytest.approx(0.000001)
+    assert model.pricing.completion == pytest.approx(0.000002)
+    assert model.pricing_source == PricingSource.OPENROUTER
+
+
+@pytest.mark.asyncio
+async def test_ppqai_standalone_negative_price_is_unresolved_and_disabled() -> None:
+    """An unmatched PPQ model priced with negative rates has no trustworthy
+    price: it must import ``unresolved`` and disabled, never ``native`` and
+    enabled with a negative rate that would credit the user per token."""
+    from routstr.upstream.ppqai import PPQAIUpstreamProvider
+
+    payload = {
+        "data": [
+            {
+                "id": "ppq-negative",
+                "name": "PPQ Negative",
+                "created_at": 0,
+                "context_length": 8192,
+                "pricing": {"api": {"input_per_1M": -1.0, "output_per_1M": -2.0}},
+            }
+        ]
+    }
+
+    provider = PPQAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.ppqai.httpx.AsyncClient",
+        lambda *a, **k: _PPQClient(payload),
+    ):
+        with patch(
+            "routstr.upstream.ppqai.async_fetch_openrouter_models",
+            AsyncMock(return_value=[]),
+        ):
+            models = await provider.fetch_models()
+
+    model = _model_by_id(models, "ppq-negative")
+    assert model.pricing_source == PricingSource.UNRESOLVED
+    assert model.enabled is False
+    assert model.pricing.prompt >= 0
+    assert model.pricing.completion >= 0
+
+
 # ---------------------------------------------------------------------------
 # ollama — no native price; resolve through the shared fallback or unresolved
 # ---------------------------------------------------------------------------
