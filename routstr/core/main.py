@@ -58,6 +58,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
+    model_paths_refresh_task = None
     key_reset_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
@@ -130,6 +131,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 refresh_upstreams_models_periodically(get_upstreams)
             )
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
+        if global_settings.model_paths_refresh_interval_seconds > 0:
+            from ..upstream.model_paths import refresh_model_paths_periodically
+
+            model_paths_refresh_task = asyncio.create_task(
+                refresh_model_paths_periodically(get_upstreams)
+            )
         payout_task = asyncio.create_task(periodic_payout())
         if global_settings.nsec:
             nip91_task = asyncio.create_task(announce_provider())
@@ -176,6 +183,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
+        if model_paths_refresh_task is not None:
+            model_paths_refresh_task.cancel()
         if key_reset_task is not None:
             key_reset_task.cancel()
         if stale_reservation_task is not None:
@@ -209,6 +218,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(models_refresh_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
+            if model_paths_refresh_task is not None:
+                tasks_to_wait.append(model_paths_refresh_task)
             if key_reset_task is not None:
                 tasks_to_wait.append(key_reset_task)
             if stale_reservation_task is not None:

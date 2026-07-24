@@ -213,6 +213,41 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
+class ModelPathRow(SQLModel, table=True):  # type: ignore
+    """Upstream provider path a model is reachable through.
+
+    Discovery/visibility data only. ``model_id`` is intentionally NOT globally
+    unique: it is the client-visible ``/v1/models`` id (``forwarded_model_id or
+    id``) grouped across every provider that exposes the model. A single model
+    can therefore have several rows — one per direct provider path plus one per
+    OpenRouter sub-provider endpoint.
+    """
+
+    __tablename__ = "model_paths"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_id",
+            "path",
+            "upstream_provider_id",
+            name="uq_model_paths_model_path_provider",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    model_id: str = Field(
+        index=True, description="Client-visible /v1/models id (forwarded_model_id or id)"
+    )
+    path: str = Field(
+        description="Provider path stamped on chat completion responses, e.g. "
+        "'anthropic' or 'openrouter:Anthropic'"
+    )
+    upstream_provider_id: int = Field(
+        index=True,
+        foreign_key="upstream_providers.id",
+        ondelete="CASCADE",
+        description="upstream_providers.id this path was discovered from",
+    )
+
+
 class LightningInvoice(SQLModel, table=True):  # type: ignore
     __tablename__ = "lightning_invoices"
 

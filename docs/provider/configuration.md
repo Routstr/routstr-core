@@ -142,6 +142,7 @@ Use environment variables for:
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |
 | `CORS_ORIGINS`       | Allowed CORS origins              | `*`                                  |
 | `RELAYS`             | Nostr relays (comma-separated)    | (default set)                        |
+| `MODEL_PATHS_REFRESH_INTERVAL_SECONDS` | How often to refresh `/v1/models/paths` discovery data; set `0` to disable | `600` |
 
 ### Priority
 
@@ -175,3 +176,8 @@ Manage which AI models you offer:
    - **Create aliases** — friendly names for models
 
 See [Pricing](pricing.md) for per-model pricing strategies.
+
+Model path discovery is refreshed in the background and exposed through
+`/v1/models/paths`. The response groups each client-visible model ID with the
+provider paths that may appear in chat-completion response metadata. Tune the
+refresh cadence with `MODEL_PATHS_REFRESH_INTERVAL_SECONDS`.
