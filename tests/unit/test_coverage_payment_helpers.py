@@ -37,7 +37,7 @@ async def test_check_token_balance_no_x_cashu_raises() -> None:
 
     from routstr.payment.helpers import check_token_balance
 
-    headers = {}
+    headers: dict[str, str] = {}
     body = {"model": "gpt-4"}
 
     with pytest.raises(HTTPException) as exc_info:

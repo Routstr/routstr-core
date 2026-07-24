@@ -75,16 +75,14 @@ def test_extract_error_simple_error_string_not_parsed() -> None:
 async def test_on_upstream_error_redirect_noop() -> None:
     """Default implementation is a no-op for non-redirect statuses."""
     p = BaseUpstreamProvider("https://api.test.com", "sk-test")
-    result = await p.on_upstream_error_redirect(402, "Insufficient balance")
-    assert result is None
+    await p.on_upstream_error_redirect(402, "Insufficient balance")
 
 
 @pytest.mark.asyncio
 async def test_on_upstream_error_redirect_429() -> None:
     """429 rate limit passes through (subclasses may override)."""
     p = BaseUpstreamProvider("https://api.test.com", "sk-test")
-    result = await p.on_upstream_error_redirect(429, "Rate limited")
-    assert result is None
+    await p.on_upstream_error_redirect(429, "Rate limited")
 
 
 # ===========================================================================
