@@ -219,8 +219,12 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
     """Internal send function - returns amount and serialized token"""
     effective_mint_url = mint_url or settings.primary_mint
     wallet: Wallet = await get_wallet(effective_mint_url, unit)
-    proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+    all_proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+    proofs = [proof for proof in all_proofs if not proof.reserved]
+    # Fallback must compare the requested amount with liquid proofs only. Counting
+    # reserved proofs here can suppress fallback even though they cannot be sent.
     proofs_for_mint = sum(p.amount for p in proofs)
+    reserved_for_mint = sum(p.amount for p in all_proofs if p.reserved)
 
     # Fallback: proofs from untrusted source mints are swapped to primary_mint
     # during receive, so the user's preferred refund_mint_url may have no proofs
@@ -232,8 +236,10 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
         )
         effective_mint_url = settings.primary_mint
         wallet = await get_wallet(effective_mint_url, unit)
-        proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+        all_proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+        proofs = [proof for proof in all_proofs if not proof.reserved]
         proofs_for_mint = sum(p.amount for p in proofs)
+        reserved_for_mint = sum(p.amount for p in all_proofs if p.reserved)
 
     all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
     proof_summary = {
@@ -247,7 +253,8 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
         raw_proofs_by_keyset[p.id] = raw_proofs_by_keyset.get(p.id, 0) + p.amount
     logger.info(
         f"send: proof inventory | mint={effective_mint_url} unit={unit} amount={amount} "
-        f"primary_mint={settings.primary_mint} proofs_for_mint={proofs_for_mint} "
+        f"primary_mint={settings.primary_mint} liquid_proofs_for_mint={proofs_for_mint} "
+        f"reserved_proofs_for_mint={reserved_for_mint} "
         f"all_mints={all_mint_urls} by_keyset={proof_summary} "
         f"raw_proofs_by_keyset_id={raw_proofs_by_keyset} "
         f"total_wallet_proofs={sum(p.amount for p in wallet.proofs)}"
@@ -848,7 +855,7 @@ async def fetch_all_balances(
                 "unit": unit,
                 "wallet_balance": proofs_balance,
                 "user_balance": user_balance,
-                "owner_balance": proofs_balance - user_balance if proofs_balance != 0 else 0,
+                "owner_balance": proofs_balance - user_balance,
             }
             return result
         except Exception as e:
@@ -904,9 +911,7 @@ async def fetch_all_balances(
             total_wallet_balance_sats += proofs_balance_sats
             total_user_balance_sats += user_balance_sats
 
-    owner_balance = 0
-    if total_wallet_balance_sats != 0:
-        owner_balance = total_wallet_balance_sats - total_user_balance_sats
+    owner_balance = total_wallet_balance_sats - total_user_balance_sats
 
     return (
         balance_details,

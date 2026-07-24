@@ -89,7 +89,9 @@ def create_model_mappings(
     overrides_by_key: dict[tuple[str, int], tuple],
     disabled_model_keys: set[tuple[str, int]],
 ) -> tuple[
-    dict[str, "Model"], dict[str, list["BaseUpstreamProvider"]], dict[str, "Model"]
+    dict[str, "Model"],
+    dict[str, list[tuple["Model", "BaseUpstreamProvider"]]],
+    dict[str, "Model"],
 ]:
     """Create optimal model mappings based on cost and provider preferences.
 
@@ -97,7 +99,9 @@ def create_model_mappings(
     and creates three mappings based on cost optimization:
 
     1. model_instances: alias -> Model (all model aliases mapped to their Model objects)
-    2. provider_map: alias -> List[UpstreamProvider] (sorted list of providers for each alias)
+    2. provider_map: alias -> List[(Model, UpstreamProvider)] (sorted candidate
+       list for each alias; each provider is paired with ITS OWN model so
+       failover can forward and bill the candidate that actually serves)
     3. unique_models: base_id -> Model (unique models without provider prefixes)
 
     The algorithm:
@@ -327,7 +331,7 @@ def create_model_mappings(
 
     # Sort candidates and build final maps
     model_instances: dict[str, "Model"] = {}
-    provider_map: dict[str, list["BaseUpstreamProvider"]] = {}
+    provider_map: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
 
     def alias_priority(model: "Model", alias: str) -> int:
         """Rank how strong the mapping of alias->model is.
@@ -374,13 +378,13 @@ def create_model_mappings(
 
         best_model, best_provider = items[0]
         model_instances[alias] = best_model
-        provider_map[alias] = [p for _, p in items]
+        provider_map[alias] = list(items)
 
     # Log provider distribution (using top provider for stats)
     provider_counts: dict[str, int] = {}
-    for providers in provider_map.values():
-        if providers:
-            provider = providers[0]
+    for candidate_list in provider_map.values():
+        if candidate_list:
+            provider = candidate_list[0][1]
             provider_name = getattr(provider, "upstream_name", "unknown")
             provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
 

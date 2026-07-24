@@ -1,6 +1,7 @@
 __pycache__
 .env
 keys.db
+routstr_secret.key
 wallet.sqlite3
 
 # Python build artifacts

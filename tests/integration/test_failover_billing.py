@@ -1,0 +1,666 @@
+"""Failover requests are billed and forwarded as the provider that served them.
+
+Covers the whole-system settlement path when two enabled providers expose the
+same model under different spellings and prices: the routing winner fails with
+a 502, the fallback provider serves, and the response must be billed at the
+fallback's configured rate, carry the fallback's model id in the forwarded
+request body, and echo the fallback's model id to the client.
+"""
+
+import json
+from typing import Any, AsyncGenerator
+from unittest.mock import patch
+
+import httpx
+import pytest
+from httpx import AsyncClient
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from routstr.core.db import ApiKey, ReservationRelease
+from routstr.payment.models import Architecture, Model, Pricing
+from routstr.proxy import refresh_model_maps
+from routstr.upstream.base import BaseUpstreamProvider
+
+CHEAP_BASE_URL = "https://cheap.example.com/v1"
+EXPENSIVE_BASE_URL = "https://expensive.example.com/v1"
+THIRD_BASE_URL = "https://third.example.com/v1"
+
+
+def _make_model(
+    model_id: str,
+    prompt_sats: float,
+    completion_sats: float,
+    max_cost: float = 50.0,
+) -> Model:
+    """Build a model whose USD and sats pricing rank consistently."""
+    return Model(
+        id=model_id,
+        name=model_id,
+        created=1,
+        description="test model",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="gpt",
+            instruct_type=None,
+        ),
+        pricing=Pricing(
+            prompt=prompt_sats, completion=completion_sats, max_cost=max_cost
+        ),
+        sats_pricing=Pricing(
+            prompt=prompt_sats, completion=completion_sats, max_cost=max_cost
+        ),
+    )
+
+
+class _StaticProvider(BaseUpstreamProvider):
+    """Upstream provider with a fixed model catalog and no remote refresh."""
+
+    def __init__(self, base_url: str, api_key: str, fee: float, model: Model) -> None:
+        super().__init__(base_url, api_key, fee)
+        self.provider_type = "custom"
+        self._static_model = model
+
+    def get_cached_models(self) -> list[Model]:
+        return [self._static_model]
+
+    async def refresh_models_cache(self) -> None:
+        pass
+
+
+async def _install_providers(
+    providers: list[_StaticProvider],
+) -> AsyncGenerator[None, None]:
+    """Install providers into the routing maps, restoring the originals after."""
+    from routstr import proxy
+
+    original_upstreams = proxy.get_upstreams()
+    with patch("routstr.proxy._upstreams", providers):
+        await refresh_model_maps()
+        yield
+    with patch("routstr.proxy._upstreams", original_upstreams):
+        await refresh_model_maps()
+
+
+@pytest.fixture
+async def dual_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[tuple[_StaticProvider, _StaticProvider], None]:
+    """Two same-tail providers under different spellings and prices."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("prova/dual-model", 0.001, 0.002),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.0,
+        _make_model("provb/dual-model", 0.005, 0.010, max_cost=100.0),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield cheap, expensive
+
+
+def _upstream_response(request: httpx.Request) -> httpx.Response:
+    """502 from the cheap (winning) provider; a served completion elsewhere."""
+    if request.url.host == "cheap.example.com":
+        return httpx.Response(
+            502,
+            content=json.dumps({"error": {"message": "bad gateway"}}).encode(),
+            headers={"content-type": "application/json"},
+        )
+    body = {
+        "id": "chatcmpl-served",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "dual-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+        },
+    }
+    return httpx.Response(
+        200,
+        content=json.dumps(body).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failover_serve_billed_at_serving_providers_rate(
+    authenticated_client: AsyncClient,
+    dual_provider_maps: tuple[_StaticProvider, _StaticProvider],
+    integration_session: AsyncSession,
+) -> None:
+    """A fallback serve is billed at the fallback's price, not the winner's.
+
+    The cheap provider ranks first for the shared tail; it 502s and the
+    expensive provider serves 1000 input + 500 output tokens. At the serving
+    provider's sats pricing (0.005/0.010 sats per token) that is 10_000 msats;
+    at the winner's (0.001/0.002) it would be 2_000 msats.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    # Patch the network transport (not AsyncClient.send) so the in-process
+    # ASGI test client is untouched and only the proxy's upstream hop is mocked.
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        # cost_calculation binds sats_usd_price at import time, so the price
+        # patch in the app fixture does not reach it; patch its own binding.
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    # Both providers were attempted, cheapest first.
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "expensive.example.com",
+    ]
+
+    # The fallback must be asked for ITS OWN model spelling, not the winner's.
+    forwarded_body = json.loads(sent_requests[1].content)
+    assert forwarded_body["model"] == "provb/dual-model"
+
+    # The response echo names the model that actually served.
+    assert payload["model"] == "provb/dual-model"
+
+    # Billed at the serving provider's rate: 1000/1000*5000 + 500/1000*10000.
+    assert payload["cost"]["total_msats"] == 10_000
+
+    # The fallback's larger max-cost envelope requires a replacement
+    # reservation. The failed candidate is released, the serving candidate is
+    # charged, and no request-owned reservation remains active.
+    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
+    records = (
+        await integration_session.exec(
+            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
+        )
+    ).all()
+    assert sorted(record.status for record in records) == ["charged", "released"]
+
+
+@pytest.fixture
+async def same_id_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Two providers exposing the IDENTICAL model id at different prices."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.0,
+        _make_model("dual-model", 0.005, 0.010),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_same_id_failover_settles_at_serving_price(
+    authenticated_client: AsyncClient,
+    same_id_provider_maps: None,
+) -> None:
+    """Settlement must not re-derive pricing from the response's model string.
+
+    Both providers expose the exact same model id, so the forwarded body is
+    identical either way — the only observable difference is the settled
+    amount. The response's model string resolves to the alias winner (cheap),
+    but the expensive provider served, so the bill must be 10_000 msats, not
+    the winner's 2_000.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "expensive.example.com",
+    ]
+    assert response.json()["cost"]["total_msats"] == 10_000
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_version_suffixed_model_id_routes(
+    authenticated_client: AsyncClient,
+    same_id_provider_maps: None,
+) -> None:
+    """A version-suffixed request (``…-YYYYMMDD``) routes to the base model.
+
+    Model resolution stripped the suffix but the provider lookup did not, so
+    such requests resolved a model yet found no provider and 400'd. With the
+    unified candidate lookup the strip applies to both.
+    """
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model-20260101",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.fixture
+async def fee_split_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Same-tail providers whose fees differ; the serving one charges 1.5x."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.5,
+        _make_model("dual-model", 0.005, 0.010),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_usd_cost_serve_carries_serving_providers_fee(
+    authenticated_client: AsyncClient,
+    fee_split_provider_maps: None,
+) -> None:
+    """The USD-cost billing path applies the SERVING provider's fee.
+
+    The upstream that serves reports ``usage.cost`` in USD, so billing goes
+    through the USD-cost path where the provider fee is applied explicitly.
+    The serving provider's fee is 1.5; the alias winner's is 1.0. At 0.001 USD
+    reported cost and 0.0005 USD/sat: 0.001 * 1.5 / 0.0005 = 3 sats = 3000
+    msats (fee 1.0 would give 2000).
+    """
+    sent_requests: list[httpx.Request] = []
+
+    def usd_cost_response(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cheap.example.com":
+            return httpx.Response(
+                502,
+                content=json.dumps({"error": {"message": "bad gateway"}}).encode(),
+                headers={"content-type": "application/json"},
+            )
+        body = {
+            "id": "chatcmpl-usd",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "dual-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "cost": 0.001,
+            },
+        }
+        return httpx.Response(
+            200,
+            content=json.dumps(body).encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return usd_cost_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "expensive.example.com",
+    ]
+    assert response.json()["cost"]["total_msats"] == 3_000
+
+
+@pytest.fixture
+async def envelope_split_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Same-id providers where the fallback's max cost dwarfs the key balance."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.0,
+        _make_model("dual-model", 0.005, 0.010, max_cost=20_000.0),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failover_beyond_balance_envelope_is_rejected(
+    authenticated_client: AsyncClient,
+    envelope_split_provider_maps: None,
+) -> None:
+    """A fallback whose max-cost envelope exceeds the balance is not served.
+
+    Admission and reservation are sized to the best-ranked candidate's max
+    cost. When that candidate fails and the next one's envelope exceeds the
+    key's balance, serving it could settle far beyond what admission allowed,
+    so the request must be rejected (as it would be if the pricier candidate
+    were ranked first) instead of forwarded.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    # The 20_000-sat envelope exceeds the key's 10_000-sat balance: the
+    # fallback must be rejected before its upstream is ever contacted.
+    assert response.status_code == 402
+    assert [r.url.host for r in sent_requests] == ["cheap.example.com"]
+
+
+@pytest.fixture
+async def three_candidate_child_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Second candidate cannot fit the child limit; third restores and serves."""
+    first = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-first",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
+    )
+    too_large = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-too-large",
+        1.0,
+        _make_model("dual-model", 0.002, 0.003, max_cost=100.0),
+    )
+    third = _StaticProvider(
+        THIRD_BASE_URL,
+        "key-third",
+        1.0,
+        _make_model("dual-model", 0.003, 0.004, max_cost=50.0),
+    )
+    async for _ in _install_providers([first, too_large, third]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_child_failover_rolls_back_failed_larger_reserve_before_restoring(
+    authenticated_client: AsyncClient,
+    three_candidate_child_maps: None,
+    integration_session: AsyncSession,
+) -> None:
+    """A failed child guard cannot leak its parent update into restoration."""
+    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
+    child = await integration_session.get(ApiKey, key_hash)
+    assert child is not None
+    parent = ApiKey(hashed_key="failover-parent", balance=10_000_000)
+    child.parent_key_hash = parent.hashed_key
+    child.balance_limit = 75_000
+    integration_session.add(parent)
+    integration_session.add(child)
+    await integration_session.commit()
+
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    # The 100-sat candidate is rejected before forwarding; the third serves.
+    assert [request.url.host for request in sent_requests] == [
+        "cheap.example.com",
+        "third.example.com",
+    ]
+
+    await integration_session.refresh(parent)
+    await integration_session.refresh(child)
+    assert parent.reserved_balance == 0
+    assert child.reserved_balance == 0
+    assert parent.total_spent == response.json()["cost"]["total_msats"]
+
+    records = (
+        await integration_session.exec(
+            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
+        )
+    ).all()
+    assert len(records) == 2
+    assert sorted(record.status for record in records) == ["charged", "released"]
+    assert len({record.reserved_msats for record in records}) == 1
+    assert all(record.status != "active" for record in records)
+
+
+@pytest.fixture
+async def raised_envelope_provider_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Same-id providers where the fallback needs a larger, affordable reserve."""
+    cheap = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-cheap",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
+    )
+    expensive = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-expensive",
+        1.0,
+        _make_model("dual-model", 0.005, 0.010, max_cost=100.0),
+    )
+    async for _ in _install_providers([cheap, expensive]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_failover_reserves_serving_candidates_envelope(
+    authenticated_client: AsyncClient,
+    raised_envelope_provider_maps: None,
+    integration_session: AsyncSession,
+) -> None:
+    """An affordable pricier fallback is re-reserved, served, and billed.
+
+    The fallback's max cost (100 sats) exceeds the winner's (50 sats) but fits
+    the key's balance, so the reservation is raised to the serving candidate's
+    envelope and the request completes, billed at the serving rate with the
+    unused reserve refunded.
+    """
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [r.url.host for r in sent_requests] == [
+        "cheap.example.com",
+        "expensive.example.com",
+    ]
+    assert response.json()["cost"]["total_msats"] == 10_000
+
+    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
+    records = (
+        await integration_session.exec(
+            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
+        )
+    ).all()
+    assert len(records) == 2
+    released = next(record for record in records if record.status == "released")
+    charged = next(record for record in records if record.status == "charged")
+    assert charged.reserved_msats > released.reserved_msats
+    assert all(record.status != "active" for record in records)

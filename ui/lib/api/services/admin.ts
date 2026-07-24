@@ -801,6 +801,15 @@ export class AdminService {
     );
   }
 
+  static async updateNsec(
+    nsec: string
+  ): Promise<{ ok: boolean; npub: string }> {
+    return await apiClient.patch<{ ok: boolean; npub: string }>(
+      '/admin/api/nsec',
+      { nsec }
+    );
+  }
+
   static async login(password: string): Promise<{
     ok: boolean;
     token: string;
