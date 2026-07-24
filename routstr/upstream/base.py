@@ -94,23 +94,22 @@ def _inject_cost_into_usage(
     usage = response_json.get("usage")
     if not isinstance(usage, dict):
         return
-    cost_obj = usage.get("cost")
-    if not isinstance(cost_obj, dict):
-        cost_obj = {}
-    cost_obj.setdefault("base_msats", cost_data.base_msats)
-    cost_obj.setdefault("input_msats", cost_data.input_msats)
-    cost_obj.setdefault("output_msats", cost_data.output_msats)
-    cost_obj.setdefault("total_msats", cost_data.total_msats)
-    cost_obj.setdefault(
-        "cache_read_input_tokens", cost_data.cache_read_input_tokens
-    )
-    cost_obj.setdefault(
-        "cache_creation_input_tokens", cost_data.cache_creation_input_tokens
-    )
-    cost_obj.setdefault("cache_read_msats", cost_data.cache_read_msats)
-    cost_obj.setdefault("cache_creation_msats", cost_data.cache_creation_msats)
+    # Direct assignment (not setdefault) so routstr's authoritative cost
+    # data always overwrites any upstream-provided cost values. Using
+    # setdefault would silently keep stale upstream values and drop our
+    # calculated msats breakdown.
+    cost_obj = {
+        "base_msats": cost_data.base_msats,
+        "input_msats": cost_data.input_msats,
+        "output_msats": cost_data.output_msats,
+        "total_msats": cost_data.total_msats,
+        "cache_read_input_tokens": cost_data.cache_read_input_tokens,
+        "cache_creation_input_tokens": cost_data.cache_creation_input_tokens,
+        "cache_read_msats": cost_data.cache_read_msats,
+        "cache_creation_msats": cost_data.cache_creation_msats,
+    }
     if cost_data.total_usd:
-        cost_obj.setdefault("total_usd", cost_data.total_usd)
+        cost_obj["total_usd"] = cost_data.total_usd
     usage["cost"] = cost_obj
     usage["cost_sats"] = cost_data.total_msats // 1000
 
