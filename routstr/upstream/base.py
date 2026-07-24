@@ -69,8 +69,21 @@ if typing.TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+CostMetadata = CostData | MaxCostData | dict[str, Any]
+
+
+def _cost_field(
+    cost_data: CostMetadata, field: str, default: int | float = 0
+) -> int | float:
+    if isinstance(cost_data, dict):
+        value = cost_data.get(field, default)
+    else:
+        value = getattr(cost_data, field, default)
+    return value if isinstance(value, (int, float)) else default
+
+
 def _inject_cost_response_headers(
-    headers: dict[str, str], cost_data: CostData | MaxCostData
+    headers: dict[str, str], cost_data: CostMetadata
 ) -> None:
     """Inject per-request cost breakdown into response headers.
 
@@ -79,16 +92,21 @@ def _inject_cost_response_headers(
     usage tracking entry — without them, x-cashu requests show 0.0 for all
     sat cost fields.
     """
-    headers["X-Routstr-Cost-Msats"] = str(cost_data.total_msats)
-    headers["X-Routstr-Input-Cost-Msats"] = str(cost_data.input_msats)
-    headers["X-Routstr-Output-Cost-Msats"] = str(cost_data.output_msats)
-    if cost_data.total_usd:
-        headers["X-Routstr-Cost-Usd"] = str(cost_data.total_usd)
+    headers["X-Routstr-Cost-Msats"] = str(
+        int(_cost_field(cost_data, "total_msats"))
+    )
+    headers["X-Routstr-Input-Cost-Msats"] = str(
+        int(_cost_field(cost_data, "input_msats"))
+    )
+    headers["X-Routstr-Output-Cost-Msats"] = str(
+        int(_cost_field(cost_data, "output_msats"))
+    )
+    total_usd = float(_cost_field(cost_data, "total_usd", 0.0))
+    if total_usd:
+        headers["X-Routstr-Cost-Usd"] = str(total_usd)
 
 
-def _inject_cost_into_usage(
-    response_json: dict, cost_data: CostData | MaxCostData
-) -> None:
+def _inject_cost_into_usage(response_json: dict, cost_data: CostMetadata) -> None:
     """Inject cost breakdown into the response body's ``usage.cost`` object.
 
     The SDK's ``extractUsageFromResponseBody`` expects ``usage.cost`` to be
@@ -104,19 +122,26 @@ def _inject_cost_into_usage(
     # setdefault would silently keep stale upstream values and drop our
     # calculated msats breakdown.
     cost_obj: dict[str, int | float] = {
-        "base_msats": cost_data.base_msats,
-        "input_msats": cost_data.input_msats,
-        "output_msats": cost_data.output_msats,
-        "total_msats": cost_data.total_msats,
-        "cache_read_input_tokens": cost_data.cache_read_input_tokens,
-        "cache_creation_input_tokens": cost_data.cache_creation_input_tokens,
-        "cache_read_msats": cost_data.cache_read_msats,
-        "cache_creation_msats": cost_data.cache_creation_msats,
+        "base_msats": int(_cost_field(cost_data, "base_msats")),
+        "input_msats": int(_cost_field(cost_data, "input_msats")),
+        "output_msats": int(_cost_field(cost_data, "output_msats")),
+        "total_msats": int(_cost_field(cost_data, "total_msats")),
+        "cache_read_input_tokens": int(
+            _cost_field(cost_data, "cache_read_input_tokens")
+        ),
+        "cache_creation_input_tokens": int(
+            _cost_field(cost_data, "cache_creation_input_tokens")
+        ),
+        "cache_read_msats": int(_cost_field(cost_data, "cache_read_msats")),
+        "cache_creation_msats": int(
+            _cost_field(cost_data, "cache_creation_msats")
+        ),
     }
-    if cost_data.total_usd:
-        cost_obj["total_usd"] = cost_data.total_usd
+    total_usd = float(_cost_field(cost_data, "total_usd", 0.0))
+    if total_usd:
+        cost_obj["total_usd"] = total_usd
     usage["cost"] = cost_obj
-    usage["cost_sats"] = cost_data.total_msats // 1000
+    usage["cost_sats"] = int(_cost_field(cost_data, "total_msats")) // 1000
 
 
 def _is_json_content_type(content_type: str | None) -> bool:
@@ -325,48 +350,24 @@ class BaseUpstreamProvider:
         self._apply_provider_field(response_json)
         if isinstance(cost_data, dict):
             total_msats = cost_data.get("total_msats", 0)
-            total_usd = cost_data.get("total_usd", 0.0)
             cost_dict = cost_data
         else:
             total_msats = cost_data.total_msats
-            total_usd = cost_data.total_usd
             cost_dict = cost_data.dict()
 
         sats_cost = total_msats // 1000
 
-        # Build the cost object that the SDK's extractUsageFromResponseBody
-        # and extractUsageFromSSEJson expect: an object with total_msats,
-        # input_msats, output_msats, cache_read_msats, cache_creation_msats,
-        # etc.  Setting usage.cost to a plain float (total_usd) means the SDK
-        # cannot extract the msats breakdown — cache_read_msats and
-        # cache_creation_msats in particular are lost.
-        cost_obj = {
-            "base_msats": cost_dict.get("base_msats", 0),
-            "input_msats": cost_dict.get("input_msats", 0),
-            "output_msats": cost_dict.get("output_msats", 0),
-            "total_msats": total_msats,
-            "total_usd": total_usd,
-            "cache_read_input_tokens": cost_dict.get("cache_read_input_tokens", 0),
-            "cache_creation_input_tokens": cost_dict.get("cache_creation_input_tokens", 0),
-            "cache_read_msats": cost_dict.get("cache_read_msats", 0),
-            "cache_creation_msats": cost_dict.get("cache_creation_msats", 0),
-        }
-
-        # Inject into top-level usage block (OpenAI/Anthropic style)
-        if "usage" in response_json:
-            response_json["usage"]["cost"] = cost_obj
-            response_json["usage"]["cost_sats"] = sats_cost
+        # Inject the shared SDK cost contract into every usage shape.
+        if isinstance(response_json.get("usage"), dict):
+            _inject_cost_into_usage(response_json, cost_data)
             response_json["usage"]["remaining_balance_msats"] = key.balance
             self._fold_cache_into_input_tokens(response_json["usage"])
 
-        # Inject into Anthropic nested usage block if present
-        if (
-            "message" in response_json
-            and isinstance(response_json["message"], dict)
-            and "usage" in response_json["message"]
-        ):
-            response_json["message"]["usage"]["sats_cost"] = sats_cost
-            self._fold_cache_into_input_tokens(response_json["message"]["usage"])
+        message = response_json.get("message")
+        if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+            _inject_cost_into_usage(message, cost_data)
+            message["usage"]["remaining_balance_msats"] = key.balance
+            self._fold_cache_into_input_tokens(message["usage"])
 
         # Unified Routstr metadata
         response_json["metadata"] = response_json.get("metadata", {})
@@ -1297,12 +1298,9 @@ class BaseUpstreamProvider:
             await session.refresh(key)
             remaining_balance_msats = key.balance
 
-            # Merge cost into usage for OpenCode
+            # Merge the shared cost contract into usage for SDKs and OpenCode.
             if "usage" in response_json:
-                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
-                response_json["usage"]["cost_sats"] = (
-                    cost_data.get("total_msats", 0) // 1000
-                )
+                _inject_cost_into_usage(response_json, cost_data)
                 response_json["usage"]["remaining_balance_msats"] = (
                     remaining_balance_msats
                 )
@@ -1349,6 +1347,7 @@ class BaseUpstreamProvider:
                 for k, v in response.headers.items()
                 if k.lower() in allowed_headers
             }
+            _inject_cost_response_headers(response_headers, cost_data)
 
             if requested_model:
                 response_json["model"] = requested_model
@@ -1734,12 +1733,9 @@ class BaseUpstreamProvider:
             await session.refresh(key)
             remaining_balance_msats = key.balance
 
-            # Merge cost into usage for OpenCode
+            # Merge the shared cost contract into usage for SDKs and OpenCode.
             if "usage" in response_json:
-                response_json["usage"]["cost"] = cost_data.get("total_usd", 0.0)
-                response_json["usage"]["cost_sats"] = (
-                    cost_data.get("total_msats", 0) // 1000
-                )
+                _inject_cost_into_usage(response_json, cost_data)
                 response_json["usage"]["remaining_balance_msats"] = (
                     remaining_balance_msats
                 )
@@ -1786,6 +1782,7 @@ class BaseUpstreamProvider:
                 for k, v in response.headers.items()
                 if k.lower() in allowed_headers
             }
+            _inject_cost_response_headers(response_headers, cost_data)
 
             if requested_model:
                 response_json["model"] = requested_model
@@ -2221,20 +2218,8 @@ class BaseUpstreamProvider:
                 if k.lower() in allowed_headers
             }
 
-            # Inject cost breakdown headers so the SDK's
-            # extractUsageFromResponseHeaders can populate
-            # inputMsats/outputMsats/totalMsats for balance-mode requests.
-            if isinstance(cost_data, dict):
-                _cost_data_obj = CostData(
-                    base_msats=cost_data.get("base_msats", 0),
-                    input_msats=cost_data.get("input_msats", 0),
-                    output_msats=cost_data.get("output_msats", 0),
-                    total_msats=cost_data.get("total_msats", 0),
-                    total_usd=cost_data.get("total_usd", 0.0),
-                )
-            else:
-                _cost_data_obj = cost_data
-            _inject_cost_response_headers(response_headers, _cost_data_obj)
+            # Inject the same cost headers used by every paid response path.
+            _inject_cost_response_headers(response_headers, cost_data)
 
             return Response(
                 content=json.dumps(response_json).encode(),
@@ -2325,19 +2310,9 @@ class BaseUpstreamProvider:
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
-        # Inject cost breakdown headers for balance-mode requests.
-        if isinstance(cost_data, dict):
-            _cost_data_obj = CostData(
-                base_msats=cost_data.get("base_msats", 0),
-                input_msats=cost_data.get("input_msats", 0),
-                output_msats=cost_data.get("output_msats", 0),
-                total_msats=cost_data.get("total_msats", 0),
-                total_usd=cost_data.get("total_usd", 0.0),
-            )
-        else:
-            _cost_data_obj = cost_data
+        # Inject the same cost headers used by every paid response path.
         response_headers: dict[str, str] = {}
-        _inject_cost_response_headers(response_headers, _cost_data_obj)
+        _inject_cost_response_headers(response_headers, cost_data)
 
         return Response(
             content=json.dumps(response_json).encode(),
@@ -2644,7 +2619,7 @@ class BaseUpstreamProvider:
         the cost of a wire-format change for clients that read ``X-Cashu``
         from headers today.
         """
-        buffered: list[bytes] = []
+        buffered: list[messages_dispatch.AnnotatedEvent] = []
         last_model_seen: str | None = None
         input_tokens = 0
         output_tokens = 0
@@ -2672,7 +2647,7 @@ class BaseUpstreamProvider:
             total_cost = max(total_cost, annotated.total_cost)
             input_cost = max(input_cost, annotated.input_cost)
             output_cost = max(output_cost, annotated.output_cost)
-            buffered.append(annotated.sse_bytes)
+            buffered.append(annotated)
 
         response_headers: dict[str, str] = {
             "Cache-Control": "no-cache",
@@ -2699,6 +2674,7 @@ class BaseUpstreamProvider:
                 },
             )
 
+        cost_data: CostData | MaxCostData | None = None
         if (
             input_tokens > 0
             or output_tokens > 0
@@ -2754,9 +2730,30 @@ class BaseUpstreamProvider:
                     },
                 )
 
+        if cost_data:
+            _inject_cost_response_headers(response_headers, cost_data)
+            for index, annotated in enumerate(buffered):
+                event = annotated.event
+                changed = False
+                message = event.get("message")
+                if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                    _inject_cost_into_usage(message, cost_data)
+                    changed = True
+                if isinstance(event.get("usage"), dict):
+                    _inject_cost_into_usage(event, cost_data)
+                    changed = True
+                if changed:
+                    event_type = str(event.get("type") or "")
+                    prefix = f"event: {event_type}\n" if event_type else ""
+                    buffered[index] = annotated._replace(
+                        sse_bytes=(
+                            f"{prefix}data: {json.dumps(event)}\n\n".encode()
+                        )
+                    )
+
         async def replay() -> AsyncGenerator[bytes, None]:
-            for chunk in buffered:
-                yield chunk
+            for annotated in buffered:
+                yield annotated.sse_bytes
 
         return StreamingResponse(
             replay(),

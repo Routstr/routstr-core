@@ -855,6 +855,9 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
 
     assert isinstance(result, StreamingResponse)
     assert result.headers.get("X-Cashu") == "cashuSTREAM"
+    assert result.headers.get("X-Routstr-Cost-Msats") == "1500000"
+    assert result.headers.get("X-Routstr-Input-Cost-Msats") == "1000000"
+    assert result.headers.get("X-Routstr-Output-Cost-Msats") == "500000"
     # 1_500_000 msats → 1500 sats. Refund = 5000 - 1500 = 3500.
     mock_refund.assert_awaited_once()
     refund_call = mock_refund.await_args
@@ -873,6 +876,9 @@ async def test_x_cashu_streaming_replays_events_and_sets_refund_header() -> None
     assert "event: message_start" in joined
     assert "event: message_delta" in joined
     assert "event: message_stop" in joined
+    assert '"total_msats": 1500000' in joined
+    assert '"input_msats": 1000000' in joined
+    assert '"output_msats": 500000' in joined
 
 
 # ---------------------------------------------------------------------------
