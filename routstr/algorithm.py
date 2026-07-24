@@ -118,8 +118,23 @@ def create_model_mappings(
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
     """
-    from .payment.models import _row_to_model
+    from .payment.models import (
+        PricingSource,
+        _row_to_model,
+        has_chargeable_price,
+    )
     from .upstream.helpers import resolve_model_alias
+
+    def _override_unroutable_free(model: "Model") -> bool:
+        """A persisted override may only route if it can bill > 0, unless an
+        operator vouched for it as free (``manual``). Mirrors the served-catalog
+        backstop in ``list_models`` so a legacy/foreign-written enabled $0
+        ``unresolved`` row is not silently routable (it would bill every request
+        at nothing)."""
+        return (
+            model.pricing_source != PricingSource.MANUAL
+            and not has_chargeable_price(model.pricing)
+        )
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
@@ -203,6 +218,8 @@ def create_model_mappings(
                 model_to_use = _row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
+                if _override_unroutable_free(model_to_use):
+                    continue
             else:
                 model_to_use = model
 
@@ -280,6 +297,8 @@ def create_model_mappings(
             )
             continue
         if not model_to_use.enabled:
+            continue
+        if _override_unroutable_free(model_to_use):
             continue
 
         base_id = get_base_model_id(model_to_use.id)

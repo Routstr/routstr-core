@@ -15,7 +15,12 @@ from routstr.algorithm import (  # noqa: E402
     create_model_mappings,
     get_provider_penalty,
 )
-from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
+from routstr.payment.models import (  # noqa: E402
+    Architecture,
+    Model,
+    Pricing,
+    PricingSource,
+)
 
 
 def create_test_model(
@@ -252,3 +257,72 @@ def test_create_model_mappings_disables_only_matching_provider() -> None:
     )
 
     assert [p for _, p in provider_map["same-id"]] == [provider_a]
+
+
+def test_create_model_mappings_excludes_unchargeable_unresolved_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted override enabled at $0 whose price no source vouches for
+    (``unresolved``/None) must not become a routable candidate — it would bill
+    every request at nothing. Mirrors the served-catalog backstop in
+    ``list_models`` so routing and serving agree."""
+    provider = create_test_provider(
+        "azure",
+        "https://example.openai.azure.com/openai/v1",
+        db_id=7,
+        models=[],
+    )
+    free_unresolved = create_test_model(
+        "azure/free", prompt_price=0.0, completion_price=0.0
+    )
+    free_unresolved.pricing_source = PricingSource.UNRESOLVED
+
+    monkeypatch.setattr(
+        "routstr.payment.models._row_to_model", lambda *a, **k: free_unresolved
+    )
+    override_row = SimpleNamespace(
+        id="azure/free", upstream_provider_id=7, enabled=True
+    )
+
+    model_instances, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("azure/free", 7): (override_row, 1.01)},
+        disabled_model_keys=set(),
+    )
+
+    assert "azure/free" not in model_instances
+    assert "azure/free" not in provider_map
+    assert "free" not in unique_models
+
+
+def test_create_model_mappings_routes_manual_free_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-vouched free (``manual``) $0 override is a deliberate choice
+    and stays routable — only unvouched free rows are held back."""
+    provider = create_test_provider(
+        "azure",
+        "https://example.openai.azure.com/openai/v1",
+        db_id=7,
+        models=[],
+    )
+    free_manual = create_test_model(
+        "azure/free", prompt_price=0.0, completion_price=0.0
+    )
+    free_manual.pricing_source = PricingSource.MANUAL
+
+    monkeypatch.setattr(
+        "routstr.payment.models._row_to_model", lambda *a, **k: free_manual
+    )
+    override_row = SimpleNamespace(
+        id="azure/free", upstream_provider_id=7, enabled=True
+    )
+
+    model_instances, provider_map, _ = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("azure/free", 7): (override_row, 1.01)},
+        disabled_model_keys=set(),
+    )
+
+    assert "azure/free" in model_instances
+    assert [p for _, p in provider_map["azure/free"]] == [provider]
