@@ -12,7 +12,8 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, or_
+from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
@@ -26,7 +27,82 @@ logger = get_logger(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
 
-engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _engine_options(database_url: str) -> dict[str, int | float | bool]:
+    """Build a bounded pool configuration, preserving SQLite memory semantics."""
+    options: dict[str, int | float | bool] = {
+        "pool_pre_ping": _env_bool("DATABASE_POOL_PRE_PING", True)
+    }
+    url = make_url(database_url)
+    is_memory_sqlite = url.get_backend_name() == "sqlite" and url.database in {
+        None,
+        "",
+        ":memory:",
+    }
+    if is_memory_sqlite:
+        return options
+
+    pool_size = int(os.environ.get("DATABASE_POOL_SIZE", "5"))
+    max_overflow = int(os.environ.get("DATABASE_MAX_OVERFLOW", "0"))
+    pool_timeout = float(os.environ.get("DATABASE_POOL_TIMEOUT", "5"))
+    pool_recycle = int(os.environ.get("DATABASE_POOL_RECYCLE", "1800"))
+    if pool_size < 1:
+        raise ValueError("DATABASE_POOL_SIZE must be at least 1")
+    if max_overflow < 0:
+        raise ValueError("DATABASE_MAX_OVERFLOW cannot be negative")
+    if pool_timeout <= 0:
+        raise ValueError("DATABASE_POOL_TIMEOUT must be positive")
+    if pool_recycle < 0:
+        raise ValueError("DATABASE_POOL_RECYCLE cannot be negative")
+    options.update(
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+    )
+    return options
+
+
+engine = create_async_engine(DATABASE_URL, echo=False, **_engine_options(DATABASE_URL))
+
+_POOL_HOLD_WARN_SECONDS = float(os.environ.get("DATABASE_POOL_HOLD_WARN_SECONDS", "10"))
+if _POOL_HOLD_WARN_SECONDS <= 0:
+    raise ValueError("DATABASE_POOL_HOLD_WARN_SECONDS must be positive")
+
+
+@event.listens_for(engine.sync_engine, "checkout")
+def _record_pool_checkout(
+    dbapi_connection: object, connection_record: object, proxy: object
+) -> None:
+    connection_record.info["routstr_checked_out_at"] = time.monotonic()  # type: ignore[attr-defined]
+
+
+@event.listens_for(engine.sync_engine, "checkin")
+def _record_pool_checkin(dbapi_connection: object, connection_record: object) -> None:
+    checked_out_at = connection_record.info.pop("routstr_checked_out_at", None)  # type: ignore[attr-defined]
+    if checked_out_at is None:
+        return
+    held_seconds = time.monotonic() - checked_out_at
+    if held_seconds >= _POOL_HOLD_WARN_SECONDS:
+        logger.warning(
+            "Database connection held longer than threshold",
+            extra={
+                "held_seconds": round(held_seconds, 3),
+                "threshold_seconds": _POOL_HOLD_WARN_SECONDS,
+                "pool_status": engine.pool.status(),
+            },
+        )
 
 
 class ApiKey(SQLModel, table=True):  # type: ignore
@@ -725,6 +801,30 @@ async def balances_for_mint_and_unit(
     )
     result = await db_session.exec(query)
     return result.one() or 0
+
+
+async def balances_by_mint_and_unit(
+    db_session: AsyncSession,
+) -> dict[tuple[str, str], int]:
+    """Return all user liabilities in one query, grouped by mint and unit."""
+    query = (
+        select(
+            col(ApiKey.refund_mint_url),
+            col(ApiKey.refund_currency),
+            func.sum(ApiKey.balance),
+        )
+        .where(
+            col(ApiKey.refund_mint_url).is_not(None),
+            col(ApiKey.refund_currency).is_not(None),
+        )
+        .group_by(col(ApiKey.refund_mint_url), col(ApiKey.refund_currency))
+    )
+    result = await db_session.exec(query)
+    return {
+        (mint_url, unit): int(balance or 0)
+        for mint_url, unit, balance in result.all()
+        if mint_url is not None and unit is not None
+    }
 
 
 async def init_db() -> None:

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -37,6 +38,43 @@ async def _load(
     async with factory() as session:
         result = await session.exec(select(CashuTransaction))
         return {row.token: row for row in result.all()}
+
+
+@pytest.mark.asyncio
+async def test_refund_sweep_releases_db_session_during_token_redemption(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="eligible", amount=1, unit="sat", type="out", created_at=800
+        ),
+    )
+    session_open = False
+
+    @asynccontextmanager
+    async def tracked_session() -> AsyncIterator[AsyncSession]:
+        nonlocal session_open
+        async with session_factory() as session:
+            session_open = True
+            try:
+                yield session
+            finally:
+                session_open = False
+
+    async def receive_token(token: str) -> None:
+        assert token == "eligible"
+        assert session_open is False
+
+    with (
+        patch("routstr.wallet.db.create_session", tracked_session),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch("routstr.wallet.recieve_token", AsyncMock(side_effect=receive_token)),
+    ):
+        await refund_sweep_once()
+
+    assert (await _load(session_factory))["eligible"].swept is True
 
 
 @pytest.mark.asyncio
