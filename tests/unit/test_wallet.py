@@ -27,7 +27,11 @@ async def test_get_balance() -> None:
     mock_wallet.load_mint = AsyncMock()
     mock_wallet.load_proofs = AsyncMock()
 
-    with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
+    # Reset the module-level wallet cache so a real wallet cached by an earlier
+    # test (e.g. an unmocked admin-withdraw path) can't shadow the mock here.
+    with patch("routstr.wallet._wallets", {}), patch(
+        "routstr.wallet.Wallet.with_db", return_value=mock_wallet
+    ):
         balance = await get_balance("sat")
         assert balance == 50000
 
