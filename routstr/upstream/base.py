@@ -101,6 +101,14 @@ def _inject_cost_into_usage(
     cost_obj.setdefault("input_msats", cost_data.input_msats)
     cost_obj.setdefault("output_msats", cost_data.output_msats)
     cost_obj.setdefault("total_msats", cost_data.total_msats)
+    cost_obj.setdefault(
+        "cache_read_input_tokens", cost_data.cache_read_input_tokens
+    )
+    cost_obj.setdefault(
+        "cache_creation_input_tokens", cost_data.cache_creation_input_tokens
+    )
+    cost_obj.setdefault("cache_read_msats", cost_data.cache_read_msats)
+    cost_obj.setdefault("cache_creation_msats", cost_data.cache_creation_msats)
     if cost_data.total_usd:
         cost_obj.setdefault("total_usd", cost_data.total_usd)
     usage["cost"] = cost_obj
@@ -325,9 +333,27 @@ class BaseUpstreamProvider:
 
         sats_cost = total_msats // 1000
 
+        # Build the cost object that the SDK's extractUsageFromResponseBody
+        # and extractUsageFromSSEJson expect: an object with total_msats,
+        # input_msats, output_msats, cache_read_msats, cache_creation_msats,
+        # etc.  Setting usage.cost to a plain float (total_usd) means the SDK
+        # cannot extract the msats breakdown — cache_read_msats and
+        # cache_creation_msats in particular are lost.
+        cost_obj = {
+            "base_msats": cost_dict.get("base_msats", 0),
+            "input_msats": cost_dict.get("input_msats", 0),
+            "output_msats": cost_dict.get("output_msats", 0),
+            "total_msats": total_msats,
+            "total_usd": total_usd,
+            "cache_read_input_tokens": cost_dict.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_dict.get("cache_creation_input_tokens", 0),
+            "cache_read_msats": cost_dict.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_dict.get("cache_creation_msats", 0),
+        }
+
         # Inject into top-level usage block (OpenAI/Anthropic style)
         if "usage" in response_json:
-            response_json["usage"]["cost"] = total_usd
+            response_json["usage"]["cost"] = cost_obj
             response_json["usage"]["cost_sats"] = sats_cost
             response_json["usage"]["remaining_balance_msats"] = key.balance
             self._fold_cache_into_input_tokens(response_json["usage"])
@@ -2103,6 +2129,21 @@ class BaseUpstreamProvider:
                 if k.lower() in allowed_headers
             }
 
+            # Inject cost breakdown headers so the SDK's
+            # extractUsageFromResponseHeaders can populate
+            # inputMsats/outputMsats/totalMsats for balance-mode requests.
+            if isinstance(cost_data, dict):
+                _cost_data_obj = CostData(
+                    base_msats=cost_data.get("base_msats", 0),
+                    input_msats=cost_data.get("input_msats", 0),
+                    output_msats=cost_data.get("output_msats", 0),
+                    total_msats=cost_data.get("total_msats", 0),
+                    total_usd=cost_data.get("total_usd", 0.0),
+                )
+            else:
+                _cost_data_obj = cost_data
+            _inject_cost_response_headers(response_headers, _cost_data_obj)
+
             return Response(
                 content=json.dumps(response_json).encode(),
                 status_code=response.status_code,
@@ -2191,9 +2232,24 @@ class BaseUpstreamProvider:
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
+        # Inject cost breakdown headers for balance-mode requests.
+        if isinstance(cost_data, dict):
+            _cost_data_obj = CostData(
+                base_msats=cost_data.get("base_msats", 0),
+                input_msats=cost_data.get("input_msats", 0),
+                output_msats=cost_data.get("output_msats", 0),
+                total_msats=cost_data.get("total_msats", 0),
+                total_usd=cost_data.get("total_usd", 0.0),
+            )
+        else:
+            _cost_data_obj = cost_data
+        response_headers: dict[str, str] = {}
+        _inject_cost_response_headers(response_headers, _cost_data_obj)
+
         return Response(
             content=json.dumps(response_json).encode(),
             status_code=200,
+            headers=response_headers,
             media_type="application/json",
         )
 

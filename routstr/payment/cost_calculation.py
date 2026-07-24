@@ -481,12 +481,37 @@ def _calculate_from_usd_cost(
         )
         output_msats = cost_in_msats - input_msats
 
+    # Allocate cache read/creation msats proportionally from the input portion.
+    # Without this, cache_read_msats and cache_creation_msats are always 0 in
+    # the USD-cost path, and the SDK cannot report cache cost breakdowns.
+    cache_read_msats = 0
+    cache_creation_msats = 0
+    if cache_read_tokens > 0 or cache_creation_tokens > 0:
+        cache_tokens = cache_read_tokens + cache_creation_tokens
+        regular_input_tokens = input_tokens
+        total_input_tokens = regular_input_tokens + cache_tokens
+        if total_input_tokens > 0:
+            # Split input_msats into regular input, cache_read, cache_creation
+            cache_read_msats = (
+                int(input_msats * cache_read_tokens / total_input_tokens)
+                if cache_read_tokens > 0
+                else 0
+            )
+            cache_creation_msats = (
+                int(input_msats * cache_creation_tokens / total_input_tokens)
+                if cache_creation_tokens > 0
+                else 0
+            )
+            input_msats = input_msats - cache_read_msats - cache_creation_msats
+
     logger.info(
         "Using cost from usage data/details",
         extra={
             "usd_cost": usd_cost,
             "cost_in_sats": cost_in_sats,
             "cost_in_msats": cost_in_msats,
+            "cache_read_msats": cache_read_msats,
+            "cache_creation_msats": cache_creation_msats,
             "model": response_data.get("model", "unknown"),
         },
     )
@@ -501,8 +526,8 @@ def _calculate_from_usd_cost(
         output_tokens=output_tokens,
         cache_read_input_tokens=cache_read_tokens,
         cache_creation_input_tokens=cache_creation_tokens,
-        cache_read_msats=0,
-        cache_creation_msats=0,
+        cache_read_msats=cache_read_msats,
+        cache_creation_msats=cache_creation_msats,
     )
 
 
