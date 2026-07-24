@@ -527,6 +527,32 @@ class ModelCreate(BaseModel):
             allowed = ", ".join(s.value for s in PricingSource)
             raise ValueError(f"pricing_source must be one of: {allowed}")
 
+    @field_validator("pricing")
+    @classmethod
+    def _validate_pricing(cls, value: dict[str, object]) -> dict[str, object]:
+        """Reject malformed, non-finite, or negative billable rates at the edge.
+
+        A present-but-invalid rate would otherwise slip through: a non-numeric
+        string coerces to $0 (an unpriced-looking row), while a negative or
+        ``NaN``/``inf`` value is truthy and reads back as chargeable, so it could
+        be enabled and bill a nonsensical amount. Surfacing a 422 catches the
+        client bug instead of persisting it. Absent rates and numeric strings
+        (``"0.000005"``) stay valid — the stored JSON accepts both.
+        """
+        for field in BILLABLE_PRICING_FIELDS:
+            raw = value.get(field)
+            if raw is None:
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+                raise ValueError(f"{field} must be a non-negative number")
+            try:
+                rate = float(raw)
+            except ValueError:
+                raise ValueError(f"{field} must be a number, got {raw!r}")
+            if not math.isfinite(rate) or rate < 0:
+                raise ValueError(f"{field} must be a finite, non-negative number")
+        return value
+
 
 def _as_price(value: object) -> float | None:
     """Coerce a payload price to ``float``, tolerating numeric strings.

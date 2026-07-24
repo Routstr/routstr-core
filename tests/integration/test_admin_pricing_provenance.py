@@ -776,3 +776,81 @@ async def test_served_map_excludes_enabled_unchargeable_non_manual_rows(
     assert "legacy-free" not in served  # unchargeable + not manual → not served
     assert "free-by-choice" in served  # operator vouched → served free
     assert "priced" in served
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_negative_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A negative rate is not a valid price — accepting it would persist a row
+    that bills a negative amount (and, being truthy, reads as chargeable). Reject
+    at the edge with a 422 rather than force-disable or silently store it."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="neg-price",
+            pricing={
+                "prompt": -1.0,
+                "completion": 2.8e-7,
+                "request": 0.0,
+                "image": 0.0,
+                "web_search": 0.0,
+                "internal_reasoning": 0.0,
+                "input_cache_read": 0.0,
+                "input_cache_write": 0.0,
+            },
+        ),
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_malformed_price_string_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A present non-numeric rate is a client bug: it silently coerces to $0
+    today (an unpriced-looking row). Surface it as a 422 instead of accepting a
+    junk value that masquerades as a deliberate free price."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="bad-price",
+            pricing={
+                "prompt": "oops",
+                "completion": 2.8e-7,
+                "request": 0.0,
+                "image": 0.0,
+                "web_search": 0.0,
+                "internal_reasoning": 0.0,
+                "input_cache_read": 0.0,
+                "input_cache_write": 0.0,
+            },
+        ),
+    )
+    assert resp.status_code == 422
+
+
+def test_non_finite_price_is_rejected() -> None:
+    """``NaN``/``inf`` are not billable rates: the ``ModelCreate`` validator must
+    reject them before they can be persisted and read back as chargeable."""
+    from pydantic import ValidationError
+
+    from routstr.core.admin import ModelCreate
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValidationError):
+            ModelCreate.model_validate(
+                _payload(
+                    1,
+                    model_id="nonfinite",
+                    pricing={"prompt": bad, "completion": 1e-7},
+                )
+            )
