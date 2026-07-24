@@ -529,6 +529,8 @@ async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
     assert isinstance(result, CostData)
     assert result.input_msats == 994
     assert result.output_msats == 3477
+    assert result.cache_read_msats == 758
+    assert result.cache_creation_msats == 0
     assert result.input_msats + result.output_msats == result.total_msats == 4471
 
 
@@ -574,6 +576,8 @@ async def test_ppq_byok_bills_upstream_inference_cost_plus_fee() -> None:
     # Token normalisation (OpenAI dialect: cached included in prompt_tokens)
     assert result.input_tokens == 5070  # 164371 - 159301
     assert result.cache_read_input_tokens == 159301
+    assert result.cache_read_msats == 897966
+    assert result.cache_creation_msats == 0
     assert result.output_tokens == 99
 
 

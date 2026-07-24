@@ -69,6 +69,56 @@ if typing.TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _inject_cost_response_headers(
+    headers: dict[str, str], cost_data: CostData | MaxCostData
+) -> None:
+    """Inject per-request cost breakdown into response headers.
+
+    The SDK's ``extractUsageFromResponseHeaders`` reads these to populate
+    ``inputMsats``, ``outputMsats``, ``totalMsats`` and ``satsCost`` in the
+    usage tracking entry — without them, x-cashu requests show 0.0 for all
+    sat cost fields.
+    """
+    headers["X-Routstr-Cost-Msats"] = str(cost_data.total_msats)
+    headers["X-Routstr-Input-Cost-Msats"] = str(cost_data.input_msats)
+    headers["X-Routstr-Output-Cost-Msats"] = str(cost_data.output_msats)
+    if cost_data.total_usd:
+        headers["X-Routstr-Cost-Usd"] = str(cost_data.total_usd)
+
+
+def _inject_cost_into_usage(
+    response_json: dict, cost_data: CostData | MaxCostData
+) -> None:
+    """Inject cost breakdown into the response body's ``usage.cost`` object.
+
+    The SDK's ``extractUsageFromResponseBody`` expects ``usage.cost`` to be
+    an object with ``total_msats``/``input_msats``/``output_msats`` (not a
+    plain USD number). When the upstream returns ``cost`` as a number, the
+    SDK cannot extract the msats breakdown from the body alone.
+    """
+    usage = response_json.get("usage")
+    if not isinstance(usage, dict):
+        return
+    # Direct assignment (not setdefault) so routstr's authoritative cost
+    # data always overwrites any upstream-provided cost values. Using
+    # setdefault would silently keep stale upstream values and drop our
+    # calculated msats breakdown.
+    cost_obj: dict[str, int | float] = {
+        "base_msats": cost_data.base_msats,
+        "input_msats": cost_data.input_msats,
+        "output_msats": cost_data.output_msats,
+        "total_msats": cost_data.total_msats,
+        "cache_read_input_tokens": cost_data.cache_read_input_tokens,
+        "cache_creation_input_tokens": cost_data.cache_creation_input_tokens,
+        "cache_read_msats": cost_data.cache_read_msats,
+        "cache_creation_msats": cost_data.cache_creation_msats,
+    }
+    if cost_data.total_usd:
+        cost_obj["total_usd"] = cost_data.total_usd
+    usage["cost"] = cost_obj
+    usage["cost_sats"] = cost_data.total_msats // 1000
+
+
 def _is_json_content_type(content_type: str | None) -> bool:
     """Return True when the upstream response should be parsed as JSON."""
     if not content_type:
@@ -284,9 +334,27 @@ class BaseUpstreamProvider:
 
         sats_cost = total_msats // 1000
 
+        # Build the cost object that the SDK's extractUsageFromResponseBody
+        # and extractUsageFromSSEJson expect: an object with total_msats,
+        # input_msats, output_msats, cache_read_msats, cache_creation_msats,
+        # etc.  Setting usage.cost to a plain float (total_usd) means the SDK
+        # cannot extract the msats breakdown — cache_read_msats and
+        # cache_creation_msats in particular are lost.
+        cost_obj = {
+            "base_msats": cost_dict.get("base_msats", 0),
+            "input_msats": cost_dict.get("input_msats", 0),
+            "output_msats": cost_dict.get("output_msats", 0),
+            "total_msats": total_msats,
+            "total_usd": total_usd,
+            "cache_read_input_tokens": cost_dict.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_dict.get("cache_creation_input_tokens", 0),
+            "cache_read_msats": cost_dict.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_dict.get("cache_creation_msats", 0),
+        }
+
         # Inject into top-level usage block (OpenAI/Anthropic style)
         if "usage" in response_json:
-            response_json["usage"]["cost"] = total_usd
+            response_json["usage"]["cost"] = cost_obj
             response_json["usage"]["cost_sats"] = sats_cost
             response_json["usage"]["remaining_balance_msats"] = key.balance
             self._fold_cache_into_input_tokens(response_json["usage"])
@@ -2153,6 +2221,21 @@ class BaseUpstreamProvider:
                 if k.lower() in allowed_headers
             }
 
+            # Inject cost breakdown headers so the SDK's
+            # extractUsageFromResponseHeaders can populate
+            # inputMsats/outputMsats/totalMsats for balance-mode requests.
+            if isinstance(cost_data, dict):
+                _cost_data_obj = CostData(
+                    base_msats=cost_data.get("base_msats", 0),
+                    input_msats=cost_data.get("input_msats", 0),
+                    output_msats=cost_data.get("output_msats", 0),
+                    total_msats=cost_data.get("total_msats", 0),
+                    total_usd=cost_data.get("total_usd", 0.0),
+                )
+            else:
+                _cost_data_obj = cost_data
+            _inject_cost_response_headers(response_headers, _cost_data_obj)
+
             return Response(
                 content=json.dumps(response_json).encode(),
                 status_code=response.status_code,
@@ -2242,9 +2325,24 @@ class BaseUpstreamProvider:
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
+        # Inject cost breakdown headers for balance-mode requests.
+        if isinstance(cost_data, dict):
+            _cost_data_obj = CostData(
+                base_msats=cost_data.get("base_msats", 0),
+                input_msats=cost_data.get("input_msats", 0),
+                output_msats=cost_data.get("output_msats", 0),
+                total_msats=cost_data.get("total_msats", 0),
+                total_usd=cost_data.get("total_usd", 0.0),
+            )
+        else:
+            _cost_data_obj = cost_data
+        response_headers: dict[str, str] = {}
+        _inject_cost_response_headers(response_headers, _cost_data_obj)
+
         return Response(
             content=json.dumps(response_json).encode(),
             status_code=200,
+            headers=response_headers,
             media_type="application/json",
         )
 
@@ -2295,11 +2393,12 @@ class BaseUpstreamProvider:
             and "usage" in response_json
             and isinstance(response_json["usage"], dict)
         ):
-            response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+            _inject_cost_into_usage(response_json, cost_data)
             self._fold_cache_into_input_tokens(response_json["usage"])
 
         response_headers: dict[str, str] = {}
         if cost_data:
+            _inject_cost_response_headers(response_headers, cost_data)
             refund_amount = messages_dispatch.compute_refund(
                 amount, unit, cost_data.total_msats
             )
@@ -3700,6 +3799,11 @@ class BaseUpstreamProvider:
                                 "model": model,
                             },
                         )
+
+                    # Inject cost breakdown headers so the SDK's
+                    # extractUsageFromResponseHeaders can populate
+                    # inputMsats/outputMsats/totalMsats for x-cashu requests.
+                    _inject_cost_response_headers(response_headers, cost_data)
             except Exception as e:
                 logger.error(
                     "Error calculating cost for streaming response",
@@ -3722,8 +3826,12 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if cost_data and "usage" in data_json and data_json["usage"]:
-                        data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                    if (
+                        cost_data
+                        and "usage" in data_json
+                        and data_json["usage"]
+                    ):
+                        _inject_cost_into_usage(data_json, cost_data)
                         changed = True
                     if changed:
                         lines[i] = "data: " + json.dumps(data_json)
@@ -3777,7 +3885,10 @@ class BaseUpstreamProvider:
             )
 
             if cost_data and "usage" in response_json:
-                response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                # Inject cost breakdown into both the response body (so the
+                # SDK's body extractor picks up the msats breakdown) and the
+                # response headers (so the SDK's header extractor works too).
+                _inject_cost_into_usage(response_json, cost_data)
 
             if not cost_data:
                 logger.error(
@@ -3807,6 +3918,8 @@ class BaseUpstreamProvider:
                 del response_headers["transfer-encoding"]
             if "content-encoding" in response_headers:
                 del response_headers["content-encoding"]
+
+            _inject_cost_response_headers(response_headers, cost_data)
 
             if unit == "msat":
                 refund_amount = amount - cost_data.total_msats
@@ -4681,6 +4794,11 @@ class BaseUpstreamProvider:
                                 "model": model,
                             },
                         )
+
+                    # Inject cost breakdown headers so the SDK's
+                    # extractUsageFromResponseHeaders can populate
+                    # inputMsats/outputMsats/totalMsats for x-cashu requests.
+                    _inject_cost_response_headers(response_headers, cost_data)
             except Exception as e:
                 logger.error(
                     "Error calculating cost for streaming Responses API response",
@@ -4703,8 +4821,12 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if cost_data and "usage" in data_json and data_json["usage"]:
-                        data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                    if (
+                        cost_data
+                        and "usage" in data_json
+                        and data_json["usage"]
+                    ):
+                        _inject_cost_into_usage(data_json, cost_data)
                         changed = True
                     if changed:
                         lines[i] = "data: " + json.dumps(data_json)
@@ -4747,7 +4869,7 @@ class BaseUpstreamProvider:
             )
 
             if cost_data and "usage" in response_json:
-                response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
+                _inject_cost_into_usage(response_json, cost_data)
 
             if not cost_data:
                 logger.error(
@@ -4777,6 +4899,8 @@ class BaseUpstreamProvider:
                 del response_headers["transfer-encoding"]
             if "content-encoding" in response_headers:
                 del response_headers["content-encoding"]
+
+            _inject_cost_response_headers(response_headers, cost_data)
 
             if unit == "msat":
                 refund_amount = amount - cost_data.total_msats

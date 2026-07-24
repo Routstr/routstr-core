@@ -481,12 +481,38 @@ def _calculate_from_usd_cost(
         )
         output_msats = cost_in_msats - input_msats
 
+    # Estimate cache read/creation msats proportionally within the input cost.
+    # These are informational subcomponents: input_msats remains inclusive of
+    # cache cost so input_msats + output_msats == total_msats, matching the
+    # token-priced path and the public CostData contract.
+    cache_read_msats = 0
+    cache_creation_msats = 0
+    if cache_read_tokens > 0 or cache_creation_tokens > 0:
+        cache_tokens = cache_read_tokens + cache_creation_tokens
+        regular_input_tokens = input_tokens
+        total_input_tokens = regular_input_tokens + cache_tokens
+        if total_input_tokens > 0:
+            # Approximate by token count because the USD path only exposes an
+            # aggregate input cost, not separately priced cache buckets.
+            cache_read_msats = (
+                int(input_msats * cache_read_tokens / total_input_tokens)
+                if cache_read_tokens > 0
+                else 0
+            )
+            cache_creation_msats = (
+                int(input_msats * cache_creation_tokens / total_input_tokens)
+                if cache_creation_tokens > 0
+                else 0
+            )
+
     logger.info(
         "Using cost from usage data/details",
         extra={
             "usd_cost": usd_cost,
             "cost_in_sats": cost_in_sats,
             "cost_in_msats": cost_in_msats,
+            "cache_read_msats": cache_read_msats,
+            "cache_creation_msats": cache_creation_msats,
             "model": response_data.get("model", "unknown"),
         },
     )
@@ -501,8 +527,8 @@ def _calculate_from_usd_cost(
         output_tokens=output_tokens,
         cache_read_input_tokens=cache_read_tokens,
         cache_creation_input_tokens=cache_creation_tokens,
-        cache_read_msats=0,
-        cache_creation_msats=0,
+        cache_read_msats=cache_read_msats,
+        cache_creation_msats=cache_creation_msats,
     )
 
 

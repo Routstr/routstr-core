@@ -451,7 +451,8 @@ async def test_non_streaming_dispatches_via_litellm_and_returns_anthropic_respon
     assert payload["model"] == "openai/gpt-4o-mini"  # mapped back to requested
     assert payload["usage"]["input_tokens"] == 5
     assert payload["usage"]["output_tokens"] == 3
-    assert payload["usage"]["cost"] == 0.0001
+    assert payload["usage"]["cost"]["total_msats"] == 1234
+    assert payload["usage"]["cost"]["total_usd"] == 0.0001
     assert payload["usage"]["cost_sats"] == 1
 
 
