@@ -281,13 +281,20 @@ async def check_invoice_payment(
                 else None,
             },
         )
-    except Exception as e:
-        await session.rollback()
+    except BaseException as e:
+        # BaseException so task cancellation (e.g. client disconnect) after a
+        # successful mint still triggers the reconciliation alert.
+        try:
+            await asyncio.shield(session.rollback())
+        except Exception:
+            logger.warning("Rollback failed during invoice check cleanup")
         if minted:
             logger.critical(
                 "Invoice mint succeeded but DB finalization failed; reconciliation required",
                 extra={"invoice_id": invoice_id, "purpose": invoice_purpose},
             )
+        if not isinstance(e, Exception):
+            raise
         logger.error(f"Failed to check invoice payment: {e}")
 
 

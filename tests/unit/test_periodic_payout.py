@@ -77,7 +77,7 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balances_by_mint_and_unit", AsyncMock(return_value={})
+            "routstr.wallet.db.balances_for_mint_and_unit", AsyncMock(return_value=0)
         ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
@@ -130,8 +130,8 @@ async def test_periodic_payout_releases_session_before_slow_mint_send() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balances_by_mint_and_unit",
-            AsyncMock(return_value={}),
+            "routstr.wallet.db.balances_for_mint_and_unit",
+            AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(side_effect=raw_send)),
     ):
@@ -172,7 +172,7 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balances_by_mint_and_unit", AsyncMock(return_value={})
+            "routstr.wallet.db.balances_for_mint_and_unit", AsyncMock(return_value=0)
         ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
@@ -190,7 +190,7 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
 
 @pytest.mark.asyncio
 async def test_periodic_payout_handles_session_creation_failure() -> None:
-    """A db.create_session failure is logged and the payout loop continues."""
+    """A db.create_session failure is logged per mint/unit and the loop continues."""
     from routstr.core.settings import settings
 
     create_session = MagicMock(side_effect=RuntimeError("db unavailable"))
@@ -203,14 +203,25 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
         patch.object(settings, "payout_interval_seconds", _INTERVAL),
         patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
         patch("routstr.wallet.db.create_session", create_session),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            MagicMock(return_value=[MagicMock(amount=100_000)]),
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            AsyncMock(side_effect=lambda proofs, wallet: proofs),
+        ),
         patch("routstr.wallet.logger", logger),
     ):
         with pytest.raises(_LoopBreak):
             await periodic_payout()
 
-    create_session.assert_called_once()
-    logger.error.assert_called_once()
+    # The liability session is opened per mint/unit (sat + msat), and each
+    # failure is isolated to its own iteration rather than aborting the cycle.
+    assert create_session.call_count == 2
+    assert logger.error.call_count == 2
     message = logger.error.call_args.args[0]
     extra = logger.error.call_args.kwargs["extra"]
-    assert message == "Error in periodic payout cycle: RuntimeError"
-    assert extra == {"error": "db unavailable"}
+    assert message == "Error sending payout: RuntimeError"
+    assert extra["error"] == "db unavailable"

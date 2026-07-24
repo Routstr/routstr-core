@@ -1,4 +1,6 @@
 import asyncio
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -172,3 +174,50 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
 
     complete.assert_not_awaited()
     critical.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_releases_db_connection_during_send(tmp_path: object) -> None:
+    """With pool_size=1, the payout must not hold a connection while the
+    external LNURL send is in flight, or the completion step would starve."""
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path}/payout.db", pool_size=1, max_overflow=0
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+    async with AsyncSession(engine) as session:
+        session.add(db.RoutstrFee(id=1, accumulated_msats=5_000_000))
+        await session.commit()
+
+    @asynccontextmanager
+    async def create_session() -> AsyncGenerator[AsyncSession, None]:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            yield session
+
+    async def send(*_args: object, **_kwargs: object) -> int:
+        assert engine.pool.checkedout() == 0  # type: ignore[attr-defined]
+        return 5
+
+    try:
+        with (
+            patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+            patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+            patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+            patch(
+                "routstr.wallet.asyncio.sleep",
+                AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+            ),
+            patch("routstr.wallet.db.create_session", create_session),
+            patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+            patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+            patch("routstr.wallet.raw_send_to_lnurl", side_effect=send),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await wallet.periodic_routstr_fee_payout()
+
+        async with AsyncSession(engine) as session:
+            fee = await db.get_routstr_fee(session)
+            assert fee.payout_in_progress_msats == 0
+            assert fee.total_paid_msats == 5_000_000
+    finally:
+        await engine.dispose()

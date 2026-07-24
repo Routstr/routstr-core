@@ -299,3 +299,58 @@ async def test_created_key_without_constraints_has_none_fields(
     assert stored_key.balance_limit is None
     assert stored_key.balance_limit_reset is None
     assert stored_key.validity_date is None
+
+
+@pytest.mark.asyncio
+async def test_db_guard_credits_once_when_both_mints_succeed(
+    integration_engine: AsyncEngine,
+) -> None:
+    """Even if the mint fails to enforce single-use quotes and both racers
+    mint successfully, the conditional status update must credit exactly once."""
+    key = ApiKey(hashed_key="race-key", balance=1_000)
+    invoice = _make_invoice(
+        id="inv_db_guard",
+        status="pending",
+        paid_at=None,
+        purpose="topup",
+        api_key_hash="race-key",
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
+        setup.add(key)
+        setup.add(invoice)
+        await setup.commit()
+
+    wallet = MagicMock()
+    wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
+
+    async def always_succeeding_mint(*args: object, **kwargs: object) -> list[object]:
+        await asyncio.sleep(0.05)
+        return []
+
+    wallet.mint = AsyncMock(side_effect=always_succeeding_mint)
+
+    async with (
+        AsyncSession(integration_engine, expire_on_commit=False) as first,
+        AsyncSession(integration_engine, expire_on_commit=False) as second,
+    ):
+        first_invoice = await first.get(LightningInvoice, invoice.id)
+        second_invoice = await second.get(LightningInvoice, invoice.id)
+        assert first_invoice is not None
+        assert second_invoice is not None
+
+        with patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)):
+            from routstr.lightning import check_invoice_payment
+
+            await asyncio.gather(
+                check_invoice_payment(first_invoice, first),
+                check_invoice_payment(second_invoice, second),
+            )
+
+    assert wallet.mint.await_count == 2
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored_invoice = await verify.get(LightningInvoice, invoice.id)
+        assert stored_invoice is not None
+        assert stored_invoice.status == "paid"
+        stored_key = await verify.get(ApiKey, "race-key")
+        assert stored_key is not None
+        assert stored_key.balance == 1_000 + invoice.amount_sats * 1000

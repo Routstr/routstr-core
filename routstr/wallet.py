@@ -931,9 +931,6 @@ async def periodic_payout() -> None:
             if settings.primary_mint and settings.primary_mint not in mint_urls:
                 mint_urls.append(settings.primary_mint)
 
-            async with db.create_session() as session:
-                user_balances = await db.balances_by_mint_and_unit(session)
-
             for mint_url in mint_urls:
                 for unit in ["sat", "msat"]:
                     # Isolate failures per mint/unit so one slow or failing
@@ -945,7 +942,14 @@ async def periodic_payout() -> None:
                         )
                         proofs = await slow_filter_spend_proofs(proofs, wallet)
                         await asyncio.sleep(5)
-                        user_balance = user_balances.get((mint_url, unit), 0)
+                        # Fetch the liability AFTER the proofs snapshot and the
+                        # settle delay: a concurrent top-up then only inflates
+                        # the liability, shrinking the payout — never sending
+                        # customer-backed funds as profit.
+                        async with db.create_session() as session:
+                            user_balance = await db.balances_for_mint_and_unit(
+                                session, mint_url, unit
+                            )
                         if unit == "sat":
                             user_balance = user_balance // 1000
                         proofs_balance = sum(proof.amount for proof in proofs)
@@ -1001,18 +1005,24 @@ async def _refund_sweep_once(cutoff: int) -> None:
         refunds = results.all()
 
     for refund in refunds:
+        # Claim the refund atomically before redeeming so a concurrent sweep
+        # cannot redeem the same token and misreport it as client-collected.
+        async with db.create_session() as session:
+            claim = await session.exec(  # type: ignore[call-overload]
+                update(db.CashuTransaction)
+                .where(
+                    col(db.CashuTransaction.id) == refund.id,
+                    col(db.CashuTransaction.swept) == False,  # noqa: E712
+                    col(db.CashuTransaction.collected) == False,  # noqa: E712
+                )
+                .values(swept=True)
+            )
+            await session.commit()
+        if claim.rowcount != 1:
+            continue
+
         try:
             await recieve_token(refund.token)
-            async with db.create_session() as session:
-                await session.exec(  # type: ignore[call-overload]
-                    update(db.CashuTransaction)
-                    .where(
-                        col(db.CashuTransaction.id) == refund.id,
-                        col(db.CashuTransaction.swept) == False,  # noqa: E712
-                    )
-                    .values(swept=True)
-                )
-                await session.commit()
             logger.info(
                 "Swept uncollected refund",
                 extra={
@@ -1024,11 +1034,13 @@ async def _refund_sweep_once(cutoff: int) -> None:
         except Exception as e:
             error_msg = str(e).lower()
             if "already spent" in error_msg:
+                # We held the claim, so nobody else swept it: the client
+                # really collected the token.
                 async with db.create_session() as session:
                     await session.exec(  # type: ignore[call-overload]
                         update(db.CashuTransaction)
                         .where(col(db.CashuTransaction.id) == refund.id)
-                        .values(collected=True)
+                        .values(collected=True, swept=False)
                     )
                     await session.commit()
                 logger.info(
@@ -1036,6 +1048,14 @@ async def _refund_sweep_once(cutoff: int) -> None:
                     extra={"id": refund.id},
                 )
             else:
+                # Release the claim so the next sweep retries this refund.
+                async with db.create_session() as session:
+                    await session.exec(  # type: ignore[call-overload]
+                        update(db.CashuTransaction)
+                        .where(col(db.CashuTransaction.id) == refund.id)
+                        .values(swept=False)
+                    )
+                    await session.commit()
                 logger.warning(
                     "Failed to sweep refund",
                     extra={
