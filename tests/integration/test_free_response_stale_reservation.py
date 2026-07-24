@@ -38,13 +38,17 @@ async def test_overrun_charges_after_reservation_swept(
     integration_session: AsyncSession,
 ) -> None:
     """Overrun finalize must charge even when the reservation was already released."""
-    from routstr.auth import adjust_payment_for_tokens
+    from routstr.auth import adjust_payment_for_tokens, pay_for_request
 
     deducted_max_cost = 990  # discounted reservation
     actual_token_cost = 1000  # actual cost overruns the reservation
 
     # Sweeper has zeroed reserved_balance but left balance untouched.
     key = _make_key(balance=1000, reserved=0)
+    integration_session.add(key)
+    await integration_session.commit()
+    await pay_for_request(key, deducted_max_cost, integration_session)
+    key.reserved_balance = 0
     integration_session.add(key)
     await integration_session.commit()
 
@@ -79,8 +83,16 @@ async def test_free_response_path_closed_end_to_end(
     patched_db_engine: None,
 ) -> None:
     """A reservation released by the real sweeper must not yield a free response."""
-    from routstr.auth import adjust_payment_for_tokens, pay_for_request
-    from routstr.core.db import create_session, release_stale_reservations
+    from routstr.auth import (
+        adjust_payment_for_tokens,
+        get_reservation_snapshot,
+        pay_for_request,
+    )
+    from routstr.core.db import (
+        ReservationRelease,
+        create_session,
+        release_stale_reservations,
+    )
 
     deducted_max_cost = 990
     actual_token_cost = 1000
@@ -104,10 +116,15 @@ async def test_free_response_path_closed_end_to_end(
         key = await session.get(ApiKey, key_hash)
         assert key is not None
         await pay_for_request(key, deducted_max_cost, session)
+        snapshot = await get_reservation_snapshot(key, session)
         await session.refresh(key)
         assert key.reserved_balance == deducted_max_cost
         key.reserved_at = int(time.time()) - 10_000
+        record = await session.get(ReservationRelease, snapshot.release_id)
+        assert record is not None
+        record.created_at = int(time.time()) - 10_000
         session.add(key)
+        session.add(record)
         await session.commit()
 
     # Sweeper releases the stale reservation without charging.
@@ -129,18 +146,20 @@ async def test_free_response_path_closed_end_to_end(
             return_value=_cost_data(actual_token_cost),
         ):
             await adjust_payment_for_tokens(
-                key, response_data, session, deducted_max_cost, None, None
+                key,
+                response_data,
+                session,
+                deducted_max_cost,
+                reservation_snapshot=snapshot,
             )
 
     async with create_session() as session:
         final = await session.get(ApiKey, key_hash)
         assert final is not None
 
-    assert final.total_spent == actual_token_cost, (
-        f"Free response: total_spent={final.total_spent}, expected {actual_token_cost}"
-    )
-    assert final.balance == 1000 - actual_token_cost, (
-        f"Balance not charged after sweep: {final.balance}"
-    )
+    # Stale release is terminal for this reservation. A late finalizer must not
+    # charge aggregate balance that may now belong to a newer request.
+    assert final.total_spent == 0
+    assert final.balance == 1000
     assert final.balance >= 0
     assert final.reserved_balance == 0

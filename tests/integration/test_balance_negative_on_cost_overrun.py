@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
 from routstr.payment.cost_calculation import CostData
 
@@ -23,7 +24,7 @@ def _make_key(balance: int, reserved: int) -> ApiKey:
     return ApiKey(
         hashed_key=f"test_{uuid.uuid4().hex}",
         balance=balance,
-        reserved_balance=reserved,
+        reserved_balance=0,
         total_spent=0,
         total_requests=1,
     )
@@ -75,6 +76,8 @@ async def test_balance_never_negative_when_cost_exceeds_reservation(
     key = _make_key(balance=deducted_max_cost, reserved=deducted_max_cost)
     integration_session.add(key)
     await integration_session.commit()
+    from routstr.auth import pay_for_request
+    await pay_for_request(key, deducted_max_cost, integration_session)
 
     response_data = {"model": "test-model", "usage": {"prompt_tokens": 100, "completion_tokens": 100}}
 
@@ -111,6 +114,8 @@ async def test_balance_floor_at_zero_on_overrun(
     key = _make_key(balance=500, reserved=500)
     integration_session.add(key)
     await integration_session.commit()
+    from routstr.auth import pay_for_request
+    await pay_for_request(key, deducted_max_cost, integration_session)
 
     response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 50}}
 
@@ -152,6 +157,8 @@ async def test_full_cost_charged_when_balance_sufficient_for_overrun(
     key = _make_key(balance=2000, reserved=990)
     integration_session.add(key)
     await integration_session.commit()
+    from routstr.auth import pay_for_request
+    await pay_for_request(key, deducted_max_cost, integration_session)
 
     response_data = {"model": "test-model", "usage": {"prompt_tokens": 100, "completion_tokens": 100}}
 
@@ -190,7 +197,11 @@ async def test_concurrent_cost_overruns_never_negative(
     """Concurrent finalization with cost overruns must never produce negative balance."""
     import asyncio
 
-    from routstr.auth import adjust_payment_for_tokens, pay_for_request
+    from routstr.auth import (
+        adjust_payment_for_tokens,
+        get_reservation_snapshot,
+        pay_for_request,
+    )
     from routstr.core.db import create_session
 
     deducted_max_cost = 990
@@ -216,12 +227,14 @@ async def test_concurrent_cost_overruns_never_negative(
     async with create_session() as session:
         key_to_reserve = await session.get(ApiKey, key_hash)
         assert key_to_reserve is not None
+        reservations = []
         for _ in range(n_requests):
             await pay_for_request(key_to_reserve, deducted_max_cost, session)
+            reservations.append(await get_reservation_snapshot(key_to_reserve, session))
             await session.refresh(key_to_reserve)
 
     # Now finalize all concurrently with cost overrun
-    async def finalize() -> None:
+    async def finalize(reservation: ReservationSnapshot) -> None:
         response_data = {
             "model": "test-model",
             "usage": {"prompt_tokens": 100, "completion_tokens": 100},
@@ -230,7 +243,11 @@ async def test_concurrent_cost_overruns_never_negative(
             fresh_key = await session.get(ApiKey, key_hash)
             assert fresh_key is not None
             await adjust_payment_for_tokens(
-                fresh_key, response_data, session, deducted_max_cost, None, None
+                fresh_key,
+                response_data,
+                session,
+                deducted_max_cost,
+                reservation_snapshot=reservation,
             )
 
     # Patch once around the gather: entering the same patch target from
@@ -240,7 +257,7 @@ async def test_concurrent_cost_overruns_never_negative(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await asyncio.gather(*[finalize() for _ in range(n_requests)])
+        await asyncio.gather(*(finalize(r) for r in reservations))
 
     async with create_session() as session:
         final_key = await session.get(ApiKey, key_hash)
@@ -281,6 +298,8 @@ async def test_zero_free_balance_overrun_is_safe(
     key = _make_key(balance=1000, reserved=1000)
     integration_session.add(key)
     await integration_session.commit()
+    from routstr.auth import pay_for_request
+    await pay_for_request(key, deducted_max_cost, integration_session)
 
     response_data = {"model": "test-model", "usage": {"prompt_tokens": 50, "completion_tokens": 100}}
 
@@ -319,7 +338,11 @@ async def test_parallel_requests_no_free_inference(
     """Second parallel finalization must be charged even when first depleted free balance."""
     import asyncio
 
-    from routstr.auth import adjust_payment_for_tokens
+    from routstr.auth import (
+        adjust_payment_for_tokens,
+        get_reservation_snapshot,
+        pay_for_request,
+    )
     from routstr.core.db import create_session
 
     deducted_max_cost = 100
@@ -340,14 +363,18 @@ async def test_parallel_requests_no_free_inference(
         key = ApiKey(
             hashed_key=key_hash,
             balance=starting_balance,
-            reserved_balance=deducted_max_cost * 2,  # both slots pre-reserved
+            reserved_balance=0,
             total_spent=0,
             total_requests=2,
         )
         session.add(key)
         await session.commit()
+        reservations = []
+        for _ in range(2):
+            await pay_for_request(key, deducted_max_cost, session)
+            reservations.append(await get_reservation_snapshot(key, session))
 
-    async def finalize() -> None:
+    async def finalize(reservation: ReservationSnapshot) -> None:
         response_data = {
             "model": "test-model",
             "usage": {"prompt_tokens": 50, "completion_tokens": 100},
@@ -356,7 +383,11 @@ async def test_parallel_requests_no_free_inference(
             fresh_key = await session.get(ApiKey, key_hash)
             assert fresh_key is not None
             await adjust_payment_for_tokens(
-                fresh_key, response_data, session, deducted_max_cost, None, None
+                fresh_key,
+                response_data,
+                session,
+                deducted_max_cost,
+                reservation_snapshot=reservation,
             )
 
     # Patch once around the gather: entering the same patch target from two
@@ -366,7 +397,7 @@ async def test_parallel_requests_no_free_inference(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await asyncio.gather(finalize(), finalize())
+        await asyncio.gather(*(finalize(r) for r in reservations))
 
     async with create_session() as session:
         final_key = await session.get(ApiKey, key_hash)

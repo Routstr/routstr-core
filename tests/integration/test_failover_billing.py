@@ -14,13 +14,17 @@ from unittest.mock import patch
 import httpx
 import pytest
 from httpx import AsyncClient
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr.core.db import ApiKey, ReservationRelease
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.proxy import refresh_model_maps
 from routstr.upstream.base import BaseUpstreamProvider
 
 CHEAP_BASE_URL = "https://cheap.example.com/v1"
 EXPENSIVE_BASE_URL = "https://expensive.example.com/v1"
+THIRD_BASE_URL = "https://third.example.com/v1"
 
 
 def _make_model(
@@ -55,9 +59,7 @@ def _make_model(
 class _StaticProvider(BaseUpstreamProvider):
     """Upstream provider with a fixed model catalog and no remote refresh."""
 
-    def __init__(
-        self, base_url: str, api_key: str, fee: float, model: Model
-    ) -> None:
+    def __init__(self, base_url: str, api_key: str, fee: float, model: Model) -> None:
         super().__init__(base_url, api_key, fee)
         self.provider_type = "custom"
         self._static_model = model
@@ -98,7 +100,7 @@ async def dual_provider_maps(
         EXPENSIVE_BASE_URL,
         "key-expensive",
         1.0,
-        _make_model("provb/dual-model", 0.005, 0.010),
+        _make_model("provb/dual-model", 0.005, 0.010, max_cost=100.0),
     )
     async for _ in _install_providers([cheap, expensive]):
         yield cheap, expensive
@@ -142,6 +144,7 @@ def _upstream_response(request: httpx.Request) -> httpx.Response:
 async def test_failover_serve_billed_at_serving_providers_rate(
     authenticated_client: AsyncClient,
     dual_provider_maps: tuple[_StaticProvider, _StaticProvider],
+    integration_session: AsyncSession,
 ) -> None:
     """A fallback serve is billed at the fallback's price, not the winner's.
 
@@ -198,6 +201,17 @@ async def test_failover_serve_billed_at_serving_providers_rate(
 
     # Billed at the serving provider's rate: 1000/1000*5000 + 500/1000*10000.
     assert payload["cost"]["total_msats"] == 10_000
+
+    # The fallback's larger max-cost envelope requires a replacement
+    # reservation. The failed candidate is released, the serving candidate is
+    # charged, and no request-owned reservation remains active.
+    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
+    records = (
+        await integration_session.exec(
+            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
+        )
+    ).all()
+    assert sorted(record.status for record in records) == ["charged", "released"]
 
 
 @pytest.fixture
@@ -349,9 +363,7 @@ async def test_usd_cost_serve_carries_serving_providers_fee(
         if request.url.host == "cheap.example.com":
             return httpx.Response(
                 502,
-                content=json.dumps(
-                    {"error": {"message": "bad gateway"}}
-                ).encode(),
+                content=json.dumps({"error": {"message": "bad gateway"}}).encode(),
                 headers={"content-type": "application/json"},
             )
         body = {
@@ -479,6 +491,101 @@ async def test_failover_beyond_balance_envelope_is_rejected(
 
 
 @pytest.fixture
+async def three_candidate_child_maps(
+    patched_db_engine: None,
+) -> AsyncGenerator[None, None]:
+    """Second candidate cannot fit the child limit; third restores and serves."""
+    first = _StaticProvider(
+        CHEAP_BASE_URL,
+        "key-first",
+        1.0,
+        _make_model("dual-model", 0.001, 0.002, max_cost=50.0),
+    )
+    too_large = _StaticProvider(
+        EXPENSIVE_BASE_URL,
+        "key-too-large",
+        1.0,
+        _make_model("dual-model", 0.002, 0.003, max_cost=100.0),
+    )
+    third = _StaticProvider(
+        THIRD_BASE_URL,
+        "key-third",
+        1.0,
+        _make_model("dual-model", 0.003, 0.004, max_cost=50.0),
+    )
+    async for _ in _install_providers([first, too_large, third]):
+        yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_child_failover_rolls_back_failed_larger_reserve_before_restoring(
+    authenticated_client: AsyncClient,
+    three_candidate_child_maps: None,
+    integration_session: AsyncSession,
+) -> None:
+    """A failed child guard cannot leak its parent update into restoration."""
+    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
+    child = await integration_session.get(ApiKey, key_hash)
+    assert child is not None
+    parent = ApiKey(hashed_key="failover-parent", balance=10_000_000)
+    child.parent_key_hash = parent.hashed_key
+    child.balance_limit = 75_000
+    integration_session.add(parent)
+    integration_session.add(child)
+    await integration_session.commit()
+
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _upstream_response(request)
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    # The 100-sat candidate is rejected before forwarding; the third serves.
+    assert [request.url.host for request in sent_requests] == [
+        "cheap.example.com",
+        "third.example.com",
+    ]
+
+    await integration_session.refresh(parent)
+    await integration_session.refresh(child)
+    assert parent.reserved_balance == 0
+    assert child.reserved_balance == 0
+    assert parent.total_spent == response.json()["cost"]["total_msats"]
+
+    records = (
+        await integration_session.exec(
+            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
+        )
+    ).all()
+    assert len(records) == 2
+    assert sorted(record.status for record in records) == ["charged", "released"]
+    assert len({record.reserved_msats for record in records}) == 1
+    assert all(record.status != "active" for record in records)
+
+
+@pytest.fixture
 async def raised_envelope_provider_maps(
     patched_db_engine: None,
 ) -> AsyncGenerator[None, None]:
@@ -504,6 +611,7 @@ async def raised_envelope_provider_maps(
 async def test_failover_reserves_serving_candidates_envelope(
     authenticated_client: AsyncClient,
     raised_envelope_provider_maps: None,
+    integration_session: AsyncSession,
 ) -> None:
     """An affordable pricier fallback is re-reserved, served, and billed.
 
@@ -544,3 +652,15 @@ async def test_failover_reserves_serving_candidates_envelope(
         "expensive.example.com",
     ]
     assert response.json()["cost"]["total_msats"] == 10_000
+
+    key_hash = authenticated_client._test_api_key.removeprefix("sk-")  # type: ignore[attr-defined]
+    records = (
+        await integration_session.exec(
+            select(ReservationRelease).where(ReservationRelease.key_hash == key_hash)
+        )
+    ).all()
+    assert len(records) == 2
+    released = next(record for record in records if record.status == "released")
+    charged = next(record for record in records if record.status == "charged")
+    assert charged.reserved_msats > released.reserved_msats
+    assert all(record.status != "active" for record in records)
