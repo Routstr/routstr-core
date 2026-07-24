@@ -1,0 +1,62 @@
+"""add reservation release idempotency records
+
+Revision ID: 7f2843d3f4e4
+Revises: fc4fa29630d2
+Create Date: 2026-07-24 02:06:06.066726
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "7f2843d3f4e4"
+down_revision = "fc4fa29630d2"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "reservation_releases",
+        sa.Column("id", sa.String(), nullable=False),
+        sa.Column("key_hash", sa.String(), nullable=False),
+        sa.Column("billing_key_hash", sa.String(), nullable=False),
+        sa.Column("reserved_msats", sa.Integer(), nullable=False),
+        sa.Column(
+            "status", sa.String(), nullable=False, server_default="active"
+        ),
+        sa.Column("created_at", sa.Integer(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_index(
+        "ix_reservation_releases_key_hash",
+        "reservation_releases",
+        ["key_hash"],
+    )
+    op.create_index(
+        "ix_reservation_releases_billing_key_hash",
+        "reservation_releases",
+        ["billing_key_hash"],
+    )
+    op.create_index(
+        "ix_reservation_releases_status_created_at",
+        "reservation_releases",
+        ["status", "created_at"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index(
+        "ix_reservation_releases_status_created_at",
+        table_name="reservation_releases",
+    )
+    op.drop_index(
+        "ix_reservation_releases_billing_key_hash",
+        table_name="reservation_releases",
+    )
+    op.drop_index(
+        "ix_reservation_releases_key_hash",
+        table_name="reservation_releases",
+    )
+    op.drop_table("reservation_releases")

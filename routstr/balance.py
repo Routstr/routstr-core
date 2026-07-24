@@ -7,7 +7,7 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlmodel import col, or_, select, update
+from sqlmodel import col, select, update
 
 from .auth import get_billing_key, validate_bearer_key
 from .core.db import (
@@ -15,6 +15,7 @@ from .core.db import (
     AsyncSession,
     CashuTransaction,
     get_session,
+    release_stale_reservations,
 )
 from .core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
@@ -323,30 +324,19 @@ async def refund_wallet_endpoint(
         )
 
     if key.reserved_balance > 0:
-        # Release the reservation if it is stale
-        cutoff = int(time.time()) - settings.stale_reservation_timeout_seconds
-        stale_release_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .where(col(ApiKey.reserved_balance) > 0)
-            .where(
-                or_(
-                    col(ApiKey.reserved_at).is_(None),
-                    col(ApiKey.reserved_at) < cutoff,
-                )
-            )
-            .values(reserved_balance=0, reserved_at=None)
+        # Release only durable reservations old enough to be stale. A newer
+        # request on the same aggregate balance must remain reserved.
+        await release_stale_reservations(
+            session,
+            settings.stale_reservation_timeout_seconds,
+            key_hash=key.hashed_key,
         )
-        stale_result = await session.exec(stale_release_stmt)  # type: ignore[call-overload]
-        await session.commit()
-
-        if stale_result.rowcount == 0:
+        await session.refresh(key)
+        if key.reserved_balance > 0:
             raise HTTPException(
                 status_code=400,
                 detail="Cannot refund key. There are ongoing requests for this api key.",
             )
-
-        await session.refresh(key)
         logger.warning(
             "refund_wallet_endpoint: released stale reservation before refund",
             extra={
