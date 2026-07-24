@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from enum import Enum
 from typing import AsyncGenerator
 
 from alembic import command
@@ -555,6 +556,42 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     payout_started_at: int | None = Field(default=None)
 
 
+class NsecState(str, Enum):
+    """Ownership state of the node's nsec — an explicit 3-state machine.
+
+    The single ``encrypted_nsec`` column cannot distinguish "never migrated" from
+    "intentionally cleared" (both leave it empty), which let a cleared identity be
+    resurrected from a stale legacy ``NSEC``. This names the three states so the
+    bootstrap branches on ownership rather than inferring it:
+
+    * ``legacy`` — the vault has not taken ownership; a plaintext ``NSEC`` (env or
+      old settings blob) may still exist and should be migrated in once.
+    * ``encrypted`` — the vault owns a ciphertext; decrypt it, never re-read env.
+    * ``cleared`` — the vault owns it but the operator emptied it; stay empty,
+      never re-import from a stale legacy copy.
+    """
+
+    legacy = "legacy"
+    encrypted = "encrypted"
+    cleared = "cleared"
+
+
+class Secret(SQLModel, table=True):  # type: ignore
+    """Node-level secrets, stored encrypted/hashed at rest (singleton, id=1).
+
+    The asymmetric column names document the encoding: ``_hash`` is one-way
+    (scrypt, verify only) while ``encrypted_`` is reversible (Fernet). Per-provider
+    upstream keys live on ``upstream_providers``, not here. See ``routstr.core.vault``.
+    """
+
+    __tablename__ = "secrets"
+    id: int = Field(default=1, primary_key=True)
+    admin_password_hash: str | None = Field(default=None)
+    encrypted_nsec: str | None = Field(default=None)
+    nsec_state: NsecState = Field(default=NsecState.legacy)
+    updated_at: int | None = Field(default=None)
+
+
 class CliToken(SQLModel, table=True):  # type: ignore
     """Long-lived authorization token for CLI/agent use against admin endpoints."""
 
@@ -591,6 +628,55 @@ async def get_routstr_fee(session: AsyncSession) -> RoutstrFee:
         await session.commit()
         await session.refresh(fee)
     return fee
+
+
+async def get_secret(session: AsyncSession) -> Secret:
+    secret = await session.get(Secret, 1)
+    if secret is None:
+        secret = Secret(id=1)
+        session.add(secret)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Another worker created the singleton row between our read and
+            # insert (multiple workers booting against one shared DB). Roll back
+            # and read the row they committed instead of failing startup.
+            await session.rollback()
+            secret = await session.get(Secret, 1)
+            if secret is None:
+                raise
+            return secret
+        await session.refresh(secret)
+    return secret
+
+
+async def set_admin_password(session: AsyncSession, password: str) -> None:
+    """Store the admin password as a one-way hash on the Secret singleton."""
+    from .vault import hash_password
+
+    secret = await get_secret(session)
+    secret.admin_password_hash = hash_password(password)
+    secret.updated_at = int(time.time())
+    session.add(secret)
+    await session.commit()
+
+
+async def set_nsec(session: AsyncSession, nsec: str) -> None:
+    """Store the node's nsec, Fernet-encrypted, on the Secret singleton.
+
+    An empty string clears it (the node then holds no Nostr identity and signs
+    no events). Either way the vault now owns the nsec, so the state moves off
+    ``legacy``: a cleared identity (``cleared``) must not be resurrected from a
+    stale legacy ``NSEC`` on the next boot.
+    """
+    from .vault import encrypt
+
+    secret = await get_secret(session)
+    secret.encrypted_nsec = encrypt(nsec) if nsec else None
+    secret.nsec_state = NsecState.encrypted if nsec else NsecState.cleared
+    secret.updated_at = int(time.time())
+    session.add(secret)
+    await session.commit()
 
 
 async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:

@@ -38,7 +38,6 @@ services:
       - routstr-data:/app/data
     environment:
       DATABASE_URL: "sqlite:////app/data/routstr.db"
-      ADMIN_KEY: "your-secure-admin-key"
       LOG_LEVEL: "info"
 
 volumes:
@@ -87,6 +86,8 @@ services:
       - ./logs:/app/logs
     environment:
       - TOR_PROXY_URL=socks5://tor:9050
+      # Keep the database (and the key file generated beside it) on the volume.
+      - DATABASE_URL=sqlite:////app/data/routstr.db
     depends_on:
       - tor
 
@@ -125,8 +126,8 @@ services:
       - UPSTREAM_BASE_URL=https://api.openai.com/v1
       - UPSTREAM_API_KEY=sk-proj-...
       
-      # Secure the dashboard (recommended)
-      - ADMIN_PASSWORD=your-secure-password
+      # The admin password is generated and logged once on first start; set
+      # ADMIN_PASSWORD here only as a legacy seed for an existing deployment.
       
       # Node identity
       - NAME=My Provider Node
@@ -134,6 +135,9 @@ services:
       
       # Lightning withdrawals
       - RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
+
+      # Keep the database (and the key file generated beside it) on the volume.
+      - DATABASE_URL=sqlite:////app/data/routstr.db
     volumes:
       - ./data:/app/data
 ```
@@ -155,10 +159,22 @@ Example `.env`:
 ```bash
 UPSTREAM_BASE_URL=https://api.openai.com/v1
 UPSTREAM_API_KEY=sk-proj-...
-ADMIN_PASSWORD=change-me
+# Keep the database (and the key file generated beside it) on the mounted volume.
+DATABASE_URL=sqlite:////app/data/routstr.db
+# Encrypts node secrets at rest. Optional — if unset, a key is generated next to
+# your database (on the same volume) and its file is named once for backup. Set
+# it explicitly to manage the key yourself.
+ROUTSTR_SECRET_KEY=
 NAME=My Provider Node
 RECEIVE_LN_ADDRESS=me@walletofsatoshi.com
 ```
+
+!!! note "Secret key persistence"
+    If you leave `ROUTSTR_SECRET_KEY` unset, the node generates one and stores it
+    as `routstr_secret.key` **next to your database**, so it persists on the same
+    volume as your data — just include that volume in your backups. For stronger
+    isolation (keeping the key off the data volume), set `ROUTSTR_SECRET_KEY` from
+    a secrets manager instead.
 
 See [Configuration](configuration.md) for all available options.
 
@@ -166,11 +182,13 @@ See [Configuration](configuration.md) for all available options.
 
 ## Persistence
 
-Routstr stores all data in `/app/data`:
+Point `DATABASE_URL` inside `/app/data` (as the examples above do) so everything
+Routstr persists lands on the mounted volume:
 
 | Path | Contents |
 |------|----------|
-| `keys.db` | SQLite database (settings, API keys, sessions) |
+| `routstr.db` | SQLite database (settings, API keys, sessions) |
+| `routstr_secret.key` | Auto-generated master key, written beside the database when `ROUTSTR_SECRET_KEY` is unset |
 | `.wallet/` | Cashu wallet data (your Bitcoin!) |
 
 !!! warning "Back Up Your Data"
