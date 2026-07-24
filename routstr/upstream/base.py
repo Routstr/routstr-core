@@ -14,7 +14,12 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
 
-from ..auth import adjust_payment_for_tokens
+from ..auth import (
+    ReservationSnapshot,
+    adjust_payment_for_tokens,
+    get_reservation_snapshot,
+    release_reservation,
+)
 from ..core import get_logger
 from ..core.db import (
     ApiKey,
@@ -65,8 +70,7 @@ logger = get_logger(__name__)
 
 
 def _is_json_content_type(content_type: str | None) -> bool:
-    """Return True when the upstream response should be parsed as JSON.
-    """
+    """Return True when the upstream response should be parsed as JSON."""
     if not content_type:
         return False
     main = content_type.split(";", 1)[0].strip().lower()
@@ -229,9 +233,7 @@ class BaseUpstreamProvider:
                 pass
         if "prompt_tokens" in usage:
             try:
-                usage["prompt_tokens"] = (
-                    int(usage.get("prompt_tokens") or 0) + extra
-                )
+                usage["prompt_tokens"] = int(usage.get("prompt_tokens") or 0) + extra
             except (TypeError, ValueError):
                 pass
 
@@ -733,7 +735,9 @@ class BaseUpstreamProvider:
             and rate_limit.retry_after_seconds is not None
             and "retry-after" not in {k.lower() for k in headers}
         ):
-            headers["Retry-After"] = str(max(1, math.ceil(rate_limit.retry_after_seconds)))
+            headers["Retry-After"] = str(
+                max(1, math.ceil(rate_limit.retry_after_seconds))
+            )
 
         if is_json_body:
             if not content_type:
@@ -792,6 +796,56 @@ class BaseUpstreamProvider:
             media_type="application/json",
         )
 
+    async def _release_failed_streaming_reservation(
+        self,
+        key: ApiKey,
+        session: AsyncSession,
+        reservation_snapshot: ReservationSnapshot | None,
+    ) -> bool:
+        """Attempt exact release and suppress unsafe settlement retries."""
+        try:
+            await session.rollback()
+            snapshot = reservation_snapshot
+            if snapshot is None:
+                snapshot = await get_reservation_snapshot(key, session)
+            released = await release_reservation(
+                snapshot,
+                session,
+                snapshot.reserved_msats,
+            )
+            if not released:
+                logger.critical(
+                    "Billing reservation could not be released",
+                    extra={
+                        "key_hash": key.hashed_key[:8] + "...",
+                        "reserved_balance": snapshot.reserved_msats,
+                    },
+                )
+            # A failed release remains recoverable by the stale-reservation
+            # sweep. Retrying settlement here could charge after an ambiguous
+            # database failure or replace the original stream exception.
+            return True
+        except asyncio.CancelledError:
+            # Preserve the exception that triggered billing cleanup. The stream
+            # propagates it immediately after this helper returns, and stale
+            # reservation cleanup can recover an interrupted release.
+            logger.critical(
+                "Billing reservation release was cancelled",
+                extra={"key_hash": key.hashed_key[:8] + "..."},
+                exc_info=True,
+            )
+            return True
+        except Exception as release_error:
+            logger.critical(
+                "Billing reservation release failed",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "error": str(release_error),
+                },
+                exc_info=True,
+            )
+            return True
+
     async def handle_streaming_chat_completion(
         self,
         response: httpx.Response,
@@ -800,6 +854,7 @@ class BaseUpstreamProvider:
         background_tasks: BackgroundTasks,
         requested_model: str | None = None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -811,6 +866,15 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        if reservation_snapshot is None:
+            async with create_session() as snapshot_session:
+                snapshot_key = await snapshot_session.get(key.__class__, key.hashed_key)
+                if snapshot_key is None:
+                    raise RuntimeError("Billing key disappeared before streaming")
+                reservation_snapshot = await get_reservation_snapshot(
+                    snapshot_key, snapshot_session
+                )
+
         logger.debug(
             "Processing streaming chat completion",
             extra={
@@ -844,6 +908,7 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             model_obj,
                             self.provider_fee,
+                            reservation_snapshot,
                         )
                         usage_finalized = True
                     except Exception:
@@ -968,9 +1033,7 @@ class BaseUpstreamProvider:
                     # line so multi-line ``data`` stays valid SSE framing - a bare
                     # second line would otherwise reach the client without its
                     # ``data:`` field and break naive parsers.
-                    body = b"".join(
-                        b"data: " + ln + b"\n" for ln in data.split(b"\n")
-                    )
+                    body = b"".join(b"data: " + ln + b"\n" for ln in data.split(b"\n"))
                     yield prefix + body + b"\n"
 
             try:
@@ -1018,48 +1081,44 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                                 model_obj,
                                 self.provider_fee,
+                                reservation_snapshot,
                             )
                             usage_finalized = True
-                        except Exception as e:
-                            logger.exception(
-                                "Error during usage finalization",
+                        except BaseException as e:
+                            logger.critical(
+                                "Error during usage finalization — CRITICAL",
                                 extra={
                                     "key_hash": key.hashed_key[:8] + "...",
                                     "error": str(e),
                                 },
+                                exc_info=True,
                             )
-
-                            # Fall back so we still emit a non-zero sats cost downstream.
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            # Release is a terminal billing state. Do not enqueue
+                            # finalize_db_only from the generator's finally block
+                            # and charge this request later.
+                            usage_finalized = (
+                                await self._release_failed_streaming_reservation(
+                                    fresh_key,
+                                    session,
+                                    reservation_snapshot,
+                                )
+                            )
+                            raise
 
                         if usage_chunk_data is None:
                             if not hasattr(self, "_current_stream_id"):
-                                self._current_stream_id = (
-                                    f"chatcmpl-{uuid.uuid4()}"
-                                )
+                                self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
                             usage_chunk_data = {
                                 "id": self._current_stream_id,
                                 "object": "chat.completion.chunk",
                                 "model": last_model_seen or "unknown",
                                 "choices": [],
                                 "usage": {
-                                    "prompt_tokens": cost_data.get(
-                                        "input_tokens", 0
-                                    ),
+                                    "prompt_tokens": cost_data.get("input_tokens", 0),
                                     "completion_tokens": cost_data.get(
                                         "output_tokens", 0
                                     ),
-                                    "total_tokens": cost_data.get(
-                                        "input_tokens", 0
-                                    )
+                                    "total_tokens": cost_data.get("input_tokens", 0)
                                     + cost_data.get("output_tokens", 0),
                                 },
                             }
@@ -1115,6 +1174,7 @@ class BaseUpstreamProvider:
         deducted_max_cost: int,
         requested_model: str | None = None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1163,6 +1223,7 @@ class BaseUpstreamProvider:
                 deducted_max_cost,
                 model_obj,
                 self.provider_fee,
+                reservation_snapshot,
             )
 
             await session.refresh(key)
@@ -1259,6 +1320,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         requested_model: str | None = None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1304,6 +1366,7 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             model_obj,
                             self.provider_fee,
+                            reservation_snapshot,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1388,9 +1451,7 @@ class BaseUpstreamProvider:
                         return
                     # Re-prefix each line so multi-line ``data`` stays valid SSE
                     # framing for the client.
-                    body = b"".join(
-                        b"data: " + ln + b"\n" for ln in data.split(b"\n")
-                    )
+                    body = b"".join(b"data: " + ln + b"\n" for ln in data.split(b"\n"))
                     yield prefix + body + b"\n"
 
             try:
@@ -1435,25 +1496,26 @@ class BaseUpstreamProvider:
                                 max_cost_for_model,
                                 model_obj,
                                 self.provider_fee,
+                                reservation_snapshot,
                             )
                             usage_finalized = True
-                        except Exception as e:
-                            logger.exception(
-                                "Error during Responses API usage finalization",
+                        except BaseException as e:
+                            logger.critical(
+                                "Error during Responses API usage finalization — CRITICAL",
                                 extra={
                                     "key_hash": key.hashed_key[:8] + "...",
                                     "error": str(e),
                                 },
+                                exc_info=True,
                             )
-                            cost_data = {
-                                "base_msats": 0,
-                                "input_msats": 0,
-                                "output_msats": 0,
-                                "total_msats": 0,
-                                "total_usd": 0.0,
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            }
+                            usage_finalized = (
+                                await self._release_failed_streaming_reservation(
+                                    fresh_key,
+                                    session,
+                                    reservation_snapshot,
+                                )
+                            )
+                            raise
 
                         if usage_chunk_data is None:
                             usage_chunk_data = {
@@ -1467,22 +1529,14 @@ class BaseUpstreamProvider:
                                         "output_tokens": cost_data.get(
                                             "output_tokens", 0
                                         ),
-                                        "total_tokens": cost_data.get(
-                                            "input_tokens", 0
-                                        )
+                                        "total_tokens": cost_data.get("input_tokens", 0)
                                         + cost_data.get("output_tokens", 0),
                                     },
                                 },
                                 "usage": {
-                                    "input_tokens": cost_data.get(
-                                        "input_tokens", 0
-                                    ),
-                                    "output_tokens": cost_data.get(
-                                        "output_tokens", 0
-                                    ),
-                                    "total_tokens": cost_data.get(
-                                        "input_tokens", 0
-                                    )
+                                    "input_tokens": cost_data.get("input_tokens", 0),
+                                    "output_tokens": cost_data.get("output_tokens", 0),
+                                    "total_tokens": cost_data.get("input_tokens", 0)
                                     + cost_data.get("output_tokens", 0),
                                 },
                             }
@@ -1498,9 +1552,9 @@ class BaseUpstreamProvider:
                             usage_chunk_data["response"]["usage"]["cost"] = (
                                 cost_data.get("total_usd", 0.0)
                             )
-                            usage_chunk_data["response"]["usage"][
-                                "cost_sats"
-                            ] = sats_cost
+                            usage_chunk_data["response"]["usage"]["cost_sats"] = (
+                                sats_cost
+                            )
                             usage_chunk_data["response"]["usage"][
                                 "remaining_balance_msats"
                             ] = remaining_balance_msats
@@ -1554,6 +1608,7 @@ class BaseUpstreamProvider:
         deducted_max_cost: int,
         requested_model: str | None = None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response:
         """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1605,6 +1660,7 @@ class BaseUpstreamProvider:
                 deducted_max_cost,
                 model_obj,
                 self.provider_fee,
+                reservation_snapshot,
             )
 
             await session.refresh(key)
@@ -1695,7 +1751,13 @@ class BaseUpstreamProvider:
             raise
 
     async def _finalize_generic_streaming_payment(
-        self, key_hash: str, max_cost: int, path: str
+        self,
+        key_hash: str,
+        max_cost: int,
+        path: str,
+        model_obj: Model | None,
+        provider_fee: float | None,
+        reservation_snapshot: ReservationSnapshot,
     ) -> None:
         """Background task to finalize payment for generic streaming requests."""
         async with create_session() as session:
@@ -1716,8 +1778,9 @@ class BaseUpstreamProvider:
                     {"model": "unknown", "usage": None},
                     session,
                     max_cost,
-                    model_obj=None,
-                    provider_fee=None,
+                    model_obj=model_obj,
+                    provider_fee=provider_fee,
+                    reservation_snapshot=reservation_snapshot,
                 )
                 logger.debug(
                     "Finalized generic streaming payment in background",
@@ -1743,6 +1806,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         requested_model: str | None = None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> StreamingResponse:
         async def stream_with_cost(
             max_cost_for_model: int,
@@ -1785,9 +1849,7 @@ class BaseUpstreamProvider:
                         _coerce_usd(cd.get("output_cost")),
                     )
                 for field in ("total_cost", "cost"):
-                    total_cost = max(
-                        total_cost, _coerce_usd(usage_or_root.get(field))
-                    )
+                    total_cost = max(total_cost, _coerce_usd(usage_or_root.get(field)))
 
             async def finalize_without_usage() -> bytes | None:
                 nonlocal usage_finalized
@@ -1810,12 +1872,27 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             model_obj,
                             self.provider_fee,
+                            reservation_snapshot,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
-                    except Exception:
-                        usage_finalized = True
-                        return None
+                    except BaseException as e:
+                        logger.critical(
+                            "Error during Messages API usage finalization — CRITICAL",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "error": str(e),
+                            },
+                            exc_info=True,
+                        )
+                        usage_finalized = (
+                            await self._release_failed_streaming_reservation(
+                                fresh_key,
+                                new_session,
+                                reservation_snapshot,
+                            )
+                        )
+                        raise
 
             try:
                 async for chunk in response.aiter_bytes():
@@ -1833,9 +1910,7 @@ class BaseUpstreamProvider:
                                         if msg and msg.get("model"):
                                             last_model_seen = str(msg.get("model"))
 
-                                        provider_added = (
-                                            "provider" not in data
-                                        )
+                                        provider_added = "provider" not in data
                                         self._apply_provider_field(data)
 
                                         if requested_model:
@@ -1963,6 +2038,7 @@ class BaseUpstreamProvider:
                                     max_cost_for_model,
                                     model_obj,
                                     self.provider_fee,
+                                    reservation_snapshot,
                                 )
 
                                 self.inject_cost_metadata(
@@ -1972,8 +2048,23 @@ class BaseUpstreamProvider:
                                 usage_finalized = True
                                 # Emit the full combined_data as the cost
                                 yield f"event: cost\ndata: {json.dumps(combined_data)}\n\n".encode()
-                            except Exception:
-                                pass
+                            except BaseException as e:
+                                logger.critical(
+                                    "Error during Messages API usage finalization — CRITICAL",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(e),
+                                    },
+                                    exc_info=True,
+                                )
+                                usage_finalized = (
+                                    await self._release_failed_streaming_reservation(
+                                        fresh_key,
+                                        new_session,
+                                        reservation_snapshot,
+                                    )
+                                )
+                                raise
 
                 if not usage_finalized:
                     maybe_cost_event = await finalize_without_usage()
@@ -2011,6 +2102,7 @@ class BaseUpstreamProvider:
         path: str,
         requested_model: str | None = None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response:
         try:
             content = await response.aread()
@@ -2037,6 +2129,7 @@ class BaseUpstreamProvider:
                 deducted_max_cost,
                 model_obj,
                 self.provider_fee,
+                reservation_snapshot,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2084,9 +2177,7 @@ class BaseUpstreamProvider:
     async def _aggregate_anthropic_events_to_message(
         self, iterator: AsyncIterator[Any]
     ) -> dict:
-        return await messages_dispatch.aggregate_anthropic_events_to_message(
-            iterator
-        )
+        return await messages_dispatch.aggregate_anthropic_events_to_message(iterator)
 
     async def _dispatch_anthropic_messages(
         self,
@@ -2112,6 +2203,7 @@ class BaseUpstreamProvider:
         session: AsyncSession,
         max_cost_for_model: int,
         model_obj: Model,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response | StreamingResponse:
         """Translate /v1/messages to upstream chat/completions via litellm.
 
@@ -2132,6 +2224,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 requested_model,
                 model_obj,
+                reservation_snapshot,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
@@ -2145,6 +2238,7 @@ class BaseUpstreamProvider:
             max_cost_for_model,
             model_obj,
             self.provider_fee,
+            reservation_snapshot,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2196,8 +2290,10 @@ class BaseUpstreamProvider:
             response_json, max_cost_for_model, model_obj
         )
 
-        if cost_data and "usage" in response_json and isinstance(
-            response_json["usage"], dict
+        if (
+            cost_data
+            and "usage" in response_json
+            and isinstance(response_json["usage"], dict)
         ):
             response_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
             self._fold_cache_into_input_tokens(response_json["usage"])
@@ -2240,6 +2336,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         requested_model: str | None,
         model_obj: Model | None = None,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> StreamingResponse:
         """Re-emit a litellm Anthropic-event iterator as live SSE bytes
         with cost reconciliation appended at end of stream."""
@@ -2274,9 +2371,7 @@ class BaseUpstreamProvider:
                     },
                 )
                 async with create_session() as new_session:
-                    fresh_key = await new_session.get(
-                        key.__class__, key.hashed_key
-                    )
+                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
                     if not fresh_key:
                         usage_finalized = True
                         return None
@@ -2292,15 +2387,29 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             model_obj,
                             self.provider_fee,
+                            reservation_snapshot,
                         )
                         usage_finalized = True
                         return (
-                            f"event: cost\ndata: "
-                            f"{json.dumps({'cost': cost_data})}\n\n"
+                            f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n"
                         ).encode()
-                    except Exception:
-                        usage_finalized = True
-                        return None
+                    except BaseException as e:
+                        logger.critical(
+                            "Error during LiteLLM Messages usage finalization — CRITICAL",
+                            extra={
+                                "key_hash": key.hashed_key[:8] + "...",
+                                "error": str(e),
+                            },
+                            exc_info=True,
+                        )
+                        usage_finalized = (
+                            await self._release_failed_streaming_reservation(
+                                fresh_key,
+                                new_session,
+                                reservation_snapshot,
+                            )
+                        )
+                        raise
 
             try:
                 async for annotated in messages_dispatch.stream_annotated_events(
@@ -2335,9 +2444,7 @@ class BaseUpstreamProvider:
                     or total_cost > 0
                 ):
                     async with create_session() as new_session:
-                        fresh_key = await new_session.get(
-                            key.__class__, key.hashed_key
-                        )
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
                         if fresh_key:
                             try:
                                 rebuilt_usage: dict = {
@@ -2367,6 +2474,7 @@ class BaseUpstreamProvider:
                                     max_cost_for_model,
                                     model_obj,
                                     self.provider_fee,
+                                    reservation_snapshot,
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -2376,8 +2484,23 @@ class BaseUpstreamProvider:
                                     f"event: cost\ndata: "
                                     f"{json.dumps({'cost': cost_data})}\n\n"
                                 ).encode()
-                            except Exception:
-                                pass
+                            except BaseException as e:
+                                logger.critical(
+                                    "Error during LiteLLM Messages usage finalization — CRITICAL",
+                                    extra={
+                                        "key_hash": key.hashed_key[:8] + "...",
+                                        "error": str(e),
+                                    },
+                                    exc_info=True,
+                                )
+                                usage_finalized = (
+                                    await self._release_failed_streaming_reservation(
+                                        fresh_key,
+                                        new_session,
+                                        reservation_snapshot,
+                                    )
+                                )
+                                raise
 
                 if not usage_finalized:
                     cost_event = await finalize_without_usage()
@@ -2388,6 +2511,9 @@ class BaseUpstreamProvider:
                 if not usage_finalized:
                     await finalize_without_usage()
                 raise
+            finally:
+                if not usage_finalized:
+                    await finalize_without_usage()
 
         return StreamingResponse(
             stream_with_cost(),
@@ -2511,8 +2637,7 @@ class BaseUpstreamProvider:
                         )
                         response_headers["X-Cashu"] = refund_token
                         logger.info(
-                            "Refund processed for streaming /v1/messages "
-                            "via litellm",
+                            "Refund processed for streaming /v1/messages via litellm",
                             extra={
                                 "refund_amount": refund_amount,
                                 "unit": unit,
@@ -2550,6 +2675,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         session: AsyncSession,
         model_obj: Model,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response | StreamingResponse:
         """Forward authenticated request to upstream service with cost tracking.
 
@@ -2584,6 +2710,7 @@ class BaseUpstreamProvider:
                 session=session,
                 max_cost_for_model=max_cost_for_model,
                 model_obj=model_obj,
+                reservation_snapshot=reservation_snapshot,
             )
 
         url = self.build_request_url(path, model_obj)
@@ -2714,6 +2841,7 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             requested_model=original_model_id,
                             model_obj=model_obj,
+                            reservation_snapshot=reservation_snapshot,
                         )
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
@@ -2731,6 +2859,7 @@ class BaseUpstreamProvider:
                                 path,
                                 requested_model=original_model_id,
                                 model_obj=model_obj,
+                                reservation_snapshot=reservation_snapshot,
                             )
                         finally:
                             await response.aclose()
@@ -2747,6 +2876,7 @@ class BaseUpstreamProvider:
                                 path,
                                 requested_model=original_model_id,
                                 model_obj=model_obj,
+                                reservation_snapshot=reservation_snapshot,
                             )
                         finally:
                             await response.aclose()
@@ -2797,6 +2927,7 @@ class BaseUpstreamProvider:
                             background_tasks,
                             requested_model=original_model_id,
                             model_obj=model_obj,
+                            reservation_snapshot=reservation_snapshot,
                         )
                         result.background = background_tasks
                         return result
@@ -2811,10 +2942,14 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             requested_model=original_model_id,
                             model_obj=model_obj,
+                            reservation_snapshot=reservation_snapshot,
                         )
                     finally:
                         await response.aclose()
                         await client.aclose()
+
+            if reservation_snapshot is None:
+                reservation_snapshot = await get_reservation_snapshot(key, session)
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
@@ -2824,6 +2959,9 @@ class BaseUpstreamProvider:
                 key.hashed_key,
                 max_cost_for_model,
                 path,
+                model_obj,
+                self.provider_fee,
+                reservation_snapshot,
             )
 
             logger.debug(
@@ -2898,7 +3036,9 @@ class BaseUpstreamProvider:
 
     supports_ehbp: bool = False
 
-    def get_confidential_inference_profile(self) -> "ConfidentialInferenceProfile | None":
+    def get_confidential_inference_profile(
+        self,
+    ) -> "ConfidentialInferenceProfile | None":
         """Return provider policy for encrypted/confidential inference forwarding."""
         return None
 
@@ -2926,6 +3066,7 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         session: AsyncSession,
         model_obj: Model,
+        reservation_snapshot: ReservationSnapshot | None = None,
     ) -> Response | StreamingResponse:
         """Forward authenticated Responses API request to upstream service with cost tracking.
 
@@ -3064,6 +3205,7 @@ class BaseUpstreamProvider:
                         max_cost_for_model,
                         requested_model=original_model_id,
                         model_obj=model_obj,
+                        reservation_snapshot=reservation_snapshot,
                     )
                     background_tasks = BackgroundTasks()
                     background_tasks.add_task(response.aclose)
@@ -3080,10 +3222,14 @@ class BaseUpstreamProvider:
                             max_cost_for_model,
                             requested_model=original_model_id,
                             model_obj=model_obj,
+                            reservation_snapshot=reservation_snapshot,
                         )
                     finally:
                         await response.aclose()
                         await client.aclose()
+
+            if reservation_snapshot is None:
+                reservation_snapshot = await get_reservation_snapshot(key, session)
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
@@ -3093,6 +3239,9 @@ class BaseUpstreamProvider:
                 key.hashed_key,
                 max_cost_for_model,
                 path,
+                model_obj,
+                self.provider_fee,
+                reservation_snapshot,
             )
 
             logger.debug(
@@ -3573,14 +3722,8 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if (
-                        cost_data
-                        and "usage" in data_json
-                        and data_json["usage"]
-                    ):
-                        data_json["usage"]["cost_sats"] = (
-                            cost_data.total_msats // 1000
-                        )
+                    if cost_data and "usage" in data_json and data_json["usage"]:
+                        data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
                         changed = True
                     if changed:
                         lines[i] = "data: " + json.dumps(data_json)
@@ -4560,14 +4703,8 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if (
-                        cost_data
-                        and "usage" in data_json
-                        and data_json["usage"]
-                    ):
-                        data_json["usage"]["cost_sats"] = (
-                            cost_data.total_msats // 1000
-                        )
+                    if cost_data and "usage" in data_json and data_json["usage"]:
+                        data_json["usage"]["cost_sats"] = cost_data.total_msats // 1000
                         changed = True
                     if changed:
                         lines[i] = "data: " + json.dumps(data_json)
@@ -5059,7 +5196,9 @@ class BaseUpstreamProvider:
                 except Exception:
                     self._models_cache = models_with_fees
 
-                self._models_by_id = {m.forwarded_model_id or m.id: m for m in self._models_cache}
+                self._models_by_id = {
+                    m.forwarded_model_id or m.id: m for m in self._models_cache
+                }
 
         except Exception as e:
             logger.error(

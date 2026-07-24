@@ -12,7 +12,7 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import UniqueConstraint, delete
+from sqlalchemy import Index, UniqueConstraint, case, delete, or_
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
@@ -99,32 +99,130 @@ class ApiKey(SQLModel, table=True):  # type: ignore
 
 
 async def reset_all_reserved_balances(session: AsyncSession) -> None:
-    stmt = update(ApiKey).values(reserved_balance=0, reserved_at=None)
-    await session.exec(stmt)  # type: ignore[call-overload]
+    """Release every active durable reservation during explicit startup reset."""
+    await session.exec(  # type: ignore[call-overload]
+        update(ReservationRelease)
+        .where(col(ReservationRelease.status) == "active")
+        .values(status="released")
+    )
+    await session.exec(  # type: ignore[call-overload]
+        update(ApiKey).values(reserved_balance=0, reserved_at=None)
+    )
     await session.commit()
     logger.info("Reset reserved balances on startup")
 
 
 async def release_stale_reservations(
-    session: AsyncSession, max_age_seconds: int
+    session: AsyncSession,
+    max_age_seconds: int,
+    *,
+    key_hash: str | None = None,
 ) -> int:
-    """Release reservations whose last reserve is older than max_age_seconds.
-    """
+    """Release stale durable reservations without touching newer reservations."""
     cutoff = int(time.time()) - max_age_seconds
-    stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.reserved_balance) > 0)
-        .where(col(ApiKey.reserved_at).is_not(None))
-        .where(col(ApiKey.reserved_at) < cutoff)
-        .values(reserved_balance=0, reserved_at=None)
+    query = (
+        select(ReservationRelease)
+        .where(col(ReservationRelease.status) == "active")
+        .where(col(ReservationRelease.created_at) < cutoff)
     )
-    result = await session.exec(stmt)  # type: ignore[call-overload]
+    if key_hash is not None:
+        query = query.where(
+            or_(
+                col(ReservationRelease.key_hash) == key_hash,
+                col(ReservationRelease.billing_key_hash) == key_hash,
+            )
+        )
+    reservations = (await session.exec(query)).all()
+    released = 0
+
+    for reservation in reservations:
+        transition = await session.exec(  # type: ignore[call-overload]
+            update(ReservationRelease)
+            .where(col(ReservationRelease.id) == reservation.id)
+            .where(col(ReservationRelease.status) == "active")
+            .values(status="released")
+        )
+        if transition.rowcount != 1:
+            continue
+
+        values = {
+            "reserved_balance": col(ApiKey.reserved_balance)
+            - reservation.reserved_msats,
+            "reserved_at": case(
+                (
+                    col(ApiKey.reserved_balance) - reservation.reserved_msats > 0,
+                    col(ApiKey.reserved_at),
+                ),
+                else_=None,
+            ),
+        }
+        parent_result = await session.exec(  # type: ignore[call-overload]
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == reservation.billing_key_hash)
+            .where(col(ApiKey.reserved_balance) >= reservation.reserved_msats)
+            .values(**values)
+        )
+        if parent_result.rowcount != 1:
+            await session.rollback()
+            return 0
+
+        if reservation.billing_key_hash != reservation.key_hash:
+            child_result = await session.exec(  # type: ignore[call-overload]
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == reservation.key_hash)
+                .where(col(ApiKey.reserved_balance) >= reservation.reserved_msats)
+                .values(**values)
+            )
+            if child_result.rowcount != 1:
+                await session.rollback()
+                return 0
+        released += 1
+
+    # Rolling upgrades can leave aggregate reservations created before durable
+    # reservation rows existed. Release only stale aggregates that have no active
+    # durable owner; targeted refund cleanup also heals legacy NULL timestamps.
+    legacy_query = select(ApiKey).where(col(ApiKey.reserved_balance) > 0)
+    if key_hash is None:
+        legacy_query = legacy_query.where(col(ApiKey.reserved_at).is_not(None)).where(
+            col(ApiKey.reserved_at) < cutoff
+        )
+    else:
+        legacy_query = legacy_query.where(
+            or_(
+                col(ApiKey.hashed_key) == key_hash,
+                col(ApiKey.parent_key_hash) == key_hash,
+            )
+        ).where(
+            or_(col(ApiKey.reserved_at).is_(None), col(ApiKey.reserved_at) < cutoff)
+        )
+
+    for legacy_key in (await session.exec(legacy_query)).all():
+        active_owner = (
+            await session.exec(
+                select(ReservationRelease.id)
+                .where(col(ReservationRelease.status) == "active")
+                .where(
+                    or_(
+                        col(ReservationRelease.key_hash) == legacy_key.hashed_key,
+                        col(ReservationRelease.billing_key_hash)
+                        == legacy_key.hashed_key,
+                    )
+                )
+                .limit(1)
+            )
+        ).first()
+        if active_owner is not None:
+            continue
+        legacy_key.reserved_balance = 0
+        legacy_key.reserved_at = None
+        session.add(legacy_key)
+        released += 1
+
     await session.commit()
-    released = int(result.rowcount or 0)
     if released:
         logger.warning(
-            "Released stale balance reservations",
-            extra={"released_keys": released, "max_age_seconds": max_age_seconds},
+            "Released stale reservations",
+            extra={"released_reservations": released, "max_age_seconds": max_age_seconds},
         )
     return released
 
@@ -432,6 +530,20 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         back_populates="upstream_provider",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+
+
+class ReservationRelease(SQLModel, table=True):  # type: ignore
+    __tablename__ = "reservation_releases"
+    __table_args__ = (
+        Index("ix_reservation_releases_status_created_at", "status", "created_at"),
+    )
+
+    id: str = Field(primary_key=True)
+    key_hash: str = Field(index=True)
+    billing_key_hash: str = Field(index=True)
+    reserved_msats: int
+    status: str = Field(default="active")
+    created_at: int = Field(default_factory=lambda: int(time.time()))
 
 
 class RoutstrFee(SQLModel, table=True):  # type: ignore
