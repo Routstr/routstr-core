@@ -2384,7 +2384,7 @@ wheels = [
 
 [[package]]
 name = "routstr"
-version = "0.4.3"
+version = "0.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -2392,6 +2392,7 @@ dependencies = [
     { name = "cashu" },
     { name = "fastapi", extra = ["standard"] },
     { name = "greenlet" },
+    { name = "h11" },
     { name = "httpx", extra = ["socks"] },
     { name = "litellm" },
     { name = "marshmallow" },
@@ -2426,6 +2427,7 @@ requires-dist = [
     { name = "cashu", specifier = ">=0.20" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115" },
     { name = "greenlet", specifier = ">=3.2.1" },
+    { name = "h11", specifier = ">=0.14" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.25.2" },
     { name = "litellm", specifier = ">=1.55.0" },
     { name = "marshmallow", specifier = ">=3.13,<4.0" },

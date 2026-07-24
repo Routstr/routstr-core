@@ -1,6 +1,6 @@
 [project]
 name = "routstr"
-version = "0.4.3"
+version = "0.4.4"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -10,6 +10,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
     "httpx[socks]>=0.25.2",
+    "h11>=0.14",
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",

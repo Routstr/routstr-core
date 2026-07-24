@@ -20,7 +20,7 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-BASE_VERSION = "0.4.3"
+BASE_VERSION = "0.4.4"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _GIT_TIMEOUT_SECONDS = 2.0

@@ -86,10 +86,12 @@ def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
 
 def create_model_mappings(
     upstreams: list["BaseUpstreamProvider"],
-    overrides_by_id: dict[str, tuple],
-    disabled_model_ids: set[str],
+    overrides_by_key: dict[tuple[str, int], tuple],
+    disabled_model_keys: set[tuple[str, int]],
 ) -> tuple[
-    dict[str, "Model"], dict[str, list["BaseUpstreamProvider"]], dict[str, "Model"]
+    dict[str, "Model"],
+    dict[str, list[tuple["Model", "BaseUpstreamProvider"]]],
+    dict[str, "Model"],
 ]:
     """Create optimal model mappings based on cost and provider preferences.
 
@@ -97,7 +99,9 @@ def create_model_mappings(
     and creates three mappings based on cost optimization:
 
     1. model_instances: alias -> Model (all model aliases mapped to their Model objects)
-    2. provider_map: alias -> List[UpstreamProvider] (sorted list of providers for each alias)
+    2. provider_map: alias -> List[(Model, UpstreamProvider)] (sorted candidate
+       list for each alias; each provider is paired with ITS OWN model so
+       failover can forward and bill the candidate that actually serves)
     3. unique_models: base_id -> Model (unique models without provider prefixes)
 
     The algorithm:
@@ -107,8 +111,9 @@ def create_model_mappings(
 
     Args:
         upstreams: List of all upstream provider instances
-        overrides_by_id: Dict of model overrides from database {model_id: (ModelRow, fee)}
-        disabled_model_ids: Set of model IDs that should be excluded
+        overrides_by_key: Dict of model overrides from database
+            {(model_id_lower, upstream_provider_id): (ModelRow, fee)}
+        disabled_model_keys: Set of provider-scoped model keys that should be excluded
 
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
@@ -179,14 +184,22 @@ def create_model_mappings(
         """Process all models from a given provider."""
         upstream_prefix = getattr(upstream, "upstream_name", None)
         provider_key = get_provider_identity(upstream)
+        upstream_db_id = getattr(upstream, "db_id", None)
 
         for model in upstream.get_cached_models():
-            if not model.enabled or model.id in disabled_model_ids:
+            model_key = (
+                (model.id.lower(), upstream_db_id)
+                if isinstance(upstream_db_id, int)
+                else None
+            )
+            if not model.enabled or (
+                model_key is not None and model_key in disabled_model_keys
+            ):
                 continue
 
-            # Apply overrides if present
-            if model.id in overrides_by_id:
-                override_row, provider_fee = overrides_by_id[model.id]
+            # Apply overrides only for this provider's model row.
+            if model_key is not None and model_key in overrides_by_key:
+                override_row, provider_fee = overrides_by_key[model_key]
                 model_to_use = _row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
@@ -237,13 +250,10 @@ def create_model_mappings(
 
     # Include enabled DB overrides even when provider discovery misses models.
     # This is important for deployment-based providers like Azure.
-    for model_id, override_data in overrides_by_id.items():
-        if model_id in disabled_model_ids:
+    for (model_id, upstream_provider_id), override_data in overrides_by_key.items():
+        if (model_id, upstream_provider_id) in disabled_model_keys:
             continue
         override_row, provider_fee = override_data
-        upstream_provider_id = getattr(override_row, "upstream_provider_id", None)
-        if not isinstance(upstream_provider_id, int):
-            continue
 
         upstream_for_override = providers_by_db_id.get(upstream_provider_id)
         if upstream_for_override is None:
@@ -321,7 +331,7 @@ def create_model_mappings(
 
     # Sort candidates and build final maps
     model_instances: dict[str, "Model"] = {}
-    provider_map: dict[str, list["BaseUpstreamProvider"]] = {}
+    provider_map: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
 
     def alias_priority(model: "Model", alias: str) -> int:
         """Rank how strong the mapping of alias->model is.
@@ -368,13 +378,13 @@ def create_model_mappings(
 
         best_model, best_provider = items[0]
         model_instances[alias] = best_model
-        provider_map[alias] = [p for _, p in items]
+        provider_map[alias] = list(items)
 
     # Log provider distribution (using top provider for stats)
     provider_counts: dict[str, int] = {}
-    for providers in provider_map.values():
-        if providers:
-            provider = providers[0]
+    for candidate_list in provider_map.values():
+        if candidate_list:
+            provider = candidate_list[0][1]
             provider_name = getattr(provider, "upstream_name", "unknown")
             provider_counts[provider_name] = provider_counts.get(provider_name, 0) + 1
 

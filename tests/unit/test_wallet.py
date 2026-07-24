@@ -1,11 +1,23 @@
 import base64
 import json
+import socket
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 
 from routstr.core.db import ApiKey
-from routstr.wallet import credit_balance, get_balance, recieve_token, send_token
+from routstr.wallet import (
+    MintConnectionError,
+    TokenConsumedError,
+    classify_redemption_error,
+    credit_balance,
+    get_balance,
+    is_mint_connection_error,
+    recieve_token,
+    send,
+    send_token,
+)
 
 
 @pytest.mark.asyncio
@@ -15,7 +27,11 @@ async def test_get_balance() -> None:
     mock_wallet.load_mint = AsyncMock()
     mock_wallet.load_proofs = AsyncMock()
 
-    with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
+    # Reset the module-level wallet cache so a real wallet cached by an earlier
+    # test (e.g. an unmocked admin-withdraw path) can't shadow the mock here.
+    with patch("routstr.wallet._wallets", {}), patch(
+        "routstr.wallet.Wallet.with_db", return_value=mock_wallet
+    ):
         balance = await get_balance("sat")
         assert balance == 50000
 
@@ -137,6 +153,69 @@ async def test_send_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_falls_back_when_preferred_mint_has_only_reserved_balance() -> None:
+    from routstr.core.settings import settings
+
+    preferred_wallet = Mock(keysets={}, proofs=[])
+    preferred_wallet.select_to_send = AsyncMock()
+    primary_wallet = Mock(keysets={}, proofs=[])
+    primary_wallet.select_to_send = AsyncMock()
+    primary_wallet.serialize_proofs = AsyncMock(return_value="primary-token")
+    primary_wallet.set_reserved_for_send = AsyncMock()
+
+    preferred_liquid = Mock(amount=500, reserved=False)
+    preferred_reserved = Mock(amount=600, reserved=True)
+    primary_liquid = Mock(amount=1000, reserved=False)
+    primary_wallet.select_to_send.return_value = ([primary_liquid], None)
+
+    async def get_wallet(mint_url: str, unit: str) -> Mock:
+        assert unit == "sat"
+        return primary_wallet if mint_url == "http://primary:3338" else preferred_wallet
+
+    def get_proofs(wallet: Mock, mint_url: str, unit: str) -> list[Mock]:
+        assert unit == "sat"
+        if wallet is primary_wallet:
+            assert mint_url == "http://primary:3338"
+            return [primary_liquid]
+        assert mint_url == "http://preferred:3338"
+        return [preferred_liquid, preferred_reserved]
+
+    with (
+        patch.object(settings, "primary_mint", "http://primary:3338"),
+        patch("routstr.wallet.get_wallet", side_effect=get_wallet),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", side_effect=get_proofs),
+    ):
+        amount, token = await send(1000, "sat", "http://preferred:3338")
+
+    assert (amount, token) == (1000, "primary-token")
+    preferred_wallet.select_to_send.assert_not_awaited()
+    primary_wallet.select_to_send.assert_awaited_once_with(
+        [primary_liquid], 1000, set_reserved=False, include_fees=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_primary_with_only_reserved_proofs_still_raises() -> None:
+    from routstr.core.settings import settings
+
+    wallet = Mock(keysets={}, proofs=[])
+    wallet.select_to_send = AsyncMock(side_effect=RuntimeError("balance too low"))
+    reserved = Mock(amount=1000, reserved=True)
+
+    with (
+        patch.object(settings, "primary_mint", "http://primary:3338"),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[reserved]),
+        pytest.raises(RuntimeError, match="balance too low"),
+    ):
+        await send(1000, "sat", "http://primary:3338")
+
+    wallet.select_to_send.assert_awaited_once_with(
+        [], 1000, set_reserved=False, include_fees=False
+    )
+
+
+@pytest.mark.asyncio
 async def test_credit_balance() -> None:
     token_data = {
         "token": [{"mint": "http://mint:3338", "proofs": [{"amount": 1000}]}],
@@ -231,9 +310,15 @@ async def test_credit_balance_rejects_missing_key() -> None:
             "routstr.wallet.recieve_token",
             return_value=(1000, "sat", "http://mint:3338"),
         ):
-            with pytest.raises(ValueError, match="disappeared"):
+            # Post-redemption: token already spent, so a vanished key is a
+            # non-retryable TokenConsumedError, not a generic token error.
+            with pytest.raises(TokenConsumedError, match="disappeared") as exc_info:
                 await credit_balance(token_str, mock_key, mock_session)
 
+    classified = classify_redemption_error(exc_info.value)
+    assert classified is not None
+    _type, status, _msg, code = classified
+    assert (status, code) == (500, "cashu_token_consumed")
     # UPDATE matched nothing; committing would hide the failed credit.
     assert mock_session.exec.called
     assert not mock_session.commit.called
@@ -902,9 +987,10 @@ def _with_recovery_mocks(
 
 
 @pytest.mark.asyncio
-async def test_swap_mint_failure_propagates_unwrapped() -> None:
-    """A non-recoverable mint failure after melt propagates as-is (a 500, not a
-    client error): the melt already spent the foreign proofs."""
+async def test_swap_mint_failure_after_melt_is_token_consumed() -> None:
+    """A non-recoverable mint failure after melt is a non-retryable
+    TokenConsumedError (the melt already spent the foreign proofs), with the
+    original error preserved in the cause chain."""
     from routstr.wallet import swap_to_primary_mint
 
     mock_token, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
@@ -919,10 +1005,10 @@ async def test_swap_mint_failure_propagates_unwrapped() -> None:
     with patch.object(settings, "primary_mint", "http://primary:3338"):
         with patch.object(settings, "primary_mint_unit", "sat"):
             with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
-                with pytest.raises(Exception, match="Quote is expired") as exc_info:
+                with pytest.raises(TokenConsumedError) as exc_info:
                     await swap_to_primary_mint(mock_token, mock_token_wallet)
 
-    assert type(exc_info.value) is Exception  # original error, not wrapped
+    assert "Quote is expired" in str(exc_info.value.__cause__)
     assert mock_token_wallet.melt.call_count == 1
     mock_primary_wallet.restore_tokens_for_keyset.assert_not_called()
 
@@ -977,7 +1063,7 @@ async def test_swap_recovery_shortfall_refuses_credit() -> None:
     with patch.object(settings, "primary_mint", "http://primary:3338"):
         with patch.object(settings, "primary_mint_unit", "sat"):
             with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
-                with pytest.raises(ValueError, match="Swap recovery failed"):
+                with pytest.raises(TokenConsumedError, match="Swap recovery failed"):
                     await swap_to_primary_mint(mock_token, mock_token_wallet)
 
 
@@ -1004,7 +1090,7 @@ async def test_swap_recovery_failure_wrapped() -> None:
     with patch.object(settings, "primary_mint", "http://primary:3338"):
         with patch.object(settings, "primary_mint_unit", "sat"):
             with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
-                with pytest.raises(ValueError, match="recovery unsuccessful"):
+                with pytest.raises(TokenConsumedError, match="recovery unsuccessful"):
                     await swap_to_primary_mint(mock_token, mock_token_wallet)
 
 
@@ -1092,3 +1178,214 @@ async def test_swap_does_not_retry_on_payment_failure() -> None:
 
     assert mock_token_wallet.melt.call_count == 1
     assert mock_primary_wallet.request_mint.call_count == 2
+
+
+# --- Mint-unreachable classification (is_mint_connection_error) ---------------
+
+
+def _chain(outer: BaseException, cause: BaseException) -> BaseException:
+    """Attach ``cause`` as the ``__cause__`` of ``outer`` (as ``raise X from Y``
+    would) and return ``outer``."""
+    outer.__cause__ = cause
+    return outer
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectTimeout("timed out"),
+        httpx.ReadTimeout("read timed out"),  # subclass of TimeoutException
+        httpx.PoolTimeout("pool timed out"),
+        httpx.WriteError("write failed"),  # subclass of NetworkError
+        ConnectionRefusedError("refused"),  # subclass of ConnectionError
+        ConnectionResetError("reset"),
+        socket.gaierror("Name or service not known"),
+        TimeoutError("timed out"),  # asyncio.TimeoutError alias on 3.11+
+        MintConnectionError("mint down"),
+        # Wrapped: the real transport error survives in the __cause__ chain.
+        _chain(ValueError("Failed to estimate fees: boom"), httpx.ConnectError("x")),
+        # Two levels deep.
+        _chain(
+            RuntimeError("outer"),
+            _chain(ValueError("mid"), httpx.ConnectTimeout("deep")),
+        ),
+    ],
+)
+def test_is_mint_connection_error_detects_transport_failures(
+    error: BaseException,
+) -> None:
+    assert is_mint_connection_error(error) is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("token already spent"),
+        ValueError("Mint unreachable: all connection attempts failed"),  # text only
+        ValueError("Invalid Cashu token"),
+        # Mint answered with an error status — reachable, so NOT a connection error.
+        httpx.HTTPStatusError(
+            "500", request=httpx.Request("POST", "http://m"), response=httpx.Response(500)
+        ),
+        RuntimeError("some internal fault"),
+    ],
+)
+def test_is_mint_connection_error_ignores_non_transport(error: BaseException) -> None:
+    assert is_mint_connection_error(error) is False
+
+
+def test_is_mint_connection_error_survives_reference_cycle() -> None:
+    """A pathological cause/context cycle must not hang the classifier."""
+    a = ValueError("a")
+    b = ValueError("b")
+    a.__cause__ = b
+    b.__context__ = a
+    assert is_mint_connection_error(a) is False
+
+
+def test_token_consumed_seals_transport_cause() -> None:
+    """A transport error wrapped in TokenConsumedError is NOT retryable — the
+    token is spent, so the seal wins over the httpx cause underneath."""
+    try:
+        raise httpx.ConnectError("mint down")
+    except httpx.ConnectError as exc:
+        consumed = TokenConsumedError("credit failed")
+        consumed.__cause__ = exc
+
+    assert is_mint_connection_error(consumed) is False
+    classified = classify_redemption_error(consumed)
+    assert classified is not None
+    type_, status, _msg, code = classified
+    assert (type_, status, code) == ("token_consumed", 500, "cashu_token_consumed")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # The message credit_balance raises for a dust/zero redemption.
+        ValueError("Redeemed token amount must be positive, got 0 msats"),
+        ValueError("Redeemed token amount must be positive, got -5 msats"),
+        ValueError("Failed to redeem Cashu token: token yielded no value"),
+    ],
+)
+def test_classify_zero_value(error: ValueError) -> None:
+    """A zero/negative redemption gets its own documented code, not the generic
+    cashu_token_redemption_failed bucket."""
+    classified = classify_redemption_error(error)
+    assert classified is not None
+    type_, status, _msg, code = classified
+    assert (type_, status, code) == ("cashu_error", 400, "cashu_token_zero_value")
+
+
+def test_classify_generic_valueerror_is_not_zero_value() -> None:
+    """A generic wallet ValueError still falls to the generic bucket — the
+    zero-value match must not over-trigger."""
+    classified = classify_redemption_error(ValueError("some unexpected wallet condition"))
+    assert classified is not None
+    type_, status, _msg, code = classified
+    assert (type_, status, code) == (
+        "cashu_error",
+        400,
+        "cashu_token_redemption_failed",
+    )
+
+
+@pytest.mark.asyncio
+async def test_swap_mint_transport_error_after_melt_is_not_retryable() -> None:
+    """A transport error minting on the primary mint (after the foreign melt
+    already spent the proofs) classifies as a non-retryable token_consumed 500,
+    never a retryable mint_unreachable 503."""
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
+        1000, fee_reserves=[10, 10]
+    )
+    # Melt succeeds (proofs spent); minting on primary hits a transport error.
+    mock_primary_wallet.mint = AsyncMock(
+        side_effect=httpx.ConnectError("primary mint down")
+    )
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "primary_mint", "http://primary:3338"):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
+                with pytest.raises(TokenConsumedError) as exc_info:
+                    await swap_to_primary_mint(mock_token, mock_token_wallet)
+
+    classified = classify_redemption_error(exc_info.value)
+    assert classified is not None
+    _type, status, _msg, code = classified
+    assert status == 500
+    assert code == "cashu_token_consumed"
+    assert is_mint_connection_error(exc_info.value) is False
+    assert mock_token_wallet.melt.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_credit_balance_db_transport_error_is_token_consumed() -> None:
+    """A transport-like DB failure after the token is redeemed must be
+    non-retryable (token_consumed), not a retryable mint_unreachable."""
+    mock_key = Mock()
+    mock_key.balance = 1000
+    mock_key.hashed_key = "test_hash"
+    mock_session = AsyncMock()
+    mock_session.exec = AsyncMock(side_effect=ConnectionError("db connection reset"))
+
+    with patch(
+        "routstr.wallet.recieve_token",
+        return_value=(100, "sat", "https://mint.example"),
+    ):
+        with pytest.raises(TokenConsumedError) as exc_info:
+            await credit_balance("cashuAtoken", mock_key, mock_session)
+
+    assert is_mint_connection_error(exc_info.value) is False
+
+
+@pytest.mark.asyncio
+async def test_swap_fee_estimation_transport_error_raises_mint_connection_error() -> None:
+    """A transport failure while estimating fees is surfaced as
+    MintConnectionError (→ 503), not a generic fee ValueError (→ 422)."""
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
+        1000, fee_reserves=[10]
+    )
+    mock_primary_wallet.request_mint = AsyncMock(
+        side_effect=httpx.ConnectError("All connection attempts failed")
+    )
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "primary_mint", "http://primary:3338"):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
+                with pytest.raises(MintConnectionError):
+                    await swap_to_primary_mint(mock_token, mock_token_wallet)
+
+    mock_token_wallet.melt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
+    """A transport failure during melt is surfaced as MintConnectionError and
+    is NOT retried — the mint is down, not demanding higher fees."""
+    from routstr.wallet import swap_to_primary_mint
+
+    mock_token, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
+        1000, fee_reserves=[10, 10]
+    )
+    mock_token_wallet.melt = AsyncMock(
+        side_effect=httpx.ConnectTimeout("timed out")
+    )
+
+    from routstr.core.settings import settings
+
+    with patch.object(settings, "primary_mint", "http://primary:3338"):
+        with patch.object(settings, "primary_mint_unit", "sat"):
+            with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
+                with pytest.raises(MintConnectionError):
+                    await swap_to_primary_mint(mock_token, mock_token_wallet)
+
+    assert mock_token_wallet.melt.call_count == 1

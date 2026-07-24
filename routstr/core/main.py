@@ -37,7 +37,7 @@ from .exceptions import general_exception_handler, http_exception_handler
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
-from .settings import SettingsService
+from .settings import SettingsService, bootstrap_secrets
 from .settings import settings as global_settings
 from .version import __version__
 
@@ -86,16 +86,19 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
         # Initialize application settings (env -> computed -> DB precedence)
         async with create_session() as session:
+            # Move secrets into the encrypted/hashed store and decrypt the nsec
+            # into the in-memory settings BEFORE initializing settings: the
+            # initialize step strips secrets from the persisted blob, so legacy
+            # plaintext (env or old blob) must be migrated into the Secret store
+            # first or the only copy of a blob-only secret would be lost.
+            # Generates and logs an admin password on a fresh node; fails fast if
+            # a stored secret can't be decrypted.
+            await bootstrap_secrets(session)
             s = await SettingsService.initialize(session)
             if s.reset_reserved_balance_on_startup:
                 from .db import reset_all_reserved_balances
 
                 await reset_all_reserved_balances(session)
-
-        if not s.admin_password:
-            logger.warning(
-                f"Admin password is not set. Visit {s.http_url or 'http://localhost:8000'}/admin to set the password."
-            )
 
         # Apply app metadata from settings
         try:
@@ -268,7 +271,20 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["x-routstr-request-id", "x-cashu"],
+    expose_headers=[
+        "x-routstr-request-id",
+        "x-cashu",
+        "x-routstr-cost-msats",
+        "x-routstr-cost-usd",
+        "x-routstr-input-cost-msats",
+        "x-routstr-output-cost-msats",
+        # EHBP (Tinfoil) protocol headers must be exposed so browser clients
+        # can detect and decrypt encrypted responses. Without these, the
+        # browser hides them via CORS and the SDK treats the response as a
+        # plaintext proxy error, returning raw ciphertext.
+        "Ehbp-Response-Nonce",
+        "Ehbp-Encapsulated-Key",
+    ],
 )
 
 # Add logging middleware

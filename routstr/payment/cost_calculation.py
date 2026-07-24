@@ -1,4 +1,5 @@
 import math
+from typing import TYPE_CHECKING
 
 from pydantic.v1 import BaseModel
 
@@ -6,6 +7,9 @@ from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
 from .usage import normalize_usage, parse_token_count
+
+if TYPE_CHECKING:
+    from .models import Model
 
 __all__ = [
     "CostData",
@@ -66,12 +70,23 @@ def _empty_cost(cls: type[CostData] = CostData) -> CostData:
 async def calculate_cost(
     response_data: dict,
     max_cost: int,
+    model_obj: "Model | None" = None,
+    provider_fee: float | None = None,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
 
     Args:
         response_data: Response data containing usage information
         max_cost: Maximum cost in millisats
+        model_obj: The model that actually served the request. When given,
+            its pricing is billed directly; without it, pricing is re-derived
+            from the response's model string via the alias map, which resolves
+            to the best-ranked candidate — not necessarily the serving one.
+        provider_fee: The serving provider's fee multiplier, applied on the
+            USD-cost path and the litellm pricing fallback (configured model
+            pricing already carries the fee baked in). Without it, the fee is
+            re-derived from the response's model string, which yields the
+            best-ranked provider's fee.
 
     Returns:
         Cost data or error information
@@ -157,11 +172,16 @@ async def calculate_cost(
                 },
             )
         try:
+            cost_details = usage_data.get("cost_details", {})
+            if not isinstance(cost_details, dict):
+                cost_details = {}
             input_usd = _coerce_usd(
-                usage_data.get("cost_details", {}).get("input_cost", 0)
+                cost_details.get("input_cost")
+                or cost_details.get("upstream_inference_prompt_cost")
             )
             output_usd = _coerce_usd(
-                usage_data.get("cost_details", {}).get("output_cost", 0)
+                cost_details.get("output_cost")
+                or cost_details.get("upstream_inference_completions_cost")
             )
             return _calculate_from_usd_cost(
                 usd_cost,
@@ -172,6 +192,7 @@ async def calculate_cost(
                 cache_creation_tokens,
                 output_tokens,
                 response_data,
+                provider_fee,
             )
         except Exception as e:
             logger.warning(
@@ -185,7 +206,7 @@ async def calculate_cost(
 
     # Fall back to token-based pricing
     try:
-        pricing_rates = _get_pricing_rates(response_data)
+        pricing_rates = _get_pricing_rates(response_data, model_obj, provider_fee)
     except ValueError as e:
         return CostDataError(message=str(e), code="pricing_error")
 
@@ -259,13 +280,35 @@ def _coerce_usd(value: object) -> float:
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
     """Resolve USD cost with clear priority order.
 
-    Priority: cost_details.total_cost → total_cost → cost (in both usage and response).
+    Priority:
+
+    1. ``cost_details.total_cost``
+    2. ``cost_details.upstream_inference_cost`` (BYOK — see below)
+    3. ``total_cost`` → ``cost`` (in both usage and response)
+
+    **BYOK path (PPQ.AI):** when ``is_byok`` is true the ``usage.cost`` field
+    is only a small (~5 %) routing fee, not the inference cost.  The real cost
+    lives in ``cost_details.upstream_inference_cost`` and the provider's
+    balance is debited by ``upstream_inference_cost + byok_fee``.  Billing just
+    the fee under-charges by ~20×.
     """
     cost_details = usage_data.get("cost_details")
     if isinstance(cost_details, dict):
         cost = _coerce_usd(cost_details.get("total_cost"))
         if cost > 0:
             return cost
+
+        # PPQ.AI BYOK: upstream_inference_cost is the real inference cost;
+        # usage.cost is only a ~5 % BYOK routing fee.  Bill the sum — what PPQ
+        # actually deducts from the balance.  For non-BYOK providers (e.g.
+        # OpenRouter) usage.cost already equals upstream_inference_cost, so we
+        # fall through to the normal ``cost`` lookup below.
+        upstream_cost = _coerce_usd(
+            cost_details.get("upstream_inference_cost")
+        )
+        if upstream_cost > 0 and usage_data.get("is_byok"):
+            byok_fee = _coerce_usd(usage_data.get("cost"))
+            return upstream_cost + byok_fee
 
     for source in [usage_data, response_data]:
         if not isinstance(source, dict):
@@ -280,55 +323,106 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
 
 def _get_pricing_rates(
     response_data: dict,
+    model_obj: "Model | None",
+    provider_fee: float | None,
 ) -> tuple[float, float, float, float] | None:
-    """Get model-based pricing rates or None if using fixed pricing.
+    """Get configured rates, falling back to LiteLLM's model cost map.
 
-    Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate)
+    The served ``model_obj`` (when the caller has it) is billed directly;
+    otherwise the response's model string is resolved through the alias map,
+    which yields the best-ranked candidate rather than the serving one.
+
+    Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate).
+    ``None`` means configured fixed pricing should be used by the caller.
     """
-    if settings.fixed_pricing:
+    if settings.fixed_pricing and (
+        settings.fixed_per_1k_input_tokens
+        or settings.fixed_per_1k_output_tokens
+    ):
         return None
 
     from ..proxy import get_model_instance
+    from .models import litellm_cost_entry
 
     response_model = response_data.get("model", "")
-    model_obj = get_model_instance(response_model)
-
-    if not model_obj:
-        logger.error("Invalid model in response", extra={"response_model": response_model})
-        raise ValueError(f"Invalid model: {response_model}")
-
-    if not model_obj.sats_pricing:
-        logger.error(
-            "Model pricing not defined",
-            extra={"model": response_model, "model_id": response_model},
+    if model_obj is None:
+        logger.warning(
+            "Settling without routed model identity — re-deriving pricing "
+            "from the response's model string via the alias map",
+            extra={"response_model": response_model},
         )
-        raise ValueError("Model pricing not defined")
+        model_obj = get_model_instance(response_model)
 
-    try:
-        mspp = float(model_obj.sats_pricing.prompt)
-        mspc = float(model_obj.sats_pricing.completion)
-        mscr = float(model_obj.sats_pricing.input_cache_read or 0)
-        mscw = float(model_obj.sats_pricing.input_cache_write or 0)
+    if model_obj and model_obj.sats_pricing:
+        try:
+            mspp = float(model_obj.sats_pricing.prompt)
+            mspc = float(model_obj.sats_pricing.completion)
+            mscr = float(model_obj.sats_pricing.input_cache_read or 0)
+            mscw = float(model_obj.sats_pricing.input_cache_write or 0)
 
-        mspp_1k = mspp * 1_000_000.0
-        mspc_1k = mspc * 1_000_000.0
-        mscr_1k = mscr * 1_000_000.0 if mscr > 0 else mspp_1k
-        mscw_1k = mscw * 1_000_000.0 if mscw > 0 else mspp_1k
+            mspp_1k = mspp * 1_000_000.0
+            mspc_1k = mspc * 1_000_000.0
+            mscr_1k = mscr * 1_000_000.0 if mscr > 0 else mspp_1k
+            mscw_1k = mscw * 1_000_000.0 if mscw > 0 else mspp_1k
+            source = "configured"
+        except Exception as e:
+            logger.error("Invalid pricing data", extra={"error": str(e)})
+            raise ValueError("Invalid pricing data") from e
+    else:
+        pricing_model = (
+            model_obj.forwarded_model_id if model_obj else None
+        ) or response_model
+        pricing = litellm_cost_entry(pricing_model)
+        if pricing is None:
+            logger.error(
+                "Model pricing not found in configured models or LiteLLM",
+                extra={
+                    "response_model": response_model,
+                    "pricing_model": pricing_model,
+                },
+            )
+            raise ValueError(f"Pricing not found for model: {response_model}")
 
-        logger.info(
-            "Applied model-specific pricing",
-            extra={
-                "model": response_model,
-                "input_price_msats_per_1k": mspp_1k,
-                "output_price_msats_per_1k": mspc_1k,
-                "cache_read_price_msats_per_1k": mscr_1k,
-                "cache_write_price_msats_per_1k": mscw_1k,
-            },
+        input_usd = _coerce_usd(pricing.get("input_cost_per_token"))
+        output_usd = _coerce_usd(pricing.get("output_cost_per_token"))
+        if input_usd <= 0 or output_usd <= 0:
+            raise ValueError(f"Incomplete LiteLLM pricing for model: {pricing_model}")
+
+        if provider_fee is None:
+            provider_fee = _resolve_provider_fee(response_model)
+        usd_per_sat = sats_usd_price()
+        mspp_1k = input_usd * provider_fee * 1_000_000.0 / usd_per_sat
+        mspc_1k = output_usd * provider_fee * 1_000_000.0 / usd_per_sat
+        cache_read_usd = _coerce_usd(
+            pricing.get("cache_read_input_token_cost")
         )
-        return mspp_1k, mspc_1k, mscr_1k, mscw_1k
-    except Exception as e:
-        logger.error("Invalid pricing data", extra={"error": str(e)})
-        raise ValueError("Invalid pricing data") from e
+        cache_write_usd = _coerce_usd(
+            pricing.get("cache_creation_input_token_cost")
+        )
+        mscr_1k = (
+            cache_read_usd * provider_fee * 1_000_000.0 / usd_per_sat
+            if cache_read_usd > 0
+            else mspp_1k
+        )
+        mscw_1k = (
+            cache_write_usd * provider_fee * 1_000_000.0 / usd_per_sat
+            if cache_write_usd > 0
+            else mspp_1k
+        )
+        source = "litellm"
+
+    logger.info(
+        "Applied model-specific pricing",
+        extra={
+            "model": response_model,
+            "pricing_source": source,
+            "input_price_msats_per_1k": mspp_1k,
+            "output_price_msats_per_1k": mspc_1k,
+            "cache_read_price_msats_per_1k": mscr_1k,
+            "cache_write_price_msats_per_1k": mscw_1k,
+        },
+    )
+    return mspp_1k, mspc_1k, mscr_1k, mscw_1k
 
 
 def _resolve_provider_fee(model_id: str) -> float:
@@ -356,9 +450,11 @@ def _calculate_from_usd_cost(
     cache_creation_tokens: int,
     output_tokens: int,
     response_data: dict,
+    provider_fee: float | None,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
-    provider_fee = _resolve_provider_fee(response_data.get("model", ""))
+    if provider_fee is None:
+        provider_fee = _resolve_provider_fee(response_data.get("model", ""))
     usd_cost = usd_cost * provider_fee
     input_usd = input_usd * provider_fee
     output_usd = output_usd * provider_fee
@@ -367,8 +463,12 @@ def _calculate_from_usd_cost(
     cost_in_msats = math.ceil(cost_in_sats * 1000)
 
     if input_usd > 0 or output_usd > 0:
-        input_msats = int((input_usd * sats_per_usd) * 1000)
-        output_msats = int((output_usd * sats_per_usd) * 1000)
+        # The total is the authoritative billed amount. Allocating that integer
+        # total proportionally avoids losing sub-millisatoshi remainders when
+        # input and output components are each truncated independently.
+        component_usd = input_usd + output_usd
+        input_msats = math.floor(cost_in_msats * input_usd / component_usd)
+        output_msats = cost_in_msats - input_msats
     else:
         effective_input_tokens = (
             input_tokens + cache_read_tokens + cache_creation_tokens

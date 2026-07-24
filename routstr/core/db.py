@@ -1,16 +1,19 @@
+import asyncio
+import hashlib
 import os
 import pathlib
 import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from enum import Enum
 from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
 from sqlalchemy import UniqueConstraint, delete
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -322,10 +325,13 @@ async def store_cashu_transaction(
     created_at: int | None = None,
     source: str = "x-cashu",
     api_key_hashed_key: str | None = None,
-) -> None:
+    transaction_id: str | None = None,
+    log_failure: bool = True,
+) -> bool:
     try:
         async with create_session() as session:
             tx = CashuTransaction(
+                id=transaction_id or uuid.uuid4().hex,
                 token=token,
                 amount=amount,
                 unit=unit,
@@ -339,11 +345,93 @@ async def store_cashu_transaction(
             )
             session.add(tx)
             await session.commit()
-    except Exception as e:
-        logger.warning(
-            f"Failed to store cashu transaction: {e} (type={typ})",
-            extra={"error": str(e), "type": typ},
-        )
+    except Exception:
+        if log_failure:
+            logger.critical(
+                "Failed to store Cashu transaction",
+                extra={"type": typ, "request_id": request_id, "source": source},
+                exc_info=True,
+            )
+        raise
+    return True
+
+
+async def _cashu_transaction_exists(transaction_id: str) -> bool:
+    async with create_session() as session:
+        return await session.get(CashuTransaction, transaction_id) is not None
+
+
+async def store_cashu_transaction_with_retry(
+    token: str,
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    typ: str = "out",
+    request_id: str | None = None,
+    collected: bool = False,
+    created_at: int | None = None,
+    source: str = "x-cashu",
+    api_key_hashed_key: str | None = None,
+    max_attempts: int = 3,
+) -> bool:
+    """Retry a critical Cashu transaction write with bounded backoff."""
+    transaction_id = hashlib.sha256(f"{typ}\0{token}".encode()).hexdigest()
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await store_cashu_transaction(
+                token=token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint_url,
+                typ=typ,
+                request_id=request_id,
+                collected=collected,
+                created_at=created_at,
+                source=source,
+                api_key_hashed_key=api_key_hashed_key,
+                transaction_id=transaction_id,
+                log_failure=False,
+            )
+        except IntegrityError as error:
+            try:
+                if await _cashu_transaction_exists(transaction_id):
+                    return True
+            except Exception as lookup_error:
+                last_error = lookup_error
+            else:
+                last_error = error
+        except Exception as error:
+            last_error = error
+
+        if last_error is not None:
+            if attempt == max_attempts:
+                break
+            delay = 0.25 * (2 ** (attempt - 1))
+            logger.warning(
+                "Cashu transaction storage failed; retrying",
+                extra={
+                    "type": typ,
+                    "request_id": request_id,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "retry_delay_seconds": delay,
+                },
+            )
+            await asyncio.sleep(delay)
+
+    logger.critical(
+        "Cashu transaction storage failed after bounded retries",
+        extra={
+            "type": typ,
+            "request_id": request_id,
+            "attempts": max_attempts,
+            "error": str(last_error),
+        },
+    )
+    if last_error is None:
+        raise RuntimeError("Cashu transaction storage failed without an exception")
+    raise last_error
 
 
 class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
@@ -387,6 +475,44 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     accumulated_msats: int = Field(default=0)
     total_paid_msats: int = Field(default=0)
     last_paid_at: int | None = Field(default=None)
+    payout_in_progress_msats: int = Field(default=0)
+    payout_started_at: int | None = Field(default=None)
+
+
+class NsecState(str, Enum):
+    """Ownership state of the node's nsec — an explicit 3-state machine.
+
+    The single ``encrypted_nsec`` column cannot distinguish "never migrated" from
+    "intentionally cleared" (both leave it empty), which let a cleared identity be
+    resurrected from a stale legacy ``NSEC``. This names the three states so the
+    bootstrap branches on ownership rather than inferring it:
+
+    * ``legacy`` — the vault has not taken ownership; a plaintext ``NSEC`` (env or
+      old settings blob) may still exist and should be migrated in once.
+    * ``encrypted`` — the vault owns a ciphertext; decrypt it, never re-read env.
+    * ``cleared`` — the vault owns it but the operator emptied it; stay empty,
+      never re-import from a stale legacy copy.
+    """
+
+    legacy = "legacy"
+    encrypted = "encrypted"
+    cleared = "cleared"
+
+
+class Secret(SQLModel, table=True):  # type: ignore
+    """Node-level secrets, stored encrypted/hashed at rest (singleton, id=1).
+
+    The asymmetric column names document the encoding: ``_hash`` is one-way
+    (scrypt, verify only) while ``encrypted_`` is reversible (Fernet). Per-provider
+    upstream keys live on ``upstream_providers``, not here. See ``routstr.core.vault``.
+    """
+
+    __tablename__ = "secrets"
+    id: int = Field(default=1, primary_key=True)
+    admin_password_hash: str | None = Field(default=None)
+    encrypted_nsec: str | None = Field(default=None)
+    nsec_state: NsecState = Field(default=NsecState.legacy)
+    updated_at: int | None = Field(default=None)
 
 
 class CliToken(SQLModel, table=True):  # type: ignore
@@ -427,18 +553,91 @@ async def get_routstr_fee(session: AsyncSession) -> RoutstrFee:
     return fee
 
 
-async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> None:
+async def get_secret(session: AsyncSession) -> Secret:
+    secret = await session.get(Secret, 1)
+    if secret is None:
+        secret = Secret(id=1)
+        session.add(secret)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Another worker created the singleton row between our read and
+            # insert (multiple workers booting against one shared DB). Roll back
+            # and read the row they committed instead of failing startup.
+            await session.rollback()
+            secret = await session.get(Secret, 1)
+            if secret is None:
+                raise
+            return secret
+        await session.refresh(secret)
+    return secret
+
+
+async def set_admin_password(session: AsyncSession, password: str) -> None:
+    """Store the admin password as a one-way hash on the Secret singleton."""
+    from .vault import hash_password
+
+    secret = await get_secret(session)
+    secret.admin_password_hash = hash_password(password)
+    secret.updated_at = int(time.time())
+    session.add(secret)
+    await session.commit()
+
+
+async def set_nsec(session: AsyncSession, nsec: str) -> None:
+    """Store the node's nsec, Fernet-encrypted, on the Secret singleton.
+
+    An empty string clears it (the node then holds no Nostr identity and signs
+    no events). Either way the vault now owns the nsec, so the state moves off
+    ``legacy``: a cleared identity (``cleared``) must not be resurrected from a
+    stale legacy ``NSEC`` on the next boot.
+    """
+    from .vault import encrypt
+
+    secret = await get_secret(session)
+    secret.encrypted_nsec = encrypt(nsec) if nsec else None
+    secret.nsec_state = NsecState.encrypted if nsec else NsecState.cleared
+    secret.updated_at = int(time.time())
+    session.add(secret)
+    await session.commit()
+
+
+async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
+    """Checkpoint a fee payout before making the external payment."""
     stmt = (
         update(RoutstrFee)
         .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == 0)
+        .where(col(RoutstrFee.accumulated_msats) >= paid_msats)
         .values(
             accumulated_msats=RoutstrFee.accumulated_msats - paid_msats,
+            payout_in_progress_msats=paid_msats,
+            payout_started_at=int(time.time()),
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def complete_routstr_fee_payout(
+    session: AsyncSession, paid_msats: int
+) -> bool:
+    """Mark a checkpointed payout complete after the external payment succeeds."""
+    stmt = (
+        update(RoutstrFee)
+        .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == paid_msats)
+        .values(
+            payout_in_progress_msats=0,
+            payout_started_at=None,
             total_paid_msats=RoutstrFee.total_paid_msats + paid_msats,
             last_paid_at=int(time.time()),
         )
     )
-    await session.exec(stmt)  # type: ignore[call-overload]
+    result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
+    return result.rowcount == 1
 
 
 async def balances_for_mint_and_unit(

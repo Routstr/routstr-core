@@ -85,6 +85,30 @@ class Model(BaseModel):
         return hash(self.id)
 
 
+def litellm_cost_entry(model_id: str) -> dict | None:
+    """Look up ``model_id`` in litellm's bundled cost map.
+
+    litellm ships per-model USD rates keyed by the exact OpenRouter id
+    (``deepseek/deepseek-chat``) or the bare model name (``gpt-4o``,
+    ``claude-sonnet-4-5``), so both spellings are tried. Keys are lowercase, so
+    a mixed-case upstream id (``deepseek-ai/DeepSeek-V4-Flash``) is retried via
+    a case-insensitive scan. Returns the matched cost dict, or ``None``.
+    """
+    import litellm
+
+    candidates = (model_id, model_id.split("/", 1)[-1])
+    for key in candidates:
+        info = litellm.model_cost.get(key)
+        if isinstance(info, dict):
+            return info
+
+    lowered = {c.lower() for c in candidates}
+    for key, info in litellm.model_cost.items():
+        if isinstance(key, str) and key.lower() in lowered and isinstance(info, dict):
+            return info
+    return None
+
+
 def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
     """Fill missing cache rates from litellm's bundled cost map.
 
@@ -92,12 +116,8 @@ def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
     for many models (most DeepSeek entries, openai/gpt-4o, ...). Without a
     cache rate, billing falls back to the full input rate, which overcharges
     cache reads (DeepSeek hits are 10x cheaper) and undercharges Anthropic
-    cache writes (1.25x). litellm ships per-model USD rates keyed by the exact
-    OpenRouter id (deepseek/deepseek-chat) or by the bare model name
-    (gpt-4o, claude-sonnet-4-5), so both spellings are tried. litellm keys are
-    lowercase, but a generic upstream may report a mixed-case id
-    (``deepseek-ai/DeepSeek-V4-Flash``); an exact match is attempted first, then
-    a case-insensitive fallback so such ids still resolve.
+    cache writes (1.25x). The lookup (see ``litellm_cost_entry``) tries both
+    id spellings and a case-insensitive fallback.
 
     Rates already present (e.g. provided by OpenRouter) are authoritative and
     never overwritten. Unknown models are returned unchanged.
@@ -107,28 +127,7 @@ def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
     if not (needs_read or needs_write):
         return pricing
 
-    import litellm
-
-    candidates = (model_id, model_id.split("/", 1)[-1])
-    info: dict | None = None
-    for key in candidates:
-        candidate = litellm.model_cost.get(key)
-        if isinstance(candidate, dict):
-            info = candidate
-            break
-    if info is None:
-        # Case-insensitive fallback: a mixed-case upstream id (e.g.
-        # ``deepseek-ai/DeepSeek-V4-Flash``) won't match litellm's lowercase
-        # keys exactly. Build a lowercased index once and retry.
-        lowered = {c.lower() for c in candidates}
-        for key, candidate in litellm.model_cost.items():
-            if (
-                isinstance(key, str)
-                and key.lower() in lowered
-                and isinstance(candidate, dict)
-            ):
-                info = candidate
-                break
+    info = litellm_cost_entry(model_id)
     if info is None:
         return pricing
 

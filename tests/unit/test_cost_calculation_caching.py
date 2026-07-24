@@ -465,9 +465,179 @@ async def test_cache_read_only_usd_cost_response_is_billed(
     assert result.cache_read_input_tokens == 1000
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("total_cost", "input_cost", "output_cost", "expected_msats"),
+    [
+        (0.000471, 0.00023451, 0.00023649, 9420),
+        (0.00000004, 0.00000002, 0.00000002, 1),
+    ],
+)
+async def test_small_usd_cost_components_sum_to_rounded_total(
+    total_cost: float,
+    input_cost: float,
+    output_cost: float,
+    expected_msats: int,
+) -> None:
+    """Small USD component costs must retain every billed millisatoshi."""
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "cost_details": {
+                "total_cost": total_cost,
+                "input_cost": input_cost,
+                "output_cost": output_cost,
+            },
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.total_msats == expected_msats
+    assert result.input_msats + result.output_msats == result.total_msats
+
+
+@pytest.mark.asyncio
+async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
+    """OpenRouter component aliases must determine the input/output split."""
+    response = {
+        "model": "gpt-4",
+        "usage": {
+            "prompt_tokens": 375,
+            "completion_tokens": 158,
+            "total_tokens": 533,
+            "cost": 0.00022354,
+            "is_byok": False,
+            "prompt_tokens_details": {
+                "cached_tokens": 286,
+                "cache_write_tokens": 0,
+            },
+            "cost_details": {
+                "upstream_inference_cost": 0.00022354,
+                "upstream_inference_prompt_cost": 0.00004974,
+                "upstream_inference_completions_cost": 0.0001738,
+            },
+            "completion_tokens_details": {"reasoning_tokens": 17},
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    assert result.input_msats == 994
+    assert result.output_msats == 3477
+    assert result.input_msats + result.output_msats == result.total_msats == 4471
+
+
+# ============================================================================
+# PPQ.AI BYOK: upstream_inference_cost + BYOK fee billing
+#
+# PPQ.AI (bring-your-own-key) returns a small ~5 % BYOK routing fee in
+# ``usage.cost`` and the real inference cost in
+# ``cost_details.upstream_inference_cost``.  The old code billed only the fee,
+# under-charging by ~20×.  The fix bills ``upstream_inference_cost + byok_fee``
+# — what PPQ actually deducts from the balance.
+# Payload numbers are from a live ``glm-5.2-fast`` request (GitHub issue #615).
+# ============================================================================
+@pytest.mark.asyncio
+async def test_ppq_byok_bills_upstream_inference_cost_plus_fee() -> None:
+    """PPQ.AI BYOK must bill upstream_inference_cost + byok_fee, not just the
+    fee.  Mirrors the live request from GitHub issue #615."""
+    response = {
+        "model": "glm-5.2-fast",
+        "usage": {
+            "prompt_tokens": 164371,  # includes 159301 cached
+            "completion_tokens": 99,
+            "cost": 0.002260057305,  # ~5% BYOK routing fee
+            "is_byok": True,
+            "prompt_tokens_details": {"cached_tokens": 159301},
+            "cost_details": {
+                "upstream_inference_cost": 0.04475361,
+                "upstream_inference_prompt_cost": 0.04410021,
+                "upstream_inference_completions_cost": 0.0006534,
+            },
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    # The fix bills upstream_inference_cost + byok_fee (~0.047 USD → ~940k
+    # msats), not the fee alone (~0.0023 USD → ~45k msats).  ~20× correction.
+    assert result.total_msats == 940274
+    assert result.input_msats + result.output_msats == result.total_msats
+    assert result.input_msats == 926546
+    assert result.output_msats == 13728
+    assert result.total_usd == pytest.approx(0.047013667305)
+    # Token normalisation (OpenAI dialect: cached included in prompt_tokens)
+    assert result.input_tokens == 5070  # 164371 - 159301
+    assert result.cache_read_input_tokens == 159301
+    assert result.output_tokens == 99
+
+
+@pytest.mark.asyncio
+async def test_ppq_byok_fee_only_would_undercharge() -> None:
+    """Sanity check: billing only usage.cost (the BYOK fee) under-charges by
+    ~20×.  This documents the regression the fix prevents."""
+    response = {
+        "model": "glm-5.2-fast",
+        "usage": {
+            "prompt_tokens": 164371,
+            "completion_tokens": 99,
+            "cost": 0.002260057305,  # BYOK fee only — no upstream_inference_cost
+            "is_byok": True,
+            "prompt_tokens_details": {"cached_tokens": 159301},
+        },
+    }
+    result = await calculate_cost(response, max_cost=100000)
+
+    assert isinstance(result, CostData)
+    # Without upstream_inference_cost, only the fee is billed — the old bug.
+    assert result.total_msats == 45202
+
+
 # ============================================================================
 # Test 13: Missing Usage Block
 # ============================================================================
+@pytest.mark.asyncio
+async def test_missing_upstream_cost_uses_litellm_model_pricing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token usage without an upstream cost is priced from LiteLLM."""
+    monkeypatch.setattr(settings, "fixed_pricing", True)
+    monkeypatch.setattr(settings, "fixed_per_1k_input_tokens", 0)
+    monkeypatch.setattr(settings, "fixed_per_1k_output_tokens", 0)
+    monkeypatch.setattr(
+        "routstr.payment.models.litellm_cost_entry",
+        lambda model: {
+            "input_cost_per_token": 0.000001,
+            "output_cost_per_token": 0.000002,
+        },
+    )
+    response = {
+        "model": "priced-by-litellm",
+        "usage": {
+            "prompt_tokens": 90,
+            "completion_tokens": 80,
+            "total_tokens": 170,
+            "prompt_tokens_details": {"cached_tokens": 0},
+            "completion_tokens_details": {"reasoning_tokens": 74},
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 90,
+        },
+    }
+
+    result = await calculate_cost(response, max_cost=10000)
+
+    assert isinstance(result, CostData)
+    assert not isinstance(result, MaxCostData)
+    assert result.input_msats == 1800
+    assert result.output_msats == 3200
+    assert result.input_msats + result.output_msats == result.total_msats == 5000
+
+
 @pytest.mark.asyncio
 async def test_missing_usage_block(mock_fixed_pricing: None) -> None:
     """When usage is missing, return MaxCostData with zero tokens."""

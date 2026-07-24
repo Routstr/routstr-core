@@ -14,6 +14,7 @@ from httpx import AsyncClient
 from sqlmodel import select
 
 from routstr.core.db import ApiKey, CashuTransaction
+from routstr.wallet import MintConnectionError
 
 
 @pytest.mark.integration
@@ -503,26 +504,19 @@ async def test_mint_unavailability_handling(
 
     # The global mock in conftest.py is already in place,
     # so we need to temporarily modify it
-    from unittest.mock import patch
+    raw_error = "Mint unavailable: Connection refused"
 
-    # Make the send_token method raise an exception
+    # Make the send_token method raise a typed mint connection exception.
     with patch(
         "routstr.balance.send_token",
-        side_effect=Exception("Mint unavailable: Connection refused"),
+        side_effect=MintConnectionError(raw_error),
     ):
-        # The exception should propagate as a 503 error (Service Unavailable)
-        # But we need to handle it properly
-        try:
-            response = await authenticated_client.post("/v1/wallet/refund")
-            # If we get here, check the status code
-            assert response.status_code == 503
-            assert "Mint service unavailable" in response.json()["detail"]
-        except Exception as e:
-            # If the exception propagates, that's also a failure scenario
-            assert "Mint unavailable" in str(e)
+        response = await authenticated_client.post("/v1/wallet/refund")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Mint service unavailable"
+        assert raw_error not in response.text
 
         # Balance should remain unchanged (transaction should roll back)
-        # Note: Current implementation might not handle this perfectly
         wallet_response = await authenticated_client.get("/v1/wallet/")
         assert wallet_response.status_code == 200
         assert wallet_response.json()["balance"] == 10_000_000

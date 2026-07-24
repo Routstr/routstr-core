@@ -13,6 +13,7 @@ services:
       - ./ui_out:/output:z
     command:
       ["sh", "-c", "mkdir -p /output && cp -r /app/built/. /output/ && echo 'UI build copied to mounted volume' && ls -la /output/ && echo 'UI built and ready' && tail -f /dev/null"]
+    restart: unless-stopped
 
   routstr:
     build: .
@@ -31,6 +32,7 @@ services:
       - 8000:8000
     extra_hosts: # Needed to access locally running models
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
 
   tor:
     image: ghcr.io/hundehausen/tor-hidden-service:latest
@@ -41,6 +43,7 @@ services:
       - HS_ROUTER=routstr:8000:80
     depends_on:
       - routstr
+    restart: unless-stopped
 
 volumes:
   tor-data:

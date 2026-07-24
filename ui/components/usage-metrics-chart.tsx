@@ -291,7 +291,7 @@ export function UsageMetricsChart({
             className={cn(
               'aspect-auto w-full',
               isFullscreen
-                ? 'h-[calc(100vh-220px)] min-h-[340px] sm:h-[calc(100vh-260px)] sm:min-h-[420px]'
+                ? 'h-[calc(100dvh-220px)] min-h-[340px] sm:h-[calc(100dvh-260px)] sm:min-h-[420px]'
                 : 'h-[260px] sm:h-[340px]'
             )}
             config={chartConfig}
