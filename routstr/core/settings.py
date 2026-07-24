@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
+    mint_operation_concurrency: int = Field(
+        default=4, ge=1, env="MINT_OPERATION_CONCURRENCY"
+    )
 
     # Lightning payout configuration
     # Minimum available balance (in satoshis) before profit is paid out over

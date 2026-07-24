@@ -9,10 +9,12 @@ Covers two things:
 
 from __future__ import annotations
 
+import asyncio
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey, LightningInvoice
@@ -47,6 +49,7 @@ def mock_wallet_mint() -> object:
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_invoice_persists_balance_limit(
@@ -91,6 +94,7 @@ async def test_invoice_persists_validity_date(
 # ---------------------------------------------------------------------------
 # Propagation to ApiKey
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_created_key_receives_balance_limit(
@@ -139,6 +143,144 @@ async def test_created_key_receives_validity_date(
     stored_key = await integration_session.get(ApiKey, api_key.hashed_key)
     assert stored_key is not None
     assert stored_key.validity_date == expiry
+
+
+@pytest.mark.asyncio
+async def test_payment_check_releases_connection_during_mint_quote(
+    integration_engine: AsyncEngine,
+) -> None:
+    invoice = _make_invoice(id="inv_slow_quote", status="pending", paid_at=None)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
+        setup.add(invoice)
+        await setup.commit()
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as session:
+        stored = await session.get(LightningInvoice, invoice.id)
+        assert stored is not None
+
+        async def quote_status(*args: object, **kwargs: object) -> MagicMock:
+            assert integration_engine.pool.checkedout() == 0  # type: ignore[attr-defined]
+            return MagicMock(paid=False)
+
+        wallet = MagicMock()
+        wallet.get_mint_quote = AsyncMock(side_effect=quote_status)
+        with patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)):
+            from routstr.lightning import check_invoice_payment
+
+            await check_invoice_payment(stored, session)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_payment_checks_mint_and_credit_invoice_once(
+    integration_engine: AsyncEngine,
+) -> None:
+    invoice = _make_invoice(id="inv_concurrent", status="pending", paid_at=None)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
+        setup.add(invoice)
+        await setup.commit()
+
+    wallet = MagicMock()
+    wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
+
+    mint_calls = 0
+
+    async def single_use_mint(*args: object, **kwargs: object) -> list[object]:
+        # Real mints enforce single-use quotes: the second concurrent minter
+        # gets rejected at the mint, mirroring cashu quote semantics.
+        nonlocal mint_calls
+        mint_calls += 1
+        call_number = mint_calls
+        await asyncio.sleep(0.05)
+        if call_number > 1:
+            raise Exception("quote already issued")
+        return []
+
+    wallet.mint = AsyncMock(side_effect=single_use_mint)
+
+    async with (
+        AsyncSession(integration_engine, expire_on_commit=False) as first,
+        AsyncSession(integration_engine, expire_on_commit=False) as second,
+    ):
+        first_invoice = await first.get(LightningInvoice, invoice.id)
+        second_invoice = await second.get(LightningInvoice, invoice.id)
+        assert first_invoice is not None
+        assert second_invoice is not None
+
+        with patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)):
+            from routstr.lightning import check_invoice_payment
+
+            await asyncio.gather(
+                check_invoice_payment(first_invoice, first),
+                check_invoice_payment(second_invoice, second),
+            )
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored_invoice = await verify.get(LightningInvoice, invoice.id)
+        assert stored_invoice is not None
+        assert stored_invoice.status == "paid"
+        assert stored_invoice.api_key_hash is not None
+        stored_key = await verify.get(ApiKey, stored_invoice.api_key_hash)
+        assert stored_key is not None
+        assert stored_key.balance == invoice.amount_sats * 1000
+
+
+@pytest.mark.asyncio
+async def test_failed_mint_keeps_invoice_pending_for_retry(
+    integration_engine: AsyncEngine,
+) -> None:
+    invoice = _make_invoice(id="inv_mint_failure", status="pending", paid_at=None)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
+        setup.add(invoice)
+        await setup.commit()
+
+    wallet = MagicMock()
+    wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
+    wallet.mint = AsyncMock(side_effect=TimeoutError("mint unavailable"))
+    async with AsyncSession(integration_engine, expire_on_commit=False) as session:
+        stored = await session.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        with patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)):
+            from routstr.lightning import check_invoice_payment
+
+            await check_invoice_payment(stored, session)
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_post_mint_db_failure_keeps_invoice_pending_for_reconciliation(
+    integration_engine: AsyncEngine,
+) -> None:
+    invoice = _make_invoice(id="inv_finalize_failure", status="pending", paid_at=None)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
+        setup.add(invoice)
+        await setup.commit()
+
+    wallet = MagicMock()
+    wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
+    wallet.mint = AsyncMock(return_value=[])
+    async with AsyncSession(integration_engine, expire_on_commit=False) as session:
+        stored = await session.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        with (
+            patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+            patch(
+                "routstr.lightning._create_api_key_record",
+                AsyncMock(side_effect=RuntimeError("database unavailable")),
+            ),
+        ):
+            from routstr.lightning import check_invoice_payment
+
+            await check_invoice_payment(stored, session)
+
+    assert wallet.mint.await_count == 1
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "pending"
 
 
 @pytest.mark.asyncio

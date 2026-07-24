@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from typing import Any
 
@@ -220,6 +221,20 @@ _API_PATH_PREFIXES = (
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
+) -> Response | StreamingResponse:
+    """Run proxy setup in a short request session, never across response streaming."""
+    try:
+        return await _proxy(request, path, session)
+    finally:
+        # FastAPI yield dependencies normally close after the response body is
+        # sent. Close explicitly so a long stream cannot retain DB resources.
+        close_result = session.close()
+        if inspect.isawaitable(close_result):
+            await close_result
+
+
+async def _proxy(
+    request: Request, path: str, session: AsyncSession
 ) -> Response | StreamingResponse:
     # GET requests must hit a known API prefix; otherwise return a 404 (HTML
     # for browsers, JSON for API clients). POST requests are always forwarded

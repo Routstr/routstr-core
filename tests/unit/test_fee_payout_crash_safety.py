@@ -1,6 +1,4 @@
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -13,9 +11,19 @@ from routstr import wallet
 from routstr.core import db
 
 
-@asynccontextmanager
-async def _session_context(session: Mock) -> AsyncIterator[Mock]:
-    yield session
+class _SessionContext:
+    def __init__(self, session: Mock) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> Mock:
+        return self.session
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+def _session_context(session: Mock) -> _SessionContext:
+    return _SessionContext(session)
 
 
 @pytest.mark.asyncio
@@ -77,7 +85,9 @@ async def test_fee_payout_checkpoints_before_sending() -> None:
             "routstr.wallet.asyncio.sleep",
             AsyncMock(side_effect=[None, asyncio.CancelledError()]),
         ),
-        patch("routstr.wallet.db.create_session", return_value=_session_context(session)),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
         patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
         patch("routstr.wallet.db.reset_routstr_fee", side_effect=checkpoint),
         patch("routstr.wallet.db.complete_routstr_fee_payout", side_effect=complete),
@@ -107,7 +117,9 @@ async def test_fee_payout_does_not_retry_an_unresolved_checkpoint() -> None:
             "routstr.wallet.asyncio.sleep",
             AsyncMock(side_effect=[None, asyncio.CancelledError()]),
         ),
-        patch("routstr.wallet.db.create_session", return_value=_session_context(session)),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
         patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
         patch("routstr.wallet.db.reset_routstr_fee", AsyncMock()) as checkpoint,
         patch("routstr.wallet.get_wallet", AsyncMock()) as get_wallet,
@@ -141,7 +153,9 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
             "routstr.wallet.asyncio.sleep",
             AsyncMock(side_effect=[None, asyncio.CancelledError()]),
         ),
-        patch("routstr.wallet.db.create_session", return_value=_session_context(session)),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
         patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
         patch("routstr.wallet.db.reset_routstr_fee", AsyncMock(return_value=True)),
         patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
