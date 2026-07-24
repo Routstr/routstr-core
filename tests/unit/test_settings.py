@@ -86,7 +86,7 @@ def test_database_pool_settings_reject_invalid_values(
     field: str, bad_value: int
 ) -> None:
     with pytest.raises(ValidationError):
-        Settings(**{field: bad_value})
+        Settings.parse_obj({field: bad_value})
 
 
 @pytest.mark.asyncio
