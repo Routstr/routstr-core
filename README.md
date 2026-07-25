@@ -55,11 +55,25 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
 
 1. **Prepare your `.env`**:
    ```bash
-   ADMIN_PASSWORD=mysecretpassword
+   # Optional: encrypts node secrets at rest. If unset, the node generates a key
+   # on first start, writes it to routstr_secret.key, and prints it once — back
+   # up that file. Set it explicitly to manage the key yourself (recommended in
+   # production).
+   ROUTSTR_SECRET_KEY=<generated-key>
    NAME="My AI Node"
    DESCRIPTION="Fast access to models"
-   NSEC=yournsec
    RECEIVE_LN_ADDRESS=yourname@wallet.com
+   ```
+
+   Your Nostr identity (`nsec`) is not set in `.env` — configure it from the admin
+   UI after first start, where it's stored encrypted in the database. (`NSEC` in
+   `.env` is still read once as a legacy seed for existing deployments.)
+
+   If you don't set one, a key is generated and printed on first start — save it
+   somewhere safe (losing it makes previously encrypted secrets unreadable). To
+   supply your own, generate it once and keep it stable:
+   ```bash
+   uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
 
 2. **Start the services**:
@@ -67,7 +81,15 @@ If you are a node runner, start a Routstr Core instance using Docker Compose:
    docker compose up -d
    ```
 
-3. **Configure**:
+3. **Get your admin password**:
+   On first start the node generates an admin password and logs it once with the
+   `/admin` URL. Read it from the logs:
+   ```bash
+   docker compose logs routstr | grep -i admin
+   ```
+   (Lost it? Reset with `docker compose exec routstr /.venv/bin/python scripts/reset_admin_password.py --regenerate`.)
+
+4. **Configure**:
    Open [http://localhost:8000/admin/](http://localhost:8000/admin/) to connect your AI providers and set pricing.
 
 For full instructions, see the **[Provider Quick Start Guide](https://docs.routstr.com/provider/quickstart/)**.

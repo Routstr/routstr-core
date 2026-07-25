@@ -603,6 +603,8 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
         wallet, effective_mint_url, unit, not_reserved=True
     )
     proofs_for_mint = sum(proof.amount for proof in proofs)
+    all_proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
+    reserved_for_mint = sum(p.amount for p in all_proofs if p.reserved)
 
     all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
     proof_summary = {
@@ -618,7 +620,8 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
         raw_proofs_by_keyset[p.id] = raw_proofs_by_keyset.get(p.id, 0) + p.amount
     logger.info(
         f"send: proof inventory | mint={effective_mint_url} unit={unit} amount={amount} "
-        f"primary_mint={settings.primary_mint} proofs_for_mint={proofs_for_mint} "
+        f"primary_mint={settings.primary_mint} liquid_proofs_for_mint={proofs_for_mint} "
+        f"reserved_proofs_for_mint={reserved_for_mint} "
         f"all_mints={all_mint_urls} by_keyset={proof_summary} "
         f"raw_proofs_by_keyset_id={raw_proofs_by_keyset} "
         f"total_wallet_proofs={sum(p.amount for p in wallet.proofs)}"
@@ -1750,9 +1753,7 @@ async def fetch_all_balances(
                 "unit": unit,
                 "wallet_balance": proofs_balance,
                 "user_balance": user_balance,
-                "owner_balance": proofs_balance - user_balance
-                if proofs_balance != 0
-                else 0,
+                "owner_balance": proofs_balance - user_balance,
             }
 
     # Build the set of mints to inspect. Received tokens are stored against
@@ -1825,9 +1826,7 @@ async def fetch_all_balances(
             total_wallet_balance_sats += proofs_balance_sats
             total_user_balance_sats += user_balance_sats
 
-    owner_balance = 0
-    if total_wallet_balance_sats != 0:
-        owner_balance = total_wallet_balance_sats - total_user_balance_sats
+    owner_balance = total_wallet_balance_sats - total_user_balance_sats
 
     return (
         balance_details,

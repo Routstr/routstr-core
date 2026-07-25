@@ -18,6 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 
+from routstr.auth import ReservationSnapshot  # noqa: E402
 from routstr.core.db import ApiKey  # noqa: E402
 from routstr.payment.cost_calculation import CostData  # noqa: E402
 from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
@@ -498,6 +499,12 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         yield {"type": "message_stop"}
 
     fake_cost = {"total_msats": 4321, "total_usd": 0.00015}
+    reservation = ReservationSnapshot(
+        release_id="messages-stream",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=10_000,
+    )
 
     captured_cost_call: dict[str, Any] = {}
 
@@ -508,9 +515,11 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
         max_cost: int,
         model_obj: Any = None,
         provider_fee: Any = None,
+        reservation_snapshot: Any = None,
     ) -> dict:
         captured_cost_call["combined_data"] = combined_data
         captured_cost_call["max_cost"] = max_cost
+        captured_cost_call["reservation_snapshot"] = reservation_snapshot
         return fake_cost
 
     fake_session = MagicMock()
@@ -544,6 +553,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
             session=session,
             max_cost_for_model=10_000,
             model_obj=model,
+            reservation_snapshot=reservation,
         )
 
         assert isinstance(result, StreamingResponse)
@@ -566,6 +576,7 @@ async def test_streaming_emits_sse_and_reconciles_cost_at_end() -> None:
     assert combined["usage"]["input_tokens"] == 5
     assert combined["usage"]["output_tokens"] == 7
     assert combined["model"] == "openai/gpt-4o-mini"
+    assert captured_cost_call["reservation_snapshot"] is reservation
 
 
 @pytest.mark.asyncio
@@ -593,6 +604,12 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
         yield b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
     fake_cost = {"total_msats": 999, "total_usd": 0.0001}
+    reservation = ReservationSnapshot(
+        release_id="messages-byte-stream",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=10_000,
+    )
     captured: dict[str, Any] = {}
 
     async def fake_adjust(
@@ -602,8 +619,10 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
         max_cost: int,
         model_obj: Any = None,
         provider_fee: Any = None,
+        reservation_snapshot: Any = None,
     ) -> dict:
         captured["combined_data"] = combined_data
+        captured["reservation_snapshot"] = reservation_snapshot
         return fake_cost
 
     fake_session = MagicMock()
@@ -636,6 +655,7 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
             session=session,
             max_cost_for_model=10_000,
             model_obj=model,
+            reservation_snapshot=reservation,
         )
 
         assert isinstance(result, StreamingResponse)
@@ -659,6 +679,7 @@ async def test_streaming_handles_iterator_yielding_raw_sse_bytes() -> None:
     assert combined["usage"]["input_tokens"] == 3
     assert combined["usage"]["output_tokens"] == 4
     assert combined["model"] == "openai/gpt-4o-mini"
+    assert captured["reservation_snapshot"] is reservation
 
 
 # ---------------------------------------------------------------------------

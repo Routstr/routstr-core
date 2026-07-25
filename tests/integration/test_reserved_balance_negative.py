@@ -141,7 +141,7 @@ async def test_revert_with_zero_reserved_balance_is_noop(
     Previously this would drive reserved_balance negative. With the floor guard,
     it should return False and leave reserved_balance at 0.
     """
-    from routstr.auth import revert_pay_for_request
+    from routstr.auth import pay_for_request, revert_pay_for_request
 
     unique_key = f"test_revert_key_{uuid.uuid4().hex[:8]}"
     test_key = ApiKey(
@@ -151,8 +151,12 @@ async def test_revert_with_zero_reserved_balance_is_noop(
     )
     integration_session.add(test_key)
     await integration_session.commit()
+    await pay_for_request(test_key, 100, integration_session)
+    test_key.reserved_balance = 0
+    integration_session.add(test_key)
+    await integration_session.commit()
 
-    # Try to revert more than available — should be a no-op
+    # A stale cleanup already released the aggregate reservation.
     result = await revert_pay_for_request(test_key, integration_session, 100)
 
     await integration_session.refresh(test_key)
@@ -161,8 +165,8 @@ async def test_revert_with_zero_reserved_balance_is_noop(
     assert test_key.reserved_balance == 0, (
         f"Reserved balance should remain 0, got: {test_key.reserved_balance}"
     )
-    assert test_key.total_requests == 0, (
-        f"Total requests should remain 0, got: {test_key.total_requests}"
+    assert test_key.total_requests == 1, (
+        f"Total requests should remain 1, got: {test_key.total_requests}"
     )
 
 
@@ -171,17 +175,18 @@ async def test_revert_with_sufficient_reserved_balance_succeeds(
     integration_session: AsyncSession,
 ) -> None:
     """Test that revert_pay_for_request works correctly when there is enough reserved balance."""
-    from routstr.auth import revert_pay_for_request
+    from routstr.auth import pay_for_request, revert_pay_for_request
 
     unique_key = f"test_revert_ok_{uuid.uuid4().hex[:8]}"
     test_key = ApiKey(
         hashed_key=unique_key,
         balance=5000,
-        reserved_balance=500,
-        total_requests=3,
+        reserved_balance=0,
+        total_requests=2,
     )
     integration_session.add(test_key)
     await integration_session.commit()
+    await pay_for_request(test_key, 500, integration_session)
 
     result = await revert_pay_for_request(test_key, integration_session, 500)
 
@@ -202,15 +207,19 @@ async def test_revert_partial_reserved_balance_is_noop(
     integration_session: AsyncSession,
 ) -> None:
     """Test that reverting more than the current reserved_balance is a no-op."""
-    from routstr.auth import revert_pay_for_request
+    from routstr.auth import pay_for_request, revert_pay_for_request
 
     unique_key = f"test_revert_partial_{uuid.uuid4().hex[:8]}"
     test_key = ApiKey(
         hashed_key=unique_key,
         balance=5000,
-        reserved_balance=50,
-        total_requests=1,
+        reserved_balance=0,
+        total_requests=0,
     )
+    integration_session.add(test_key)
+    await integration_session.commit()
+    await pay_for_request(test_key, 500, integration_session)
+    test_key.reserved_balance = 50
     integration_session.add(test_key)
     await integration_session.commit()
 
@@ -237,20 +246,28 @@ async def test_double_revert_prevented(
     This simulates the double-revert scenario where both upstream/base.py
     and proxy.py attempt to revert the same reservation.
     """
-    from routstr.auth import revert_pay_for_request
+    from routstr.auth import (
+        get_reservation_snapshot,
+        pay_for_request,
+        revert_pay_for_request,
+    )
 
     unique_key = f"test_double_revert_{uuid.uuid4().hex[:8]}"
     test_key = ApiKey(
         hashed_key=unique_key,
         balance=10000,
-        reserved_balance=500,
-        total_requests=5,
+        reserved_balance=0,
+        total_requests=4,
     )
     integration_session.add(test_key)
     await integration_session.commit()
+    await pay_for_request(test_key, 500, integration_session)
+    snapshot = await get_reservation_snapshot(test_key, integration_session)
 
     # First revert — should succeed
-    result1 = await revert_pay_for_request(test_key, integration_session, 500)
+    result1 = await revert_pay_for_request(
+        test_key, integration_session, 500, snapshot
+    )
     await integration_session.refresh(test_key)
 
     assert result1 is True
@@ -258,7 +275,9 @@ async def test_double_revert_prevented(
     assert test_key.total_requests == 4
 
     # Second revert of the same amount — should be no-op
-    result2 = await revert_pay_for_request(test_key, integration_session, 500)
+    result2 = await revert_pay_for_request(
+        test_key, integration_session, 500, snapshot
+    )
     await integration_session.refresh(test_key)
 
     assert result2 is False, "Second revert should be a no-op"
@@ -279,22 +298,30 @@ async def test_sequential_reverts_never_go_negative(
     Simulates the double-revert scenario where multiple code paths
     attempt to revert the same reservation.
     """
-    from routstr.auth import revert_pay_for_request
+    from routstr.auth import (
+        get_reservation_snapshot,
+        pay_for_request,
+        revert_pay_for_request,
+    )
 
     unique_key = f"test_multi_revert_{uuid.uuid4().hex[:8]}"
     test_key = ApiKey(
         hashed_key=unique_key,
         balance=10000,
-        reserved_balance=500,
-        total_requests=5,
+        reserved_balance=0,
+        total_requests=4,
     )
     integration_session.add(test_key)
     await integration_session.commit()
+    await pay_for_request(test_key, 500, integration_session)
+    snapshot = await get_reservation_snapshot(test_key, integration_session)
 
     # Run 5 sequential reverts for the same 500 reservation
     results = []
     for _ in range(5):
-        r = await revert_pay_for_request(test_key, integration_session, 500)
+        r = await revert_pay_for_request(
+            test_key, integration_session, 500, snapshot
+        )
         results.append(r)
 
     await integration_session.refresh(test_key)
@@ -317,7 +344,11 @@ async def test_child_key_revert_floor_guard(
     integration_session: AsyncSession,
 ) -> None:
     """Test that child key reserved_balance also has floor guard on revert."""
-    from routstr.auth import revert_pay_for_request
+    from routstr.auth import (
+        get_reservation_snapshot,
+        pay_for_request,
+        revert_pay_for_request,
+    )
 
     parent_key_hash = f"test_parent_{uuid.uuid4().hex[:8]}"
     child_key_hash = f"test_child_{uuid.uuid4().hex[:8]}"
@@ -325,22 +356,26 @@ async def test_child_key_revert_floor_guard(
     parent_key = ApiKey(
         hashed_key=parent_key_hash,
         balance=10000,
-        reserved_balance=500,
-        total_requests=3,
+        reserved_balance=0,
+        total_requests=2,
     )
     child_key = ApiKey(
         hashed_key=child_key_hash,
         balance=0,
-        reserved_balance=500,
-        total_requests=3,
+        reserved_balance=0,
+        total_requests=2,
         parent_key_hash=parent_key_hash,
     )
     integration_session.add(parent_key)
     integration_session.add(child_key)
     await integration_session.commit()
+    await pay_for_request(child_key, 500, integration_session)
+    snapshot = await get_reservation_snapshot(child_key, integration_session)
 
     # First revert succeeds
-    result1 = await revert_pay_for_request(child_key, integration_session, 500)
+    result1 = await revert_pay_for_request(
+        child_key, integration_session, 500, snapshot
+    )
     await integration_session.refresh(parent_key)
     await integration_session.refresh(child_key)
 
@@ -349,7 +384,9 @@ async def test_child_key_revert_floor_guard(
     assert child_key.reserved_balance == 0
 
     # Second revert is a no-op for both parent and child
-    result2 = await revert_pay_for_request(child_key, integration_session, 500)
+    result2 = await revert_pay_for_request(
+        child_key, integration_session, 500, snapshot
+    )
     await integration_session.refresh(parent_key)
     await integration_session.refresh(child_key)
 

@@ -20,6 +20,7 @@ from ..wallet import (
     send_token,
     slow_filter_spend_proofs,
 )
+from . import vault
 from .db import (
     ApiKey,
     CashuTransaction,
@@ -28,6 +29,9 @@ from .db import (
     ModelRow,
     UpstreamProviderRow,
     create_session,
+    get_secret,
+    set_admin_password,
+    set_nsec,
 )
 from .db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
@@ -35,7 +39,7 @@ from .db import (
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
-from .settings import SettingsService, settings
+from .settings import SettingsService, derive_npub_from_nsec, settings
 
 logger = get_logger(__name__)
 
@@ -206,8 +210,6 @@ async def get_settings(request: Request) -> dict:
     data = settings.dict()
     if "upstream_api_key" in data:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
-    if "admin_password" in data:
-        data["admin_password"] = "[REDACTED]" if data["admin_password"] else ""
     if "nsec" in data:
         data["nsec"] = "[REDACTED]" if data["nsec"] else ""
     return data
@@ -224,9 +226,10 @@ class PasswordUpdate(BaseModel):
 
 @admin_router.patch("/api/settings", dependencies=[Depends(require_admin_api)])
 async def update_settings(request: Request, update: SettingsUpdate) -> dict:
-    # Remove sensitive fields from general settings update
+    # Secrets are not editable through the general settings endpoint; they have
+    # dedicated rotation paths and never reach the settings blob.
     settings_data = update.root.copy()
-    sensitive_fields = ["admin_password", "upstream_api_key", "nsec"]
+    sensitive_fields = ["upstream_api_key", "nsec"]
     for field in sensitive_fields:
         if field in settings_data:
             del settings_data[field]
@@ -241,8 +244,6 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
     data = new_settings.dict()
     if "upstream_api_key" in data:
         data["upstream_api_key"] = "[REDACTED]" if data["upstream_api_key"] else ""
-    if "admin_password" in data:
-        data["admin_password"] = "[REDACTED]" if data["admin_password"] else ""
     if "nsec" in data:
         data["nsec"] = "[REDACTED]" if data["nsec"] else ""
     return data
@@ -250,44 +251,63 @@ async def update_settings(request: Request, update: SettingsUpdate) -> dict:
 
 @admin_router.patch("/api/password", dependencies=[Depends(require_admin_api)])
 async def update_password(request: Request, password_update: PasswordUpdate) -> dict:
-    current_password = settings.admin_password
-
-    if not current_password:
-        raise HTTPException(status_code=500, detail="Admin password not configured")
-
-    if password_update.current_password != current_password:
-        raise HTTPException(status_code=401, detail="Current password is incorrect")
-
-    # Validate new password
-    new_password = password_update.new_password.strip()
-    if len(new_password) < 6:
-        raise HTTPException(
-            status_code=400, detail="New password must be at least 6 characters"
-        )
-
-    # Update password
     async with create_session() as session:
-        await SettingsService.update({"admin_password": new_password}, session)
+        secret = await get_secret(session)
+
+        if not secret.admin_password_hash:
+            raise HTTPException(
+                status_code=500, detail="Admin password not configured"
+            )
+
+        if not vault.verify_password(
+            password_update.current_password, secret.admin_password_hash
+        ):
+            raise HTTPException(
+                status_code=401, detail="Current password is incorrect"
+            )
+
+        # Validate new password
+        new_password = password_update.new_password.strip()
+        if len(new_password) < vault.MIN_PASSWORD_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "New password must be at least "
+                    f"{vault.MIN_PASSWORD_LENGTH} characters"
+                ),
+            )
+
+        await set_admin_password(session, new_password)
 
     return {"ok": True, "message": "Password updated successfully"}
 
 
-class SetupRequest(BaseModel):
-    password: str
+class NsecUpdate(BaseModel):
+    nsec: str
 
 
-@admin_router.post("/api/setup")
-async def initial_setup(request: Request, payload: SetupRequest) -> dict[str, object]:
-    if settings.admin_password:
-        raise HTTPException(status_code=409, detail="Admin password already set")
-    pw = (payload.password or "").strip()
-    if len(pw) < 8:
-        raise HTTPException(
-            status_code=400, detail="Password must be at least 8 characters"
-        )
+@admin_router.patch("/api/nsec", dependencies=[Depends(require_admin_api)])
+async def update_nsec(request: Request, payload: NsecUpdate) -> dict[str, object]:
+    # The node's Nostr identity is a secret: it is stored encrypted in the
+    # Secret store, never in the settings blob, so it gets its own endpoint
+    # rather than riding the general settings PATCH (which strips it). An empty
+    # nsec clears the identity.
+    nsec = payload.nsec.strip()
+    npub = ""
+    if nsec:
+        derived = derive_npub_from_nsec(nsec)
+        if not derived:
+            raise HTTPException(status_code=400, detail="Invalid nsec")
+        npub = derived
+
     async with create_session() as session:
-        await SettingsService.update({"admin_password": pw}, session)
-    return {"ok": True}
+        await set_nsec(session, nsec)
+
+    # Reflect the change in the live runtime so Nostr signing/announcements pick
+    # it up without a restart (mirrors what bootstrap_secrets sets at boot).
+    settings.nsec = nsec
+    settings.npub = npub
+    return {"ok": True, "npub": npub}
 
 
 class AdminLoginRequest(BaseModel):
@@ -298,12 +318,16 @@ class AdminLoginRequest(BaseModel):
 async def admin_login(
     request: Request, payload: AdminLoginRequest
 ) -> dict[str, object]:
-    admin_pw = settings.admin_password
+    async with create_session() as session:
+        secret = await get_secret(session)
+        # Read the hash while the session is open; the ORM object is detached
+        # once the context exits and its attributes can no longer be loaded.
+        password_hash = secret.admin_password_hash
 
-    if not admin_pw:
+    if not password_hash:
         raise HTTPException(status_code=500, detail="Admin password not configured")
 
-    if payload.password != admin_pw:
+    if not vault.verify_password(payload.password, password_hash):
         raise HTTPException(status_code=401, detail="Invalid password")
 
     token = secrets.token_urlsafe(32)
@@ -482,7 +506,6 @@ class ModelCreate(BaseModel):
 async def upsert_provider_model(
     provider_id: str, payload: ModelCreate
 ) -> dict[str, object]:
-    print(payload)
     logger.info(
         f"UPSERT_PROVIDER_MODEL called: provider_id={provider_id}, model_id={payload.id}"
     )

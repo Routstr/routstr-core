@@ -13,7 +13,10 @@ Before running your node, you should create a `.env` file in the project root. T
 ### Example .env
 
 ```bash
-ADMIN_PASSWORD=your-secure-password
+# Encrypts node secrets at rest. Optional — if unset, the node generates a key on
+# first start and prints it once (back it up). Set it to manage the key yourself
+# (recommended in production). See "Secrets at Rest" below.
+ROUTSTR_SECRET_KEY=
 
 # Node Identity
 NAME="My AI Node"
@@ -25,10 +28,10 @@ RECEIVE_LN_ADDRESS=yourname@wallet.com
 
 ### Setting the UI Password
 
-There are two ways to set or change your Admin Dashboard password:
+On first start the node generates an admin password and logs it once — read it from the container logs to sign in. You can then change it two ways:
 
-1.  **Via Environment Variable**: Set `ADMIN_PASSWORD` in your `.env` file before starting the container. This will be the password used for the first login.
-2.  **Via Dashboard**: Once logged in, go to **Settings** → **Security** to update your password. Dashboard settings override the `.env` file once saved.
+1.  **Via Dashboard**: Once logged in, go to **Settings** → **Security** to update your password.
+2.  **Via Environment Variable (legacy seed)**: Setting `ADMIN_PASSWORD` in `.env` before the first start seeds the initial password instead of generating one. It's read only once, for existing deployments; a value left in `.env` is ignored after the node has been configured.
 
 ---
 
@@ -123,12 +126,14 @@ Use environment variables for:
 | -------------------- | --------------------------------- | ------------------------------------ |
 | `UPSTREAM_BASE_URL`  | Upstream API endpoint             | —                                    |
 | `UPSTREAM_API_KEY`   | Upstream API key                  | —                                    |
-| `ADMIN_PASSWORD`     | Dashboard password                | (none)                               |
+| `ADMIN_PASSWORD`     | Legacy seed for the dashboard password (otherwise generated + logged on first start) | (auto-generated) |
+| `ROUTSTR_SECRET_KEY` | Master key encrypting node secrets at rest. Auto-generated to a key file if unset | (auto-generated) |
+| `ROUTSTR_SECRET_KEY_FILE` | Path to the generated key file (used when `ROUTSTR_SECRET_KEY` is unset) | `routstr_secret.key` beside the database |
 | `DATABASE_URL`       | Database connection string        | `sqlite+aiosqlite:///keys.db`        |
 | `NAME`               | Node display name                 | `ARoutstrNode`                       |
 | `DESCRIPTION`        | Node description                  | `A Routstr Node`                     |
 | `NPUB`               | Nostr public key (bech32)         | —                                    |
-| `NSEC`               | Nostr private key                 | —                                    |
+| `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
@@ -141,6 +146,20 @@ Use environment variables for:
 ### Priority
 
 Environment variables are read on startup. Dashboard settings override them and persist in the database. Once you change a setting in the dashboard, the env var is ignored for that setting.
+
+### Secrets at Rest
+
+The node's Nostr private key (`nsec`) is encrypted in the database using
+`ROUTSTR_SECRET_KEY`. You don't have to set it: if it's unset, the node generates a
+key on first start, writes it **beside the database** (the file named by
+`ROUTSTR_SECRET_KEY_FILE`, default `routstr_secret.key`) so it persists on the same
+volume as your data, and prints it once.
+
+**Back up that key** — it lives on the same volume as your database, so include it
+in your backups. If it is lost or changed, previously encrypted secrets can't be
+decrypted and must be re-entered — there is no rotation. To keep the key off the
+data volume, set `ROUTSTR_SECRET_KEY` explicitly (an env value always takes
+precedence over the file). See also [Deployment](deployment.md).
 
 ---
 

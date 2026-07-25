@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from routstr.auth import ReservationSnapshot
 from routstr.core.db import ApiKey
 from routstr.upstream.base import BaseUpstreamProvider
 
@@ -67,6 +68,12 @@ async def test_stream_with_id_injection() -> None:
             max_cost_for_model=100,
             background_tasks=background_tasks,
             requested_model="test-model",
+            reservation_snapshot=ReservationSnapshot(
+                release_id="test-release",
+                key_hash="test_hash",
+                billing_key_hash="test_hash",
+                reserved_msats=100,
+            ),
         )
 
         results = []

@@ -7,7 +7,7 @@ from typing import Annotated, NoReturn
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlmodel import col, or_, select, update
+from sqlmodel import col, select, update
 
 from .auth import get_billing_key, validate_bearer_key
 from .core.db import (
@@ -15,6 +15,7 @@ from .core.db import (
     AsyncSession,
     CashuTransaction,
     get_session,
+    release_stale_reservations,
 )
 from .core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
@@ -109,13 +110,19 @@ async def account_info(
 # Note: validate_bearer_key already supports refund_address and key_expiry_time params
 
 
-@router.get("/create")
-async def create_balance(
+class BalanceCreateRequest(BaseModel):
+    initial_balance_token: str
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
+
+
+async def _create_balance(
     initial_balance_token: str,
-    balance_limit: int | None = None,
-    balance_limit_reset: str | None = None,
-    validity_date: int | None = None,
-    session: AsyncSession = Depends(get_session),
+    balance_limit: int | None,
+    balance_limit_reset: str | None,
+    validity_date: int | None,
+    session: AsyncSession,
 ) -> dict:
     key = await validate_bearer_key(initial_balance_token, session)
 
@@ -133,6 +140,37 @@ async def create_balance(
         "api_key": "sk-" + key.hashed_key,
         "balance": key.balance,
     }
+
+
+@router.post("/create")
+async def create_balance_from_body(
+    payload: BalanceCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _create_balance(
+        payload.initial_balance_token,
+        payload.balance_limit,
+        payload.balance_limit_reset,
+        payload.validity_date,
+        session,
+    )
+
+
+@router.get("/create")
+async def create_balance(
+    initial_balance_token: str,
+    balance_limit: int | None = None,
+    balance_limit_reset: str | None = None,
+    validity_date: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _create_balance(
+        initial_balance_token,
+        balance_limit,
+        balance_limit_reset,
+        validity_date,
+        session,
+    )
 
 
 @router.get("/info")
@@ -384,30 +422,19 @@ async def refund_wallet_endpoint(
         )
 
     if key.reserved_balance > 0:
-        # Release the reservation if it is stale
-        cutoff = int(time.time()) - settings.stale_reservation_timeout_seconds
-        stale_release_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .where(col(ApiKey.reserved_balance) > 0)
-            .where(
-                or_(
-                    col(ApiKey.reserved_at).is_(None),
-                    col(ApiKey.reserved_at) < cutoff,
-                )
-            )
-            .values(reserved_balance=0, reserved_at=None)
+        # Release only durable reservations old enough to be stale. A newer
+        # request on the same aggregate balance must remain reserved.
+        await release_stale_reservations(
+            session,
+            settings.stale_reservation_timeout_seconds,
+            key_hash=key.hashed_key,
         )
-        stale_result = await session.exec(stale_release_stmt)  # type: ignore[call-overload]
-        await session.commit()
-
-        if stale_result.rowcount == 0:
+        await session.refresh(key)
+        if key.reserved_balance > 0:
             raise HTTPException(
                 status_code=400,
                 detail="Cannot refund key. There are ongoing requests for this api key.",
             )
-
-        await session.refresh(key)
         logger.warning(
             "refund_wallet_endpoint: released stale reservation before refund",
             extra={

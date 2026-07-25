@@ -16,13 +16,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import pay_for_request
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import (
     ApiKey,
+    ReservationRelease,
     release_stale_reservations,
     reset_all_reserved_balances,
 )
@@ -70,7 +71,9 @@ async def test_pay_for_request_sets_reserved_at(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pay_for_request_sets_reserved_at_on_child_key(session: AsyncSession) -> None:
+async def test_pay_for_request_sets_reserved_at_on_child_key(
+    session: AsyncSession,
+) -> None:
     parent = ApiKey(hashed_key="parentkey", balance=10_000)
     child = ApiKey(hashed_key="childkey", balance=0, parent_key_hash="parentkey")
     session.add(parent)
@@ -151,6 +154,39 @@ async def test_release_stale_reservations_releases_old(session: AsyncSession) ->
 
 
 @pytest.mark.asyncio
+async def test_targeted_parent_cleanup_releases_child_owned_reservation(
+    session: AsyncSession,
+) -> None:
+    parent = ApiKey(hashed_key="stale-parent", balance=5_000)
+    child = ApiKey(
+        hashed_key="stale-child", parent_key_hash=parent.hashed_key, balance=0
+    )
+    session.add_all([parent, child])
+    await session.commit()
+    await pay_for_request(child, 1_000, session)
+    reservation = (
+        await session.exec(
+            select(ReservationRelease).where(
+                ReservationRelease.key_hash == child.hashed_key
+            )
+        )
+    ).one()
+    reservation.created_at = int(time.time()) - 1_000
+    session.add(reservation)
+    await session.commit()
+
+    released = await release_stale_reservations(
+        session, max_age_seconds=300, key_hash=parent.hashed_key
+    )
+
+    assert released == 1
+    await session.refresh(parent)
+    await session.refresh(child)
+    assert parent.reserved_balance == 0
+    assert child.reserved_balance == 0
+
+
+@pytest.mark.asyncio
 async def test_release_stale_reservations_keeps_fresh(session: AsyncSession) -> None:
     key = ApiKey(
         hashed_key="freshkey",
@@ -170,7 +206,9 @@ async def test_release_stale_reservations_keeps_fresh(session: AsyncSession) -> 
 
 
 @pytest.mark.asyncio
-async def test_release_stale_reservations_skips_null_reserved_at(session: AsyncSession) -> None:
+async def test_release_stale_reservations_skips_null_reserved_at(
+    session: AsyncSession,
+) -> None:
     # Reservations without a timestamp may belong to instances running older
     # code (rolling deploy) — the background sweeper must not touch them.
     key = ApiKey(
@@ -190,7 +228,9 @@ async def test_release_stale_reservations_skips_null_reserved_at(session: AsyncS
 
 
 @pytest.mark.asyncio
-async def test_reset_all_reserved_balances_clears_reserved_at(session: AsyncSession) -> None:
+async def test_reset_all_reserved_balances_clears_reserved_at(
+    session: AsyncSession,
+) -> None:
     key = ApiKey(
         hashed_key="resetkey",
         balance=5_000,
@@ -352,6 +392,7 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
     upstream.forward_request = AsyncMock(side_effect=asyncio.CancelledError())
 
     session = MagicMock()
+    reservation_snapshot = MagicMock()
     revert_mock = AsyncMock(return_value=True)
 
     with (
@@ -369,13 +410,16 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
             AsyncMock(return_value=1_000),
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
-        patch.object(
-            proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)
-        ),
+        patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
         patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
+        patch.object(
+            proxy_module,
+            "get_reservation_snapshot",
+            AsyncMock(return_value=reservation_snapshot),
+        ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),
     ):
         with pytest.raises(asyncio.CancelledError):
             await proxy_module.proxy(request, "v1/chat/completions", session=session)
 
-    revert_mock.assert_awaited_once_with(key, session, 900)
+    revert_mock.assert_awaited_once_with(key, session, 900, reservation_snapshot)

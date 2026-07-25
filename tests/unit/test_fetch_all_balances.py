@@ -28,7 +28,9 @@ async def _fake_session():  # type: ignore[no-untyped-def]
     yield MagicMock()
 
 
-def _patches(proof_amount: int = 1000):  # type: ignore[no-untyped-def]
+def _patches(  # type: ignore[no-untyped-def]
+    proof_amount: int = 1000, user_balance_msats: int = 0
+):
     proof = MagicMock(amount=proof_amount)
     return [
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
@@ -42,7 +44,7 @@ def _patches(proof_amount: int = 1000):  # type: ignore[no-untyped-def]
         ),
         patch(
             "routstr.wallet.db.balances_for_mint_and_unit",
-            AsyncMock(return_value=0),
+            AsyncMock(return_value=user_balance_msats),
         ),
         patch("routstr.wallet.db.create_session", _fake_session),
     ]
@@ -223,6 +225,31 @@ async def test_balance_failure_applies_mint_cooldown_to_other_units() -> None:
     assert details[0]["error_code"] == "unreachable"
     assert details[1]["error"] == "Mint is unreachable"
     assert details[1]["error_code"] == "unreachable"
+
+
+async def test_fetch_all_balances_reports_liability_when_wallet_is_empty() -> None:
+    """An empty wallet must not hide outstanding user liabilities."""
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", []),
+        patch.object(settings, "primary_mint", "http://primary:3338"),
+    ):
+        for p in _patches(proof_amount=0, user_balance_msats=5000):
+            p.start()
+        try:
+            details, total_wallet, total_user, owner = await fetch_all_balances(
+                units=["sat"]
+            )
+        finally:
+            patch.stopall()
+
+    assert details[0]["wallet_balance"] == 0
+    assert details[0]["user_balance"] == 5
+    assert details[0]["owner_balance"] == -5
+    assert total_wallet == 0
+    assert total_user == 5
+    assert owner == -5
 
 
 @pytest.mark.asyncio

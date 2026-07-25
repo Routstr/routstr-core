@@ -18,6 +18,7 @@ from routstr.wallet import (
     get_balance,
     is_mint_connection_error,
     recieve_token,
+    send,
     send_token,
 )
 
@@ -49,7 +50,12 @@ async def test_get_balance() -> None:
     mock_wallet.load_mint = AsyncMock()
     mock_wallet.load_proofs = AsyncMock()
 
-    with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
+    # Reset the module-level wallet cache so a real wallet cached by an earlier
+    # test (e.g. an unmocked admin-withdraw path) can't shadow the mock here.
+    with (
+        patch("routstr.wallet._wallets", {}),
+        patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet),
+    ):
         balance = await get_balance("sat")
         assert balance == 50000
 
@@ -261,6 +267,93 @@ async def test_refund_mint_falls_back_to_trusted_mint_with_funds() -> None:
         mint = await find_trusted_mint_with_funds(100, "sat", primary)
 
     assert mint == secondary
+
+
+@pytest.mark.asyncio
+async def test_send_falls_back_when_preferred_mint_has_only_reserved_balance() -> None:
+    from routstr.core.settings import settings
+
+    preferred = "http://preferred:3338"
+    primary = "http://primary:3338"
+    preferred_wallet = Mock(keysets={}, proofs=[])
+    preferred_wallet.select_to_send = AsyncMock()
+    primary_wallet = Mock(keysets={}, proofs=[])
+    primary_wallet.select_to_send = AsyncMock()
+    primary_wallet.serialize_proofs = AsyncMock(return_value="primary-token")
+    primary_wallet.set_reserved_for_send = AsyncMock()
+
+    preferred_liquid = Mock(amount=500, reserved=False)
+    preferred_reserved = Mock(amount=600, reserved=True)
+    primary_liquid = Mock(amount=1000, reserved=False)
+    primary_wallet.select_to_send.return_value = ([primary_liquid], None)
+
+    async def get_wallet(mint_url: str, unit: str, **_: object) -> Mock:
+        assert unit == "sat"
+        return primary_wallet if mint_url == primary else preferred_wallet
+
+    def get_proofs(
+        wallet: Mock,
+        mint_url: str,
+        unit: str,
+        *,
+        not_reserved: bool = False,
+    ) -> list[Mock]:
+        assert unit == "sat"
+        if wallet is primary_wallet:
+            assert mint_url == primary
+            proofs = [primary_liquid]
+        else:
+            assert mint_url == preferred
+            proofs = [preferred_liquid, preferred_reserved]
+        return (
+            [proof for proof in proofs if not proof.reserved]
+            if not_reserved
+            else proofs
+        )
+
+    with (
+        patch.object(settings, "primary_mint", primary),
+        patch.object(settings, "cashu_mints", [primary, preferred]),
+        patch("routstr.wallet.get_wallet", side_effect=get_wallet),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", side_effect=get_proofs),
+    ):
+        amount, token = await send(1000, "sat", preferred)
+
+    assert (amount, token) == (1000, "primary-token")
+    preferred_wallet.select_to_send.assert_not_awaited()
+    primary_wallet.select_to_send.assert_awaited_once_with(
+        [primary_liquid], 1000, set_reserved=False, include_fees=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_primary_with_only_reserved_proofs_still_raises() -> None:
+    from routstr.core.settings import settings
+
+    primary = "http://primary:3338"
+    wallet = Mock(keysets={}, proofs=[])
+    wallet.select_to_send = AsyncMock()
+    reserved = Mock(amount=1000, reserved=True)
+
+    def get_proofs(
+        _wallet: Mock,
+        _mint_url: str,
+        _unit: str,
+        *,
+        not_reserved: bool = False,
+    ) -> list[Mock]:
+        return [] if not_reserved else [reserved]
+
+    with (
+        patch.object(settings, "primary_mint", primary),
+        patch.object(settings, "cashu_mints", [primary]),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", side_effect=get_proofs),
+        pytest.raises(ValueError, match="No trusted mint has"),
+    ):
+        await send(1000, "sat", primary)
+
+    wallet.select_to_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2182,9 +2275,7 @@ def _http_500_error(message: str = "") -> httpx.HTTPStatusError:
         ),
     ],
 )
-def test_is_mint_rate_limited_strictness(
-    error: BaseException, expected: bool
-) -> None:
+def test_is_mint_rate_limited_strictness(error: BaseException, expected: bool) -> None:
     assert _is_mint_rate_limited(error) is expected
 
 
@@ -2231,9 +2322,7 @@ def test_classify_rate_limit_takes_priority_over_connection_error() -> None:
 def test_classify_connection_error_still_returns_mint_unreachable() -> None:
     """Transport failures without a 429 in the chain are still
     classified as mint_unreachable."""
-    classified = classify_redemption_error(
-        httpx.ConnectError("connection refused")
-    )
+    classified = classify_redemption_error(httpx.ConnectError("connection refused"))
     assert classified is not None
     type_, status, _msg, code = classified
     assert type_ == "mint_unreachable"
@@ -2276,9 +2365,7 @@ async def test_probe_does_not_escalate_consecutive_rate_limits() -> None:
 
     # Simulate probe failure: _run_probe uses apply_cooldown, NOT
     # apply_rate_limit_cooldown, so the counter stays at 1.
-    guard.apply_cooldown(
-        _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, reason="rate_limited"
-    )
+    guard.apply_cooldown(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, reason="rate_limited")
     assert guard._consecutive_rate_limits == 1  # unchanged!
     assert guard._needs_probe is True
 

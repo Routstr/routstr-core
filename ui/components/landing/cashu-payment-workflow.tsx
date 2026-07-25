@@ -91,25 +91,27 @@ export function CashuPaymentWorkflow({
     setIsCreatingKey(true);
 
     try {
-      const params = new URLSearchParams({
+      const requestPayload: {
+        initial_balance_token: string;
+        balance_limit?: number;
+        balance_limit_reset?: string;
+        validity_date?: number;
+      } = {
         initial_balance_token: initialToken.trim(),
-      });
-      if (balanceLimit) params.append('balance_limit', balanceLimit);
+      };
+      if (balanceLimit) requestPayload.balance_limit = Number(balanceLimit);
       if (balanceLimitReset)
-        params.append('balance_limit_reset', balanceLimitReset);
+        requestPayload.balance_limit_reset = balanceLimitReset;
       if (validityDate) {
-        const timestamp = Math.floor(
+        requestPayload.validity_date = Math.floor(
           new Date(validityDate + 'T23:59:59').getTime() / 1000
         );
-        params.append('validity_date', timestamp.toString());
       }
-      const response = await fetch(
-        `${baseUrl}/v1/balance/create?${params.toString()}`,
-        {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-        }
-      );
+      const response = await fetch(`${baseUrl}/v1/balance/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestPayload),
+      });
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(errorText || 'Failed to create API key');

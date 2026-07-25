@@ -1,16 +1,16 @@
 """add mint url to lightning invoices
 
-Revision ID: 11eaab843b49
-Revises: d7e8f9a0b1c2
-Create Date: 2026-07-22 22:25:45.278261
+Revision ID: c7d5f8638599
+Revises: 9c4d8e2f1a6b
+Create Date: 2026-07-26 00:00:00.000000
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "11eaab843b49"
-down_revision = "d7e8f9a0b1c2"
+revision = "c7d5f8638599"
+down_revision = "9c4d8e2f1a6b"
 branch_labels = None
 depends_on = None
 
