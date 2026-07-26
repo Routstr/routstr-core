@@ -1726,20 +1726,48 @@ async def test_mint_operation_honors_retry_after_as_minimum() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mint_operation_timeout_includes_adaptive_cooldown() -> None:
+async def test_mint_operation_timeout_excludes_adaptive_cooldown() -> None:
     from routstr.core.settings import settings
     from routstr.wallet import _mint_operation, _MintRateGuard
 
-    operation = AsyncMock(return_value="unexpected")
-    with patch.object(settings, "mint_max_concurrency", 1):
+    operation = AsyncMock(return_value="ok")
+    with (
+        patch.object(settings, "mint_max_concurrency", 1),
+        patch.object(settings, "mint_operation_timeout_seconds", 0.01),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+    ):
         guard = _MintRateGuard.get("http://mint:3338")
-        assert guard is not None
         guard.apply_cooldown(60)
-        with patch.object(settings, "mint_operation_timeout_seconds", 0.01):
-            with pytest.raises(httpx.TimeoutException, match="total timeout"):
-                await _mint_operation(operation, mint_url="http://mint:3338")
+        assert await _mint_operation(operation, mint_url="http://mint:3338") == "ok"
 
-    operation.assert_not_awaited()
+    sleep.assert_awaited_once()
+    operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_default_timeout_allows_retry_after_rate_limit_cooldown() -> None:
+    from routstr.core.settings import settings
+    from routstr.wallet import _mint_operation
+
+    request = httpx.Request("POST", "http://mint:3338/v1/mint/quote/bolt11")
+    response = httpx.Response(429, request=request)
+    operation = AsyncMock(
+        side_effect=[
+            httpx.HTTPStatusError(
+                "rate limited", request=request, response=response
+            ),
+            "ok",
+        ]
+    )
+    with (
+        patch.object(settings, "mint_retry_max_attempts", 3),
+        patch.object(settings, "mint_operation_timeout_seconds", 30),
+        patch.object(settings, "mint_max_concurrency", 1),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock()),
+    ):
+        assert await _mint_operation(operation, mint_url="http://mint:3338") == "ok"
+
+    assert operation.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1984,27 +2012,26 @@ async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lightning_mint_fallback_on_429() -> None:
-    """A 429 from the primary mint should trigger fallback to a secondary,
-    not just transport errors."""
+async def test_lightning_mint_fallback_on_cashu_json_429() -> None:
+    """The real Cashu JSON-error adapter preserves 429 for fallback."""
     from routstr.core.settings import settings
     from routstr.lightning import _request_mint_with_fallback
+    from routstr.wallet import MintRateLimitedError, Wallet
 
     primary = "http://primary:3338"
     secondary = "http://secondary:3338"
 
-    mock_resp = Mock(status_code=429, headers={})
-    mock_resp.raise_for_status = Mock(
-        side_effect=httpx.HTTPStatusError(
-            "rate limited", request=Mock(), response=mock_resp
-        )
+    request = httpx.Request("POST", f"{primary}/v1/mint/quote/bolt11")
+    response = httpx.Response(
+        429,
+        request=request,
+        json={"detail": "too many requests", "code": 0},
     )
+    with pytest.raises(MintRateLimitedError) as captured:
+        Wallet.raise_on_error_request(response)
+
     mock_primary_wallet = Mock()
-    mock_primary_wallet.request_mint = AsyncMock(
-        side_effect=httpx.HTTPStatusError(
-            "rate limited", request=Mock(), response=mock_resp
-        )
-    )
+    mock_primary_wallet.request_mint = AsyncMock(side_effect=captured.value)
 
     mock_quote = Mock(request="lnbc1secondary", quote="quote_secondary")
     mock_secondary_wallet = Mock()

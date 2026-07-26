@@ -18,11 +18,14 @@ from ..wallet import deserialize_token_from_string
 
 logger = get_logger(__name__)
 
-_MINT_FEE_ALLOWANCE = 0.10
+# Interim policy: when Routstr must move value to another trusted mint, the
+# cross-mint Lightning round trip can consume fees that are not visible to the
+# client. Reserve 5% headroom until the fee-payer policy is made explicit.
+_MINT_FEE_ALLOWANCE = 0.05
 
 
 def apply_mint_fee_allowance(cost_msat: int) -> int:
-    """Reduce the admission reservation to account for mint fallback fees."""
+    """Reserve headroom for possible trusted-mint fallback fees."""
     adjusted = math.ceil(cost_msat * (1 - _MINT_FEE_ALLOWANCE))
     return max(settings.min_request_msat, adjusted)
 

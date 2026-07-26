@@ -25,7 +25,6 @@ from .core.db import (
 )
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
-from .core.settings import settings
 from .payment.helpers import (
     apply_mint_fee_allowance,
     calculate_discounted_max_cost,
@@ -469,7 +468,9 @@ async def proxy(
             candidate_max = await calculate_discounted_max_cost(
                 candidate_max, request_body_dict, model_obj=model_obj
             )
-            candidate_max = max(candidate_max, settings.min_request_msat)
+            # Apply the same interim 5% trusted-mint fee headroom used for the
+            # first candidate; failover must not silently change admission.
+            candidate_max = apply_mint_fee_allowance(candidate_max)
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot

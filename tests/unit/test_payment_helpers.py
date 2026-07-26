@@ -13,8 +13,10 @@ from routstr.payment.helpers import (  # noqa: E402
 )
 
 
-def test_mint_fee_allowance_reduces_admission_cost_by_ten_percent() -> None:
-    assert apply_mint_fee_allowance(124_886) == 112_398
+def test_mint_fee_allowance_reserves_five_percent_fallback_headroom() -> None:
+    # Interim policy: Routstr may pay hidden cross-mint Lightning fees when a
+    # trusted-mint fallback is required.
+    assert apply_mint_fee_allowance(124_886) == 118_642
 
 
 def test_mint_fee_allowance_never_drops_below_minimum() -> None:

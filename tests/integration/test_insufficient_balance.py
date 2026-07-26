@@ -208,13 +208,13 @@ async def test_pay_for_request_succeeds_when_balance_equals_cost(
 
 
 @pytest.mark.asyncio
-async def test_ten_percent_mint_fee_shortfall_is_admitted_and_reserved(
+async def test_five_percent_mint_fallback_headroom_is_admitted_and_reserved(
     integration_session: AsyncSession,
 ) -> None:
     from routstr.auth import pay_for_request, validate_bearer_key
     from routstr.payment.helpers import apply_mint_fee_allowance
 
-    key = _key(balance=90_000)
+    key = _key(balance=95_000)
     integration_session.add(key)
     await integration_session.commit()
 
@@ -225,8 +225,8 @@ async def test_ten_percent_mint_fee_shortfall_is_admitted_and_reserved(
     await pay_for_request(validated, admission_cost, integration_session)
 
     await integration_session.refresh(key)
-    assert admission_cost == 90_000
-    assert key.reserved_balance == 90_000
+    assert admission_cost == 95_000
+    assert key.reserved_balance == 95_000
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ async def test_http_402_response_shape_on_insufficient_balance(
     error = body["detail"]["error"]
     assert error["code"] == "insufficient_balance"
     assert error["type"] == "insufficient_quota"
-    assert "560.6 sats (560600 msats) required" in error["message"]
+    assert "591.744 sats (591744 msats) required" in error["message"]
     assert "20.32 sats (20320 msats) available" in error["message"]
 
     # Balance must be completely untouched

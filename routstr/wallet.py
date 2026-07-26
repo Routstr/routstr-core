@@ -9,7 +9,7 @@ import httpx
 from cashu.core.base import MintQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
-from cashu.wallet.wallet import Wallet
+from cashu.wallet.wallet import Wallet as _CashuWallet
 from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
@@ -53,6 +53,30 @@ class TokenConsumedError(Exception):
     a transport error underneath is never re-surfaced as a retryable
     mint_unreachable.
     """
+
+
+class MintRateLimitedError(httpx.HTTPStatusError):
+    """Typed boundary error preserving a Cashu mint's HTTP 429 response."""
+
+
+class Wallet(_CashuWallet):
+    """Cashu wallet adapter that preserves rate-limit status information.
+
+    Cashu's default response adapter converts JSON error bodies into plain
+    ``Exception`` instances before calling ``raise_for_status``. Intercept 429
+    here so Routstr's fallback and cooldown policy can use the real status
+    without unreliable message matching.
+    """
+
+    @staticmethod
+    def raise_on_error_request(resp: httpx.Response) -> None:
+        if resp.status_code == 429:
+            raise MintRateLimitedError(
+                "Cashu mint rate limited",
+                request=resp.request,
+                response=resp,
+            )
+        _CashuWallet.raise_on_error_request(resp)
 
 
 # httpx base classes cover their subclasses. HTTPStatusError is excluded on
@@ -253,8 +277,10 @@ async def _mint_operation(
 ) -> Any:
     """Run a mint operation with bounded concurrency and adaptive cooldown.
 
-    The timeout covers concurrency queueing, 429 cooldown, backoff, and network
-    work together.  ``factory`` must return a fresh coroutine for every retry.
+    The timeout applies to each network attempt. Queueing, cooldown, and retry
+    backoff are deliberately outside it so the shipped 60-second 429 cooldown
+    is not cancelled by the 30-second operation timeout. ``factory`` must
+    return a fresh coroutine for every retry.
 
     When ``retry_on_rate_limit`` is False a 429 is not retried in-place — the
     cooldown is still applied to the per-mint guard (so subsequent operations on
@@ -265,10 +291,15 @@ async def _mint_operation(
     timeout = settings.mint_operation_timeout_seconds
     max_attempts = settings.mint_retry_max_attempts + 1
 
+    async def timed_factory() -> Any:
+        if timeout > 0:
+            return await asyncio.wait_for(factory(), timeout=timeout)
+        return await factory()
+
     async def invoke() -> Any:
         if guard is not None:
-            return await guard.run(factory)
-        return await factory()
+            return await guard.run(timed_factory)
+        return await timed_factory()
 
     async def run_with_retries() -> Any:
         for attempt in range(max_attempts):
@@ -343,14 +374,7 @@ async def _mint_operation(
 
         raise RuntimeError(f"{op_name}: exhausted retries unexpectedly")
 
-    try:
-        if timeout > 0:
-            return await asyncio.wait_for(run_with_retries(), timeout=timeout)
-        return await run_with_retries()
-    except asyncio.TimeoutError as exc:
-        raise httpx.TimeoutException(
-            f"{op_name} exceeded its {timeout}s total timeout"
-        ) from exc
+    return await run_with_retries()
 
 
 def _parse_retry_after(headers: Any) -> float | None:

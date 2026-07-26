@@ -13,6 +13,7 @@ import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from cashu.core.base import Proof
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey, LightningInvoice
@@ -39,7 +40,15 @@ def _make_invoice(**kwargs: object) -> LightningInvoice:
 def mock_wallet_mint() -> object:
     with patch("routstr.lightning.get_wallet") as mock_get_wallet:
         wallet = AsyncMock()
-        wallet.mint = AsyncMock(return_value=[])
+        wallet.proofs = []
+        wallet.load_proofs = AsyncMock()
+
+        async def mint(amount: int, quote_id: str) -> list[Proof]:
+            proofs = [Proof(amount=amount, mint_id=quote_id)]
+            wallet.proofs.extend(proofs)
+            return proofs
+
+        wallet.mint = AsyncMock(side_effect=mint)
         mock_get_wallet.return_value = wallet
         yield mock_get_wallet
 
