@@ -161,13 +161,11 @@ export function RoutstrCreateKeySection({
 
     setIsCreatingCashu(true);
     try {
-      const params = new URLSearchParams({
-        initial_balance_token: cashuToken.trim(),
+      const resp = await fetch(`${cleanUrl}/v1/balance/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initial_balance_token: cashuToken.trim() }),
       });
-      const resp = await fetch(
-        `${cleanUrl}/v1/balance/create?${params.toString()}`,
-        { method: 'GET', headers: { 'Content-Type': 'application/json' } }
-      );
 
       if (!resp.ok) {
         const errorText = await resp.text();
