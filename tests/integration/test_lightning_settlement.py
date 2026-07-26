@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from cashu.core.base import Proof
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlmodel import col, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -61,7 +62,7 @@ async def test_invoice_read_transaction_closes_before_external_mint_io(
 
 @pytest.mark.asyncio
 async def test_separate_sessions_cas_topup_credit_exactly_once(
-    integration_engine: object,
+    integration_engine: AsyncEngine,
 ) -> None:
     key_hash = uuid.uuid4().hex
     invoice = _lightning_invoice(
@@ -103,7 +104,7 @@ async def test_separate_sessions_cas_topup_credit_exactly_once(
 
 @pytest.mark.asyncio
 async def test_topup_atomic_increment_preserves_concurrent_balance_mutation(
-    integration_engine: object,
+    integration_engine: AsyncEngine,
 ) -> None:
     key_hash = uuid.uuid4().hex
     invoice = _lightning_invoice(
@@ -149,7 +150,7 @@ async def test_topup_atomic_increment_preserves_concurrent_balance_mutation(
 
 @pytest.mark.asyncio
 async def test_failed_final_commit_rolls_back_claim_and_credit_for_retry(
-    integration_engine: object,
+    integration_engine: AsyncEngine,
 ) -> None:
     key_hash = uuid.uuid4().hex
     invoice = _lightning_invoice(
@@ -201,7 +202,7 @@ async def test_failed_final_commit_rolls_back_claim_and_credit_for_retry(
 
 @pytest.mark.asyncio
 async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
-    integration_engine: object,
+    integration_engine: AsyncEngine,
 ) -> None:
     key_hash = uuid.uuid4().hex
     invoice = _lightning_invoice(
