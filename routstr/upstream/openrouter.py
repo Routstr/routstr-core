@@ -18,6 +18,23 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     supports_anthropic_messages = True
     litellm_provider_prefix = "openrouter/"
 
+    def discovery_path_for_subprovider(self, sub_provider: str | None) -> str | None:
+        """Mirror ``_apply_provider_field``: strip repeated prefixes, map a
+        missing or self-echoing sub-provider to the literal ``"unknown"``."""
+        provider_type = (self.provider_type or "").strip()
+        sub = (sub_provider or "").strip()
+        prefix = f"{provider_type}:"
+        while sub.lower().startswith(prefix.lower()):
+            sub = sub[len(prefix) :].strip()
+        if not sub or sub.lower() == provider_type.lower():
+            return "unknown"
+        return f"{provider_type}:{sub}"
+
+    def discovery_base_paths(self) -> list[str]:
+        """Native OpenRouter never stamps a bare ``openrouter``; a response
+        with no sub-provider is stamped ``unknown``."""
+        return ["unknown"]
+
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the ``provider`` field for OpenRouter responses.
 

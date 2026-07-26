@@ -455,7 +455,9 @@ async def _update_sats_pricing_once() -> None:
             for m in upstream.get_cached_models()
         ]
         upstream._models_cache = updated_models
-        upstream._models_by_id = {m.forwarded_model_id or m.id: m for m in updated_models}
+        upstream._models_by_id = {
+            m.forwarded_model_id or m.id: m for m in updated_models
+        }
         updated_count += len(updated_models)
 
     if updated_count > 0:
@@ -510,9 +512,7 @@ class ModelTestRequest(V2BaseModel):
     request_data: dict
 
 
-@models_router.post(
-    "/api/models/test", dependencies=[Depends(_require_admin_api)]
-)
+@models_router.post("/api/models/test", dependencies=[Depends(_require_admin_api)])
 async def test_model(
     payload: ModelTestRequest,
     session: AsyncSession = Depends(get_session),
@@ -601,7 +601,7 @@ async def model_paths() -> dict:
     """All models with every upstream provider path they are reachable through."""
     from ..upstream.model_paths import get_all_model_paths
 
-    return {"data": await get_all_model_paths()}
+    return await get_all_model_paths()
 
 
 @models_router.get("/v1/models/paths/model")
@@ -615,7 +615,7 @@ async def model_paths_for_model(model_id: str) -> dict:
     """
     from ..upstream.model_paths import get_paths_for_model
 
-    return {"data": await get_paths_for_model(model_id)}
+    return await get_paths_for_model(model_id)
 
 
 @models_router.get("/v1/models")

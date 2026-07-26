@@ -237,6 +237,28 @@ class BaseUpstreamProvider:
             except (TypeError, ValueError):
                 pass
 
+    def discovery_path_for_subprovider(self, sub_provider: str | None) -> str | None:
+        """Discovery path for a reported sub-provider name.
+
+        Must produce exactly the value ``_apply_provider_field`` would stamp on
+        a response whose upstream payload reported ``sub_provider``, so the
+        model-path discovery API never advertises a path that cannot appear on
+        the wire. Subclasses that override ``_apply_provider_field`` must
+        override this to match.
+        """
+        provider_type = (self.provider_type or "").strip()
+        if not provider_type:
+            return None
+        sub = (sub_provider or "").strip()
+        if not sub or sub == provider_type or sub.startswith(f"{provider_type}:"):
+            return sub or provider_type
+        return f"{provider_type}:{sub}"
+
+    def discovery_base_paths(self) -> list[str]:
+        """Paths stamped when the upstream reports no sub-provider of its own."""
+        provider_type = (self.provider_type or "").strip()
+        return [provider_type] if provider_type else []
+
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the routstr ``provider`` field onto an upstream response payload.
 

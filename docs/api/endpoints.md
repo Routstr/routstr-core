@@ -374,10 +374,13 @@ GET /v1/models/paths/model?model_id=anthropic/claude-sonnet-4
 }
 ```
 
-Model IDs in responses are unqualified display IDs: provider prefixes such as
-`z-ai/` or `openai/` are stripped. Path values match the provider string stamped
-on chat-completion responses, such as `anthropic`, `generic:my-upstream`, or
-`openrouter:Anthropic`.
+Model IDs in responses are base model IDs: the leading provider prefix such as
+`z-ai/` or `openai/` is stripped (the same rule routing uses, so the ID can be
+sent back to `/v1/chat/completions` verbatim). Path values match the provider
+string stamped on chat-completion responses, such as `anthropic`,
+`generic:Anthropic`, `openrouter:Anthropic`, or `unknown` (native OpenRouter
+with no usable sub-provider). Responses also carry an `updated_at` Unix
+timestamp of the last successful refresh (`null` when no refresh has run).
 
 ## Wallet Management
 

@@ -183,6 +183,19 @@ async def refresh_model_maps() -> None:
         disabled_model_keys=disabled_model_keys,
     )
 
+    # Keep model-path discovery in sync with admin mutations: disabling or
+    # deleting a provider must stop advertising its paths immediately rather
+    # than after the next timed refresh.
+    from .upstream.model_paths import prune_model_paths_for_inactive_providers
+
+    try:
+        await prune_model_paths_for_inactive_providers()
+    except Exception as e:  # noqa: BLE001 - discovery sync must not break routing
+        logger.warning(
+            "Failed to prune model paths for inactive providers",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+
 
 async def refresh_model_maps_periodically() -> None:
     """Background task to refresh model maps every minute."""
