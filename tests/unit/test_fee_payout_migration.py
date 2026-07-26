@@ -18,6 +18,32 @@ def _run_alembic(root: Path, database_url: str, revision: str) -> None:
     )
 
 
+def _alembic_heads(root: Path, database_url: str) -> set[str]:
+    """The revisions alembic itself reports as heads.
+
+    Reading the head back from the migration tree rather than pinning a literal
+    keeps the assertion about what this test is for — a fresh node reaching the
+    end of the chain with the fee-payout schema in place — instead of failing on
+    every later migration that legitimately advances the head. A single head is
+    part of the invariant: a second one means `upgrade head` would refuse to run.
+    """
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "heads"],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        line.split()[0]
+        for line in result.stdout.splitlines()
+        if line.strip().endswith("(head)")
+    }
+
+
 def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     database_path = tmp_path / "fresh-node.db"
@@ -37,7 +63,9 @@ def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
             "payout_in_progress_msats, payout_started_at FROM routstr_fees"
         ).fetchone()
 
-    assert version == ("9c4d8e2f1a6b",)
+    heads = _alembic_heads(root, database_url)
+    assert len(heads) == 1
+    assert version == (heads.pop(),)
     assert {
         "id",
         "accumulated_msats",
