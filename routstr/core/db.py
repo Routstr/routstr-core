@@ -338,8 +338,18 @@ class ModelPathRow(SQLModel, table=True):  # type: ignore
         description="Client-visible /v1/models id (forwarded_model_id or id)"
     )
     path: str = Field(
-        description="Provider path stamped on chat completion responses, e.g. "
-        "'anthropic' or 'openrouter:Anthropic'"
+        description="Opaque selector containing provider ID and optional endpoint tag"
+    )
+    provider_slug: str = Field(
+        description="Public slug of the configured upstream provider"
+    )
+    provider_type: str = Field(description="Configured upstream provider type")
+    endpoint_tag: str | None = Field(
+        default=None,
+        description="Exact OpenRouter endpoint tag used for request-side selection",
+    )
+    endpoint_name: str | None = Field(
+        default=None, description="Human-readable endpoint display name"
     )
     upstream_provider_id: int = Field(
         index=True,

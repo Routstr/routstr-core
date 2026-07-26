@@ -613,9 +613,17 @@ async def model_paths_for_model(model_id: str) -> dict:
     model ids containing ``/`` (e.g. ``anthropic/claude-opus-4.6``) need no URL
     encoding and there is no dynamic-route ambiguity.
     """
+    from ..proxy import get_unique_models
     from ..upstream.model_paths import get_paths_for_model
 
-    return await get_paths_for_model(model_id)
+    result = await get_paths_for_model(model_id)
+    if not result["data"]:
+        advertised_ids = {
+            model.forwarded_model_id or model.id for model in get_unique_models()
+        }
+        if model_id not in advertised_ids:
+            raise HTTPException(status_code=404, detail="Model not found")
+    return result
 
 
 @models_router.get("/v1/models")

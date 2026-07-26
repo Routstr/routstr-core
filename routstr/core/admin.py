@@ -51,6 +51,23 @@ ADMIN_SESSION_DURATION = 3600
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
+async def _refresh_provider_model_paths(upstream_provider_id: int) -> None:
+    """Best-effort immediate discovery sync after an admin mutation."""
+    from ..upstream.model_paths import refresh_model_paths_for_provider
+
+    try:
+        await refresh_model_paths_for_provider(upstream_provider_id)
+    except Exception as exc:  # noqa: BLE001 - committed admin writes must survive
+        logger.warning(
+            "Failed to refresh model paths after admin mutation",
+            extra={
+                "upstream_provider_id": upstream_provider_id,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+
+
 async def require_admin_api(request: Request) -> None:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -579,6 +596,7 @@ async def upsert_provider_model(
             await session.refresh(row)
 
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return _row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
@@ -633,6 +651,7 @@ async def delete_provider_model(provider_id: str, model_id: str) -> dict[str, ob
         await session.delete(row)
         await session.commit()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {"ok": True, "deleted_id": model_id}
 
 
@@ -652,6 +671,7 @@ async def delete_all_provider_models(provider_id: str) -> dict[str, object]:
             await session.delete(row)  # type: ignore
         await session.commit()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {"ok": True, "deleted": len(rows)}
 
 
@@ -705,6 +725,9 @@ async def batch_override_provider_models(
                     json.dumps(model_data.alias_ids) if model_data.alias_ids else None
                 )
                 existing_row.enabled = model_data.enabled
+                existing_row.forwarded_model_id = (
+                    model_data.forwarded_model_id or model_data.id
+                )
                 session.add(existing_row)
             else:
                 # Create new
@@ -735,6 +758,7 @@ async def batch_override_provider_models(
                     ),
                     upstream_provider_id=provider_pk,
                     enabled=model_data.enabled,
+                    forwarded_model_id=model_data.forwarded_model_id or model_data.id,
                 )
                 session.add(row)
 
@@ -743,6 +767,7 @@ async def batch_override_provider_models(
         await session.commit()
 
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {
         "ok": True,
         "count": overridden_count,
@@ -943,6 +968,7 @@ async def create_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -968,6 +994,7 @@ async def update_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -1003,6 +1030,7 @@ async def update_upstream_provider_by_slug(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 

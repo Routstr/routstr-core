@@ -142,11 +142,18 @@ def _mock_transport(
     return counter
 
 
-def _endpoints_response(*provider_names: str) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={"data": {"endpoints": [{"provider_name": n} for n in provider_names]}},
-    )
+def _endpoints_response(
+    *providers: str | tuple[str, str],
+) -> httpx.Response:
+    endpoints = []
+    for provider in providers:
+        if isinstance(provider, tuple):
+            provider_name, tag = provider
+        else:
+            provider_name = provider
+            tag = provider.lower().replace(" ", "-")
+        endpoints.append({"provider_name": provider_name, "tag": tag})
+    return httpx.Response(200, json={"data": {"endpoints": endpoints}})
 
 
 _SEEDED_PROVIDER_IDS = (1, 2, 4, 5, 7)
@@ -206,6 +213,29 @@ def _ids_of(payload: dict) -> set[str]:
     return {entry["id"] for entry in payload["data"]}
 
 
+def _path_entry(
+    provider_id: int,
+    *,
+    provider_slug: str | None = None,
+    provider_type: str | None = None,
+    endpoint_tag: str | None = None,
+    endpoint_name: str | None = None,
+) -> dict[str, Any]:
+    endpoint = None
+    if endpoint_tag or endpoint_name:
+        endpoint = {"tag": endpoint_tag, "name": endpoint_name}
+    return {
+        "path": mp.encode_model_path(provider_id, endpoint_tag),
+        "provider": {
+            "id": provider_id,
+            "slug": provider_slug or f"p{provider_id}",
+            "type": provider_type
+            or ("anthropic" if provider_id == 1 else "openrouter"),
+        },
+        "endpoint": endpoint,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Predicates / pure helpers
 # --------------------------------------------------------------------------- #
@@ -221,6 +251,13 @@ def test_native_anthropic_not_openrouter() -> None:
     """Native Anthropic must not be treated as OpenRouter-compatible even though
     ``_upstream_accepts_cache_control`` returns True for it."""
     assert mp.is_openrouter_base_url("https://api.anthropic.com/v1") is False
+
+
+def test_encode_model_path_uses_provider_id_without_exposing_url() -> None:
+    assert mp.encode_model_path(42) == "provider=42"
+    assert mp.encode_model_path(42, "google-vertex/us-east5") == (
+        "provider=42&endpoint=google-vertex%2Fus-east5"
+    )
 
 
 def test_exposed_model_id_prefers_forwarded() -> None:
@@ -300,9 +337,7 @@ async def test_direct_provider_single_path_uses_provider_type(
     )
     await mp.refresh_model_paths([provider])
     payload = await mp.get_all_model_paths()
-    assert payload["data"] == [
-        {"id": "claude-opus-4.6", "paths": [{"path": "anthropic"}]}
-    ]
+    assert payload["data"] == [{"id": "claude-opus-4.6", "paths": [_path_entry(1)]}]
     assert payload["updated_at"] is not None
 
 
@@ -318,6 +353,22 @@ async def test_direct_path_stores_exposed_model_id(
     )
     await mp.refresh_model_paths([provider])
     assert _ids_of(await mp.get_all_model_paths()) == {"claude-opus-4.6"}
+
+
+@pytest.mark.asyncio
+async def test_forwarded_model_id_with_slash_remains_exact_and_routable(
+    patched_session: AsyncEngine,
+) -> None:
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        models=[_model("local-alias", forwarded_model_id="anthropic/claude-opus-4.6")],
+        db_id=1,
+    )
+    await mp.refresh_model_paths([provider])
+
+    assert _ids_of(await mp.get_all_model_paths()) == {"anthropic/claude-opus-4.6"}
+    assert (await mp.get_paths_for_model("anthropic/claude-opus-4.6"))["data"]
 
 
 @pytest.mark.asyncio
@@ -361,7 +412,7 @@ async def test_disabling_model_on_one_provider_keeps_other_provider(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {"anthropic"}
+    assert _paths_of(payload, "shared-model") == {mp.encode_model_path(1)}
 
 
 @pytest.mark.asyncio
@@ -395,8 +446,8 @@ async def test_override_alias_not_applied_across_providers(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {"anthropic"}
-    assert _paths_of(payload, "private-alias") == {"generic"}
+    assert _paths_of(payload, "shared-model") == {mp.encode_model_path(1)}
+    assert _paths_of(payload, "private-alias") == {mp.encode_model_path(2)}
 
 
 @pytest.mark.asyncio
@@ -464,7 +515,7 @@ async def test_refresh_model_paths_uses_db_forwarded_alias(
     await mp.refresh_model_paths([provider])
 
     assert (await mp.get_all_model_paths())["data"] == [
-        {"id": "public-alias", "paths": [{"path": "anthropic"}]}
+        {"id": "public-alias", "paths": [_path_entry(1)]}
     ]
 
 
@@ -486,7 +537,7 @@ async def test_refresh_model_paths_includes_enabled_db_override_missing_from_cac
     await mp.refresh_model_paths([provider])
 
     assert (await mp.get_all_model_paths())["data"] == [
-        {"id": "public-deployment", "paths": [{"path": "generic"}]}
+        {"id": "public-deployment", "paths": [_path_entry(1)]}
     ]
 
 
@@ -638,24 +689,34 @@ async def test_openrouter_provider_adds_endpoint_paths(
     )
     _mock_transport(
         monkeypatch,
-        lambda request: _endpoints_response("Anthropic", "Amazon Bedrock"),
+        lambda request: _endpoints_response(
+            ("Google", "google-vertex/eu"),
+            ("Google", "google-vertex/us"),
+        ),
     )
 
     await mp.refresh_model_paths([provider])
 
-    paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert "openrouter:Anthropic" in paths
-    assert "openrouter:Amazon Bedrock" in paths
-    assert "openrouter" not in paths
+    payload = await mp.get_paths_for_model("claude-opus-4.6")
+    assert {item["path"] for item in payload["data"]} == {
+        mp.encode_model_path(2),
+        mp.encode_model_path(2, "google-vertex/eu"),
+        mp.encode_model_path(2, "google-vertex/us"),
+    }
+    assert {
+        item["endpoint"]["tag"] for item in payload["data"] if item["endpoint"]
+    } == {"google-vertex/eu", "google-vertex/us"}
+    assert {
+        item["endpoint"]["name"] for item in payload["data"] if item["endpoint"]
+    } == {"Google"}
+    assert {item["provider"]["id"] for item in payload["data"]} == {2}
 
 
 @pytest.mark.asyncio
-async def test_openrouter_self_echoing_subprovider_maps_to_unknown(
+async def test_openrouter_uses_exact_tag_even_when_display_name_is_router(
     patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Responses stamped for a sub-provider echoing "OpenRouter" say
-    ``unknown``; discovery must advertise the same string, never
-    ``openrouter:OpenRouter``."""
+    """Machine-readable endpoint tags, not display names, define identity."""
     provider = _FakeOpenRouterProvider(
         models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
         db_id=2,
@@ -665,17 +726,14 @@ async def test_openrouter_self_echoing_subprovider_maps_to_unknown(
     await mp.refresh_model_paths([provider])
 
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert "openrouter:OpenRouter" not in paths
-    assert "unknown" in paths
+    assert paths == {mp.encode_model_path(2), mp.encode_model_path(2, "openrouter")}
 
 
 @pytest.mark.asyncio
 async def test_generic_provider_with_openrouter_base_url_discovers(
     patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A generic provider pointed at OpenRouter exposes both the bare
-    ``generic`` path (stamped when the upstream omits its provider field) and
-    the ``generic:<upstream>`` endpoint paths."""
+    """Configured provider identity is independent from its endpoint URL."""
     provider = _FakeProvider(
         provider_type="generic",
         base_url="https://openrouter.ai/api/v1",
@@ -687,7 +745,35 @@ async def test_generic_provider_with_openrouter_base_url_discovers(
     await mp.refresh_model_paths([provider])
 
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert paths == {"generic", "generic:Anthropic"}
+    assert paths == {mp.encode_model_path(1), mp.encode_model_path(1, "anthropic")}
+
+
+@pytest.mark.asyncio
+async def test_openrouter_partial_failure_keeps_failed_models_previous_rows(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _FakeOpenRouterProvider(
+        models=[
+            _model("good", canonical_slug="author/good"),
+            _model("degraded", canonical_slug="author/degraded"),
+        ],
+        db_id=2,
+    )
+    _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
+    await mp.refresh_model_paths([provider])
+    before = _paths_of(await mp.get_all_model_paths(), "degraded")
+    assert before
+
+    def _partial_failure(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/author/degraded/endpoints"):
+            return httpx.Response(503)
+        return _endpoints_response("Google")
+
+    _mock_transport(monkeypatch, _partial_failure)
+    await mp.refresh_model_paths([provider])
+
+    assert _paths_of(await mp.get_all_model_paths(), "degraded") == before
+    assert _paths_of(await mp.get_all_model_paths(), "good") != before
 
 
 @pytest.mark.asyncio
@@ -703,7 +789,7 @@ async def test_openrouter_failure_keeps_previous_rows(
     _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
     await mp.refresh_model_paths([provider])
     before = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert "openrouter:Anthropic" in before
+    assert mp.encode_model_path(2, "anthropic") in before
 
     def _network_down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("network down", request=request)
@@ -726,10 +812,8 @@ async def test_openrouter_rate_limit_aborts_cycle_and_keeps_rows(
 
     _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
     await mp.refresh_model_paths([provider])
-    assert _paths_of(await mp.get_all_model_paths(), "m0") == {
-        "unknown",
-        "openrouter:Anthropic",
-    }
+    expected = {mp.encode_model_path(2), mp.encode_model_path(2, "anthropic")}
+    assert _paths_of(await mp.get_all_model_paths(), "m0") == expected
 
     counter = _mock_transport(monkeypatch, lambda request: httpx.Response(429))
     await mp.refresh_model_paths([provider])
@@ -739,27 +823,28 @@ async def test_openrouter_rate_limit_aborts_cycle_and_keeps_rows(
     assert counter["requests"] <= mp._OPENROUTER_CONCURRENCY, (
         "429 must abort the remaining fan-out"
     )
-    assert _paths_of(await mp.get_all_model_paths(), "m0") == {
-        "unknown",
-        "openrouter:Anthropic",
-    }
+    assert _paths_of(await mp.get_all_model_paths(), "m0") == expected
 
 
 @pytest.mark.asyncio
-async def test_openrouter_bad_payload_shapes_do_not_raise(
+async def test_openrouter_bad_payload_shapes_preserve_previous_rows(
     patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``endpoints: null`` and non-list endpoint payloads are swallowed as
-    documented, not raised into the generic task-errored bucket."""
+    """Malformed successful responses are degraded snapshots, not empty sets."""
+    provider = _FakeOpenRouterProvider(
+        models=[_model("m", canonical_slug="a/m")], db_id=2
+    )
+    _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
+    await mp.refresh_model_paths([provider])
+    before = _paths_of(await mp.get_all_model_paths(), "m")
+
     for payload in (
         {"data": {"endpoints": None}},
         {"data": {"endpoints": "none"}},
+        {"data": {"endpoints": [{"provider_name": "Anthropic"}]}},
         {"data": None},
         {},
     ):
-        provider = _FakeOpenRouterProvider(
-            models=[_model("m", canonical_slug="a/m")], db_id=2
-        )
 
         def _handler(
             request: httpx.Request, p: dict[str, Any] | None = payload
@@ -767,8 +852,8 @@ async def test_openrouter_bad_payload_shapes_do_not_raise(
             return httpx.Response(200, json=p)
 
         _mock_transport(monkeypatch, _handler)
-        # Must not raise.
         await mp.refresh_model_paths([provider])
+        assert _paths_of(await mp.get_all_model_paths(), "m") == before
 
 
 @pytest.mark.asyncio
@@ -795,8 +880,12 @@ async def test_openrouter_shared_base_url_fetched_once(
 
     assert counter["requests"] == 1
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert "openrouter:Anthropic" in paths
-    assert "generic:Anthropic" in paths
+    assert paths == {
+        mp.encode_model_path(2),
+        mp.encode_model_path(2, "anthropic"),
+        mp.encode_model_path(4),
+        mp.encode_model_path(4, "anthropic"),
+    }
 
 
 @pytest.mark.asyncio
@@ -857,13 +946,16 @@ async def test_same_model_two_providers_two_paths(
     assert len(payload["data"]) == 1
     entry = payload["data"][0]
     assert entry["id"] == "claude-opus-4.6"
-    assert {p["path"] for p in entry["paths"]} == {"anthropic", "generic"}
+    assert {p["path"] for p in entry["paths"]} == {
+        mp.encode_model_path(1),
+        mp.encode_model_path(2),
+    }
     assert "canonical_id" not in entry
     assert all("canonical_id" not in p for p in entry["paths"])
 
 
 @pytest.mark.asyncio
-async def test_get_all_model_paths_deduplicates_visible_paths(
+async def test_get_all_model_paths_keeps_distinct_configured_providers(
     patched_session: AsyncEngine,
 ) -> None:
     p1 = _FakeProvider(
@@ -881,7 +973,10 @@ async def test_get_all_model_paths_deduplicates_visible_paths(
     await mp.refresh_model_paths([p1, p2])
 
     assert (await mp.get_all_model_paths())["data"] == [
-        {"id": "claude-opus-4.6", "paths": [{"path": "anthropic"}]}
+        {
+            "id": "claude-opus-4.6",
+            "paths": [_path_entry(1), _path_entry(2)],
+        }
     ]
 
 
@@ -906,14 +1001,13 @@ async def test_get_all_model_paths_is_deterministic(
 
 
 @pytest.mark.asyncio
-async def test_get_paths_for_model_returns_only_paths(
+async def test_get_paths_for_model_returns_route_identity(
     patched_session: AsyncEngine,
 ) -> None:
     await _seed_two_provider_shared_model(patched_session)
 
     payload = await mp.get_paths_for_model("claude-opus-4.6")
-    assert {p["path"] for p in payload["data"]} == {"anthropic", "generic"}
-    assert all(set(p.keys()) == {"path"} for p in payload["data"])
+    assert payload["data"] == [_path_entry(1), _path_entry(2)]
     assert (await mp.get_paths_for_model("does-not-exist"))["data"] == []
 
 
@@ -929,13 +1023,11 @@ async def test_get_paths_for_model_falls_back_to_provider_prefixed_id(
     )
     await mp.refresh_model_paths([provider])
 
-    assert (await mp.get_paths_for_model("glm-5v-turbo"))["data"] == [
-        {"path": "generic"}
-    ]
+    assert (await mp.get_paths_for_model("glm-5v-turbo"))["data"] == [_path_entry(4)]
 
 
 @pytest.mark.asyncio
-async def test_get_paths_for_model_merges_prefixed_and_unprefixed_aliases(
+async def test_get_paths_for_model_requires_exact_advertised_id(
     patched_session: AsyncEngine,
 ) -> None:
     p1 = _FakeProvider(
@@ -955,8 +1047,8 @@ async def test_get_paths_for_model_merges_prefixed_and_unprefixed_aliases(
     short_paths = (await mp.get_paths_for_model("deepseek-v4-pro"))["data"]
     prefixed_paths = (await mp.get_paths_for_model("deepseek/deepseek-v4-pro"))["data"]
 
-    assert {p["path"] for p in short_paths} == {"generic", "anthropic"}
-    assert prefixed_paths == short_paths
+    assert short_paths == [_path_entry(4), _path_entry(7)]
+    assert prefixed_paths == []
 
 
 @pytest.mark.asyncio
@@ -975,16 +1067,38 @@ async def test_get_paths_for_model_multi_segment_id_matches_models_listing(
 
     assert _ids_of(await mp.get_all_model_paths()) == {"fireworks/models/glm-5"}
     assert (await mp.get_paths_for_model("fireworks/models/glm-5"))["data"] == [
-        {"path": "generic"}
+        _path_entry(1)
     ]
     assert (await mp.get_paths_for_model("accounts/fireworks/models/glm-5"))[
         "data"
-    ] == [{"path": "generic"}]
+    ] == []
 
 
 # --------------------------------------------------------------------------- #
-# Periodic refresh loop
+# Immediate and periodic refresh
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_refresh_model_paths_for_provider_selects_mutated_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import routstr.proxy as proxy
+
+    target = SimpleNamespace(db_id=2)
+    other = SimpleNamespace(db_id=1)
+    seen: list[list[Any]] = []
+
+    monkeypatch.setattr(proxy, "get_upstreams", lambda: [other, target])
+
+    async def _fake_refresh(upstreams: list[Any]) -> None:
+        seen.append(upstreams)
+
+    monkeypatch.setattr(mp, "refresh_model_paths", _fake_refresh)
+
+    await mp.refresh_model_paths_for_provider(2)
+
+    assert seen == [[target]]
 
 
 @pytest.mark.asyncio
@@ -1093,37 +1207,88 @@ def _make_model_paths_app() -> FastAPI:
 def test_model_paths_endpoint_returns_all_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    expected = {
+        "data": [
+            {
+                "id": "claude-opus-4.6",
+                "paths": [
+                    _path_entry(1),
+                    _path_entry(
+                        2,
+                        endpoint_tag="google-vertex/us",
+                        endpoint_name="Google",
+                    ),
+                ],
+            }
+        ],
+        "updated_at": 1753500000,
+    }
+
     async def _fake_get_all_model_paths() -> dict[str, Any]:
-        return {
-            "data": [
-                {
-                    "id": "claude-opus-4.6",
-                    "paths": [
-                        {"path": "anthropic"},
-                        {"path": "openrouter:Anthropic"},
-                    ],
-                }
-            ],
-            "updated_at": 1753500000,
-        }
+        return expected
 
     monkeypatch.setattr(mp, "get_all_model_paths", _fake_get_all_model_paths)
 
     response = TestClient(_make_model_paths_app()).get("/v1/models/paths")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "data": [
-            {
-                "id": "claude-opus-4.6",
-                "paths": [
-                    {"path": "anthropic"},
-                    {"path": "openrouter:Anthropic"},
-                ],
-            }
-        ],
-        "updated_at": 1753500000,
-    }
+    assert response.json() == expected
+
+
+def test_model_paths_for_model_returns_404_for_unknown_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import routstr.proxy as proxy
+
+    async def _fake_get_paths_for_model(model_id: str) -> dict[str, Any]:
+        return {"data": [], "updated_at": None}
+
+    monkeypatch.setattr(mp, "get_paths_for_model", _fake_get_paths_for_model)
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: [])
+
+    response = TestClient(_make_model_paths_app()).get(
+        "/v1/models/paths/model", params={"model_id": "does-not-exist"}
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Model not found"}
+
+
+def test_model_paths_for_known_model_can_return_empty_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import routstr.proxy as proxy
+
+    async def _fake_get_paths_for_model(model_id: str) -> dict[str, Any]:
+        return {"data": [], "updated_at": None}
+
+    monkeypatch.setattr(mp, "get_paths_for_model", _fake_get_paths_for_model)
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: [_model("known")])
+
+    response = TestClient(_make_model_paths_app()).get(
+        "/v1/models/paths/model", params={"model_id": "known"}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"data": [], "updated_at": None}
+
+
+def test_model_paths_for_routing_only_alias_returns_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import routstr.proxy as proxy
+
+    async def _fake_get_paths_for_model(model_id: str) -> dict[str, Any]:
+        return {"data": [], "updated_at": None}
+
+    monkeypatch.setattr(mp, "get_paths_for_model", _fake_get_paths_for_model)
+    monkeypatch.setattr(proxy, "get_unique_models", lambda: [_model("advertised")])
+
+    response = TestClient(_make_model_paths_app()).get(
+        "/v1/models/paths/model", params={"model_id": "routing-alias"}
+    )
+
+    assert response.status_code == 404
 
 
 def test_model_paths_for_model_endpoint_accepts_slash_model_id(
@@ -1131,9 +1296,14 @@ def test_model_paths_for_model_endpoint_accepts_slash_model_id(
 ) -> None:
     calls: list[str] = []
 
+    expected = {
+        "data": [_path_entry(2, endpoint_tag="anthropic", endpoint_name="Anthropic")],
+        "updated_at": None,
+    }
+
     async def _fake_get_paths_for_model(model_id: str) -> dict[str, Any]:
         calls.append(model_id)
-        return {"data": [{"path": "generic:Anthropic"}], "updated_at": None}
+        return expected
 
     monkeypatch.setattr(mp, "get_paths_for_model", _fake_get_paths_for_model)
 
@@ -1143,8 +1313,5 @@ def test_model_paths_for_model_endpoint_accepts_slash_model_id(
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "data": [{"path": "generic:Anthropic"}],
-        "updated_at": None,
-    }
+    assert response.json() == expected
     assert calls == ["anthropic/claude-opus-4.6"]

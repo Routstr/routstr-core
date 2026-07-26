@@ -4,12 +4,13 @@ Exposes every selectable upstream route a Routstr model is reachable through.
 This PR remains discovery-only: request-side routing will consume the opaque
 selectors in a follow-up.
 
-A path is a standard percent-encoded query string containing the normalized
-upstream URL and, for an exact OpenRouter endpoint, its machine-readable tag.
-Display names never participate in identity::
+A path is a standard percent-encoded query string containing the configured
+provider's stable node-local ID and, for an exact OpenRouter endpoint, its
+machine-readable tag. Upstream URLs and display names never participate in or
+leak through public identity::
 
-    url=https%3A%2F%2Fapi.anthropic.com%2Fv1
-    url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider=google-vertex%2Fus
+    provider=42
+    provider=42&endpoint=google-vertex%2Fus
 """
 
 from __future__ import annotations
@@ -58,14 +59,23 @@ class EndpointIdentity:
 
 
 @dataclass(frozen=True)
+class ConfiguredProviderIdentity:
+    """Public-safe identity of one configured upstream provider."""
+
+    id: int
+    slug: str
+    provider_type: str
+
+
+@dataclass(frozen=True)
 class DiscoveredPath:
     """One model route ready for persistence and API serialization."""
 
     model_id: str
     path: str
-    upstream_url: str
-    provider_tag: str | None = None
-    provider_name: str | None = None
+    provider: ConfiguredProviderIdentity
+    endpoint_tag: str | None = None
+    endpoint_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,16 +86,11 @@ class ProviderPathSnapshot:
     preserve_model_ids: frozenset[str] = frozenset()
 
 
-def normalize_upstream_url(base_url: str) -> str:
-    """Normalize route identity without changing URL semantics."""
-    return base_url.rstrip("/")
-
-
-def encode_model_path(base_url: str, provider_tag: str | None = None) -> str:
-    """Encode a stable opaque selector for future request-side routing."""
-    components = [("url", normalize_upstream_url(base_url))]
-    if provider_tag:
-        components.append(("provider", provider_tag))
+def encode_model_path(provider_id: int, endpoint_tag: str | None = None) -> str:
+    """Encode a stable opaque selector without exposing upstream URLs."""
+    components: list[tuple[str, str | int]] = [("provider", provider_id)]
+    if endpoint_tag:
+        components.append(("endpoint", endpoint_tag))
     return urlencode(components)
 
 
@@ -218,9 +223,11 @@ async def _fetch_openrouter_endpoint_subproviders(
         return None
 
     try:
-        endpoints = resp.json().get("data", {}).get("endpoints", [])
+        payload = resp.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        endpoints = data.get("endpoints") if isinstance(data, dict) else None
         if not isinstance(endpoints, list):
-            endpoints = []
+            raise ValueError("endpoints must be a list")
         identities: dict[str, EndpointIdentity] = {}
         for endpoint in endpoints:
             if not isinstance(endpoint, dict):
@@ -238,6 +245,8 @@ async def _fetch_openrouter_endpoint_subproviders(
                     else None,
                 ),
             )
+        if endpoints and not identities:
+            raise ValueError("endpoints contain no usable tags")
         result = list(identities.values())
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -251,7 +260,9 @@ async def _fetch_openrouter_endpoint_subproviders(
 
 
 async def _load_model_visibility() -> tuple[
-    dict[ModelKey, ModelRow], set[ModelKey], set[int]
+    dict[ModelKey, ModelRow],
+    set[ModelKey],
+    dict[int, ConfiguredProviderIdentity],
 ]:
     """Load the same DB model visibility inputs used by routing.
 
@@ -271,12 +282,16 @@ async def _load_model_visibility() -> tuple[
 
     overrides_by_key: dict[ModelKey, ModelRow] = {}
     disabled_model_keys: set[ModelKey] = set()
-    enabled_provider_ids: set[int] = set()
+    provider_identities: dict[int, ConfiguredProviderIdentity] = {}
 
     for provider in provider_rows:
         if not provider.enabled or provider.id is None:
             continue
-        enabled_provider_ids.add(provider.id)
+        provider_identities[provider.id] = ConfiguredProviderIdentity(
+            id=provider.id,
+            slug=provider.slug or f"provider-{provider.id}",
+            provider_type=provider.provider_type,
+        )
         for model in provider.models:
             key = (model.id.lower(), provider.id)
             if model.enabled:
@@ -284,7 +299,7 @@ async def _load_model_visibility() -> tuple[
             else:
                 disabled_model_keys.add(key)
 
-    return overrides_by_key, disabled_model_keys, enabled_provider_ids
+    return overrides_by_key, disabled_model_keys, provider_identities
 
 
 def _apply_model_visibility(
@@ -338,6 +353,7 @@ def _apply_model_visibility(
 
 async def _collect_provider_paths(
     upstream: BaseUpstreamProvider,
+    provider_identity: ConfiguredProviderIdentity,
     overrides_by_key: dict[ModelKey, ModelRow] | None = None,
     disabled_model_keys: set[ModelKey] | None = None,
     cycle: _RefreshCycleState | None = None,
@@ -350,13 +366,12 @@ async def _collect_provider_paths(
     """
     cycle = cycle or _RefreshCycleState()
     models = _apply_model_visibility(upstream, overrides_by_key, disabled_model_keys)
-    upstream_url = normalize_upstream_url(upstream.base_url)
 
     def _base_path(model: object) -> DiscoveredPath:
         return DiscoveredPath(
             model_id=exposed_model_id(model),
-            path=encode_model_path(upstream_url),
-            upstream_url=upstream_url,
+            path=encode_model_path(provider_identity.id),
+            provider=provider_identity,
         )
 
     if not is_openrouter_base_url(upstream.base_url):
@@ -389,10 +404,10 @@ async def _collect_provider_paths(
             paths.extend(
                 DiscoveredPath(
                     model_id=model_id,
-                    path=encode_model_path(upstream_url, endpoint.tag),
-                    upstream_url=upstream_url,
-                    provider_tag=endpoint.tag,
-                    provider_name=endpoint.provider_name,
+                    path=encode_model_path(provider_identity.id, endpoint.tag),
+                    provider=provider_identity,
+                    endpoint_tag=endpoint.tag,
+                    endpoint_name=endpoint.provider_name,
                 )
                 for endpoint in endpoints
             )
@@ -448,9 +463,10 @@ async def _persist_provider_paths(
                     {
                         "model_id": discovered.model_id,
                         "path": discovered.path,
-                        "upstream_url": discovered.upstream_url,
-                        "provider_tag": discovered.provider_tag,
-                        "provider_name": discovered.provider_name,
+                        "provider_slug": discovered.provider.slug,
+                        "provider_type": discovered.provider.provider_type,
+                        "endpoint_tag": discovered.endpoint_tag,
+                        "endpoint_name": discovered.endpoint_name,
                         "upstream_provider_id": upstream_provider_id,
                         "updated_at": now,
                     }
@@ -505,17 +521,18 @@ async def refresh_model_paths(
     (
         overrides_by_key,
         disabled_model_keys,
-        enabled_provider_ids,
+        provider_identities,
     ) = await _load_model_visibility()
     await prune_model_paths_for_inactive_providers()
 
     cycle = _RefreshCycleState()
     for upstream in upstreams:
-        if upstream.db_id is None or upstream.db_id not in enabled_provider_ids:
+        if upstream.db_id is None or upstream.db_id not in provider_identities:
             continue
         try:
             snapshot = await _collect_provider_paths(
                 upstream,
+                provider_identity=provider_identities[upstream.db_id],
                 overrides_by_key=overrides_by_key,
                 disabled_model_keys=disabled_model_keys,
                 cycle=cycle,
@@ -611,13 +628,17 @@ async def refresh_model_paths_periodically(
 
 
 def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
-    provider = None
-    if row.provider_tag or row.provider_name:
-        provider = {"name": row.provider_name, "slug": row.provider_tag}
+    endpoint = None
+    if row.endpoint_tag or row.endpoint_name:
+        endpoint = {"tag": row.endpoint_tag, "name": row.endpoint_name}
     return {
         "path": row.path,
-        "upstream_url": row.upstream_url,
-        "provider": provider,
+        "provider": {
+            "id": row.upstream_provider_id,
+            "slug": row.provider_slug,
+            "type": row.provider_type,
+        },
+        "endpoint": endpoint,
     }
 
 
@@ -646,9 +667,7 @@ async def get_all_model_paths() -> dict:
     data = [
         {
             "id": grouped_model_id,
-            "paths": sorted(
-                grouped[grouped_model_id], key=lambda item: str(item["path"])
-            ),
+            "paths": grouped[grouped_model_id],
         }
         for grouped_model_id in sorted(grouped)
     ]

@@ -22,6 +22,10 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("model_id", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
         sa.Column("path", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("provider_slug", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("provider_type", sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+        sa.Column("endpoint_tag", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+        sa.Column("endpoint_name", sqlmodel.sql.sqltypes.AutoString(), nullable=True),
         sa.Column("upstream_provider_id", sa.Integer(), nullable=False),
         sa.Column("updated_at", sa.Integer(), nullable=False, server_default="0"),
         sa.ForeignKeyConstraint(
