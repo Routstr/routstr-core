@@ -68,9 +68,7 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (
-            cli_token.expires_at is None or cli_token.expires_at > now_ts
-        ):
+        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -257,12 +255,16 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
         secret = await get_secret(session)
 
         if not secret.admin_password_hash:
-            raise HTTPException(status_code=500, detail="Admin password not configured")
+            raise HTTPException(
+                status_code=500, detail="Admin password not configured"
+            )
 
         if not vault.verify_password(
             password_update.current_password, secret.admin_password_hash
         ):
-            raise HTTPException(status_code=401, detail="Current password is incorrect")
+            raise HTTPException(
+                status_code=401, detail="Current password is incorrect"
+            )
 
         # Validate new password
         new_password = password_update.new_password.strip()
@@ -978,7 +980,9 @@ async def update_upstream_provider_by_slug(
     lookup = _validate_slug(payload.slug)
     async with create_session() as session:
         result = await session.exec(
-            select(UpstreamProviderRow).where(UpstreamProviderRow.slug == lookup)
+            select(UpstreamProviderRow).where(
+                UpstreamProviderRow.slug == lookup
+            )
         )
         provider = result.first()
         if not provider:
@@ -1665,11 +1669,7 @@ async def get_transactions_api(
         )
         total = count_result.one()
 
-        stmt = (
-            base.order_by(col(CashuTransaction.created_at).desc())
-            .offset(offset)
-            .limit(limit)
-        )
+        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
         results = await session.exec(stmt)
         transactions = results.all()
 
@@ -1679,7 +1679,9 @@ async def get_transactions_api(
         }
 
 
-@admin_router.get("/api/lightning-invoices", dependencies=[Depends(require_admin_api)])
+@admin_router.get(
+    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
+)
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,

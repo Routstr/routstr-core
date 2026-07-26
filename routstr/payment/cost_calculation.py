@@ -224,7 +224,9 @@ async def calculate_cost(
             "Token counts %s in the upstream response but cannot be "
             "priced; the request will appear in dashboards with the "
             "raw counts and a fixed max-cost charge.",
-            "are present" if (input_tokens > 0 or output_tokens > 0) else "are zero",
+            "are present"
+            if (input_tokens > 0 or output_tokens > 0)
+            else "are zero",
             extra={
                 "base_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
@@ -301,7 +303,9 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
         # actually deducts from the balance.  For non-BYOK providers (e.g.
         # OpenRouter) usage.cost already equals upstream_inference_cost, so we
         # fall through to the normal ``cost`` lookup below.
-        upstream_cost = _coerce_usd(cost_details.get("upstream_inference_cost"))
+        upstream_cost = _coerce_usd(
+            cost_details.get("upstream_inference_cost")
+        )
         if upstream_cost > 0 and usage_data.get("is_byok"):
             byok_fee = _coerce_usd(usage_data.get("cost"))
             return upstream_cost + byok_fee
@@ -332,7 +336,8 @@ def _get_pricing_rates(
     ``None`` means configured fixed pricing should be used by the caller.
     """
     if settings.fixed_pricing and (
-        settings.fixed_per_1k_input_tokens or settings.fixed_per_1k_output_tokens
+        settings.fixed_per_1k_input_tokens
+        or settings.fixed_per_1k_output_tokens
     ):
         return None
 
@@ -388,8 +393,12 @@ def _get_pricing_rates(
         usd_per_sat = sats_usd_price()
         mspp_1k = input_usd * provider_fee * 1_000_000.0 / usd_per_sat
         mspc_1k = output_usd * provider_fee * 1_000_000.0 / usd_per_sat
-        cache_read_usd = _coerce_usd(pricing.get("cache_read_input_token_cost"))
-        cache_write_usd = _coerce_usd(pricing.get("cache_creation_input_token_cost"))
+        cache_read_usd = _coerce_usd(
+            pricing.get("cache_read_input_token_cost")
+        )
+        cache_write_usd = _coerce_usd(
+            pricing.get("cache_creation_input_token_cost")
+        )
         mscr_1k = (
             cache_read_usd * provider_fee * 1_000_000.0 / usd_per_sat
             if cache_read_usd > 0

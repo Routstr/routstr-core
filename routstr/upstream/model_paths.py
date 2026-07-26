@@ -1,19 +1,15 @@
 """Model-path discovery service.
 
-Exposes every upstream provider path a Routstr model is reachable through.
-This is discovery/visibility data only — routing still selects the cheapest or
-best provider separately.
+Exposes every selectable upstream route a Routstr model is reachable through.
+This PR remains discovery-only: request-side routing will consume the opaque
+selectors in a follow-up.
 
-A *path* is the provider string that may appear in Routstr chat completion
-responses. The strings emitted here are produced by the provider's own
-``discovery_path_for_subprovider`` / ``discovery_base_paths`` hooks, which
-mirror ``_apply_provider_field`` so discovery and response stamping cannot
-drift:
+A path is a standard percent-encoded query string containing the normalized
+upstream URL and, for an exact OpenRouter endpoint, its machine-readable tag.
+Display names never participate in identity::
 
-- Direct upstream -> ``<provider_type>`` e.g. ``anthropic``
-- Generic/custom OpenRouter-compatible upstream -> ``generic:<name>``
-- Native OpenRouter routing to a sub-provider -> ``openrouter:<name>``
-- Native OpenRouter with no usable sub-provider -> ``unknown``
+    url=https%3A%2F%2Fapi.anthropic.com%2Fv1
+    url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider=google-vertex%2Fus
 """
 
 from __future__ import annotations
@@ -21,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from typing import TYPE_CHECKING, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable
+from urllib.parse import urlencode
 
 import httpx
-from sqlalchemy import insert, or_
+from sqlalchemy import insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import col, delete, select
 
@@ -51,6 +49,46 @@ _PERSIST_CHUNK_SIZE = 500
 ModelKey = tuple[str, int]
 
 
+@dataclass(frozen=True)
+class EndpointIdentity:
+    """Exact OpenRouter endpoint identity returned by ``/endpoints``."""
+
+    tag: str
+    provider_name: str | None
+
+
+@dataclass(frozen=True)
+class DiscoveredPath:
+    """One model route ready for persistence and API serialization."""
+
+    model_id: str
+    path: str
+    upstream_url: str
+    provider_tag: str | None = None
+    provider_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderPathSnapshot:
+    """Refresh result plus model IDs whose prior rows must survive degradation."""
+
+    paths: tuple[DiscoveredPath, ...]
+    preserve_model_ids: frozenset[str] = frozenset()
+
+
+def normalize_upstream_url(base_url: str) -> str:
+    """Normalize route identity without changing URL semantics."""
+    return base_url.rstrip("/")
+
+
+def encode_model_path(base_url: str, provider_tag: str | None = None) -> str:
+    """Encode a stable opaque selector for future request-side routing."""
+    components = [("url", normalize_upstream_url(base_url))]
+    if provider_tag:
+        components.append(("provider", provider_tag))
+    return urlencode(components)
+
+
 def _make_http_client() -> httpx.AsyncClient:
     """Client factory, separated so tests can substitute a mock transport."""
     return httpx.AsyncClient()
@@ -69,9 +107,15 @@ def is_openrouter_base_url(base_url: str | None) -> bool:
 
 
 def exposed_model_id(model: object) -> str:
-    """Client-visible ``/v1/models`` id for a cached model."""
+    """Return exactly the ID advertised by ``/v1/models``.
+
+    A forwarded ID is already a public routable alias and must remain intact,
+    including any slash. Without one, ``/v1/models`` exposes the base ID.
+    """
     forwarded = getattr(model, "forwarded_model_id", None)
-    return forwarded or getattr(model, "id")
+    if forwarded:
+        return forwarded
+    return public_model_id(getattr(model, "id"))
 
 
 def public_model_id(model_id: str) -> str:
@@ -116,7 +160,7 @@ class _RefreshCycleState:
     """
 
     def __init__(self) -> None:
-        self.endpoint_cache: dict[tuple[str, str], list[str] | None] = {}
+        self.endpoint_cache: dict[tuple[str, str], list[EndpointIdentity] | None] = {}
         self.rate_limited = False
 
 
@@ -127,8 +171,8 @@ async def _fetch_openrouter_endpoint_subproviders(
     author_slug: str,
     semaphore: asyncio.Semaphore,
     cycle: _RefreshCycleState,
-) -> list[str] | None:
-    """Return sub-provider names for one model, or ``None`` when unknown.
+) -> list[EndpointIdentity] | None:
+    """Return exact endpoint identities for one model, or ``None`` when unknown.
 
     ``None`` (not ``[]``) signals a degraded fetch — network failure, rate
     limit, non-200, or an unparseable payload — so callers can distinguish
@@ -143,7 +187,7 @@ async def _fetch_openrouter_endpoint_subproviders(
 
     url = f"{base_url.rstrip('/')}/models/{author_slug}/endpoints"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    result: list[str] | None
+    result: list[EndpointIdentity] | None
     async with semaphore:
         try:
             resp = await client.get(
@@ -177,14 +221,24 @@ async def _fetch_openrouter_endpoint_subproviders(
         endpoints = resp.json().get("data", {}).get("endpoints", [])
         if not isinstance(endpoints, list):
             endpoints = []
-        names: list[str] = []
+        identities: dict[str, EndpointIdentity] = {}
         for endpoint in endpoints:
-            provider_name = (
-                endpoint.get("provider_name") if isinstance(endpoint, dict) else None
+            if not isinstance(endpoint, dict):
+                continue
+            tag = endpoint.get("tag")
+            if not isinstance(tag, str) or not tag.strip():
+                continue
+            provider_name = endpoint.get("provider_name")
+            identities.setdefault(
+                tag,
+                EndpointIdentity(
+                    tag=tag,
+                    provider_name=provider_name
+                    if isinstance(provider_name, str) and provider_name
+                    else None,
+                ),
             )
-            if provider_name:
-                names.append(provider_name)
-        result = list(dict.fromkeys(names))
+        result = list(identities.values())
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "OpenRouter endpoint discovery bad payload",
@@ -287,46 +341,41 @@ async def _collect_provider_paths(
     overrides_by_key: dict[ModelKey, ModelRow] | None = None,
     disabled_model_keys: set[ModelKey] | None = None,
     cycle: _RefreshCycleState | None = None,
-) -> list[tuple[str, str]] | None:
-    """Collect ``(model_id, path)`` pairs for one provider instance.
+) -> ProviderPathSnapshot:
+    """Collect selectable routes while marking model-level degraded fetches.
 
-    Emits the provider's ``discovery_base_paths`` for normal upstreams. For
-    OpenRouter-compatible providers, additionally emits one path per OpenRouter
-    sub-provider endpoint via ``discovery_path_for_subprovider`` so the strings
-    match response stamping exactly.
-
-    Returns ``None`` when the provider's path set could not be determined this
-    cycle (every endpoint fetch degraded); callers must then keep previously
-    persisted rows instead of wiping them.
+    A failed OpenRouter lookup preserves only that model's prior rows. Other
+    models in the same provider still refresh, so a partial outage cannot erase
+    valid discovery data or freeze the entire provider snapshot.
     """
     cycle = cycle or _RefreshCycleState()
     models = _apply_model_visibility(upstream, overrides_by_key, disabled_model_keys)
-    base_paths = upstream.discovery_base_paths()
+    upstream_url = normalize_upstream_url(upstream.base_url)
+
+    def _base_path(model: object) -> DiscoveredPath:
+        return DiscoveredPath(
+            model_id=exposed_model_id(model),
+            path=encode_model_path(upstream_url),
+            upstream_url=upstream_url,
+        )
 
     if not is_openrouter_base_url(upstream.base_url):
-        return [
-            (exposed_model_id(model), path) for model in models for path in base_paths
-        ]
+        return ProviderPathSnapshot(paths=tuple(_base_path(model) for model in models))
 
     if not (upstream.provider_type or "").strip():
-        return []
+        return ProviderPathSnapshot(paths=())
 
-    any_fetch_succeeded = False
-    any_fetch_attempted = False
     semaphore = asyncio.Semaphore(_OPENROUTER_CONCURRENCY)
     async with _make_http_client() as client:
 
-        async def _for_model(model: object) -> list[tuple[str, str]]:
-            nonlocal any_fetch_succeeded, any_fetch_attempted
+        async def _for_model(
+            model: object,
+        ) -> tuple[list[DiscoveredPath], str | None]:
             model_id = exposed_model_id(model)
-            # Base paths always apply: responses whose upstream payload lacks a
-            # provider field are stamped with them (see _apply_provider_field).
-            pairs = [(model_id, path) for path in base_paths]
             author_slug = openrouter_author_slug(model)
             if not author_slug:
-                return pairs
-            any_fetch_attempted = True
-            sub_providers = await _fetch_openrouter_endpoint_subproviders(
+                return [_base_path(model)], None
+            endpoints = await _fetch_openrouter_endpoint_subproviders(
                 client,
                 upstream.base_url,
                 upstream.api_key,
@@ -334,67 +383,78 @@ async def _collect_provider_paths(
                 semaphore,
                 cycle,
             )
-            if sub_providers is None:
-                return []
-            any_fetch_succeeded = True
-            paths = [
-                upstream.discovery_path_for_subprovider(name) for name in sub_providers
-            ]
-            pairs.extend((model_id, path) for path in paths if path)
-            return list(dict.fromkeys(pairs))
+            if endpoints is None:
+                return [], model_id
+            paths = [_base_path(model)]
+            paths.extend(
+                DiscoveredPath(
+                    model_id=model_id,
+                    path=encode_model_path(upstream_url, endpoint.tag),
+                    upstream_url=upstream_url,
+                    provider_tag=endpoint.tag,
+                    provider_name=endpoint.provider_name,
+                )
+                for endpoint in endpoints
+            )
+            return paths, None
 
         results = await asyncio.gather(
-            *(_for_model(m) for m in models), return_exceptions=True
+            *(_for_model(model) for model in models), return_exceptions=True
         )
 
-    if any_fetch_attempted and not any_fetch_succeeded:
-        # Every endpoint lookup degraded (offline, throttled, bad payloads):
-        # the true path set is unknown, not empty.
-        return None
-
-    pairs: list[tuple[str, str]] = []
-    for result in results:
+    paths: list[DiscoveredPath] = []
+    preserve_model_ids: set[str] = set()
+    for model, result in zip(models, results):
         if isinstance(result, BaseException):
+            model_id = exposed_model_id(model)
+            preserve_model_ids.add(model_id)
             logger.warning(
                 "OpenRouter endpoint discovery task errored",
                 extra={"provider": upstream.provider_type, "error": str(result)},
             )
             continue
-        pairs.extend(result)
+        model_paths, preserved_model_id = result
+        paths.extend(model_paths)
+        if preserved_model_id:
+            preserve_model_ids.add(preserved_model_id)
 
-    return pairs
+    return ProviderPathSnapshot(
+        paths=tuple(paths), preserve_model_ids=frozenset(preserve_model_ids)
+    )
 
 
 async def _persist_provider_paths(
-    upstream_provider_id: int, pairs: list[tuple[str, str]]
+    upstream_provider_id: int, snapshot: ProviderPathSnapshot
 ) -> None:
-    """Replace all rows for ``upstream_provider_id`` with ``pairs``.
-
-    Replacement (not upsert) so stale paths disappear when provider config or
-    upstream availability changes. Rows are written with chunked bulk INSERTs
-    so the transaction holds SQLite's write lock briefly — billing writes share
-    this database file.
-    """
-    unique_pairs = list(dict.fromkeys(pairs))
+    """Replace refreshed rows while retaining model-level degraded snapshots."""
+    unique_paths = list(
+        {(path.model_id, path.path): path for path in snapshot.paths}.values()
+    )
     now = int(time.time())
     async with create_session() as session:
-        await session.exec(  # type: ignore[call-overload]
-            delete(ModelPathRow).where(
-                col(ModelPathRow.upstream_provider_id) == upstream_provider_id
-            )
+        delete_stmt = delete(ModelPathRow).where(
+            col(ModelPathRow.upstream_provider_id) == upstream_provider_id
         )
-        for start in range(0, len(unique_pairs), _PERSIST_CHUNK_SIZE):
-            chunk = unique_pairs[start : start + _PERSIST_CHUNK_SIZE]
+        if snapshot.preserve_model_ids:
+            delete_stmt = delete_stmt.where(
+                col(ModelPathRow.model_id).not_in(sorted(snapshot.preserve_model_ids))
+            )
+        await session.exec(delete_stmt)  # type: ignore[call-overload]
+        for start in range(0, len(unique_paths), _PERSIST_CHUNK_SIZE):
+            chunk = unique_paths[start : start + _PERSIST_CHUNK_SIZE]
             await session.execute(
                 insert(ModelPathRow),
                 [
                     {
-                        "model_id": model_id,
-                        "path": path,
+                        "model_id": discovered.model_id,
+                        "path": discovered.path,
+                        "upstream_url": discovered.upstream_url,
+                        "provider_tag": discovered.provider_tag,
+                        "provider_name": discovered.provider_name,
                         "upstream_provider_id": upstream_provider_id,
                         "updated_at": now,
                     }
-                    for model_id, path in chunk
+                    for discovered in chunk
                 ],
             )
         await session.commit()
@@ -454,22 +514,22 @@ async def refresh_model_paths(
         if upstream.db_id is None or upstream.db_id not in enabled_provider_ids:
             continue
         try:
-            pairs = await _collect_provider_paths(
+            snapshot = await _collect_provider_paths(
                 upstream,
                 overrides_by_key=overrides_by_key,
                 disabled_model_keys=disabled_model_keys,
                 cycle=cycle,
             )
-            if pairs is None:
+            if snapshot.preserve_model_ids:
                 logger.warning(
-                    "Model paths unknown this cycle; keeping previous rows",
+                    "Some model paths are unknown; keeping their previous rows",
                     extra={
                         "provider": upstream.provider_type or upstream.base_url,
                         "db_id": upstream.db_id,
+                        "preserved_models": len(snapshot.preserve_model_ids),
                     },
                 )
-                continue
-            await _persist_provider_paths(upstream.db_id, pairs)
+            await _persist_provider_paths(upstream.db_id, snapshot)
         except Exception as e:  # noqa: BLE001 - isolate per-provider failures
             logger.error(
                 "Failed to refresh model paths for provider",
@@ -480,6 +540,21 @@ async def refresh_model_paths(
                     "error_type": type(e).__name__,
                 },
             )
+
+
+async def refresh_model_paths_for_provider(upstream_provider_id: int) -> None:
+    """Immediately synchronize discovery after an admin provider/model mutation."""
+    from ..proxy import get_upstreams
+
+    matching = [
+        upstream
+        for upstream in get_upstreams()
+        if upstream.db_id == upstream_provider_id
+    ]
+    if matching:
+        await refresh_model_paths(matching)
+    else:
+        await prune_model_paths_for_inactive_providers()
 
 
 def _refresh_interval_seconds() -> int:
@@ -535,8 +610,19 @@ async def refresh_model_paths_periodically(
             break
 
 
+def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
+    provider = None
+    if row.provider_tag or row.provider_name:
+        provider = {"name": row.provider_name, "slug": row.provider_tag}
+    return {
+        "path": row.path,
+        "upstream_url": row.upstream_url,
+        "provider": provider,
+    }
+
+
 async def get_all_model_paths() -> dict:
-    """All models with their paths, shaped for ``GET /v1/models/paths``."""
+    """All models with their exact selectable routes."""
     async with create_session() as session:
         rows = (
             await session.exec(
@@ -548,49 +634,37 @@ async def get_all_model_paths() -> dict:
             )
         ).all()
 
-    grouped: dict[str, list[dict]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
     seen_paths: dict[str, set[str]] = {}
     updated_at = 0
     for row in rows:
         updated_at = max(updated_at, row.updated_at)
-        model_id = public_model_id(row.model_id)
-        if row.path in seen_paths.setdefault(model_id, set()):
+        if row.path in seen_paths.setdefault(row.model_id, set()):
             continue
-        seen_paths[model_id].add(row.path)
-        grouped.setdefault(model_id, []).append({"path": row.path})
-    # Deterministic output: models sorted by public id, paths sorted within.
-    data: list[dict] = []
-    for grouped_model_id in sorted(grouped):
-        model_paths = sorted(grouped[grouped_model_id], key=lambda p: str(p["path"]))
-        data.append({"id": grouped_model_id, "paths": model_paths})
+        seen_paths[row.model_id].add(row.path)
+        grouped.setdefault(row.model_id, []).append(_serialize_path(row))
+    data = [
+        {
+            "id": grouped_model_id,
+            "paths": sorted(
+                grouped[grouped_model_id], key=lambda item: str(item["path"])
+            ),
+        }
+        for grouped_model_id in sorted(grouped)
+    ]
     return {"data": data, "updated_at": updated_at or None}
 
 
 async def get_paths_for_model(model_id: str) -> dict:
-    """Paths for a single model, shaped for ``GET /v1/models/paths/model``.
-
-    Match by the public, unqualified model id, mirroring the model cache alias
-    behavior. Both ``deepseek-v4-pro`` and ``deepseek/deepseek-v4-pro`` resolve
-    every row whose stored id has the same base model id. The candidate set is
-    narrowed in SQL (exact id or ``%/<id>`` suffix) so the route does not
-    materialize the whole table per request.
-    """
-    # The request may be a full stored id ("z-ai/glm-5v-turbo") or an
-    # already-stripped public id ("fireworks/models/glm-5"); accept both.
-    accepted_ids = {model_id, public_model_id(model_id)}
+    """Return paths only for the exact model ID advertised by ``/v1/models``."""
     async with create_session() as session:
-        conditions = []
-        for candidate in accepted_ids:
-            conditions.append(col(ModelPathRow.model_id) == candidate)
-            conditions.append(col(ModelPathRow.model_id).endswith(f"/{candidate}"))
         rows = (
             await session.exec(
                 select(ModelPathRow)
-                .where(or_(*conditions))
+                .where(col(ModelPathRow.model_id) == model_id)
                 .order_by(
                     col(ModelPathRow.path),
                     col(ModelPathRow.upstream_provider_id),
-                    col(ModelPathRow.model_id),
                 )
             )
         ).all()
@@ -599,15 +673,9 @@ async def get_paths_for_model(model_id: str) -> dict:
     paths: list[dict] = []
     updated_at = 0
     for row in rows:
-        # The SQL suffix match is a prefilter; enforce the exact public-id rule.
-        if (
-            row.model_id not in accepted_ids
-            and public_model_id(row.model_id) not in accepted_ids
-        ):
-            continue
         updated_at = max(updated_at, row.updated_at)
         if row.path in seen:
             continue
         seen.add(row.path)
-        paths.append({"path": row.path})
+        paths.append(_serialize_path(row))
     return {"data": paths, "updated_at": updated_at or None}

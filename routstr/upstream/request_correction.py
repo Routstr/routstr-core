@@ -84,7 +84,9 @@ def extract_error_message(response: Response) -> str:
     return ""
 
 
-def strip_unsupported_param(body: dict, error_message: str) -> tuple[dict, str] | None:
+def strip_unsupported_param(
+    body: dict, error_message: str
+) -> tuple[dict, str] | None:
     """Drop a top-level param the upstream named as unsupported/deprecated.
 
     Returns ``(new_body, param)`` (a new dict, original untouched) when the

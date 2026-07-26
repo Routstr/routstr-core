@@ -110,7 +110,9 @@ def normalize_usage(usage_data: object) -> NormalizedUsage | None:
     if not isinstance(usage_data, dict):
         return None
 
-    output_tokens = _first_token_count(usage_data, "completion_tokens", "output_tokens")
+    output_tokens = _first_token_count(
+        usage_data, "completion_tokens", "output_tokens"
+    )
     cache_read, cache_write = _extract_cache_tokens(usage_data)
 
     # ``prompt_tokens`` is the inclusive grand total; ``input_tokens`` (Anthropic

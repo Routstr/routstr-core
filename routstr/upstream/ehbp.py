@@ -191,9 +191,7 @@ def _resolve_ehbp_target_url(
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
     """
-    override_header = (
-        profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
-    )
+    override_header = profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
     if not override_header:
         return target_url
     enclave_url = _get_header_case_insensitive(headers, override_header)
@@ -297,7 +295,9 @@ def _build_cost_info(
     return result
 
 
-def _inject_cost_response_headers(headers: dict[str, str], cost_info: dict) -> None:
+def _inject_cost_response_headers(
+    headers: dict[str, str], cost_info: dict
+) -> None:
     """Add per-request cost headers to an EHBP response.
 
     Since EHBP response bodies are opaque encrypted blobs, cost cannot be
@@ -375,7 +375,9 @@ async def _compute_ehbp_actual_cost(
             resolved_upstream_model = (
                 actual_model_obj.forwarded_model_id or actual_model_obj.id
             )
-            resolved_identity = _normalize_upstream_model_id(resolved_upstream_model)
+            resolved_identity = _normalize_upstream_model_id(
+                resolved_upstream_model
+            )
             if resolved_identity != expected_identity:
                 logger.info(
                     "EHBP served model differs from requested, using actual "
@@ -515,9 +517,7 @@ async def finalize_ehbp_actual_cost_payment(
     billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
     billing_key_hash = billing_key.hashed_key
-    total_cost_msats = max(
-        0, int(cost_info.get("total_msats", reserved_cost_for_model))
-    )
+    total_cost_msats = max(0, int(cost_info.get("total_msats", reserved_cost_for_model)))
     now = int(time.time())
 
     safe_reserved = case(
@@ -560,9 +560,7 @@ async def finalize_ehbp_actual_cost_payment(
         )
         child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
 
-    if result.rowcount == 0 or (
-        child_result is not None and child_result.rowcount == 0
-    ):
+    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
         await session.rollback()
         logger.error(
             "Failed to finalize EHBP usage-based payment",
@@ -692,9 +690,7 @@ async def finalize_ehbp_max_cost_payment(
     else:
         child_result = None
 
-    if result.rowcount == 0 or (
-        child_result is not None and child_result.rowcount == 0
-    ):
+    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
         await session.rollback()
         logger.error(
             "Failed to finalize EHBP max-cost payment",
@@ -1038,9 +1034,7 @@ async def forward_ehbp_x_cashu_request(
         target_url = _resolve_ehbp_target_url(
             target.url, path, headers, provider_type, profile
         )
-        upstream_headers = _prepare_ehbp_upstream_headers(
-            headers, target.headers, profile
-        )
+        upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
         request_body = await request.body()
 
         # Merge query params into the target URL
@@ -1088,7 +1082,9 @@ async def forward_ehbp_x_cashu_request(
             usage_source = (
                 "header"
                 if usage_header_name
-                and any(k.lower() == usage_header_name.lower() for k, _ in resp.headers)
+                and any(
+                    k.lower() == usage_header_name.lower() for k, _ in resp.headers
+                )
                 else ("trailer" if usage_header else "none")
             )
 
