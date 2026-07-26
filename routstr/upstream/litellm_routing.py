@@ -91,9 +91,7 @@ OLLAMA_HOST_HINTS: tuple[str, ...] = (
 )
 
 
-def detect_litellm_prefix(
-    base_url: str | None, default: str = DEFAULT_PREFIX
-) -> str:
+def detect_litellm_prefix(base_url: str | None, default: str = DEFAULT_PREFIX) -> str:
     """Return the litellm provider prefix (`"<provider>/"`) for `base_url`.
 
     Falls back to `default` when the host doesn't match any known provider.

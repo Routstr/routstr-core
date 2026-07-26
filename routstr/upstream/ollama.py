@@ -66,9 +66,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         """Strip 'ollama/' prefix for Ollama API compatibility."""
         return model_id.removeprefix("ollama/")
 
-    def get_request_base_url(
-        self, path: str, model_obj: Model | None = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: Model | None = None) -> str:
         """Route proxy traffic through Ollama's OpenAI-compatible /v1 endpoint."""
         return f"{self.base_url.rstrip('/')}/v1"
 
@@ -185,7 +183,9 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             except Exception:
                 self._models_cache = models_with_fees
 
-            self._models_by_id = {m.forwarded_model_id or m.id: m for m in self._models_cache}
+            self._models_by_id = {
+                m.forwarded_model_id or m.id: m for m in self._models_cache
+            }
             logger.info(
                 f"Refreshed models cache for {self.base_url}",
                 extra={"model_count": len(models)},

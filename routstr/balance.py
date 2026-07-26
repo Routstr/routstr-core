@@ -260,7 +260,11 @@ async def _lookup_key_no_create(
 
 
 async def _restore_balance(
-    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int, mint_url: str
+    session: AsyncSession,
+    hashed_key: str,
+    balance: int,
+    reserved_balance: int,
+    mint_url: str,
 ) -> None:
     """Restore balance after a failed refund mint attempt."""
     restore_stmt = (
@@ -275,7 +279,11 @@ async def _restore_balance(
     await session.commit()
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
-        extra={"hashed_key": hashed_key, "restored_balance": balance, "mint_url": mint_url},
+        extra={
+            "hashed_key": hashed_key,
+            "restored_balance": balance,
+            "mint_url": mint_url,
+        },
     )
 
 
@@ -460,11 +468,23 @@ async def refund_wallet_endpoint(
 
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         error_msg = str(e)
         logger.error(
             "refund_wallet_endpoint: mint/send failed",
@@ -683,7 +703,6 @@ async def reset_child_key_spent(
     await session.commit()
 
     return {"success": True, "message": "Child key balance reset successfully."}
-
 
 
 @router.api_route(

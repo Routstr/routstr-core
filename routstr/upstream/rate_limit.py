@@ -119,7 +119,9 @@ def classify_rate_limit(
         retry_match = _RETRY_RE.search(redacted)
         if retry_match is not None:
             value = float(retry_match.group(1))
-            retry_after = value / 1000.0 if retry_match.group(2).lower() == "ms" else value
+            retry_after = (
+                value / 1000.0 if retry_match.group(2).lower() == "ms" else value
+            )
 
     limit_name_match = _LIMIT_NAME_RE.search(redacted)
 

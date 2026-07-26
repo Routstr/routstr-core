@@ -215,7 +215,9 @@ def _build_window_payload(
     summary = dashboard.get("summary", {})
     model_usage_mix = dashboard.get("model_usage_mix", {})
 
-    summary_payload = _build_summary_payload(summary if isinstance(summary, dict) else {})
+    summary_payload = _build_summary_payload(
+        summary if isinstance(summary, dict) else {}
+    )
     usage_mix_payload = model_usage_mix if isinstance(model_usage_mix, dict) else {}
     top_model_usage, others_usage = _aggregate_top_model_usage(usage_mix_payload)
 
@@ -338,7 +340,9 @@ async def publish_usage_analytics() -> None:
             nsec = (settings.nsec or "").strip()
             if not nsec:
                 if not warned_missing_nsec:
-                    logger.info("NSEC is not configured; skipping analytics sharing to Nostr")
+                    logger.info(
+                        "NSEC is not configured; skipping analytics sharing to Nostr"
+                    )
                     warned_missing_nsec = True
                 await asyncio.sleep(DISABLED_POLL_SECONDS)
                 continue

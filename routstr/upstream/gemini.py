@@ -94,9 +94,7 @@ class GeminiUpstreamProvider(BaseUpstreamProvider):
         """
         return self.base_url.rstrip("/").removesuffix("/openai") + "/openai"
 
-    def get_request_base_url(
-        self, path: str, model_obj: "Model | None" = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: "Model | None" = None) -> str:
         """Route every proxied request to the OpenAI-compat surface.
 
         Required because the stored ``base_url`` typically points at the

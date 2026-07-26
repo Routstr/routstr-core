@@ -371,9 +371,7 @@ async def dispatch_gemini_messages(
     aggregates).
     """
     if not request_body:
-        raise UpstreamError(
-            "Missing request body for /v1/messages", status_code=400
-        )
+        raise UpstreamError("Missing request body for /v1/messages", status_code=400)
 
     try:
         body: dict = json.loads(request_body)

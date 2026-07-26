@@ -408,7 +408,9 @@ class LogManager:
     def get_error_details(self, hours: int = 24, limit: int = 100) -> dict:
         def compute() -> dict:
             try:
-                return self._usage_store.get_error_details(hours_back=hours, limit=limit)
+                return self._usage_store.get_error_details(
+                    hours_back=hours, limit=limit
+                )
             except Exception as e:
                 logger.error(
                     f"Usage analytics index failed, falling back to log scan: {e}"
@@ -628,8 +630,7 @@ class LogManager:
                     stats["total_tokens"] += input_tokens + output_tokens
 
                 failed = (
-                    "upstream request failed" in message
-                    or "revert payment" in message
+                    "upstream request failed" in message or "revert payment" in message
                 )
                 if failed:
                     stats["total_requests"] += 1
@@ -787,7 +788,9 @@ class LogManager:
                     if bucket_key:
                         model_mix_buckets[bucket_key][model] += 1
                         if revenue_msats > 0:
-                            model_mix_revenue_buckets[bucket_key][model] += revenue_msats
+                            model_mix_revenue_buckets[bucket_key][model] += (
+                                revenue_msats
+                            )
                             model_mix_revenue_totals[model] += revenue_msats
                         if input_tokens > 0 or output_tokens > 0:
                             token_total = input_tokens + output_tokens
@@ -801,8 +804,7 @@ class LogManager:
                             bucket["revenue_msats"] += revenue_msats
 
                 failed = (
-                    "upstream request failed" in message
-                    or "revert payment" in message
+                    "upstream request failed" in message or "revert payment" in message
                 )
                 if failed:
                     summary_stats["total_requests"] += 1
@@ -872,9 +874,7 @@ class LogManager:
         models.sort(key=lambda x: float(x["net_revenue_sats"]), reverse=True)
         latest_errors = [
             item
-            for _, item in sorted(
-                latest_errors_heap, key=lambda x: x[0], reverse=True
-            )
+            for _, item in sorted(latest_errors_heap, key=lambda x: x[0], reverse=True)
         ]
         top_model_limit = max(1, min(model_limit, 20))
         top_models_requests = [
@@ -1051,8 +1051,7 @@ class LogManager:
                     bucket["warnings"] += 1
 
                 failed = (
-                    "upstream request failed" in message
-                    or "revert payment" in message
+                    "upstream request failed" in message or "revert payment" in message
                 )
                 if failed:
                     bucket["total_requests"] += 1

@@ -232,7 +232,10 @@ def create_model_mappings(
                     aliases.append(prefixed_id)
 
             # Register forwarded_model_id as a routable alias
-            if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
+            if (
+                model_to_use.forwarded_model_id
+                and model_to_use.forwarded_model_id not in aliases
+            ):
                 aliases.append(model_to_use.forwarded_model_id)
 
             # Try to set each alias
@@ -322,7 +325,10 @@ def create_model_mappings(
                 aliases.append(prefixed_id)
 
         # Register forwarded_model_id as a routable alias
-        if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
+        if (
+            model_to_use.forwarded_model_id
+            and model_to_use.forwarded_model_id not in aliases
+        ):
             aliases.append(model_to_use.forwarded_model_id)
 
         for alias in aliases:
@@ -342,16 +348,10 @@ def create_model_mappings(
         forwarded_model_ids, the one whose forwarded_model_id equals the
         requested alias wins.
         """
-        if (
-            model.forwarded_model_id
-            and model.forwarded_model_id.lower() == alias
-        ):
+        if model.forwarded_model_id and model.forwarded_model_id.lower() == alias:
             return 5
 
-        if (
-            model.id
-            and model.id.lower() == alias
-        ):
+        if model.id and model.id.lower() == alias:
             return 4
 
         model_base = get_base_model_id(model.id)

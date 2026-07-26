@@ -314,9 +314,7 @@ class UsageAnalyticsStore:
         if column in existing_columns:
             return
 
-        conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {column_definition}"
-        )
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_definition}")
         logger.info(f"Migrated analytics schema: added {table}.{column}")
 
     def _drop_index_tables_locked(self, conn: sqlite3.Connection) -> None:
@@ -364,7 +362,11 @@ class UsageAnalyticsStore:
         self._drop_index_tables_locked(conn)
         self._initialize_schema_locked(conn)
 
-        files = log_files if log_files is not None else sorted(self.logs_dir.glob("app_*.log"))
+        files = (
+            log_files
+            if log_files is not None
+            else sorted(self.logs_dir.glob("app_*.log"))
+        )
         for log_file in files:
             try:
                 self._process_log_file_locked(conn, log_file, force_full_read=True)
@@ -568,8 +570,7 @@ class UsageAnalyticsStore:
                         model_bucket["revenue_msats"] += revenue_msats
 
                 failed = (
-                    "upstream request failed" in message
-                    or "revert payment" in message
+                    "upstream request failed" in message or "revert payment" in message
                 )
                 if failed:
                     bucket["total_requests"] += 1
@@ -592,9 +593,9 @@ class UsageAnalyticsStore:
                     if isinstance(max_cost, (int, float)) and max_cost > 0:
                         max_cost_float = float(max_cost)
                         bucket["refunds_msats"] += max_cost_float
-                        model_updates[(minute_key, model)][
-                            "refunds_msats"
-                        ] += max_cost_float
+                        model_updates[(minute_key, model)]["refunds_msats"] += (
+                            max_cost_float
+                        )
 
         return (
             end_offset,
@@ -1032,7 +1033,9 @@ class UsageAnalyticsStore:
                 """,
                 (cutoff_timestamp,),
             ).fetchone()
-            total_error_count = int(total_error_count_row[0]) if total_error_count_row else 0
+            total_error_count = (
+                int(total_error_count_row[0]) if total_error_count_row else 0
+            )
 
         return {
             "errors": [
@@ -1204,11 +1207,7 @@ class UsageAnalyticsStore:
             total_successful = int(row["total_successful"])
             total_revenue_msats = float(row["total_revenue_msats"])
             total_tokens = int(row["total_tokens"])
-            if (
-                total_successful <= 0
-                and total_revenue_msats <= 0
-                and total_tokens <= 0
-            ):
+            if total_successful <= 0 and total_revenue_msats <= 0 and total_tokens <= 0:
                 continue
 
             bucket_ts = str(row["bucket_ts"])
