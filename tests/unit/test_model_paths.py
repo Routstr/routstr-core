@@ -13,7 +13,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable, cast
 
 import httpx
 import pytest
@@ -760,9 +760,13 @@ async def test_openrouter_bad_payload_shapes_do_not_raise(
         provider = _FakeOpenRouterProvider(
             models=[_model("m", canonical_slug="a/m")], db_id=2
         )
-        _mock_transport(
-            monkeypatch, lambda request, p=payload: httpx.Response(200, json=p)
-        )
+
+        def _handler(
+            request: httpx.Request, p: dict[str, Any] | None = payload
+        ) -> httpx.Response:
+            return httpx.Response(200, json=p)
+
+        _mock_transport(monkeypatch, _handler)
         # Must not raise.
         await mp.refresh_model_paths([provider])
 
@@ -1051,7 +1055,10 @@ async def test_refresh_loop_idles_while_disabled(
 
     monkeypatch.setattr(mp.asyncio, "sleep", _fast_sleep)
 
-    await mp.refresh_model_paths_periodically(lambda: [object()])
+    def _upstreams() -> list[BaseUpstreamProvider]:
+        return [cast(BaseUpstreamProvider, object())]
+
+    await mp.refresh_model_paths_periodically(_upstreams)
 
     assert refresh_calls == [], "disabled loop must not refresh"
     assert len(idle_sleeps) == 2, "disabled loop must keep polling, not exit"
