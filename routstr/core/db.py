@@ -11,9 +11,8 @@ from typing import AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
-from alembic.util.exc import CommandError
 from sqlalchemy import Index, UniqueConstraint, case, delete, or_
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
@@ -790,17 +789,6 @@ def fix_cashu_migrations() -> None:
             logger.warning(f"Could not check/fix Cashu database {db_file}: {e}")
 
 
-def _clear_alembic_version() -> None:
-    """Clear the alembic_version table so stamp/upgrade can proceed."""
-    sync_url = DATABASE_URL.replace("+aiosqlite", "")
-    from sqlalchemy import create_engine, text
-
-    eng = create_engine(sync_url)
-    with eng.begin() as conn:
-        conn.execute(text("DELETE FROM alembic_version"))
-    eng.dispose()
-
-
 def run_migrations() -> None:
     """Run Alembic migrations programmatically."""
     try:
@@ -822,30 +810,11 @@ def run_migrations() -> None:
         # Set the database URL in the config
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-        try:
-            command.upgrade(alembic_cfg, "head")
-        except CommandError as e:
-            if "Can't locate revision" in str(e):
-                logger.warning(
-                    "Database stamped with unknown revision (likely from another branch). "
-                    "Re-stamping to current head.",
-                    extra={"error": str(e)},
-                )
-                _clear_alembic_version()
-                command.stamp(alembic_cfg, "head")
-            else:
-                raise
-        except OperationalError as e:
-            if "duplicate column name" in str(e).lower():
-                logger.warning(
-                    "Migration hit a column that already exists (likely added via "
-                    "create_all on another branch). Stamping to current head.",
-                    extra={"error": str(e)},
-                )
-                _clear_alembic_version()
-                command.stamp(alembic_cfg, "head")
-            else:
-                raise
+        # Never stamp past a migration failure. Doing so makes Alembic's version
+        # metadata claim schema changes were applied when the physical schema may
+        # still be missing them. Unknown revisions must be restored or merged into
+        # the revision graph; other migration errors must fail startup visibly.
+        command.upgrade(alembic_cfg, "head")
 
         logger.info("Database migrations completed successfully")
 

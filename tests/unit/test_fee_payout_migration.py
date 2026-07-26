@@ -4,12 +4,31 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _run_alembic(root: Path, database_url: str, revision: str) -> None:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", revision],
+        cwd=root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _run_routstr_startup_migrations(root: Path, database_url: str) -> None:
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from routstr.core.db import run_migrations; run_migrations()",
+        ],
         cwd=root,
         env=env,
         check=True,
@@ -37,7 +56,7 @@ def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
             "payout_in_progress_msats, payout_started_at FROM routstr_fees"
         ).fetchone()
 
-    assert version == ("c7d5f8638599",)
+    assert version == ("d8e6f974960a",)
     assert {
         "id",
         "accumulated_msats",
@@ -77,14 +96,46 @@ def test_fee_payout_checkpoint_migration_preserves_existing_row(
     assert row == (5000, 1000, 123, 0, None)
 
 
-def test_fee_payout_checkpoint_repair_restores_columns_missing_at_old_head(
+@pytest.mark.parametrize("replaced_revision", ["21c84cd5ad83", "11eaab843b49"])
+def test_branch_update_repairs_database_stamped_with_replaced_revision(
+    tmp_path: Path,
+    replaced_revision: str,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    database_path = tmp_path / "replaced-revision.db"
+    database_url = f"sqlite+aiosqlite:///{database_path}"
+    _run_alembic(root, database_url, "c6d7e8f9a0b1")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("ALTER TABLE lightning_invoices ADD COLUMN mint_url VARCHAR")
+        connection.execute(
+            "UPDATE alembic_version SET version_num = ?",
+            (replaced_revision,),
+        )
+        connection.commit()
+
+    _run_routstr_startup_migrations(root, database_url)
+
+    with sqlite3.connect(database_path) as connection:
+        version = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(routstr_fees)")
+        }
+
+    assert version == ("d8e6f974960a",)
+    assert {"payout_in_progress_msats", "payout_started_at"} <= columns
+
+
+def test_fee_payout_checkpoint_repair_restores_columns_missing_at_previous_head(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
     database_path = tmp_path / "migration.db"
     database_url = f"sqlite+aiosqlite:///{database_path}"
-    old_head = "7f2843d3f4e4"
-    _run_alembic(root, database_url, old_head)
+    previous_head = "c7d5f8638599"
+    _run_alembic(root, database_url, previous_head)
 
     # Reproduce a database that was stamped to head after a duplicate-column or
     # unknown-revision recovery skipped part of the migration chain.
