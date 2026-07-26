@@ -1,19 +1,24 @@
 import base64
 import json
 import socket
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 import pytest
 
 from routstr.core.db import ApiKey
 from routstr.wallet import (
+    Bolt11PaymentAmbiguous,
+    Bolt11PaymentNotAttempted,
     MintConnectionError,
     TokenConsumedError,
     classify_redemption_error,
     credit_balance,
+    execute_bolt11_payment,
     get_balance,
     is_mint_connection_error,
+    pay_bolt11_invoice,
+    prepare_bolt11_payment,
     recieve_token,
     send,
     send_token,
@@ -1389,3 +1394,176 @@ async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
                     await swap_to_primary_mint(mock_token, mock_token_wallet)
 
     assert mock_token_wallet.melt.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pay_bolt11_invoice_uses_sufficient_mint_with_highest_balance() -> None:
+    from routstr.core.settings import settings
+
+    low_wallet = MagicMock()
+    high_wallet = MagicMock()
+    low_proof = MagicMock(amount=200)
+    high_proof = MagicMock(amount=500)
+    low_wallet.proofs = [low_proof]
+    high_wallet.proofs = [high_proof]
+
+    for wallet in (low_wallet, high_wallet):
+        wallet.melt_quote = AsyncMock(
+            return_value=MagicMock(amount=100, fee_reserve=2, quote="quote-1")
+        )
+        wallet.get_fees_for_proofs = Mock(return_value=0)
+        wallet.select_to_send = AsyncMock(
+            side_effect=lambda proofs, *args, **kwargs: (proofs, 0)
+        )
+        wallet.melt = AsyncMock(
+            return_value=MagicMock(
+                state="PAID", change=[MagicMock(amount=399)]
+            )
+        )
+        wallet.set_reserved_for_send = AsyncMock()
+
+    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+        if unit == "msat":
+            raise ValueError("unit unsupported")
+        return high_wallet if mint_url == "https://high.test" else low_wallet
+
+    with (
+        patch.object(
+            settings,
+            "cashu_mints",
+            ["https://low.test", "https://high.test"],
+        ),
+        patch.object(settings, "primary_mint", "https://low.test"),
+        patch("routstr.wallet.get_wallet", side_effect=get_wallet),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            side_effect=lambda wallet, *args, **kwargs: wallet.proofs,
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            side_effect=lambda proofs, wallet: proofs,
+        ),
+    ):
+        amount, mint_url, unit = await pay_bolt11_invoice("lnbc-invoice")
+
+    assert (amount, mint_url, unit) == (101, "https://high.test", "sat")
+    high_wallet.melt.assert_awaited_once()
+    low_wallet.melt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_bolt11_payment_rejects_unpaid_melt_state() -> None:
+    plan = MagicMock()
+    plan.proofs = [MagicMock(amount=110)]
+    plan.quote.amount = 100
+    plan.quote.fee_reserve = 10
+    plan.quote.quote = "quote-1"
+    plan.invoice = "lnbc-invoice"
+    plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.set_reserved_for_send = AsyncMock()
+    plan.wallet.melt = AsyncMock(return_value=MagicMock(state="UNPAID", change=[]))
+
+    with pytest.raises(Bolt11PaymentNotAttempted):
+        await execute_bolt11_payment(plan)
+
+    # An explicit unpaid answer means the proofs are ours again.
+    plan.wallet.set_reserved_for_send.assert_awaited_with(plan.proofs, reserved=False)
+
+
+@pytest.mark.asyncio
+async def test_execute_bolt11_payment_accepts_legacy_paid_response() -> None:
+    plan = MagicMock()
+    plan.proofs = [MagicMock(amount=110)]
+    plan.quote.amount = 100
+    plan.quote.fee_reserve = 10
+    plan.quote.quote = "quote-1"
+    plan.invoice = "lnbc-invoice"
+    plan.mint_url = "https://mint.test"
+    plan.unit = "sat"
+    plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.set_reserved_for_send = AsyncMock()
+    plan.wallet.melt = AsyncMock(
+        return_value=MagicMock(state=None, paid=True, change=[])
+    )
+
+    assert await execute_bolt11_payment(plan) == (
+        110,
+        "https://mint.test",
+        "sat",
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_bolt11_payment_keeps_proofs_reserved_when_melt_errors() -> None:
+    plan = MagicMock()
+    plan.proofs = [MagicMock(amount=110)]
+    plan.quote.amount = 100
+    plan.quote.fee_reserve = 10
+    plan.quote.quote = "quote-1"
+    plan.invoice = "lnbc-invoice"
+    plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.set_reserved_for_send = AsyncMock()
+    plan.wallet.set_reserved_for_melt = AsyncMock()
+    plan.wallet.melt = AsyncMock(side_effect=TimeoutError("no answer"))
+
+    with pytest.raises(Bolt11PaymentAmbiguous):
+        await execute_bolt11_payment(plan)
+
+    # The mint may still settle with these proofs. cashu's own melt()
+    # un-reserves them on a mint transport error, so the ambiguous path must
+    # re-reserve — and it must do so with the melt quote id, because
+    # get_melt_quote() finds the proofs to settle by melt_id.
+    plan.wallet.set_reserved_for_melt.assert_awaited_once_with(
+        plan.proofs, reserved=True, quote_id="quote-1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_bolt11_payment_does_not_reserve_when_selection_fails() -> None:
+    plan = MagicMock()
+    plan.proofs = [MagicMock(amount=110)]
+    plan.quote.amount = 100
+    plan.quote.fee_reserve = 10
+    plan.wallet.select_to_send = AsyncMock(side_effect=ValueError("insufficient"))
+    plan.wallet.set_reserved_for_send = AsyncMock()
+    plan.wallet.melt = AsyncMock()
+
+    with pytest.raises(Bolt11PaymentNotAttempted):
+        await execute_bolt11_payment(plan)
+
+    plan.wallet.set_reserved_for_send.assert_not_awaited()
+    plan.wallet.melt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_bolt11_payment_counts_input_fees_in_sufficiency() -> None:
+    from routstr.core.settings import settings
+
+    wallet = MagicMock()
+    wallet.proofs = [MagicMock(amount=105)]
+    wallet.melt_quote = AsyncMock(
+        return_value=MagicMock(amount=100, fee_reserve=2, quote="quote-1")
+    )
+    # Balance covers amount + fee_reserve (102) but not the 5 sat input fee.
+    wallet.get_fees_for_proofs = Mock(return_value=5)
+
+    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+        if unit == "msat":
+            raise ValueError("unit unsupported")
+        return wallet
+
+    with (
+        patch.object(settings, "cashu_mints", ["https://only.test"]),
+        patch.object(settings, "primary_mint", "https://only.test"),
+        patch("routstr.wallet.get_wallet", side_effect=get_wallet),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            side_effect=lambda wallet, *args, **kwargs: wallet.proofs,
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            side_effect=lambda proofs, wallet: proofs,
+        ),
+        pytest.raises(ValueError, match="enough balance"),
+    ):
+        await prepare_bolt11_payment("lnbc-invoice")

@@ -3,10 +3,11 @@ import re
 import socket
 import time
 import typing
+from dataclasses import dataclass
 from typing import TypedDict
 
 import httpx
-from cashu.core.base import Proof, Token
+from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet
@@ -280,6 +281,203 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str:
     _, token = await send(amount, unit, mint_url)
     return token
+
+
+class Bolt11PaymentNotAttempted(Exception):
+    """The invoice was definitively not paid, so the attempt can be retried.
+
+    Raised only where the mint's own answer rules out a settlement: coin
+    selection never reached ``melt``, or ``melt`` returned an explicit unpaid
+    state. Any proofs reserved along the way are released before this is
+    raised.
+    """
+
+
+class Bolt11PaymentAmbiguous(Exception):
+    """The payment may or may not have settled, so it must not be retried.
+
+    Raised when ``melt`` errored, timed out, or came back pending. The selected
+    proofs stay reserved: the mint may still complete the payment with them,
+    and spending them elsewhere would be a double spend.
+    """
+
+
+@dataclass
+class Bolt11PaymentPlan:
+    invoice: str
+    wallet: Wallet
+    proofs: list[Proof]
+    quote: MeltQuote
+    mint_url: str
+    unit: str
+
+    @property
+    def invoice_amount_sats(self) -> int:
+        amount = int(self.quote.amount)
+        return amount if self.unit == "sat" else (amount + 999) // 1000
+
+    @property
+    def maximum_spend_sats(self) -> int:
+        maximum = (
+            int(self.quote.amount)
+            + int(self.quote.fee_reserve)
+            + int(self.wallet.get_fees_for_proofs(self.proofs))
+        )
+        return maximum if self.unit == "sat" else (maximum + 999) // 1000
+
+
+async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
+    """Choose the sufficiently funded configured mint with most balance.
+
+    Candidate discovery only reads balances and melt quotes. Coin selection,
+    which may split proofs, is deferred until the winning mint is known.
+    """
+    mint_urls = list(dict.fromkeys([*settings.cashu_mints, settings.primary_mint]))
+    candidates: list[tuple[int, Wallet, list[Proof], MeltQuote, str, str]] = []
+
+    for mint_url in mint_urls:
+        if not mint_url:
+            continue
+        for unit in ("sat", "msat"):
+            try:
+                wallet = await get_wallet(mint_url, unit)
+                proofs = get_proofs_per_mint_and_unit(
+                    wallet, mint_url, unit, not_reserved=True
+                )
+                proofs = await slow_filter_spend_proofs(proofs, wallet)
+                balance = sum(proof.amount for proof in proofs)
+                if balance <= 0:
+                    continue
+
+                quote = await wallet.melt_quote(invoice=invoice)
+                # select_to_send runs with include_fees=True, so the input fee
+                # has to be part of sufficiency too. Without it a mint passes
+                # this filter and then fails coin selection.
+                required = (
+                    quote.amount
+                    + quote.fee_reserve
+                    + wallet.get_fees_for_proofs(proofs)
+                )
+                if balance < required:
+                    continue
+                balance_msats = balance * 1000 if unit == "sat" else balance
+                candidates.append(
+                    (balance_msats, wallet, proofs, quote, mint_url, unit)
+                )
+            except Exception as e:
+                logger.debug(
+                    "Cashu mint cannot fund BOLT11 invoice",
+                    extra={"mint_url": mint_url, "unit": unit, "error": str(e)},
+                )
+
+    if not candidates:
+        raise ValueError("No configured Cashu mint has enough balance to pay invoice")
+
+    _, wallet, proofs, quote, mint_url, unit = max(
+        candidates, key=lambda item: item[0]
+    )
+    return Bolt11PaymentPlan(invoice, wallet, proofs, quote, mint_url, unit)
+
+
+async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str]:
+    """Execute a prepared payment, separating retryable from ambiguous failure.
+
+    Raises ``Bolt11PaymentNotAttempted`` when the invoice provably did not
+    settle, and ``Bolt11PaymentAmbiguous`` when the outcome is unknown. Callers
+    may safely retry the first and must never retry the second.
+    """
+    # Select unreserved, mirroring send_token: a selection failure must not
+    # strand proofs that were never handed to the mint.
+    try:
+        selected, _ = await plan.wallet.select_to_send(
+            plan.proofs,
+            plan.quote.amount + plan.quote.fee_reserve,
+            set_reserved=False,
+            include_fees=True,
+        )
+    except Exception as e:
+        raise Bolt11PaymentNotAttempted(f"Coin selection failed: {e}") from e
+
+    await plan.wallet.set_reserved_for_send(selected, reserved=True)
+
+    try:
+        result = await asyncio.wait_for(
+            plan.wallet.melt(
+                proofs=selected,
+                invoice=plan.invoice,
+                fee_reserve_sat=plan.quote.fee_reserve,
+                quote_id=plan.quote.quote,
+            ),
+            timeout=60,
+        )
+    except Exception as e:
+        # The mint may still be settling with these proofs, so they must stay
+        # reserved — but cashu's melt() un-reserves them itself on a mint
+        # transport error, the exact ambiguous case. Re-reserve with the melt
+        # quote id, not as a send: get_melt_quote() finds the proofs to settle
+        # by melt_id, so a send-style reservation would strand them — paid
+        # proofs never invalidated, unpaid ones never released.
+        try:
+            await plan.wallet.set_reserved_for_melt(
+                selected, reserved=True, quote_id=plan.quote.quote
+            )
+        except Exception:
+            logger.critical(
+                "Could not re-reserve proofs after an ambiguous melt",
+                extra={"mint_url": plan.mint_url, "quote_id": plan.quote.quote},
+            )
+        raise Bolt11PaymentAmbiguous(f"Cashu melt did not return: {e}") from e
+
+    raw_state = getattr(result, "state", None)
+    state = str(raw_state).lower().rsplit(".", 1)[-1] if raw_state is not None else ""
+    if state == "paid" or getattr(result, "paid", None) is True:
+        change = getattr(result, "change", None) or []
+        paid = sum(proof.amount for proof in selected) - sum(
+            int(item.amount) for item in change
+        )
+        return paid, plan.mint_url, plan.unit
+
+    if state == "unpaid":
+        # The mint is telling us it did not pay, so the proofs are ours again.
+        await plan.wallet.set_reserved_for_send(selected, reserved=False)
+        raise Bolt11PaymentNotAttempted("Cashu mint reported the melt as unpaid")
+
+    raise Bolt11PaymentAmbiguous(
+        f"Cashu melt did not reach a final state: {state or 'unknown'}"
+    )
+
+
+async def pay_bolt11_invoice(invoice: str) -> tuple[int, str, str]:
+    """Prepare and pay a BOLT11 invoice from the best-funded Cashu mint."""
+    return await execute_bolt11_payment(await prepare_bolt11_payment(invoice))
+
+
+async def check_bolt11_payment_status(
+    mint_url: str, unit: str, quote_id: str
+) -> str:
+    """Ask the mint what became of an earlier melt attempt.
+
+    Returns ``"paid"``, ``"unpaid"``, ``"pending"``, or ``"unknown"``. This is
+    the durable reconciliation path for an ambiguous payment: cashu's
+    ``get_melt_quote`` also settles the wallet database — invalidating the
+    proofs on ``paid`` and releasing their reservation on ``unpaid`` — so a
+    caller that sees ``"unpaid"`` may safely retry with the same funds.
+    """
+    try:
+        wallet = await get_wallet(mint_url, unit)
+        quote = await wallet.get_melt_quote(quote_id)
+    except Exception as e:
+        logger.warning(
+            "Could not query the mint for a melt quote's status",
+            extra={"mint_url": mint_url, "quote_id": quote_id, "error": str(e)},
+        )
+        return "unknown"
+    if quote is None:
+        return "unknown"
+    state = str(getattr(quote, "state", "")).lower().rsplit(".", 1)[-1]
+    if state in ("paid", "unpaid", "pending"):
+        return state
+    return "unknown"
 
 
 # A foreign mint's fee_reserve is a non-binding estimate (NUT-05): the mint may
@@ -999,6 +1197,10 @@ async def _refund_sweep_once(cutoff: int) -> None:
             db.CashuTransaction.type == "out",
             db.CashuTransaction.collected == False,  # noqa: E712
             db.CashuTransaction.swept == False,  # noqa: E712
+            # NULL != 'x' is NULL in SQL, so legacy rows with no source would
+            # drop out of the sweep without the explicit IS NULL arm.
+            (db.CashuTransaction.source != "ppq_auto_topup")
+            | (db.CashuTransaction.source == None),  # noqa: E711
             db.CashuTransaction.created_at < cutoff,
         )
         results = await session.exec(stmt)
