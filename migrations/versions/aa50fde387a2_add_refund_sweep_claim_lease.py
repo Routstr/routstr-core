@@ -1,15 +1,17 @@
-"""add recoverable refund sweep claim lease
+"""add refund sweep claim lease
 
-Revision ID: 8a1b2c3d4e5f
-Revises: 7f2843d3f4e4
-Create Date: 2026-07-24 23:15:00.000000
+Revision ID: aa50fde387a2
+Revises: 9c4d8e2f1a6b
+Create Date: 2026-07-26 12:50:10.509217
 """
+
+from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "8a1b2c3d4e5f"
-down_revision = "7f2843d3f4e4"
+revision = "aa50fde387a2"
+down_revision = "9c4d8e2f1a6b"
 branch_labels = None
 depends_on = None
 
