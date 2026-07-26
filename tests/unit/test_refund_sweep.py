@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from routstr import wallet
 from routstr.core.db import CashuTransaction
 from routstr.wallet import refund_sweep_once
 
@@ -183,6 +184,116 @@ async def test_refund_sweep_releases_claim_on_cancellation(
     refund = (await _load(session_factory))["cancelled"]
     assert refund.swept is False
     assert refund.sweep_started_at is None
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_retains_claim_and_stale_retry_records_sweep(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="checkpoint-failure",
+            amount=1,
+            unit="sat",
+            type="out",
+            created_at=800,
+        ),
+    )
+    real_set_state = wallet._set_refund_sweep_state
+
+    async def fail_swept_checkpoint(
+        refund_id: str,
+        *,
+        predicates: tuple[object, ...] = (),
+        **values: object,
+    ) -> int:
+        if values.get("swept") is True:
+            raise RuntimeError("checkpoint unavailable")
+        return await real_set_state(refund_id, predicates=predicates, **values)
+
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.settings.refund_sweep_claim_timeout_seconds", 200),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch(
+            "routstr.wallet.recieve_token", AsyncMock(return_value=(1, "sat", "mint"))
+        ),
+        patch(
+            "routstr.wallet._set_refund_sweep_state",
+            side_effect=fail_swept_checkpoint,
+        ),
+        patch("routstr.wallet.logger.critical") as critical,
+    ):
+        await refund_sweep_once()
+
+    retained = (await _load(session_factory))["checkpoint-failure"]
+    assert retained.swept is False
+    assert retained.collected is False
+    assert retained.sweep_started_at == 1000
+    critical.assert_called_once()
+
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.settings.refund_sweep_claim_timeout_seconds", 200),
+        patch("routstr.wallet.time.time", return_value=1300),
+        patch(
+            "routstr.wallet.recieve_token",
+            AsyncMock(side_effect=RuntimeError("token already spent")),
+        ),
+    ):
+        await refund_sweep_once()
+
+    recovered = (await _load(session_factory))["checkpoint-failure"]
+    assert recovered.swept is True
+    assert recovered.collected is False
+    assert recovered.sweep_started_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redemption_succeeds", [True, False])
+async def test_expired_worker_cannot_overwrite_or_release_newer_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    redemption_succeeds: bool,
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="reclaimed",
+            amount=1,
+            unit="sat",
+            type="out",
+            created_at=800,
+        ),
+    )
+
+    async def replace_claim(_token: str) -> tuple[int, str, str]:
+        async with session_factory() as session:
+            result = await session.exec(
+                select(CashuTransaction).where(CashuTransaction.token == "reclaimed")
+            )
+            transaction = result.one()
+            transaction.sweep_started_at = 1100
+            session.add(transaction)
+            await session.commit()
+        if not redemption_succeeds:
+            raise RuntimeError("mint unavailable")
+        return (1, "sat", "mint")
+
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch("routstr.wallet.recieve_token", AsyncMock(side_effect=replace_claim)),
+    ):
+        await refund_sweep_once()
+
+    reclaimed = (await _load(session_factory))["reclaimed"]
+    assert reclaimed.swept is False
+    assert reclaimed.collected is False
+    assert reclaimed.sweep_started_at == 1100
 
 
 @pytest.mark.asyncio

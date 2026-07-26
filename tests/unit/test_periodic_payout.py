@@ -77,8 +77,8 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balances_by_mint_and_unit",
-            AsyncMock(return_value={}),
+            "routstr.wallet.db.balance_for_mint_and_unit",
+            AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
@@ -131,8 +131,8 @@ async def test_periodic_payout_releases_session_before_slow_mint_send() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balances_by_mint_and_unit",
-            AsyncMock(return_value={}),
+            "routstr.wallet.db.balance_for_mint_and_unit",
+            AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(side_effect=raw_send)),
     ):
@@ -173,8 +173,8 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balances_by_mint_and_unit",
-            AsyncMock(return_value={}),
+            "routstr.wallet.db.balance_for_mint_and_unit",
+            AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
     ):
@@ -220,10 +220,11 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
             await periodic_payout()
 
     # The liability session is opened per mint/unit (sat + msat), and each
-    # failure is isolated to its own iteration rather than aborting the cycle.
+    # DB failure retains the cycle-specific alert wording while remaining
+    # isolated to its own iteration.
     assert create_session.call_count == 2
     assert logger.error.call_count == 2
     message = logger.error.call_args.args[0]
     extra = logger.error.call_args.kwargs["extra"]
-    assert message == "Error sending payout: RuntimeError"
+    assert message == "Error in periodic payout cycle: RuntimeError"
     assert extra["error"] == "db unavailable"

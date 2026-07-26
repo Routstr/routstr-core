@@ -106,14 +106,17 @@ class Settings(BaseSettings):
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
     )
 
-    # Database connection-pool controls (advanced). Keep the default pool
-    # bounded and fail quickly: increasing it can hide leaked connections and
-    # makes SQLite lock contention worse. These fields are env-only below.
+    # Database connection-pool controls (advanced). Capacity defaults match
+    # SQLAlchemy's established queue-pool behavior. Pre-ping is enabled by the
+    # engine factory for networked backends; SQLite can explicitly opt in.
+    # These fields are env-only below.
     database_pool_size: int = Field(default=5, ge=1, env="DATABASE_POOL_SIZE")
-    database_max_overflow: int = Field(default=0, ge=0, env="DATABASE_MAX_OVERFLOW")
-    database_pool_timeout: float = Field(default=5.0, gt=0, env="DATABASE_POOL_TIMEOUT")
+    database_max_overflow: int = Field(default=10, ge=0, env="DATABASE_MAX_OVERFLOW")
+    database_pool_timeout: float = Field(
+        default=30.0, gt=0, env="DATABASE_POOL_TIMEOUT"
+    )
     database_pool_recycle: int = Field(default=1800, ge=0, env="DATABASE_POOL_RECYCLE")
-    database_pool_pre_ping: bool = Field(default=True, env="DATABASE_POOL_PRE_PING")
+    database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
     database_pool_hold_warn_seconds: float = Field(
         default=10.0, gt=0, env="DATABASE_POOL_HOLD_WARN_SECONDS"
     )

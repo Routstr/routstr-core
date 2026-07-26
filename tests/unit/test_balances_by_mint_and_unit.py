@@ -13,7 +13,11 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.db import ApiKey, balances_by_mint_and_unit
+from routstr.core.db import (
+    ApiKey,
+    balance_for_mint_and_unit,
+    balances_by_mint_and_unit,
+)
 
 
 def _make_engine() -> AsyncEngine:
@@ -90,6 +94,17 @@ async def test_excludes_rows_with_null_mint_or_currency(session: AsyncSession) -
     result = await balances_by_mint_and_unit(session, ["http://m1"], ["sat"])
 
     assert result == {("http://m1", "sat"): 1000}
+
+
+@pytest.mark.asyncio
+async def test_scalar_balance_for_one_mint_and_unit(session: AsyncSession) -> None:
+    await _add_key(session, "a", 1000, "http://m1", "sat")
+    await _add_key(session, "b", 500, "http://m1", "sat")
+    await _add_key(session, "c", 9000, "http://m1", "msat")
+    await _add_key(session, "d", 700, "http://m2", "sat")
+
+    assert await balance_for_mint_and_unit(session, "http://m1", "sat") == 1500
+    assert await balance_for_mint_and_unit(session, "http://missing", "sat") == 0
 
 
 @pytest.mark.asyncio

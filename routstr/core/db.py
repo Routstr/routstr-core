@@ -22,6 +22,7 @@ from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
+from .settings import settings
 
 logger = get_logger(__name__)
 
@@ -29,18 +30,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
 
 def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
-    """Build an async engine from validated, environment-only pool settings."""
-    from .settings import settings
-
+    """Build and instrument an async engine from environment-only settings."""
     url = make_url(database_url)
-    is_memory_sqlite = url.get_backend_name() == "sqlite" and url.database in {
-        None,
-        "",
-        ":memory:",
-    }
-    options: dict[str, int | float | bool] = {
-        "pool_pre_ping": settings.database_pool_pre_ping,
-    }
+    backend = url.get_backend_name()
+    is_sqlite = backend == "sqlite"
+    is_memory_sqlite = is_sqlite and url.database in {None, "", ":memory:"}
+    pool_pre_ping = settings.database_pool_pre_ping or not is_sqlite
+    options: dict[str, int | float | bool] = {"pool_pre_ping": pool_pre_ping}
     if not is_memory_sqlite:
         options.update(
             pool_size=settings.database_pool_size,
@@ -52,43 +48,44 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
     logger.info(
         "Database pool configured",
         extra={
-            "database_url_backend": url.get_backend_name(),
+            "database_url_backend": backend,
             "in_memory_sqlite": is_memory_sqlite,
             **options,
         },
     )
-    return create_async_engine(database_url, echo=False, **options)
+    created_engine = create_async_engine(database_url, echo=False, **options)
+    hold_warn_seconds = settings.database_pool_hold_warn_seconds
+
+    def record_pool_checkout(
+        dbapi_connection: object, connection_record: object, proxy: object
+    ) -> None:
+        connection_record.info["routstr_checked_out_at"] = time.monotonic()  # type: ignore[attr-defined]
+
+    def record_pool_checkin(
+        dbapi_connection: object, connection_record: object
+    ) -> None:
+        checked_out_at = connection_record.info.pop(  # type: ignore[attr-defined]
+            "routstr_checked_out_at", None
+        )
+        if checked_out_at is None:
+            return
+        held_seconds = time.monotonic() - checked_out_at
+        if held_seconds >= hold_warn_seconds:
+            logger.warning(
+                "Database connection held longer than threshold",
+                extra={
+                    "held_seconds": round(held_seconds, 3),
+                    "threshold_seconds": hold_warn_seconds,
+                    "pool_status": created_engine.pool.status(),
+                },
+            )
+
+    event.listen(created_engine.sync_engine, "checkout", record_pool_checkout)
+    event.listen(created_engine.sync_engine, "checkin", record_pool_checkin)
+    return created_engine
 
 
 engine = create_db_engine()
-
-from .settings import settings as _runtime_settings  # noqa: E402
-
-_POOL_HOLD_WARN_SECONDS = _runtime_settings.database_pool_hold_warn_seconds
-
-
-@event.listens_for(engine.sync_engine, "checkout")
-def _record_pool_checkout(
-    dbapi_connection: object, connection_record: object, proxy: object
-) -> None:
-    connection_record.info["routstr_checked_out_at"] = time.monotonic()  # type: ignore[attr-defined]
-
-
-@event.listens_for(engine.sync_engine, "checkin")
-def _record_pool_checkin(dbapi_connection: object, connection_record: object) -> None:
-    checked_out_at = connection_record.info.pop("routstr_checked_out_at", None)  # type: ignore[attr-defined]
-    if checked_out_at is None:
-        return
-    held_seconds = time.monotonic() - checked_out_at
-    if held_seconds >= _POOL_HOLD_WARN_SECONDS:
-        logger.warning(
-            "Database connection held longer than threshold",
-            extra={
-                "held_seconds": round(held_seconds, 3),
-                "threshold_seconds": _POOL_HOLD_WARN_SECONDS,
-                "pool_status": engine.pool.status(),
-            },
-        )
 
 
 class ApiKey(SQLModel, table=True):  # type: ignore
@@ -284,7 +281,10 @@ async def release_stale_reservations(
     if released:
         logger.warning(
             "Released stale reservations",
-            extra={"released_reservations": released, "max_age_seconds": max_age_seconds},
+            extra={
+                "released_reservations": released,
+                "max_age_seconds": max_age_seconds,
+            },
         )
     return released
 
@@ -781,6 +781,19 @@ async def complete_routstr_fee_payout(
     result = await session.exec(stmt)  # type: ignore[call-overload]
     await session.commit()
     return result.rowcount == 1
+
+
+async def balance_for_mint_and_unit(
+    db_session: AsyncSession, mint_url: str, unit: str
+) -> int:
+    """Return the user liability for one mint and unit in millisatoshis."""
+    result = await db_session.exec(
+        select(func.sum(ApiKey.balance)).where(
+            col(ApiKey.refund_mint_url) == mint_url,
+            col(ApiKey.refund_currency) == unit,
+        )
+    )
+    return int(result.one() or 0)
 
 
 async def balances_by_mint_and_unit(

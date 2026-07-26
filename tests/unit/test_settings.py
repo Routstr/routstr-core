@@ -62,13 +62,13 @@ def test_payout_settings_have_sensible_defaults() -> None:
     assert s.payout_interval_seconds == 900
 
 
-def test_database_pool_defaults_are_bounded_and_fail_fast() -> None:
+def test_database_pool_defaults_match_sqlalchemy_capacity() -> None:
     s = Settings()
     assert s.database_pool_size == 5
-    assert s.database_max_overflow == 0
-    assert s.database_pool_timeout == 5.0
+    assert s.database_max_overflow == 10
+    assert s.database_pool_timeout == 30.0
     assert s.database_pool_recycle == 1800
-    assert s.database_pool_pre_ping is True
+    assert s.database_pool_pre_ping is False
     assert s.database_pool_hold_warn_seconds == 10.0
 
 

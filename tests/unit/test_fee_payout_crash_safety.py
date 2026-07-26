@@ -253,6 +253,56 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_site", ["session", "completion"])
+async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
+    failure_site: str,
+) -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=5_000,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+    completion = AsyncMock()
+    if failure_site == "session":
+        create_session = Mock(
+            side_effect=[
+                _session_context(session),
+                _session_context(session),
+                RuntimeError("pool unavailable"),
+            ]
+        )
+    else:
+        create_session = Mock(return_value=_session_context(session))
+        completion.side_effect = RuntimeError("checkpoint unavailable")
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch("routstr.wallet.db.create_session", create_session),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", AsyncMock(return_value=True)),
+        patch("routstr.wallet.db.complete_routstr_fee_payout", completion),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(return_value=5)),
+        patch("routstr.wallet.logger.critical") as critical,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    critical.assert_called_once()
+    assert critical.call_args.args[0] == (
+        "Routstr fee payout sent but checkpoint was not completed"
+    )
+
+
+@pytest.mark.asyncio
 async def test_fee_payout_releases_db_connection_during_send(tmp_path: object) -> None:
     """With pool_size=1, the payout must not hold a connection while the
     external LNURL send is in flight, or the completion step would starve."""

@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -43,17 +42,44 @@ async def test_memory_sqlite_keeps_static_pool(
         await engine.dispose()
 
 
-def test_pool_observer_warns_when_connection_is_held_too_long(
+def test_non_sqlite_backend_enables_pre_ping_automatically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    record = SimpleNamespace(info={})
-    monotonic = MagicMock(side_effect=[100.0, 112.5])
-    monkeypatch.setattr(db.time, "monotonic", monotonic)
-    monkeypatch.setattr(db, "_POOL_HOLD_WARN_SECONDS", 10.0)
+    monkeypatch.setattr(settings, "database_pool_pre_ping", False)
+    fake_engine = MagicMock()
 
-    with patch.object(db.logger, "warning") as warning:
-        db._record_pool_checkout(None, record, None)
-        db._record_pool_checkin(None, record)
+    with (
+        patch.object(db, "create_async_engine", return_value=fake_engine) as factory,
+        patch.object(db.event, "listen") as listen,
+    ):
+        created = create_db_engine("postgresql+asyncpg://user:pass@db/node")
 
-    warning.assert_called_once()
-    assert warning.call_args.kwargs["extra"]["held_seconds"] == 12.5
+    assert created is fake_engine
+    assert factory.call_args.kwargs["pool_pre_ping"] is True
+    assert listen.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_every_created_engine_warns_for_long_checkouts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    monkeypatch.setattr(settings, "database_pool_hold_warn_seconds", 0.0)
+    monkeypatch.setattr(settings, "database_pool_pre_ping", False)
+    first = create_db_engine(f"sqlite+aiosqlite:///{tmp_path}/first.db")
+    second = create_db_engine(f"sqlite+aiosqlite:///{tmp_path}/second.db")
+
+    try:
+        with patch.object(db.logger, "warning") as warning:
+            async with first.connect() as connection:
+                await connection.exec_driver_sql("SELECT 1")
+            async with second.connect() as connection:
+                await connection.exec_driver_sql("SELECT 1")
+
+        assert warning.call_count == 2
+        assert all(
+            call.kwargs["extra"]["threshold_seconds"] == 0.0
+            for call in warning.call_args_list
+        )
+    finally:
+        await first.dispose()
+        await second.dispose()

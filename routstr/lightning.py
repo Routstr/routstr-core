@@ -225,48 +225,84 @@ async def check_invoice_payment(
     minted = False
     invoice_id = invoice.id
     invoice_purpose = invoice.purpose
+    invoice_amount_sats = invoice.amount_sats
+    invoice_payment_hash = invoice.payment_hash
+    finalized_api_key_hash = invoice.api_key_hash
     try:
         # A preceding invoice lookup starts a transaction. End it before the
         # potentially slow mint request so it cannot pin a pool connection.
         await session.commit()
 
+        # Do not redeem a paid top-up quote if its target has already been
+        # pruned. This validation owns a short-lived session and releases its
+        # connection before any mint I/O starts.
+        if invoice_purpose == "topup":
+            if not finalized_api_key_hash:
+                raise ValueError("No API key associated with topup invoice")
+            async with create_session() as validation_session:
+                target = await validation_session.get(ApiKey, finalized_api_key_hash)
+            if target is None:
+                logger.error(
+                    "Topup invoice target API key was not found; skipping mint",
+                    extra={"invoice_id": invoice_id},
+                )
+                return
+
         wallet = await get_wallet(settings.primary_mint, "sat")
-        mint_status = await wallet.get_mint_quote(invoice.payment_hash)
+        mint_status = await wallet.get_mint_quote(invoice_payment_hash)
         if not mint_status.paid:
             return
 
         # The mint enforces single-use quotes, so a concurrent checker that
         # races us here fails inside wallet.mint rather than double-minting.
-        await wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash)
+        await wallet.mint(invoice_amount_sats, quote_id=invoice_payment_hash)
         minted = True
 
-        if invoice_purpose == "create":
-            api_key = await _create_api_key_record(invoice, session)
-            invoice.api_key_hash = api_key.hashed_key
-        elif invoice_purpose == "topup":
-            await _credit_topup_record(invoice, session)
+        # Paid finalization owns a fresh session. The API/watcher session is
+        # never rolled back by this function, so its invoice and sibling ORM
+        # objects remain usable after a DB failure or lost CAS race.
+        async with create_session() as finalization_session:
+            if invoice_purpose == "create":
+                api_key = await _create_api_key_record(invoice, finalization_session)
+                finalized_api_key_hash = api_key.hashed_key
+            elif invoice_purpose == "topup":
+                await _credit_topup_record(invoice, finalization_session)
 
-        # Conditional transition guards against double-credit: the credit
-        # above and this status flip commit atomically, and a lost race
-        # rolls both back.
-        paid_at = int(time.time())
-        finalized = await session.exec(  # type: ignore[call-overload]
-            update(LightningInvoice)
-            .where(
-                col(LightningInvoice.id) == invoice_id,
-                col(LightningInvoice.status) == "pending",
+            # Conditional transition guards against double-credit: the credit
+            # above and this status flip commit atomically, and a lost race
+            # rolls both back in the owned finalization session.
+            paid_at = int(time.time())
+            finalized = await finalization_session.exec(  # type: ignore[call-overload]
+                update(LightningInvoice)
+                .where(
+                    col(LightningInvoice.id) == invoice_id,
+                    col(LightningInvoice.status) == "pending",
+                )
+                .values(
+                    status="paid",
+                    paid_at=paid_at,
+                    api_key_hash=finalized_api_key_hash,
+                )
             )
-            .values(
-                status="paid",
-                paid_at=paid_at,
-                api_key_hash=invoice.api_key_hash,
-            )
-        )
-        if finalized.rowcount != 1:
-            await session.rollback()
-            await session.refresh(invoice)
-            return
-        await session.commit()
+            if finalized.rowcount != 1:
+                await finalization_session.rollback()
+                committed_invoice = await finalization_session.get(
+                    LightningInvoice, invoice_id
+                )
+                await finalization_session.commit()
+                if committed_invoice is not None:
+                    # A concurrent finalizer won the CAS. Publish only the
+                    # state observed from the database after ending the owned
+                    # read transaction; never refresh the caller's session.
+                    invoice.api_key_hash = committed_invoice.api_key_hash
+                    invoice.status = committed_invoice.status
+                    invoice.paid_at = committed_invoice.paid_at
+                return
+            await finalization_session.commit()
+
+        # Only publish finalized values to the caller-owned object after the
+        # owned transaction has committed successfully.
+        invoice.api_key_hash = finalized_api_key_hash
         invoice.status = "paid"
         invoice.paid_at = paid_at
 
@@ -274,20 +310,17 @@ async def check_invoice_payment(
             "Lightning invoice paid",
             extra={
                 "invoice_id": invoice_id,
-                "amount_sats": invoice.amount_sats,
+                "amount_sats": invoice_amount_sats,
                 "purpose": invoice_purpose,
-                "api_key_hash": invoice.api_key_hash[:8] + "..."
-                if invoice.api_key_hash
+                "api_key_hash": finalized_api_key_hash[:8] + "..."
+                if finalized_api_key_hash
                 else None,
             },
         )
     except BaseException as e:
         # BaseException so task cancellation (e.g. client disconnect) after a
-        # successful mint still triggers the reconciliation alert.
-        try:
-            await asyncio.shield(session.rollback())
-        except Exception:
-            logger.warning("Rollback failed during invoice check cleanup")
+        # successful mint still triggers the reconciliation alert. Any rollback
+        # belongs to create_session(), never to the caller-owned session.
         if minted:
             logger.critical(
                 "Invoice mint succeeded but DB finalization failed; reconciliation required",
@@ -329,22 +362,6 @@ async def _credit_topup_record(
     )
     if credited.rowcount != 1:
         raise ValueError("Associated API key not found")
-
-
-async def create_api_key_from_invoice(
-    invoice: LightningInvoice, session: AsyncSession
-) -> ApiKey:
-    wallet = await get_wallet(settings.primary_mint, "sat")
-    await wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash)
-    return await _create_api_key_record(invoice, session)
-
-
-async def topup_api_key_from_invoice(
-    invoice: LightningInvoice, session: AsyncSession
-) -> None:
-    wallet = await get_wallet(settings.primary_mint, "sat")
-    await wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash)
-    await _credit_topup_record(invoice, session)
 
 
 INVOICE_WATCH_INTERVAL_SECONDS = 5
