@@ -138,7 +138,9 @@ def test_has_chargeable_price_true_when_any_billable_rate_positive() -> None:
     assert has_chargeable_price(Pricing(prompt=0.0, completion=1e-06)) is True
     # A per-request charge alone makes a model chargeable even at zero per-token
     # rates — the reason the guard can't look at prompt+completion only.
-    assert has_chargeable_price(Pricing(prompt=0.0, completion=0.0, request=0.5)) is True
+    assert (
+        has_chargeable_price(Pricing(prompt=0.0, completion=0.0, request=0.5)) is True
+    )
 
 
 def test_has_chargeable_price_false_when_all_billable_rates_zero() -> None:
@@ -191,8 +193,6 @@ async def test_litellm_rung_rejects_non_finite_entry_price() -> None:
     model = _model_by_id(models, "litellm-junk-model")
     assert model.pricing_source == PricingSource.UNRESOLVED
     assert model.enabled is False
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +336,7 @@ async def test_ppqai_standalone_prices_tagged_native_and_unresolved() -> None:
             models = await provider.fetch_models()
 
     assert _model_by_id(models, "ppq-priced").pricing_source == PricingSource.NATIVE
-    assert (
-        _model_by_id(models, "ppq-free").pricing_source == PricingSource.UNRESOLVED
-    )
+    assert _model_by_id(models, "ppq-free").pricing_source == PricingSource.UNRESOLVED
 
 
 @pytest.mark.asyncio
@@ -691,6 +689,109 @@ async def test_ollama_unresolvable_model_is_unresolved_and_disabled() -> None:
     model = _model_by_id(models, "nobody-prices-this-ollama-qqq")
     assert model.pricing_source == PricingSource.UNRESOLVED
     assert model.enabled is False
+
+
+# ---------------------------------------------------------------------------
+# tinfoil — its own price is native; a missing one must not import free
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_tinfoil(payload: dict[str, Any], or_feed: list[dict]) -> list[Model]:
+    from routstr.upstream.tinfoil import TinfoilUpstreamProvider
+
+    provider = TinfoilUpstreamProvider(api_key="tf-test-key")
+    with patch(
+        "routstr.upstream.tinfoil.httpx.AsyncClient",
+        lambda *a, **k: _FakeAsyncClient(payload),
+    ):
+        with patch(
+            "routstr.payment.models.async_fetch_openrouter_models",
+            AsyncMock(return_value=or_feed),
+        ):
+            return await provider.fetch_models()
+
+
+@pytest.mark.asyncio
+async def test_tinfoil_native_price_is_tagged_native() -> None:
+    """Tinfoil publishes its own per-1M rates, so a priced model is ``native``.
+
+    Untagged, a re-post of the fetched model through the admin upsert is read as
+    a hand-added price and laundered into ``manual`` — which then exempts it from
+    the free-row force-disable guard.
+    """
+    payload = {
+        "data": [
+            {
+                "id": "llama-tinfoil-3",
+                "context_window": 16384,
+                "pricing": {
+                    "inputTokenPricePer1M": 0.5,
+                    "outputTokenPricePer1M": 1.5,
+                },
+            }
+        ]
+    }
+    models = await _fetch_tinfoil(payload, [])
+    model = _model_by_id(models, "llama-tinfoil-3")
+    assert model.pricing_source == PricingSource.NATIVE
+    assert model.pricing.prompt == 0.5 / 1_000_000
+    assert model.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_tinfoil_missing_price_resolves_through_shared_chain() -> None:
+    """A Tinfoil model with no pricing must be priced by the shared resolver and
+    wear that source, not import at Tinfoil's ``0.0`` schema defaults."""
+    payload = {"data": [{"id": "exotic-tinfoil-zzz", "context_window": 8192}]}
+    or_feed = [
+        {
+            "id": "exotic-tinfoil-zzz",
+            "context_length": 8192,
+            "pricing": {"prompt": "0.000004", "completion": "0.000008"},
+        }
+    ]
+    models = await _fetch_tinfoil(payload, or_feed)
+    model = _model_by_id(models, "exotic-tinfoil-zzz")
+    assert model.pricing_source == PricingSource.OPENROUTER
+    assert model.pricing.prompt == 0.000004
+    assert model.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_tinfoil_unpriceable_model_is_unresolved_and_disabled() -> None:
+    """Tinfoil's pricing fields default to ``0.0``, so a model it ships without
+    pricing that no source can price would otherwise import enabled at $0 and
+    serve every request free. It must import disabled as ``unresolved``."""
+    payload = {
+        "data": [{"id": "nobody-prices-this-tinfoil-qqq", "context_window": 4096}]
+    }
+    models = await _fetch_tinfoil(payload, [])
+    model = _model_by_id(models, "nobody-prices-this-tinfoil-qqq")
+    assert model.pricing_source == PricingSource.UNRESOLVED
+    assert model.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_tinfoil_non_finite_price_is_not_treated_as_native() -> None:
+    """``json.loads`` accepts bare ``Infinity``/``NaN`` (and ``1e999`` overflows
+    to ``inf``), so a junk Tinfoil rate must fall through to the shared chain
+    rather than be published as a trusted native price."""
+    payload = {
+        "data": [
+            {
+                "id": "deepseek-chat",
+                "context_window": 8192,
+                "pricing": {
+                    "inputTokenPricePer1M": float("inf"),
+                    "outputTokenPricePer1M": float("nan"),
+                },
+            }
+        ]
+    }
+    models = await _fetch_tinfoil(payload, [])
+    model = _model_by_id(models, "deepseek-chat")
+    assert model.pricing_source == PricingSource.LITELLM
+    assert has_chargeable_price(model.pricing) is True
 
 
 # ---------------------------------------------------------------------------
