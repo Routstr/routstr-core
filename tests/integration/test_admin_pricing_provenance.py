@@ -854,3 +854,26 @@ def test_non_finite_price_is_rejected() -> None:
                     pricing={"prompt": bad, "completion": 1e-7},
                 )
             )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_oversized_integer_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A JSON integer too large for a float is still a client bug, not a server
+    fault: ``float()`` raises ``OverflowError``, which pydantic does not convert
+    into a validation error, so it escapes the validator as a 500. It must be
+    rejected with the same 422 as every other unusable rate."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers={**_admin_headers(), "Content-Type": "application/json"},
+        content=(
+            '{"id": "huge-price", "name": "huge", "description": "d", "created": 0,'
+            ' "context_length": 8192, "architecture": {"modality": "text"},'
+            ' "pricing": {"prompt": ' + "9" * 400 + ', "completion": 2.8e-7},'
+            f' "upstream_provider_id": {provider_id}}}'
+        ),
+    )
+    assert resp.status_code == 422

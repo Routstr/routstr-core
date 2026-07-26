@@ -547,7 +547,10 @@ class ModelCreate(BaseModel):
                 raise ValueError(f"{field} must be a non-negative number")
             try:
                 rate = float(raw)
-            except ValueError:
+            except (ValueError, OverflowError):
+                # An integer too large for a float raises OverflowError, which
+                # pydantic does not convert into a validation error — unhandled
+                # it escapes as a 500 for what is still a bad client value.
                 raise ValueError(f"{field} must be a number, got {raw!r}")
             if not math.isfinite(rate) or rate < 0:
                 raise ValueError(f"{field} must be a finite, non-negative number")
@@ -566,12 +569,13 @@ def _as_price(value: object) -> float | None:
     """
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if isinstance(value, (int, float, str)):
+        # An oversized int raises OverflowError, not ValueError; both mean "not
+        # a usable rate" here (the edge validator rejects such a write anyway,
+        # but this helper also runs on stored values).
         try:
             return float(value)
-        except ValueError:
+        except (ValueError, OverflowError):
             return None
     return None
 
