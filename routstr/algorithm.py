@@ -125,12 +125,16 @@ def create_model_mappings(
     )
     from .upstream.helpers import resolve_model_alias
 
-    def _override_unroutable_free(model: "Model") -> bool:
-        """A persisted override may only route if it can bill > 0, unless an
-        operator vouched for it as free (``manual``). Mirrors the served-catalog
-        backstop in ``list_models`` so a legacy/foreign-written enabled $0
-        ``unresolved`` row is not silently routable (it would bill every request
-        at nothing)."""
+    def _unroutable_free(model: "Model") -> bool:
+        """A candidate may only route if it can bill > 0, unless an operator
+        vouched for it as free (``manual``). Mirrors the served-catalog backstop
+        in ``list_models`` so a legacy/foreign-written enabled $0 ``unresolved``
+        row is not silently routable (it would bill every request at nothing).
+
+        Applies to provider-discovered models as well as persisted overrides: a
+        provider whose catalog schema defaults its pricing fields to zero reports
+        an unpriced model as a free one, and no override row need exist for it to
+        be built into the candidate map."""
         return (
             model.pricing_source != PricingSource.MANUAL
             and not has_chargeable_price(model.pricing)
@@ -218,10 +222,11 @@ def create_model_mappings(
                 model_to_use = _row_to_model(
                     override_row, apply_provider_fee=True, provider_fee=provider_fee
                 )
-                if _override_unroutable_free(model_to_use):
-                    continue
             else:
                 model_to_use = model
+
+            if _unroutable_free(model_to_use):
+                continue
 
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
@@ -298,7 +303,7 @@ def create_model_mappings(
             continue
         if not model_to_use.enabled:
             continue
-        if _override_unroutable_free(model_to_use):
+        if _unroutable_free(model_to_use):
             continue
 
         base_id = get_base_model_id(model_to_use.id)

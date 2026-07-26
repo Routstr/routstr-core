@@ -326,3 +326,54 @@ def test_create_model_mappings_routes_manual_free_override(
 
     assert "azure/free" in model_instances
     assert [p for _, p in provider_map["azure/free"]] == [provider]
+
+
+def test_create_model_mappings_excludes_unchargeable_discovered_model() -> None:
+    """A provider-discovered model with no override row gets no guard from the
+    override branch, yet it can arrive unchargeable at $0 with no provenance (a
+    provider whose catalog ships pricing fields defaulting to zero). Routing it
+    would serve and bill every request at nothing, so the backstop must cover the
+    discovered path too — not only persisted overrides."""
+    free_discovered = create_test_model(
+        "tinfoil/free", prompt_price=0.0, completion_price=0.0
+    )
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh",
+        db_id=9,
+        models=[free_discovered],
+    )
+
+    model_instances, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert "tinfoil/free" not in model_instances
+    assert "tinfoil/free" not in provider_map
+    assert "free" not in unique_models
+
+
+def test_create_model_mappings_routes_manual_free_discovered_model() -> None:
+    """An operator-vouched free (``manual``) discovered model is a deliberate
+    choice and stays routable — only unvouched free models are held back."""
+    free_manual = create_test_model(
+        "tinfoil/free", prompt_price=0.0, completion_price=0.0
+    )
+    free_manual.pricing_source = PricingSource.MANUAL
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh",
+        db_id=9,
+        models=[free_manual],
+    )
+
+    model_instances, provider_map, _ = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert "tinfoil/free" in model_instances
+    assert [p for _, p in provider_map["tinfoil/free"]] == [provider]
