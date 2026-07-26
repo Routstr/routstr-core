@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import random
 from enum import StrEnum
 from typing import TypedDict
@@ -127,14 +128,26 @@ BILLABLE_PRICING_FIELDS = (
 
 
 def has_chargeable_price(pricing: Pricing) -> bool:
-    """True if any billable rate is positive — i.e. a request can bill > 0.
+    """True if every billable rate is finite and at least one is positive.
 
     The money-safety invariant: an enabled model must be chargeable unless an
     operator has explicitly vouched for it as free (``manual``). Checking every
     billable field (not just prompt/completion) means a per-request-billed model
     is correctly recognised as chargeable.
+
+    A non-finite rate is not a price: ``inf > 0`` is True, so an infinite rate
+    would otherwise read as chargeable and be served, routed, and billed as
+    ``inf`` — and ``NaN`` poisons any total it enters. Rates reach a stored row
+    from upstream catalogs as well as the admin edge (``json.loads`` accepts the
+    bare ``NaN``/``Infinity`` literals and overflows ``1e999`` to ``inf``), so
+    the shared predicate rejects them wherever they came from. One bad rate
+    disqualifies the model even alongside a valid one, since a request can bill
+    on the bad field.
     """
-    return any(getattr(pricing, field) > 0 for field in BILLABLE_PRICING_FIELDS)
+    rates = [getattr(pricing, field) for field in BILLABLE_PRICING_FIELDS]
+    if any(not math.isfinite(rate) for rate in rates):
+        return False
+    return any(rate > 0 for rate in rates)
 
 
 class TopProvider(BaseModel):
@@ -232,7 +245,12 @@ def _has_valid_pricing(model: dict) -> bool:
     try:
         prompt = float(pricing.get("prompt", 0))
         completion = float(pricing.get("completion", 0))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+    # `NaN`/`inf` are not prices, and `NaN` slips past both checks below (every
+    # comparison with it is False) into a model tagged with a real source.
+    if not math.isfinite(prompt) or not math.isfinite(completion):
         return False
 
     if prompt < 0 or completion < 0:

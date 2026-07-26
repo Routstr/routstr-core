@@ -145,6 +145,56 @@ def test_has_chargeable_price_false_when_all_billable_rates_zero() -> None:
     assert has_chargeable_price(Pricing(prompt=0.0, completion=0.0)) is False
 
 
+def test_has_chargeable_price_false_for_non_finite_rates() -> None:
+    """``inf > 0`` is True, so an infinite rate would read as a real price and be
+    served, routed, and billed as ``inf``. Only a finite positive rate can bill a
+    sane amount, so non-finite rates are not chargeable — including alongside a
+    valid one, since that field can still be the one a request bills on."""
+    assert has_chargeable_price(Pricing(prompt=float("inf"), completion=0.0)) is False
+    assert has_chargeable_price(Pricing(prompt=float("nan"), completion=0.0)) is False
+    assert has_chargeable_price(Pricing(prompt=1e-06, completion=float("inf"))) is False
+
+
+@pytest.mark.asyncio
+async def test_openrouter_rung_rejects_non_finite_feed_price() -> None:
+    """``json.loads`` accepts bare ``NaN``/``Infinity`` and overflows ``1e999`` to
+    ``inf``, and ``float("Infinity")`` parses from a feed string — so a non-finite
+    rate can reach the resolver from any upstream catalog. It must not be reported
+    as a resolved ``openrouter`` price; the model imports unresolved and disabled.
+    """
+    payload = {"data": [{"id": "junk/model-8000", "owned_by": "junk"}]}
+    or_feed = [
+        {
+            "id": "junk/model-8000",
+            "context_length": 8192,
+            "pricing": {"prompt": "Infinity", "completion": "0.000008"},
+        }
+    ]
+    models = await _fetch(payload, or_feed)
+    model = _model_by_id(models, "junk/model-8000")
+    assert model.pricing_source == PricingSource.UNRESOLVED
+    assert model.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_litellm_rung_rejects_non_finite_entry_price() -> None:
+    """The litellm rung guards negatives and both-zero but not non-finite values,
+    which would otherwise be stamped ``litellm`` and served at an insane rate."""
+    entry = {
+        "input_cost_per_token": float("inf"),
+        "output_cost_per_token": 8e-06,
+        "max_input_tokens": 8192,
+    }
+    payload = {"data": [{"id": "litellm-junk-model", "owned_by": "junk"}]}
+    with patch("routstr.payment.models.litellm_cost_entry", lambda model_id: entry):
+        models = await _fetch(payload, [])
+    model = _model_by_id(models, "litellm-junk-model")
+    assert model.pricing_source == PricingSource.UNRESOLVED
+    assert model.enabled is False
+
+
+
+
 # ---------------------------------------------------------------------------
 # carrier preservation — the fee/sats rebuilds must not drop provenance
 # ---------------------------------------------------------------------------
