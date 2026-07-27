@@ -503,6 +503,10 @@ async def integration_app(
     # Copy all routes from the main app
     test_app.router = app.router
 
+    # ...and its exception handlers, so a request that fails here fails the way
+    # it would in production rather than escaping as a bare exception.
+    test_app.exception_handlers.update(app.exception_handlers)
+
     # Override the get_session dependency
     async def override_get_session() -> AsyncGenerator[AsyncSession, None]:
         yield integration_session

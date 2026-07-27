@@ -869,3 +869,49 @@ async def test_oversized_integer_price_is_rejected(
         ),
     )
     assert resp.status_code == 422
+
+
+async def test_non_finite_literal_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A bare ``Infinity``/``NaN`` literal must be answered with the same 422 as
+    any other unusable rate.
+
+    ``json`` accepts both literals, so the validator sees a real float and
+    rejects it — but pydantic echoes the offending value back in the error's
+    ``input`` field, and serializing that reply raises "Out of range float
+    values are not JSON compliant". The 422 then escapes as a 500, hiding a
+    client bug behind a server fault.
+    """
+    provider_id = await _make_provider(integration_session)
+    for literal in ("Infinity", "-Infinity", "NaN"):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider_id}/models",
+            headers={**_admin_headers(), "Content-Type": "application/json"},
+            content=(
+                '{"id": "odd-price", "name": "odd", "description": "d", "created": 0,'
+                ' "context_length": 8192, "architecture": {"modality": "text"},'
+                f' "pricing": {{"prompt": {literal}, "completion": 2.8e-7}},'
+                f' "upstream_provider_id": {provider_id}}}'
+            ),
+        )
+        assert resp.status_code == 422, literal
+
+
+async def test_non_finite_literal_price_is_rejected_in_batch_override(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The batch path shares the edge, so it must answer 422 too."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers={**_admin_headers(), "Content-Type": "application/json"},
+        content=(
+            '{"models": [{"id": "odd-batch", "name": "odd", "description": "d",'
+            ' "created": 0, "context_length": 8192,'
+            ' "architecture": {"modality": "text"},'
+            ' "pricing": {"prompt": Infinity, "completion": 2.8e-7},'
+            f' "upstream_provider_id": {provider_id}}}]}}'
+        ),
+    )
+    assert resp.status_code == 422
