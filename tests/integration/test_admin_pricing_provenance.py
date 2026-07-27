@@ -299,9 +299,7 @@ async def test_partial_payload_dropping_a_rate_flips_to_manual(
                 "instruct_type": None,
             }
         ),
-        pricing=json.dumps(
-            {"prompt": 1e-7, "completion": 2e-7, "request": 0.5}
-        ),
+        pricing=json.dumps({"prompt": 1e-7, "completion": 2e-7, "request": 0.5}),
         upstream_provider_id=provider_id,
         enabled=True,
         forwarded_model_id="req-priced-xyz",
@@ -340,9 +338,7 @@ async def test_batch_override_create_and_price_edit(
         headers=headers,
         json={
             "models": [
-                _payload(
-                    provider_id, model_id="batch-a", pricing_source="openrouter"
-                )
+                _payload(provider_id, model_id="batch-a", pricing_source="openrouter")
             ]
         },
     )
@@ -466,9 +462,7 @@ async def test_reenabling_unresolved_row_without_price_stays_disabled(
     resp = await integration_client.post(
         f"/admin/api/upstream-providers/{provider_id}/models",
         headers=headers,
-        json=_payload(
-            provider_id, model_id="needs-price", prompt=0.0, completion=0.0
-        ),
+        json=_payload(provider_id, model_id="needs-price", prompt=0.0, completion=0.0),
     )
     assert resp.status_code == 200
     await integration_session.refresh(row)
@@ -770,9 +764,7 @@ async def test_served_map_excludes_enabled_unchargeable_non_manual_rows(
         pricing_source="litellm",
     )
 
-    served = {
-        m.id for m in await list_models(integration_session, provider_id)
-    }
+    served = {m.id for m in await list_models(integration_session, provider_id)}
     assert "legacy-free" not in served  # unchargeable + not manual → not served
     assert "free-by-choice" in served  # operator vouched → served free
     assert "priced" in served

@@ -75,7 +75,9 @@ def _disable_unchargeable_enabled_rows(conn: sa.Connection) -> None:
     rows = conn.execute(
         sa.text("SELECT rowid, pricing FROM models WHERE enabled")
     ).all()
-    stale = [rowid for rowid, pricing_json in rows if not _row_is_chargeable(pricing_json)]
+    stale = [
+        rowid for rowid, pricing_json in rows if not _row_is_chargeable(pricing_json)
+    ]
     if not stale:
         return
     conn.execute(

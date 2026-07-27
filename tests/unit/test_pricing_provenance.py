@@ -268,9 +268,7 @@ async def test_openrouter_feed_stamps_openrouter_provenance() -> None:
             payload = or_payload if "embeddings" not in url else embeddings_payload
             return _FakeResponse(payload)
 
-    with patch.object(
-        models_mod.httpx, "AsyncClient", lambda *a, **k: _Client()
-    ):
+    with patch.object(models_mod.httpx, "AsyncClient", lambda *a, **k: _Client()):
         feed = await models_mod.async_fetch_openrouter_models()
 
     assert feed
@@ -644,9 +642,7 @@ async def test_ppqai_standalone_negative_price_is_unresolved_and_disabled() -> N
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_ollama(
-    tags: dict[str, Any], or_feed: list[dict]
-) -> list[Model]:
+async def _fetch_ollama(tags: dict[str, Any], or_feed: list[dict]) -> list[Model]:
     from routstr.upstream.ollama import OllamaUpstreamProvider
 
     provider = OllamaUpstreamProvider(base_url="http://ollama")

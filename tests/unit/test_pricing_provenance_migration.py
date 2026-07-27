@@ -19,7 +19,9 @@ _MIGRATION_PATH = (
     / "versions"
     / "f0e1d2c3b4a5_add_pricing_provenance_to_models.py"
 )
-_spec = importlib.util.spec_from_file_location("pricing_provenance_migration", _MIGRATION_PATH)
+_spec = importlib.util.spec_from_file_location(
+    "pricing_provenance_migration", _MIGRATION_PATH
+)
 assert _spec is not None and _spec.loader is not None
 migration = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(migration)
@@ -74,9 +76,9 @@ def test_disables_enabled_unchargeable_rows_only() -> None:
                 "(id, upstream_provider_id, pricing, enabled) VALUES "
                 "('free-enabled', 1, '{\"prompt\": 0, \"completion\": 0}', 1), "
                 "('priced-enabled', 1, "
-                "'{\"prompt\": 0.000001, \"completion\": 0}', 1), "
+                '\'{"prompt": 0.000001, "completion": 0}\', 1), '
                 "('request-priced', 1, "
-                "'{\"prompt\": 0, \"completion\": 0, \"request\": 0.5}', 1), "
+                '\'{"prompt": 0, "completion": 0, "request": 0.5}\', 1), '
                 "('free-disabled', 1, '{\"prompt\": 0, \"completion\": 0}', 0), "
                 "('junk-pricing', 1, 'not-json', 1)"
             )
