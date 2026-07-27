@@ -338,7 +338,7 @@ class ModelPathRow(SQLModel, table=True):  # type: ignore
         description="Client-visible /v1/models id (forwarded_model_id or id)"
     )
     path: str = Field(
-        description="Opaque selector containing provider ID and optional endpoint tag"
+        description="Opaque selector containing provider slug and optional endpoint tag"
     )
     provider_slug: str = Field(
         description="Public slug of the configured upstream provider"

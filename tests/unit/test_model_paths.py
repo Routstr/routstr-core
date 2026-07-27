@@ -225,7 +225,7 @@ def _path_entry(
     if endpoint_tag or endpoint_name:
         endpoint = {"tag": endpoint_tag, "name": endpoint_name}
     return {
-        "path": mp.encode_model_path(provider_id, endpoint_tag),
+        "path": mp.encode_model_path(provider_slug or f"p{provider_id}", endpoint_tag),
         "provider": {
             "id": provider_id,
             "slug": provider_slug or f"p{provider_id}",
@@ -253,10 +253,10 @@ def test_native_anthropic_not_openrouter() -> None:
     assert mp.is_openrouter_base_url("https://api.anthropic.com/v1") is False
 
 
-def test_encode_model_path_uses_provider_id_without_exposing_url() -> None:
-    assert mp.encode_model_path(42) == "provider=42"
-    assert mp.encode_model_path(42, "google-vertex/us-east5") == (
-        "provider=42&endpoint=google-vertex%2Fus-east5"
+def test_encode_model_path_uses_provider_slug_without_exposing_url() -> None:
+    assert mp.encode_model_path("openrouter-main") == "provider=openrouter-main"
+    assert mp.encode_model_path("openrouter-main", "google-vertex/us-east5") == (
+        "provider=openrouter-main&endpoint=google-vertex%2Fus-east5"
     )
 
 
@@ -303,21 +303,6 @@ def test_openrouter_author_slug_falls_back_to_forwarded_id() -> None:
 def test_openrouter_author_slug_none_when_no_slash() -> None:
     m = _model("claude-opus-4.6", canonical_slug="claude-opus-4.6")
     assert mp.openrouter_author_slug(m) is None
-
-
-def test_discovery_paths_mirror_response_stamping() -> None:
-    """The discovery hook and ``_apply_provider_field`` must agree."""
-    generic = _FakeProvider(provider_type="generic", base_url="https://x", models=[])
-    assert generic.discovery_path_for_subprovider("Anthropic") == "generic:Anthropic"
-    assert generic.discovery_base_paths() == ["generic"]
-
-    native = _FakeOpenRouterProvider(models=[])
-    assert native.discovery_path_for_subprovider("GMICloud") == "openrouter:GMICloud"
-    # Sub-provider echoing the router name is stamped "unknown" on responses.
-    assert native.discovery_path_for_subprovider("OpenRouter") == "unknown"
-    assert native.discovery_path_for_subprovider("openrouter:openrouter") == "unknown"
-    assert native.discovery_path_for_subprovider(None) == "unknown"
-    assert native.discovery_base_paths() == ["unknown"]
 
 
 # --------------------------------------------------------------------------- #
@@ -412,7 +397,7 @@ async def test_disabling_model_on_one_provider_keeps_other_provider(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {mp.encode_model_path(1)}
+    assert _paths_of(payload, "shared-model") == {mp.encode_model_path("p1")}
 
 
 @pytest.mark.asyncio
@@ -446,8 +431,8 @@ async def test_override_alias_not_applied_across_providers(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {mp.encode_model_path(1)}
-    assert _paths_of(payload, "private-alias") == {mp.encode_model_path(2)}
+    assert _paths_of(payload, "shared-model") == {mp.encode_model_path("p1")}
+    assert _paths_of(payload, "private-alias") == {mp.encode_model_path("p2")}
 
 
 @pytest.mark.asyncio
@@ -699,9 +684,9 @@ async def test_openrouter_provider_adds_endpoint_paths(
 
     payload = await mp.get_paths_for_model("claude-opus-4.6")
     assert {item["path"] for item in payload["data"]} == {
-        mp.encode_model_path(2),
-        mp.encode_model_path(2, "google-vertex/eu"),
-        mp.encode_model_path(2, "google-vertex/us"),
+        mp.encode_model_path("p2"),
+        mp.encode_model_path("p2", "google-vertex/eu"),
+        mp.encode_model_path("p2", "google-vertex/us"),
     }
     assert {
         item["endpoint"]["tag"] for item in payload["data"] if item["endpoint"]
@@ -726,7 +711,10 @@ async def test_openrouter_uses_exact_tag_even_when_display_name_is_router(
     await mp.refresh_model_paths([provider])
 
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert paths == {mp.encode_model_path(2), mp.encode_model_path(2, "openrouter")}
+    assert paths == {
+        mp.encode_model_path("p2"),
+        mp.encode_model_path("p2", "openrouter"),
+    }
 
 
 @pytest.mark.asyncio
@@ -745,7 +733,10 @@ async def test_generic_provider_with_openrouter_base_url_discovers(
     await mp.refresh_model_paths([provider])
 
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert paths == {mp.encode_model_path(1), mp.encode_model_path(1, "anthropic")}
+    assert paths == {
+        mp.encode_model_path("p1"),
+        mp.encode_model_path("p1", "anthropic"),
+    }
 
 
 @pytest.mark.asyncio
@@ -777,6 +768,37 @@ async def test_openrouter_partial_failure_keeps_failed_models_previous_rows(
 
 
 @pytest.mark.asyncio
+async def test_partial_failure_upserts_collapsed_public_model_paths(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded canonical sibling may preserve the same public path that a
+    successful sibling refreshes; persistence must merge instead of rolling back."""
+    provider = _FakeOpenRouterProvider(
+        models=[
+            _model("vendora/shared", canonical_slug="vendora/shared"),
+            _model("vendorb/shared", canonical_slug="vendorb/shared"),
+        ],
+        db_id=2,
+    )
+    _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
+    await mp.refresh_model_paths([provider])
+
+    def _one_sibling_degrades(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/vendorb/shared/endpoints"):
+            return httpx.Response(503)
+        return _endpoints_response("Google")
+
+    _mock_transport(monkeypatch, _one_sibling_degrades)
+    await mp.refresh_model_paths([provider])
+
+    assert _paths_of(await mp.get_all_model_paths(), "shared") == {
+        mp.encode_model_path("p2"),
+        mp.encode_model_path("p2", "anthropic"),
+        mp.encode_model_path("p2", "google"),
+    }
+
+
+@pytest.mark.asyncio
 async def test_openrouter_failure_keeps_previous_rows(
     patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -789,7 +811,7 @@ async def test_openrouter_failure_keeps_previous_rows(
     _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
     await mp.refresh_model_paths([provider])
     before = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert mp.encode_model_path(2, "anthropic") in before
+    assert mp.encode_model_path("p2", "anthropic") in before
 
     def _network_down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("network down", request=request)
@@ -812,7 +834,10 @@ async def test_openrouter_rate_limit_aborts_cycle_and_keeps_rows(
 
     _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
     await mp.refresh_model_paths([provider])
-    expected = {mp.encode_model_path(2), mp.encode_model_path(2, "anthropic")}
+    expected = {
+        mp.encode_model_path("p2"),
+        mp.encode_model_path("p2", "anthropic"),
+    }
     assert _paths_of(await mp.get_all_model_paths(), "m0") == expected
 
     counter = _mock_transport(monkeypatch, lambda request: httpx.Response(429))
@@ -881,10 +906,10 @@ async def test_openrouter_shared_base_url_fetched_once(
     assert counter["requests"] == 1
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
     assert paths == {
-        mp.encode_model_path(2),
-        mp.encode_model_path(2, "anthropic"),
-        mp.encode_model_path(4),
-        mp.encode_model_path(4, "anthropic"),
+        mp.encode_model_path("p2"),
+        mp.encode_model_path("p2", "anthropic"),
+        mp.encode_model_path("p4"),
+        mp.encode_model_path("p4", "anthropic"),
     }
 
 
@@ -947,8 +972,8 @@ async def test_same_model_two_providers_two_paths(
     entry = payload["data"][0]
     assert entry["id"] == "claude-opus-4.6"
     assert {p["path"] for p in entry["paths"]} == {
-        mp.encode_model_path(1),
-        mp.encode_model_path(2),
+        mp.encode_model_path("p1"),
+        mp.encode_model_path("p2"),
     }
     assert "canonical_id" not in entry
     assert all("canonical_id" not in p for p in entry["paths"])
@@ -1099,6 +1124,53 @@ async def test_refresh_model_paths_for_provider_selects_mutated_provider(
     await mp.refresh_model_paths_for_provider(2)
 
     assert seen == [[target]]
+
+
+@pytest.mark.asyncio
+async def test_admin_refresh_is_disabled_by_model_paths_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from routstr.core.settings import settings
+
+    monkeypatch.setattr(settings, "enable_model_paths_refresh", False, raising=False)
+    calls: list[int] = []
+
+    async def _fake_refresh(provider_id: int) -> None:
+        calls.append(provider_id)
+
+    monkeypatch.setattr(mp, "refresh_model_paths_for_provider", _fake_refresh)
+    await mp.schedule_model_paths_refresh_for_provider(2)
+    await asyncio.sleep(0)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_admin_refresh_is_backgrounded_and_coalesced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from routstr.core.settings import settings
+
+    monkeypatch.setattr(settings, "enable_model_paths_refresh", True, raising=False)
+    monkeypatch.setattr(
+        settings, "model_paths_refresh_interval_seconds", 600, raising=False
+    )
+    mp._scheduled_provider_refresh_ids.clear()
+    mp._scheduled_provider_refresh_task = None
+    calls: list[int] = []
+
+    async def _fake_refresh(provider_id: int) -> None:
+        calls.append(provider_id)
+
+    monkeypatch.setattr(mp, "refresh_model_paths_for_provider", _fake_refresh)
+
+    await mp.schedule_model_paths_refresh_for_provider(2)
+    await mp.schedule_model_paths_refresh_for_provider(2)
+    task = mp._scheduled_provider_refresh_task
+    assert task is not None
+    await task
+
+    assert calls == [2]
 
 
 @pytest.mark.asyncio

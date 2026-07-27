@@ -52,20 +52,10 @@ MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
 async def _refresh_provider_model_paths(upstream_provider_id: int) -> None:
-    """Best-effort immediate discovery sync after an admin mutation."""
-    from ..upstream.model_paths import refresh_model_paths_for_provider
+    """Queue discovery sync without blocking the committed admin mutation."""
+    from ..upstream.model_paths import schedule_model_paths_refresh_for_provider
 
-    try:
-        await refresh_model_paths_for_provider(upstream_provider_id)
-    except Exception as exc:  # noqa: BLE001 - committed admin writes must survive
-        logger.warning(
-            "Failed to refresh model paths after admin mutation",
-            extra={
-                "upstream_provider_id": upstream_provider_id,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            },
-        )
+    await schedule_model_paths_refresh_for_provider(upstream_provider_id)
 
 
 async def require_admin_api(request: Request) -> None:
@@ -725,9 +715,6 @@ async def batch_override_provider_models(
                     json.dumps(model_data.alias_ids) if model_data.alias_ids else None
                 )
                 existing_row.enabled = model_data.enabled
-                existing_row.forwarded_model_id = (
-                    model_data.forwarded_model_id or model_data.id
-                )
                 session.add(existing_row)
             else:
                 # Create new
@@ -758,7 +745,6 @@ async def batch_override_provider_models(
                     ),
                     upstream_provider_id=provider_pk,
                     enabled=model_data.enabled,
-                    forwarded_model_id=model_data.forwarded_model_id or model_data.id,
                 )
                 session.add(row)
 

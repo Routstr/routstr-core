@@ -5,12 +5,12 @@ This PR remains discovery-only: request-side routing will consume the opaque
 selectors in a follow-up.
 
 A path is a standard percent-encoded query string containing the configured
-provider's stable node-local ID and, for an exact OpenRouter endpoint, its
+provider's public slug and, for an exact OpenRouter endpoint, its
 machine-readable tag. Upstream URLs and display names never participate in or
 leak through public identity::
 
-    provider=42
-    provider=42&endpoint=google-vertex%2Fus
+    provider=anthropic-primary
+    provider=openrouter-main&endpoint=google-vertex%2Fus
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlencode
 
 import httpx
-from sqlalchemy import insert
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import selectinload
 from sqlmodel import col, delete, select
 
@@ -43,6 +43,12 @@ _OPENROUTER_TIMEOUT_SECONDS = 10.0
 # Rows inserted per statement during persist. Keeps each INSERT bounded while
 # avoiding per-row round-trips that hold SQLite's write lock for ~1s per cycle.
 _PERSIST_CHUNK_SIZE = 500
+
+# Admin mutations enqueue provider IDs here instead of running OpenRouter's
+# per-model endpoint fan-out inside the request. One worker serializes refreshes
+# and coalesces repeated mutations for the same provider.
+_scheduled_provider_refresh_ids: set[int] = set()
+_scheduled_provider_refresh_task: asyncio.Task[None] | None = None
 
 # Visibility key used across this module: routing carries the provider
 # dimension everywhere (ModelRow's primary key is (id, upstream_provider_id)),
@@ -86,9 +92,9 @@ class ProviderPathSnapshot:
     preserve_model_ids: frozenset[str] = frozenset()
 
 
-def encode_model_path(provider_id: int, endpoint_tag: str | None = None) -> str:
+def encode_model_path(provider_slug: str, endpoint_tag: str | None = None) -> str:
     """Encode a stable opaque selector without exposing upstream URLs."""
-    components: list[tuple[str, str | int]] = [("provider", provider_id)]
+    components = [("provider", provider_slug)]
     if endpoint_tag:
         components.append(("endpoint", endpoint_tag))
     return urlencode(components)
@@ -370,7 +376,7 @@ async def _collect_provider_paths(
     def _base_path(model: object) -> DiscoveredPath:
         return DiscoveredPath(
             model_id=exposed_model_id(model),
-            path=encode_model_path(provider_identity.id),
+            path=encode_model_path(provider_identity.slug),
             provider=provider_identity,
         )
 
@@ -404,7 +410,7 @@ async def _collect_provider_paths(
             paths.extend(
                 DiscoveredPath(
                     model_id=model_id,
-                    path=encode_model_path(provider_identity.id, endpoint.tag),
+                    path=encode_model_path(provider_identity.slug, endpoint.tag),
                     provider=provider_identity,
                     endpoint_tag=endpoint.tag,
                     endpoint_name=endpoint.provider_name,
@@ -457,21 +463,31 @@ async def _persist_provider_paths(
         await session.exec(delete_stmt)  # type: ignore[call-overload]
         for start in range(0, len(unique_paths), _PERSIST_CHUNK_SIZE):
             chunk = unique_paths[start : start + _PERSIST_CHUNK_SIZE]
+            values = [
+                {
+                    "model_id": discovered.model_id,
+                    "path": discovered.path,
+                    "provider_slug": discovered.provider.slug,
+                    "provider_type": discovered.provider.provider_type,
+                    "endpoint_tag": discovered.endpoint_tag,
+                    "endpoint_name": discovered.endpoint_name,
+                    "upstream_provider_id": upstream_provider_id,
+                    "updated_at": now,
+                }
+                for discovered in chunk
+            ]
+            insert_stmt = insert(ModelPathRow).values(values)
             await session.execute(
-                insert(ModelPathRow),
-                [
-                    {
-                        "model_id": discovered.model_id,
-                        "path": discovered.path,
-                        "provider_slug": discovered.provider.slug,
-                        "provider_type": discovered.provider.provider_type,
-                        "endpoint_tag": discovered.endpoint_tag,
-                        "endpoint_name": discovered.endpoint_name,
-                        "upstream_provider_id": upstream_provider_id,
-                        "updated_at": now,
-                    }
-                    for discovered in chunk
-                ],
+                insert_stmt.on_conflict_do_update(
+                    index_elements=["model_id", "path", "upstream_provider_id"],
+                    set_={
+                        "provider_slug": insert_stmt.excluded.provider_slug,
+                        "provider_type": insert_stmt.excluded.provider_type,
+                        "endpoint_tag": insert_stmt.excluded.endpoint_tag,
+                        "endpoint_name": insert_stmt.excluded.endpoint_name,
+                        "updated_at": insert_stmt.excluded.updated_at,
+                    },
+                )
             )
         await session.commit()
 
@@ -560,7 +576,10 @@ async def refresh_model_paths(
 
 
 async def refresh_model_paths_for_provider(upstream_provider_id: int) -> None:
-    """Immediately synchronize discovery after an admin provider/model mutation."""
+    """Synchronize one provider when model-path discovery is enabled."""
+    if _refresh_interval_seconds() <= 0:
+        return
+
     from ..proxy import get_upstreams
 
     matching = [
@@ -572,6 +591,55 @@ async def refresh_model_paths_for_provider(upstream_provider_id: int) -> None:
         await refresh_model_paths(matching)
     else:
         await prune_model_paths_for_inactive_providers()
+
+
+async def _drain_scheduled_provider_refreshes() -> None:
+    """Serialize and coalesce model-path refreshes scheduled by admin writes."""
+    global _scheduled_provider_refresh_task
+
+    try:
+        # Let mutations in the same event-loop turn collapse into one refresh.
+        await asyncio.sleep(0)
+        while _scheduled_provider_refresh_ids:
+            if _refresh_interval_seconds() <= 0:
+                _scheduled_provider_refresh_ids.clear()
+                return
+            provider_id = min(_scheduled_provider_refresh_ids)
+            _scheduled_provider_refresh_ids.remove(provider_id)
+            try:
+                await refresh_model_paths_for_provider(provider_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - background best effort
+                logger.warning(
+                    "Failed to refresh model paths after admin mutation",
+                    extra={
+                        "upstream_provider_id": provider_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+    finally:
+        _scheduled_provider_refresh_task = None
+
+
+async def schedule_model_paths_refresh_for_provider(
+    upstream_provider_id: int,
+) -> None:
+    """Queue a non-blocking, coalesced refresh after an admin mutation."""
+    global _scheduled_provider_refresh_task
+
+    if _refresh_interval_seconds() <= 0:
+        return
+    _scheduled_provider_refresh_ids.add(upstream_provider_id)
+    if (
+        _scheduled_provider_refresh_task is None
+        or _scheduled_provider_refresh_task.done()
+    ):
+        _scheduled_provider_refresh_task = asyncio.create_task(
+            _drain_scheduled_provider_refreshes(),
+            name="model-path-admin-refresh",
+        )
 
 
 def _refresh_interval_seconds() -> int:

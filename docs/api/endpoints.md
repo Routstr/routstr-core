@@ -345,12 +345,12 @@ GET /v1/models/paths
       "id": "anthropic/claude-sonnet-4",
       "paths": [
         {
-          "path": "provider=12",
+          "path": "provider=anthropic-primary",
           "provider": {"id": 12, "slug": "anthropic-primary", "type": "anthropic"},
           "endpoint": null
         },
         {
-          "path": "provider=42&endpoint=google-vertex%2Fus",
+          "path": "provider=openrouter-main&endpoint=google-vertex%2Fus",
           "provider": {"id": 42, "slug": "openrouter-main", "type": "openrouter"},
           "endpoint": {"tag": "google-vertex/us", "name": "Google"}
         }
@@ -363,7 +363,7 @@ GET /v1/models/paths
 
 `path` is an opaque, percent-encoded selector. Clients must store and return it
 unchanged rather than parsing or reconstructing it. The configured provider's
-stable node-local ID defines the upstream route; no upstream URL is exposed.
+public slug defines the upstream route; no upstream URL is exposed.
 OpenRouter routes additionally use the exact machine-readable endpoint `tag`.
 Provider slugs/types and endpoint names are display data and never participate
 in identity. When request-side selection is implemented, an endpoint tag must
