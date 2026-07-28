@@ -230,6 +230,45 @@ def test_create_model_mappings_applies_override_only_to_matching_provider(
     assert {p for _, p in provider_map["same-id"]} == {provider_a, provider_b}
 
 
+def test_create_model_mappings_does_not_split_self_alias_from_base_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write-time self-alias must not advertise one shared model twice (#639)."""
+    model_id = "deepseek/deepseek-chat"
+    provider_a = create_test_provider(
+        "provider-a",
+        "https://provider-a.example/v1",
+        db_id=1,
+        models=[create_test_model(model_id)],
+    )
+    provider_b = create_test_provider(
+        "provider-b",
+        "https://provider-b.example/v1",
+        db_id=2,
+        models=[create_test_model(model_id)],
+    )
+
+    admin_saved_model = create_test_model(model_id)
+    admin_saved_model.forwarded_model_id = model_id
+    override_row = SimpleNamespace(id=model_id, upstream_provider_id=1, enabled=True)
+
+    def fake_row_to_model(*args, **kwargs) -> Model:  # type: ignore[no-untyped-def]
+        return admin_saved_model
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", fake_row_to_model)
+
+    _, _, unique_models = create_model_mappings(
+        upstreams=[provider_a, provider_b],
+        overrides_by_key={(model_id, 1): (override_row, 1.0)},
+        disabled_model_keys=set(),
+    )
+
+    advertised_ids = sorted(
+        model.forwarded_model_id or model.id for model in unique_models.values()
+    )
+    assert advertised_ids == ["deepseek-chat"]
+
+
 def test_create_model_mappings_disables_only_matching_provider() -> None:
     """Disabled overrides are scoped to the provider row, not the shared model id."""
     provider_a = create_test_provider(
