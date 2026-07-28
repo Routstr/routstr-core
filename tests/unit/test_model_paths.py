@@ -213,8 +213,19 @@ def _ids_of(payload: dict) -> set[str]:
     return {entry["id"] for entry in payload["data"]}
 
 
+def _expected_path(
+    provider_id: int,
+    model_id: str,
+    endpoint_tag: str | None = None,
+) -> str:
+    return mp.encode_model_path(
+        f"https://provider-{provider_id}", provider_id, model_id, endpoint_tag
+    )
+
+
 def _path_entry(
     provider_id: int,
+    model_id: str,
     *,
     provider_slug: str | None = None,
     provider_type: str | None = None,
@@ -225,7 +236,7 @@ def _path_entry(
     if endpoint_tag or endpoint_name:
         endpoint = {"tag": endpoint_tag, "name": endpoint_name}
     return {
-        "path": mp.encode_model_path(provider_slug or f"p{provider_id}", endpoint_tag),
+        "path": _expected_path(provider_id, model_id, endpoint_tag),
         "provider": {
             "id": provider_id,
             "slug": provider_slug or f"p{provider_id}",
@@ -253,10 +264,38 @@ def test_native_anthropic_not_openrouter() -> None:
     assert mp.is_openrouter_base_url("https://api.anthropic.com/v1") is False
 
 
-def test_encode_model_path_uses_provider_slug_without_exposing_url() -> None:
-    assert mp.encode_model_path("openrouter-main") == "provider=openrouter-main"
-    assert mp.encode_model_path("openrouter-main", "google-vertex/us-east5") == (
-        "provider=openrouter-main&endpoint=google-vertex%2Fus-east5"
+def test_public_provider_url_masks_private_addresses_and_explicit_ports() -> None:
+    assert mp.public_provider_url("http://192.168.1.10/v1") == "http://localhost"
+    assert mp.public_provider_url("http://10.0.0.5:11434/v1") == "http://localhost"
+    assert mp.public_provider_url("http://[fd00::1]/v1") == "http://localhost"
+    assert mp.public_provider_url("https://api.example.com:8443/v1") == (
+        "http://localhost"
+    )
+
+
+def test_public_provider_url_preserves_public_urls_without_ports() -> None:
+    assert mp.public_provider_url("https://openrouter.ai/api/v1") == (
+        "https://openrouter.ai/api/v1"
+    )
+    assert mp.public_provider_url("http://localhost") == "http://localhost"
+
+
+def test_encode_model_path_includes_complete_route_identity() -> None:
+    assert mp.encode_model_path(
+        "https://openrouter.ai/api/v1", 42, "anthropic/claude-sonnet-4"
+    ) == (
+        "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1"
+        "&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4"
+    )
+    assert mp.encode_model_path(
+        "https://openrouter.ai/api/v1",
+        42,
+        "anthropic/claude-sonnet-4",
+        "google-vertex/us-east5",
+    ) == (
+        "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1"
+        "&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4"
+        "&endpoint=google-vertex%2Fus-east5"
     )
 
 
@@ -322,8 +361,34 @@ async def test_direct_provider_single_path_uses_provider_type(
     )
     await mp.refresh_model_paths([provider])
     payload = await mp.get_all_model_paths()
-    assert payload["data"] == [{"id": "claude-opus-4.6", "paths": [_path_entry(1)]}]
+    assert payload["data"] == [
+        {"id": "claude-opus-4.6", "paths": [_path_entry(1, "claude-opus-4.6")]}
+    ]
     assert payload["updated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_direct_path_masks_private_configured_provider_url(
+    patched_session: AsyncEngine,
+) -> None:
+    async with AsyncSession(patched_session) as session:
+        provider_row = await session.get(UpstreamProviderRow, 1)
+        assert provider_row is not None
+        provider_row.base_url = "http://192.168.1.10:11434/v1"
+        session.add(provider_row)
+        await session.commit()
+
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="http://192.168.1.10:11434/v1",
+        models=[_model("local-model")],
+        db_id=1,
+    )
+    await mp.refresh_model_paths([provider])
+
+    assert _paths_of(await mp.get_all_model_paths(), "local-model") == {
+        mp.encode_model_path("http://localhost", 1, "local-model")
+    }
 
 
 @pytest.mark.asyncio
@@ -397,7 +462,9 @@ async def test_disabling_model_on_one_provider_keeps_other_provider(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {mp.encode_model_path("p1")}
+    assert _paths_of(payload, "shared-model") == {
+        _expected_path(1, "shared-model")
+    }
 
 
 @pytest.mark.asyncio
@@ -431,8 +498,12 @@ async def test_override_alias_not_applied_across_providers(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {mp.encode_model_path("p1")}
-    assert _paths_of(payload, "private-alias") == {mp.encode_model_path("p2")}
+    assert _paths_of(payload, "shared-model") == {
+        _expected_path(1, "shared-model")
+    }
+    assert _paths_of(payload, "private-alias") == {
+        _expected_path(2, "private-alias")
+    }
 
 
 @pytest.mark.asyncio
@@ -500,7 +571,7 @@ async def test_refresh_model_paths_uses_db_forwarded_alias(
     await mp.refresh_model_paths([provider])
 
     assert (await mp.get_all_model_paths())["data"] == [
-        {"id": "public-alias", "paths": [_path_entry(1)]}
+        {"id": "public-alias", "paths": [_path_entry(1, "public-alias")]}
     ]
 
 
@@ -522,7 +593,10 @@ async def test_refresh_model_paths_includes_enabled_db_override_missing_from_cac
     await mp.refresh_model_paths([provider])
 
     assert (await mp.get_all_model_paths())["data"] == [
-        {"id": "public-deployment", "paths": [_path_entry(1)]}
+        {
+            "id": "public-deployment",
+            "paths": [_path_entry(1, "public-deployment")],
+        }
     ]
 
 
@@ -684,9 +758,9 @@ async def test_openrouter_provider_adds_endpoint_paths(
 
     payload = await mp.get_paths_for_model("claude-opus-4.6")
     assert {item["path"] for item in payload["data"]} == {
-        mp.encode_model_path("p2"),
-        mp.encode_model_path("p2", "google-vertex/eu"),
-        mp.encode_model_path("p2", "google-vertex/us"),
+        _expected_path(2, "claude-opus-4.6"),
+        _expected_path(2, "claude-opus-4.6", "google-vertex/eu"),
+        _expected_path(2, "claude-opus-4.6", "google-vertex/us"),
     }
     assert {
         item["endpoint"]["tag"] for item in payload["data"] if item["endpoint"]
@@ -712,8 +786,8 @@ async def test_openrouter_uses_exact_tag_even_when_display_name_is_router(
 
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
     assert paths == {
-        mp.encode_model_path("p2"),
-        mp.encode_model_path("p2", "openrouter"),
+        _expected_path(2, "claude-opus-4.6"),
+        _expected_path(2, "claude-opus-4.6", "openrouter"),
     }
 
 
@@ -734,8 +808,8 @@ async def test_generic_provider_with_openrouter_base_url_discovers(
 
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
     assert paths == {
-        mp.encode_model_path("p1"),
-        mp.encode_model_path("p1", "anthropic"),
+        _expected_path(1, "claude-opus-4.6"),
+        _expected_path(1, "claude-opus-4.6", "anthropic"),
     }
 
 
@@ -792,9 +866,9 @@ async def test_partial_failure_upserts_collapsed_public_model_paths(
     await mp.refresh_model_paths([provider])
 
     assert _paths_of(await mp.get_all_model_paths(), "shared") == {
-        mp.encode_model_path("p2"),
-        mp.encode_model_path("p2", "anthropic"),
-        mp.encode_model_path("p2", "google"),
+        _expected_path(2, "shared"),
+        _expected_path(2, "shared", "anthropic"),
+        _expected_path(2, "shared", "google"),
     }
 
 
@@ -811,7 +885,7 @@ async def test_openrouter_failure_keeps_previous_rows(
     _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
     await mp.refresh_model_paths([provider])
     before = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
-    assert mp.encode_model_path("p2", "anthropic") in before
+    assert _expected_path(2, "claude-opus-4.6", "anthropic") in before
 
     def _network_down(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("network down", request=request)
@@ -835,8 +909,8 @@ async def test_openrouter_rate_limit_aborts_cycle_and_keeps_rows(
     _mock_transport(monkeypatch, lambda request: _endpoints_response("Anthropic"))
     await mp.refresh_model_paths([provider])
     expected = {
-        mp.encode_model_path("p2"),
-        mp.encode_model_path("p2", "anthropic"),
+        _expected_path(2, "m0"),
+        _expected_path(2, "m0", "anthropic"),
     }
     assert _paths_of(await mp.get_all_model_paths(), "m0") == expected
 
@@ -906,10 +980,10 @@ async def test_openrouter_shared_base_url_fetched_once(
     assert counter["requests"] == 1
     paths = _paths_of(await mp.get_all_model_paths(), "claude-opus-4.6")
     assert paths == {
-        mp.encode_model_path("p2"),
-        mp.encode_model_path("p2", "anthropic"),
-        mp.encode_model_path("p4"),
-        mp.encode_model_path("p4", "anthropic"),
+        _expected_path(2, "claude-opus-4.6"),
+        _expected_path(2, "claude-opus-4.6", "anthropic"),
+        _expected_path(4, "claude-opus-4.6"),
+        _expected_path(4, "claude-opus-4.6", "anthropic"),
     }
 
 
@@ -972,8 +1046,8 @@ async def test_same_model_two_providers_two_paths(
     entry = payload["data"][0]
     assert entry["id"] == "claude-opus-4.6"
     assert {p["path"] for p in entry["paths"]} == {
-        mp.encode_model_path("p1"),
-        mp.encode_model_path("p2"),
+        _expected_path(1, "claude-opus-4.6"),
+        _expected_path(2, "claude-opus-4.6"),
     }
     assert "canonical_id" not in entry
     assert all("canonical_id" not in p for p in entry["paths"])
@@ -1000,7 +1074,10 @@ async def test_get_all_model_paths_keeps_distinct_configured_providers(
     assert (await mp.get_all_model_paths())["data"] == [
         {
             "id": "claude-opus-4.6",
-            "paths": [_path_entry(1), _path_entry(2)],
+            "paths": [
+                _path_entry(1, "claude-opus-4.6"),
+                _path_entry(2, "claude-opus-4.6"),
+            ],
         }
     ]
 
@@ -1032,7 +1109,10 @@ async def test_get_paths_for_model_returns_route_identity(
     await _seed_two_provider_shared_model(patched_session)
 
     payload = await mp.get_paths_for_model("claude-opus-4.6")
-    assert payload["data"] == [_path_entry(1), _path_entry(2)]
+    assert payload["data"] == [
+        _path_entry(1, "claude-opus-4.6"),
+        _path_entry(2, "claude-opus-4.6"),
+    ]
     assert (await mp.get_paths_for_model("does-not-exist"))["data"] == []
 
 
@@ -1048,7 +1128,9 @@ async def test_get_paths_for_model_falls_back_to_provider_prefixed_id(
     )
     await mp.refresh_model_paths([provider])
 
-    assert (await mp.get_paths_for_model("glm-5v-turbo"))["data"] == [_path_entry(4)]
+    assert (await mp.get_paths_for_model("glm-5v-turbo"))["data"] == [
+        _path_entry(4, "glm-5v-turbo")
+    ]
 
 
 @pytest.mark.asyncio
@@ -1072,7 +1154,10 @@ async def test_get_paths_for_model_requires_exact_advertised_id(
     short_paths = (await mp.get_paths_for_model("deepseek-v4-pro"))["data"]
     prefixed_paths = (await mp.get_paths_for_model("deepseek/deepseek-v4-pro"))["data"]
 
-    assert short_paths == [_path_entry(4), _path_entry(7)]
+    assert short_paths == [
+        _path_entry(4, "deepseek-v4-pro"),
+        _path_entry(7, "deepseek-v4-pro"),
+    ]
     assert prefixed_paths == []
 
 
@@ -1092,7 +1177,7 @@ async def test_get_paths_for_model_multi_segment_id_matches_models_listing(
 
     assert _ids_of(await mp.get_all_model_paths()) == {"fireworks/models/glm-5"}
     assert (await mp.get_paths_for_model("fireworks/models/glm-5"))["data"] == [
-        _path_entry(1)
+        _path_entry(1, "fireworks/models/glm-5")
     ]
     assert (await mp.get_paths_for_model("accounts/fireworks/models/glm-5"))[
         "data"
@@ -1284,9 +1369,10 @@ def test_model_paths_endpoint_returns_all_paths(
             {
                 "id": "claude-opus-4.6",
                 "paths": [
-                    _path_entry(1),
+                    _path_entry(1, "claude-opus-4.6"),
                     _path_entry(
                         2,
+                        "claude-opus-4.6",
                         endpoint_tag="google-vertex/us",
                         endpoint_name="Google",
                     ),
@@ -1369,7 +1455,14 @@ def test_model_paths_for_model_endpoint_accepts_slash_model_id(
     calls: list[str] = []
 
     expected = {
-        "data": [_path_entry(2, endpoint_tag="anthropic", endpoint_name="Anthropic")],
+        "data": [
+            _path_entry(
+                2,
+                "anthropic/claude-opus-4.6",
+                endpoint_tag="anthropic",
+                endpoint_name="Anthropic",
+            )
+        ],
         "updated_at": None,
     }
 

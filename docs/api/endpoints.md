@@ -345,12 +345,12 @@ GET /v1/models/paths
       "id": "anthropic/claude-sonnet-4",
       "paths": [
         {
-          "path": "provider=anthropic-primary",
+          "path": "url=https%3A%2F%2Fapi.anthropic.com%2Fv1&provider-id=12&model-id=anthropic%2Fclaude-sonnet-4",
           "provider": {"id": 12, "slug": "anthropic-primary", "type": "anthropic"},
           "endpoint": null
         },
         {
-          "path": "provider=openrouter-main&endpoint=google-vertex%2Fus",
+          "path": "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4&endpoint=google-vertex%2Fus",
           "provider": {"id": 42, "slug": "openrouter-main", "type": "openrouter"},
           "endpoint": {"tag": "google-vertex/us", "name": "Google"}
         }
@@ -362,12 +362,13 @@ GET /v1/models/paths
 ```
 
 `path` is an opaque, percent-encoded selector. Clients must store and return it
-unchanged rather than parsing or reconstructing it. The configured provider's
-public slug defines the upstream route; no upstream URL is exposed.
-OpenRouter routes additionally use the exact machine-readable endpoint `tag`.
-Provider slugs/types and endpoint names are display data and never participate
-in identity. When request-side selection is implemented, an endpoint tag must
-not silently fall back to another backend.
+unchanged rather than parsing or reconstructing it. It identifies the exact
+configured route with `url`, `provider-id`, and `model-id`. To avoid exposing
+private network details, a configured private IP address or any URL with an
+explicit port is advertised as `http://localhost`. OpenRouter routes additionally
+preserve the exact machine-readable endpoint `tag`. Provider slugs/types and
+endpoint names remain display data. When request-side selection is implemented,
+an endpoint tag must not silently fall back to another backend.
 
 ### List Paths for One Model
 

@@ -5,22 +5,22 @@ This PR remains discovery-only: request-side routing will consume the opaque
 selectors in a follow-up.
 
 A path is a standard percent-encoded query string containing the configured
-provider's public slug and, for an exact OpenRouter endpoint, its
-machine-readable tag. Upstream URLs and display names never participate in or
-leak through public identity::
+upstream URL, provider ID, client-visible model ID and, for an exact OpenRouter
+endpoint, its machine-readable tag::
 
-    provider=anthropic-primary
-    provider=openrouter-main&endpoint=google-vertex%2Fus
+    url=https%3A%2F%2Fapi.anthropic.com%2Fv1&provider-id=12&model-id=claude-sonnet-4
+    url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider-id=42&model-id=claude-sonnet-4&endpoint=google-vertex%2Fus
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import random
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from sqlalchemy.dialects.sqlite import insert
@@ -66,11 +66,12 @@ class EndpointIdentity:
 
 @dataclass(frozen=True)
 class ConfiguredProviderIdentity:
-    """Public-safe identity of one configured upstream provider."""
+    """Public identity of one configured upstream provider."""
 
     id: int
     slug: str
     provider_type: str
+    base_url: str
 
 
 @dataclass(frozen=True)
@@ -92,9 +93,38 @@ class ProviderPathSnapshot:
     preserve_model_ids: frozenset[str] = frozenset()
 
 
-def encode_model_path(provider_slug: str, endpoint_tag: str | None = None) -> str:
-    """Encode a stable opaque selector without exposing upstream URLs."""
-    components = [("provider", provider_slug)]
+def public_provider_url(base_url: str) -> str:
+    """Mask private IP addresses and URLs with explicit ports."""
+    parsed = urlsplit(base_url)
+    try:
+        if parsed.port is not None:
+            return "http://localhost"
+    except ValueError:
+        # An invalid explicit port must not accidentally leak through.
+        return "http://localhost"
+
+    hostname = parsed.hostname
+    if hostname is None:
+        return base_url
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return base_url
+    return "http://localhost" if address.is_private else base_url
+
+
+def encode_model_path(
+    base_url: str,
+    provider_id: int,
+    model_id: str,
+    endpoint_tag: str | None = None,
+) -> str:
+    """Encode the complete upstream route selector advertised to clients."""
+    components: list[tuple[str, str | int]] = [
+        ("url", base_url),
+        ("provider-id", provider_id),
+        ("model-id", model_id),
+    ]
     if endpoint_tag:
         components.append(("endpoint", endpoint_tag))
     return urlencode(components)
@@ -297,6 +327,7 @@ async def _load_model_visibility() -> tuple[
             id=provider.id,
             slug=provider.slug or f"provider-{provider.id}",
             provider_type=provider.provider_type,
+            base_url=public_provider_url(provider.base_url),
         )
         for model in provider.models:
             key = (model.id.lower(), provider.id)
@@ -374,9 +405,12 @@ async def _collect_provider_paths(
     models = _apply_model_visibility(upstream, overrides_by_key, disabled_model_keys)
 
     def _base_path(model: object) -> DiscoveredPath:
+        model_id = exposed_model_id(model)
         return DiscoveredPath(
-            model_id=exposed_model_id(model),
-            path=encode_model_path(provider_identity.slug),
+            model_id=model_id,
+            path=encode_model_path(
+                provider_identity.base_url, provider_identity.id, model_id
+            ),
             provider=provider_identity,
         )
 
@@ -410,7 +444,12 @@ async def _collect_provider_paths(
             paths.extend(
                 DiscoveredPath(
                     model_id=model_id,
-                    path=encode_model_path(provider_identity.slug, endpoint.tag),
+                    path=encode_model_path(
+                        provider_identity.base_url,
+                        provider_identity.id,
+                        model_id,
+                        endpoint.tag,
+                    ),
                     provider=provider_identity,
                     endpoint_tag=endpoint.tag,
                     endpoint_name=endpoint.provider_name,
