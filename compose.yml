@@ -29,7 +29,7 @@ services:
     environment:
       - TOR_PROXY_URL=socks5://tor:9050
     ports:
-      - 8000:8000
+      - 8011:8000
     extra_hosts: # Needed to access locally running models
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
