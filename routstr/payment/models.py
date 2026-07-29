@@ -127,25 +127,45 @@ BILLABLE_PRICING_FIELDS = (
 )
 
 
+def is_usable_rate(rate: float) -> bool:
+    """True if a single billable rate is a number a request could be billed on.
+
+    The one definition of a usable rate, so every guard that asks the question
+    answers it identically. A rate qualifies only when it is finite and
+    non-negative; zero is usable (it means "free", which is a real price) but
+    ``NaN``, ``±inf`` and negatives are not prices at all.
+
+    Non-finite: ``inf > 0`` is True, so an infinite rate reads as chargeable and
+    would be served, routed and billed as ``inf``; ``NaN`` poisons every total it
+    enters and defeats ordinary comparisons, since ``NaN > 0``, ``NaN < 0`` and
+    ``NaN == 0`` are all False. Negative: a negative rate produces a negative
+    cost, which the settlement path subtracts from the balance — it pays the
+    caller to make requests.
+
+    Both reach a stored row from upstream catalogs as well as the admin edge
+    (``json.loads`` accepts the bare ``NaN``/``Infinity`` literals and overflows
+    ``1e999`` to ``inf``), so the check belongs in one shared place rather than
+    at each writer.
+    """
+    return math.isfinite(rate) and rate >= 0.0
+
+
 def has_chargeable_price(pricing: Pricing) -> bool:
-    """True if every billable rate is finite and at least one is positive.
+    """True if every billable rate is usable and at least one is positive.
 
     The money-safety invariant: an enabled model must be chargeable unless an
     operator has explicitly vouched for it as free (``manual``). Checking every
     billable field (not just prompt/completion) means a per-request-billed model
     is correctly recognised as chargeable.
 
-    A non-finite rate is not a price: ``inf > 0`` is True, so an infinite rate
-    would otherwise read as chargeable and be served, routed, and billed as
-    ``inf`` — and ``NaN`` poisons any total it enters. Rates reach a stored row
-    from upstream catalogs as well as the admin edge (``json.loads`` accepts the
-    bare ``NaN``/``Infinity`` literals and overflows ``1e999`` to ``inf``), so
-    the shared predicate rejects them wherever they came from. One bad rate
-    disqualifies the model even alongside a valid one, since a request can bill
-    on the bad field.
+    One unusable rate disqualifies the model even alongside a valid one, since a
+    request can bill on the bad field — a positive ``completion`` must not hide a
+    negative ``prompt``. Testing usability before the positivity check is what
+    makes that hold: ``any(rate > 0)`` on its own is satisfied by the good field
+    and never looks at the bad one.
     """
     rates = [getattr(pricing, field) for field in BILLABLE_PRICING_FIELDS]
-    if any(not math.isfinite(rate) for rate in rates):
+    if not all(is_usable_rate(rate) for rate in rates):
         return False
     return any(rate > 0 for rate in rates)
 

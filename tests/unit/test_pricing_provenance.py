@@ -157,6 +157,19 @@ def test_has_chargeable_price_false_for_non_finite_rates() -> None:
     assert has_chargeable_price(Pricing(prompt=1e-06, completion=float("inf"))) is False
 
 
+def test_has_chargeable_price_false_when_one_rate_is_negative() -> None:
+    """One positive field must not hide a malformed negative billable field.
+
+    Upstream catalogs and foreign/direct database writers bypass the admin
+    validator. If this shared predicate accepts the row, listing and routing use
+    it as their money-safety backstop and a request can still bill on the
+    negative component.
+    """
+    pricing = Pricing(prompt=-1.0, completion=1.0)
+
+    assert has_chargeable_price(pricing) is False
+
+
 @pytest.mark.asyncio
 async def test_openrouter_rung_rejects_non_finite_feed_price() -> None:
     """``json.loads`` accepts bare ``NaN``/``Infinity`` and overflows ``1e999`` to
@@ -451,6 +464,83 @@ async def test_ppqai_matched_partial_price_keeps_openrouter_provenance() -> None
 
     model = _model_by_id(models, "gpt-4o")
     assert model.pricing_source == PricingSource.OPENROUTER
+
+
+@pytest.mark.asyncio
+async def test_ppqai_native_price_does_not_retain_openrouter_auxiliary_rates() -> None:
+    """Whole-``Pricing`` provenance cannot say ``native`` while billable fields
+    still come from OpenRouter.
+
+    PPQ publishes only input/output token prices. Once both PPQ rates replace the
+    matched token rates and the model is relabelled ``native``, unrelated
+    OpenRouter request/image/cache charges must not survive on that price.
+    Otherwise Routstr can bill fees PPQ never published while the audit tag says
+    every rate is provider-native.
+    """
+    from routstr.upstream.ppqai import PPQAIUpstreamProvider
+
+    payload = {
+        "data": [
+            {
+                "id": "gpt-4o",
+                "name": "GPT-4o",
+                "created_at": 0,
+                "context_length": 8192,
+                "pricing": {
+                    "api": {"input_per_1M": 5.0, "output_per_1M": 15.0}
+                },
+            }
+        ]
+    }
+    or_feed = [
+        {
+            "id": "gpt-4o",
+            "name": "GPT-4o",
+            "created": 0,
+            "description": "d",
+            "context_length": 8192,
+            "architecture": {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            },
+            "pricing": {
+                "prompt": 0.000001,
+                "completion": 0.000002,
+                "request": 0.25,
+                "image": 0.5,
+                "web_search": 0.75,
+                "internal_reasoning": 0.0000003,
+                "input_cache_read": 0.0000001,
+                "input_cache_write": 0.0000002,
+            },
+            "pricing_source": "openrouter",
+        }
+    ]
+
+    provider = PPQAIUpstreamProvider(api_key="k")
+    with patch(
+        "routstr.upstream.ppqai.httpx.AsyncClient",
+        lambda *a, **k: _PPQClient(payload),
+    ):
+        with patch(
+            "routstr.upstream.ppqai.async_fetch_openrouter_models",
+            AsyncMock(return_value=or_feed),
+        ):
+            models = await provider.fetch_models()
+
+    model = _model_by_id(models, "gpt-4o")
+    assert model.pricing_source == PricingSource.NATIVE
+    assert model.pricing.prompt == pytest.approx(5.0 / 1_000_000)
+    assert model.pricing.completion == pytest.approx(15.0 / 1_000_000)
+    assert model.pricing.request == 0.0
+    assert model.pricing.image == 0.0
+    assert model.pricing.web_search == 0.0
+    assert model.pricing.internal_reasoning == 0.0
+    assert model.pricing.input_cache_read == 0.0
+    assert model.pricing.input_cache_write == 0.0
 
 
 @pytest.mark.asyncio
