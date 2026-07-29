@@ -175,13 +175,14 @@ async def calculate_cost(
             cost_details = usage_data.get("cost_details", {})
             if not isinstance(cost_details, dict):
                 cost_details = {}
-            input_usd = _coerce_usd(
-                cost_details.get("input_cost")
-                or cost_details.get("upstream_inference_prompt_cost")
+            # Coerce each spelling before choosing between them: `inf` and `NaN`
+            # are truthy, so a malformed first field would otherwise win the
+            # fallback and the usable figure beside it would never be read.
+            input_usd = _coerce_usd(cost_details.get("input_cost")) or _coerce_usd(
+                cost_details.get("upstream_inference_prompt_cost")
             )
-            output_usd = _coerce_usd(
-                cost_details.get("output_cost")
-                or cost_details.get("upstream_inference_completions_cost")
+            output_usd = _coerce_usd(cost_details.get("output_cost")) or _coerce_usd(
+                cost_details.get("upstream_inference_completions_cost")
             )
             return _calculate_from_usd_cost(
                 usd_cost,
@@ -281,15 +282,35 @@ async def calculate_cost(
 
 
 def _coerce_usd(value: object) -> float:
-    """Coerce a value to USD float, handling various formats safely."""
+    """Coerce an upstream-reported USD figure to a usable amount, else ``0.0``.
+
+    These values come straight off the upstream response, where ``json.loads``
+    accepts the bare ``NaN``/``Infinity`` literals and overflows ``1e999`` to
+    ``inf``. A non-finite figure is not a cost, and letting one through poisoned
+    the proportional split in ``_calculate_from_usd_cost`` (``inf / inf`` is
+    ``NaN``): the resulting exception was absorbed by the broad handler around
+    the USD path, so a request whose *total* cost was perfectly valid fell
+    through to token-estimated pricing and was billed a fraction of what the
+    upstream charged.
+
+    ``0.0`` means "no usable figure" to every caller, which is the same thing an
+    absent field means, so the caller's existing ``> 0`` checks handle it.
+    """
+    # Local import mirrors this module's existing lazy pricing imports.
+    from .models import is_usable_rate
+
     if value is None or isinstance(value, bool):
         return 0.0
     if not isinstance(value, (int, float, str)):
         return 0.0
     try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
+        # An oversized integer raises OverflowError, not ValueError.
+        amount = float(value)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    # `is_usable_rate` also rejects negatives, which the previous `max(0.0, …)`
+    # clamped to zero — same outcome, stated once instead of inline.
+    return amount if is_usable_rate(amount) else 0.0
 
 
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
