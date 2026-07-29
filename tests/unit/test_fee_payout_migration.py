@@ -37,7 +37,7 @@ def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
             "payout_in_progress_msats, payout_started_at FROM routstr_fees"
         ).fetchone()
 
-    assert version == ("9c4d8e2f1a6b",)
+    assert version == ("aa50fde387a2",)
     assert {
         "id",
         "accumulated_msats",
