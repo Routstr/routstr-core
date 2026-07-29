@@ -772,6 +772,54 @@ async def test_served_map_excludes_enabled_unchargeable_non_manual_rows(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_served_map_excludes_unusable_rates_even_when_manual(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """``manual`` vouches for a *free* price, never for a malformed one.
+
+    The backstop exempts ``manual`` rows so an operator can serve a deliberately
+    free model. Zero is a real price and that exemption is correct for it, but a
+    negative or non-finite rate is not a price at all and no operator intent can
+    make it one — a negative bills a negative amount, and ``NaN`` poisons every
+    total it enters. The admin edge rejects these, so such a row means a legacy
+    or foreign writer, which is exactly what this backstop is here for.
+    """
+    from routstr.payment.models import list_models
+
+    provider_id = await _make_provider(integration_session)
+    for model_id, prompt in (
+        ("manual-negative", -1e-06),
+        ("manual-nan", float("nan")),
+        ("manual-inf", float("inf")),
+    ):
+        await _insert_row(
+            integration_session,
+            provider_id,
+            model_id=model_id,
+            prompt=prompt,
+            completion=2e-06,
+            enabled=True,
+            pricing_source="manual",
+        )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="manual-free",
+        prompt=0.0,
+        completion=0.0,
+        enabled=True,
+        pricing_source="manual",
+    )
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+    assert "manual-negative" not in served
+    assert "manual-nan" not in served
+    assert "manual-inf" not in served
+    assert "manual-free" in served  # zero is a price an operator can vouch for
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_negative_price_is_rejected(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:

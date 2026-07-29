@@ -150,6 +150,17 @@ def is_usable_rate(rate: float) -> bool:
     return math.isfinite(rate) and rate >= 0.0
 
 
+def has_usable_pricing(pricing: Pricing) -> bool:
+    """True if every billable rate is a number a request could be billed on.
+
+    Free is usable — a rate of zero is a real price. This asks only whether the
+    price is well-formed, which is the part no operator intent can override.
+    """
+    return all(
+        is_usable_rate(getattr(pricing, field)) for field in BILLABLE_PRICING_FIELDS
+    )
+
+
 def has_chargeable_price(pricing: Pricing) -> bool:
     """True if every billable rate is usable and at least one is positive.
 
@@ -164,10 +175,9 @@ def has_chargeable_price(pricing: Pricing) -> bool:
     makes that hold: ``any(rate > 0)`` on its own is satisfied by the good field
     and never looks at the bad one.
     """
-    rates = [getattr(pricing, field) for field in BILLABLE_PRICING_FIELDS]
-    if not all(is_usable_rate(rate) for rate in rates):
+    if not has_usable_pricing(pricing):
         return False
-    return any(rate > 0 for rate in rates)
+    return any(getattr(pricing, field) > 0 for field in BILLABLE_PRICING_FIELDS)
 
 
 class TopProvider(BaseModel):
@@ -451,10 +461,18 @@ async def list_models(
         # Served-map money-safety backstop for legacy rows and writers that
         # bypass the admin upsert: never serve an unchargeable price unless an
         # operator vouched for it as free (``manual``); it would bill at nothing.
-        if (
-            not include_disabled
-            and model.pricing_source != PricingSource.MANUAL
-            and not has_chargeable_price(model.pricing)
+        #
+        # The ``manual`` exemption covers a *free* price, never a malformed one:
+        # zero is a real price an operator can stand behind, but a negative or
+        # non-finite rate is not a price at all, and serving one bills a negative
+        # amount or poisons the total. So a well-formedness failure drops the row
+        # whatever its provenance says.
+        if not include_disabled and (
+            not has_usable_pricing(model.pricing)
+            or (
+                model.pricing_source != PricingSource.MANUAL
+                and not has_chargeable_price(model.pricing)
+            )
         ):
             continue
         models.append(model)
