@@ -451,13 +451,31 @@ async def list_models(
             and providers_by_id[r.upstream_provider_id].enabled
         ):
             continue
-        model = _row_to_model(
-            r,
-            apply_provider_fee=apply_fees,
-            provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
-            if r.upstream_provider_id in providers_by_id
-            else 1.01,
-        )
+        try:
+            model = _row_to_model(
+                r,
+                apply_provider_fee=apply_fees,
+                provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
+                if r.upstream_provider_id in providers_by_id
+                else 1.01,
+            )
+        except Exception as e:
+            # Stored pricing/architecture is JSON from whatever wrote the row, so
+            # a legacy import or foreign writer can leave a field that will not
+            # parse. Converting inside this loop meant one such row raised out of
+            # the whole listing and the node advertised nothing at all. Drop the
+            # row we cannot read — it is unservable either way — and keep serving
+            # the rest.
+            logger.warning(
+                "Skipping model row that could not be read",
+                extra={
+                    "model_id": r.id,
+                    "upstream_provider_id": r.upstream_provider_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+            continue
         # Served-map money-safety backstop for legacy rows and writers that
         # bypass the admin upsert: never serve an unchargeable price unless an
         # operator vouched for it as free (``manual``); it would bill at nothing.

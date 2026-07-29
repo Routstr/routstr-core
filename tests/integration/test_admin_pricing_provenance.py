@@ -818,6 +818,61 @@ async def test_served_map_excludes_unusable_rates_even_when_manual(
     assert "manual-inf" not in served
     assert "manual-free" in served  # zero is a price an operator can vouch for
 
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_one_unreadable_stored_price_does_not_blank_the_catalog(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """A single unparseable row must cost that row, not every model on the node.
+
+    Stored pricing is JSON written by whatever produced the row, so a
+    non-numeric rate is reachable from a legacy import or a foreign writer.
+    Parsing it raised out of the row-to-model conversion, and because the
+    conversion runs inside the catalog loop the exception took the whole listing
+    with it — one bad row and the node advertises nothing at all.
+    """
+    from routstr.payment.models import list_models
+
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="good",
+        prompt=1e-06,
+        completion=2e-06,
+        enabled=True,
+        pricing_source="litellm",
+    )
+    integration_session.add(
+        ModelRow(
+            id="unreadable",
+            name="unreadable",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": "not-a-number", "completion": 2e-06}),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="unreadable",
+            pricing_source="litellm",
+        )
+    )
+    await integration_session.commit()
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+    assert served == {"good"}
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_negative_price_is_rejected(
