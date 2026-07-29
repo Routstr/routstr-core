@@ -118,8 +118,32 @@ def create_model_mappings(
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
     """
-    from .payment.models import _row_to_model
+    from .payment.models import (
+        PricingSource,
+        _row_to_model,
+        has_chargeable_price,
+        has_usable_pricing,
+    )
     from .upstream.helpers import resolve_model_alias
+
+    def _unroutable_price(model: "Model") -> bool:
+        """A candidate may only route if it can bill > 0, unless an operator
+        vouched for it as free (``manual``). Mirrors the served-catalog backstop
+        in ``list_models`` so a legacy/foreign-written enabled $0 ``unresolved``
+        row is not silently routable (it would bill every request at nothing).
+
+        Applies to provider-discovered models as well as persisted overrides: a
+        provider whose catalog schema defaults its pricing fields to zero reports
+        an unpriced model as a free one, and no override row need exist for it to
+        be built into the candidate map.
+
+        The ``manual`` exemption covers free, not malformed: a negative or
+        non-finite rate is not a price an operator can vouch for, and routing one
+        bills every request on the model at the maximum reservation instead."""
+        return not has_usable_pricing(model.pricing) or (
+            model.pricing_source != PricingSource.MANUAL
+            and not has_chargeable_price(model.pricing)
+        )
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
@@ -200,11 +224,26 @@ def create_model_mappings(
             # Apply overrides only for this provider's model row.
             if model_key is not None and model_key in overrides_by_key:
                 override_row, provider_fee = overrides_by_key[model_key]
-                model_to_use = _row_to_model(
-                    override_row, apply_provider_fee=True, provider_fee=provider_fee
-                )
+                try:
+                    model_to_use = _row_to_model(
+                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping invalid model override while building model mappings",
+                        extra={
+                            "model_id": model.id,
+                            "upstream_provider_id": upstream_db_id,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
             else:
                 model_to_use = model
+
+            if _unroutable_price(model_to_use):
+                continue
 
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
@@ -280,6 +319,8 @@ def create_model_mappings(
             )
             continue
         if not model_to_use.enabled:
+            continue
+        if _unroutable_price(model_to_use):
             continue
 
         base_id = get_base_model_id(model_to_use.id)

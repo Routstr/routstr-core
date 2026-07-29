@@ -1,0 +1,1073 @@
+"""Admin persist-path provenance: how ``pricing_source`` is set on write.
+
+Rules under test (price-edit-only ``manual`` semantics):
+- a hand-created model with a real price and no provenance is ``manual``;
+- a hand-created model priced at zero with no provenance is ``unresolved``
+  (a free import can't be told from an unpriced one), imported disabled;
+- a create that carries provenance adopts it (a "save as fetched");
+- editing a price flips the row to ``manual``;
+- saving an *unchanged* price preserves the resolved source — even when the
+  read-back view carries litellm cache rates the stored JSON lacked (the
+  false-flip regression).
+
+Money-safety (zero-price handling): a row priced at zero whose source is not
+``manual`` is *force-disabled* on write rather than rejected, so it can never
+bill at nothing. A ``manual`` price — including an operator editing a price
+down to zero — is a deliberate declaration and its ``enabled`` state is left
+exactly as the write requests.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from httpx import AsyncClient
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from routstr.core.admin import admin_sessions
+from routstr.core.db import ModelRow, UpstreamProviderRow
+from routstr.payment.models import _row_to_model
+from routstr.proxy import reinitialize_upstreams
+
+
+def _admin_headers() -> dict[str, str]:
+    token = "test-admin-provenance-token"
+    admin_sessions[token] = int(
+        (datetime.now(timezone.utc) + timedelta(minutes=5)).timestamp()
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _payload(
+    provider_id: int,
+    *,
+    model_id: str = "prov-model",
+    prompt: float = 1.4e-7,
+    completion: float = 2.8e-7,
+    enabled: bool = True,
+    pricing: dict[str, object] | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    body: dict[str, object] = {
+        "id": model_id,
+        "name": "Prov Model",
+        "description": "d",
+        "created": 0,
+        "context_length": 128000,
+        "architecture": {
+            "modality": "text",
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+            "tokenizer": "unknown",
+            "instruct_type": None,
+        },
+        "pricing": pricing
+        if pricing is not None
+        else {
+            "prompt": prompt,
+            "completion": completion,
+            "request": 0.0,
+            "image": 0.0,
+            "web_search": 0.0,
+            "internal_reasoning": 0.0,
+            "input_cache_read": 0.0,
+            "input_cache_write": 0.0,
+        },
+        "per_request_limits": None,
+        "top_provider": None,
+        "upstream_provider_id": provider_id,
+        "canonical_slug": None,
+        "alias_ids": [],
+        "enabled": enabled,
+        "forwarded_model_id": model_id,
+    }
+    body.update(extra)
+    return body
+
+
+async def _make_provider(session: AsyncSession) -> int:
+    provider = UpstreamProviderRow(
+        provider_type="generic",
+        base_url="https://prov-upstream.example/v1",
+        api_key="test-key",
+        provider_fee=1.0,
+    )
+    session.add(provider)
+    await session.commit()
+    await session.refresh(provider)
+    await reinitialize_upstreams()
+    assert provider.id is not None
+    return provider.id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_hand_created_model_is_manual(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(provider_id, model_id="hand-made"),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("hand-made", provider_id))
+    assert row is not None
+    assert row.pricing_source == "manual"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_create_adopts_payload_provenance(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="as-fetched",
+            pricing_source="litellm",
+        ),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("as-fetched", provider_id))
+    assert row is not None
+    assert row.pricing_source == "litellm"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_price_edit_flips_to_manual(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _make_provider(integration_session)
+    headers = _admin_headers()
+    # Seed a litellm-sourced row.
+    await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(provider_id, model_id="edit-me", pricing_source="litellm"),
+    )
+    # Edit the prompt price → must become manual.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(
+            provider_id, model_id="edit-me", prompt=9.9e-7, pricing_source="litellm"
+        ),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("edit-me", provider_id))
+    assert row is not None
+    assert row.pricing_source == "manual"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_unchanged_price_preserves_source_despite_cache_backfill(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The false-flip regression: a litellm-known model stored without cache
+    rates reads back *with* them (backfilled on read). Re-saving that fee-free
+    view unchanged must NOT flip to manual — the comparison is against the same
+    backfilled view the UI was shown, not the raw stored JSON."""
+    provider_id = await _make_provider(integration_session)
+    # Seed deepseek-chat (litellm-known) with NO cache rates in stored pricing.
+    row = ModelRow(
+        id="deepseek-chat",
+        name="DeepSeek",
+        description="d",
+        created=0,
+        context_length=131072,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 2.8e-7, "completion": 4.2e-7}),
+        upstream_provider_id=provider_id,
+        enabled=True,
+        forwarded_model_id="deepseek-chat",
+        pricing_source="litellm",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    # The fee-free view the admin UI is served (cache rates now backfilled).
+    view = _row_to_model(row, apply_provider_fee=False)
+    assert view.pricing.input_cache_read > 0  # proves backfill happened
+
+    # Re-save that exact view, provenance omitted → must preserve litellm.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="deepseek-chat",
+            pricing=view.pricing.dict(),
+        ),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "litellm"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_omitting_backfilled_cache_rate_preserves_source(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A client that saves an unchanged price but OMITS the cache rates (which
+    exist only via read-time litellm backfill, never in the stored JSON) must
+    NOT flip to manual: persisting 0 for those fields is re-backfilled on read,
+    so the effective price is unchanged. The edit check backfills the payload
+    the same way, so an absent backfill-derived rate reads like-for-like."""
+    provider_id = await _make_provider(integration_session)
+    # Seed deepseek-chat (litellm-known) with NO cache rates in stored pricing.
+    row = ModelRow(
+        id="deepseek-chat",
+        name="DeepSeek",
+        description="d",
+        created=0,
+        context_length=131072,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 2.8e-7, "completion": 4.2e-7}),
+        upstream_provider_id=provider_id,
+        enabled=True,
+        forwarded_model_id="deepseek-chat",
+        pricing_source="litellm",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    # A non-UI client re-saves the unchanged prompt/completion but sends NO
+    # cache rates (unlike the UI, which round-trips the full backfilled view).
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="deepseek-chat",
+            pricing={"prompt": 2.8e-7, "completion": 4.2e-7},
+        ),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "litellm"  # not falsely flipped to manual
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_partial_payload_dropping_a_rate_flips_to_manual(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A replacement payload that OMITS a priced field really changes the stored
+    price (the reparse defaults it to 0), so it must be treated as an edit — the
+    trusted tag can't survive while the stored rate silently drops to zero."""
+    provider_id = await _make_provider(integration_session)
+    # Seed a request-priced row from a trusted source (not litellm-known, so the
+    # read view has no cache backfill to muddy the comparison).
+    row = ModelRow(
+        id="req-priced-xyz",
+        name="Req Priced",
+        description="d",
+        created=0,
+        context_length=8192,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 1e-7, "completion": 2e-7, "request": 0.5}),
+        upstream_provider_id=provider_id,
+        enabled=True,
+        forwarded_model_id="req-priced-xyz",
+        pricing_source="openrouter",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    # Post prompt/completion unchanged but WITHOUT request → request drops to 0.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="req-priced-xyz",
+            pricing={"prompt": 1e-7, "completion": 2e-7},
+        ),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    stored = _row_to_model(row, apply_provider_fee=False)
+    assert stored.pricing.request == 0.0  # the rate really dropped
+    assert row.pricing_source == "manual"  # so the trusted tag must not survive
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_batch_override_create_and_price_edit(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _make_provider(integration_session)
+    headers = _admin_headers()
+    # Batch create carrying provenance → adopted.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers=headers,
+        json={
+            "models": [
+                _payload(provider_id, model_id="batch-a", pricing_source="openrouter")
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("batch-a", provider_id))
+    assert row is not None and row.pricing_source == "openrouter"
+
+    # Batch update editing the price → manual.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers=headers,
+        json={
+            "models": [
+                _payload(
+                    provider_id,
+                    model_id="batch-a",
+                    prompt=5e-7,
+                    pricing_source="openrouter",
+                )
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "manual"
+
+
+# ---------------------------------------------------------------------------
+# money-safety — a zero-price non-manual row is force-disabled, not billed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_create_zero_price_without_provenance_is_unresolved_and_disabled(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The create-bypass fix: a client that omits provenance (today's UI) and
+    posts a zero price gets ``unresolved`` + disabled, not a laundered
+    ``manual`` $0 enabled at nothing."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="silent-free",
+            prompt=0.0,
+            completion=0.0,
+            enabled=True,
+        ),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("silent-free", provider_id))
+    assert row is not None
+    assert row.pricing_source == "unresolved"
+    assert row.enabled is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_enabling_unresolved_zero_price_is_disabled(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """An explicit ``unresolved`` zero-price enable is persisted but forced
+    disabled — never rejected, never billable."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="free-fall",
+            prompt=0.0,
+            completion=0.0,
+            enabled=True,
+            pricing_source="unresolved",
+        ),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("free-fall", provider_id))
+    assert row is not None
+    assert row.pricing_source == "unresolved"
+    assert row.enabled is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reenabling_unresolved_row_without_price_stays_disabled(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    provider_id = await _make_provider(integration_session)
+    headers = _admin_headers()
+    # Seed a fail-closed row: unresolved, zero price, disabled.
+    row = ModelRow(
+        id="needs-price",
+        name="Needs Price",
+        description="d",
+        created=0,
+        context_length=4096,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 0.0, "completion": 0.0}),
+        upstream_provider_id=provider_id,
+        enabled=False,
+        forwarded_model_id="needs-price",
+        pricing_source="unresolved",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    # Flipping enabled=True while still zero-priced is accepted but stays
+    # disabled: the source is preserved as unresolved, so it can't be billed.
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(provider_id, model_id="needs-price", prompt=0.0, completion=0.0),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "unresolved"
+    assert row.enabled is False
+
+    # Giving it a real price flips it to manual and enabling now succeeds.
+    ok = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(provider_id, model_id="needs-price", prompt=1e-7),
+    )
+    assert ok.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "manual"
+    assert row.enabled is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_operator_zeroing_price_keeps_enabled_state(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """An operator editing a real price down to zero owns that price (``manual``)
+    and their ``enabled`` choice is never second-guessed — the model stays
+    enabled at an explicit $0."""
+    provider_id = await _make_provider(integration_session)
+    headers = _admin_headers()
+    # Seed a litellm-priced, enabled model.
+    row = ModelRow(
+        id="going-free",
+        name="Going Free",
+        description="d",
+        created=0,
+        context_length=4096,
+        architecture=json.dumps(
+            {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "unknown",
+                "instruct_type": None,
+            }
+        ),
+        pricing=json.dumps({"prompt": 2.8e-7, "completion": 4.2e-7}),
+        upstream_provider_id=provider_id,
+        enabled=True,
+        forwarded_model_id="going-free",
+        pricing_source="litellm",
+    )
+    integration_session.add(row)
+    await integration_session.commit()
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(
+            provider_id,
+            model_id="going-free",
+            prompt=0.0,
+            completion=0.0,
+            enabled=True,
+        ),
+    )
+    assert resp.status_code == 200
+    await integration_session.refresh(row)
+    assert row.pricing_source == "manual"  # a price edit → operator owns it
+    assert row.enabled is True  # zeroing a price never flips enabled
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_explicitly_free_manual_model_is_allowed(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A zero price the operator explicitly marks ``manual`` is a deliberate
+    free-model declaration: it is enabled as requested, never auto-disabled."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="truly-free",
+            prompt=0.0,
+            completion=0.0,
+            enabled=True,
+            pricing_source="manual",
+        ),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("truly-free", provider_id))
+    assert row is not None
+    assert row.pricing_source == "manual"
+    assert row.enabled is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_batch_zero_price_entry_disabled_without_blocking_siblings(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A zero-price non-manual entry in a batch is force-disabled in place; it
+    no longer aborts the whole batch, so a priced sibling still lands enabled."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                _payload(
+                    provider_id,
+                    model_id="batch-free",
+                    prompt=0.0,
+                    completion=0.0,
+                    enabled=True,
+                ),
+                _payload(provider_id, model_id="batch-paid", enabled=True),
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    free_row = await integration_session.get(ModelRow, ("batch-free", provider_id))
+    assert free_row is not None
+    assert free_row.pricing_source == "unresolved"
+    assert free_row.enabled is False
+    paid_row = await integration_session.get(ModelRow, ("batch-paid", provider_id))
+    assert paid_row is not None
+    assert paid_row.enabled is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_batch_reports_force_disabled_ids(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The batch response names the entries it silently force-disabled, so a
+    caller that asked for ``enabled=True`` can tell which models did not land
+    enabled instead of the override looking wholly successful."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                _payload(
+                    provider_id,
+                    model_id="batch-free",
+                    prompt=0.0,
+                    completion=0.0,
+                    enabled=True,
+                ),
+                _payload(provider_id, model_id="batch-paid", enabled=True),
+            ]
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["force_disabled"] == ["batch-free"]
+
+
+# ---------------------------------------------------------------------------
+# edge cases — string-typed prices and invalid provenance
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_string_typed_price_edit_flips_to_manual(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A price edit sent with string-typed rates (some JSON producers emit
+    strings) must still flip provenance to manual — the stored JSON is parsed as
+    float on read, so the edit check must interpret strings the same way or the
+    operator's edit silently keeps a stale non-manual tag."""
+    provider_id = await _make_provider(integration_session)
+    headers = _admin_headers()
+    await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(provider_id, model_id="str-edit", pricing_source="litellm"),
+    )
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=headers,
+        json=_payload(
+            provider_id,
+            model_id="str-edit",
+            pricing_source="litellm",
+            pricing={
+                "prompt": "9.9e-07",  # edited (was 1.4e-7), sent as a string
+                "completion": "2.8e-07",
+                "request": 0.0,
+                "image": 0.0,
+                "web_search": 0.0,
+                "internal_reasoning": 0.0,
+                "input_cache_read": 0.0,
+                "input_cache_write": 0.0,
+            },
+        ),
+    )
+    assert resp.status_code == 200
+    row = await integration_session.get(ModelRow, ("str-edit", provider_id))
+    assert row is not None
+    assert row.pricing_source == "manual"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_invalid_pricing_source_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """An unknown pricing_source is a client bug: reject it at the edge rather
+    than persist a junk tag that reads back as None (silent provenance loss, and
+    a would-be trusted $0 that never gets the guard it needs)."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(provider_id, model_id="bad-src", pricing_source="lite-llm"),
+    )
+    assert resp.status_code == 422
+
+
+async def _insert_row(
+    session: AsyncSession,
+    provider_id: int,
+    *,
+    model_id: str,
+    prompt: float,
+    completion: float,
+    enabled: bool,
+    pricing_source: str,
+) -> None:
+    session.add(
+        ModelRow(
+            id=model_id,
+            name=model_id,
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": prompt, "completion": completion}),
+            upstream_provider_id=provider_id,
+            enabled=enabled,
+            forwarded_model_id=model_id,
+            pricing_source=pricing_source,
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_served_map_excludes_enabled_unchargeable_non_manual_rows(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """The served-map backstop for legacy/foreign writers: an ``enabled`` row
+    priced at nothing whose source isn't ``manual`` is never served (it would
+    bill every request at zero), while a deliberately-free ``manual`` row and an
+    ordinary priced row are."""
+    from routstr.payment.models import list_models
+
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="legacy-free",
+        prompt=0.0,
+        completion=0.0,
+        enabled=True,
+        pricing_source="unresolved",
+    )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="free-by-choice",
+        prompt=0.0,
+        completion=0.0,
+        enabled=True,
+        pricing_source="manual",
+    )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="priced",
+        prompt=1e-06,
+        completion=2e-06,
+        enabled=True,
+        pricing_source="litellm",
+    )
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+    assert "legacy-free" not in served  # unchargeable + not manual → not served
+    assert "free-by-choice" in served  # operator vouched → served free
+    assert "priced" in served
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_served_map_excludes_unusable_rates_even_when_manual(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """``manual`` vouches for a *free* price, never for a malformed one.
+
+    The backstop exempts ``manual`` rows so an operator can serve a deliberately
+    free model. Zero is a real price and that exemption is correct for it, but a
+    negative or non-finite rate is not a price at all and no operator intent can
+    make it one — a negative bills a negative amount, and ``NaN`` poisons every
+    total it enters. The admin edge rejects these, so such a row means a legacy
+    or foreign writer, which is exactly what this backstop is here for.
+    """
+    from routstr.payment.models import list_models
+
+    provider_id = await _make_provider(integration_session)
+    for model_id, prompt in (
+        ("manual-negative", -1e-06),
+        ("manual-nan", float("nan")),
+        ("manual-inf", float("inf")),
+    ):
+        await _insert_row(
+            integration_session,
+            provider_id,
+            model_id=model_id,
+            prompt=prompt,
+            completion=2e-06,
+            enabled=True,
+            pricing_source="manual",
+        )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="manual-free",
+        prompt=0.0,
+        completion=0.0,
+        enabled=True,
+        pricing_source="manual",
+    )
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+    assert "manual-negative" not in served
+    assert "manual-nan" not in served
+    assert "manual-inf" not in served
+    assert "manual-free" in served  # zero is a price an operator can vouch for
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_one_unreadable_stored_price_does_not_blank_the_catalog(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """A single unparseable row must cost that row, not every model on the node.
+
+    Stored pricing is JSON written by whatever produced the row, so a
+    non-numeric rate is reachable from a legacy import or a foreign writer.
+    Parsing it raised out of the row-to-model conversion, and because the
+    conversion runs inside the catalog loop the exception took the whole listing
+    with it — one bad row and the node advertises nothing at all.
+    """
+    from routstr.payment.models import list_models
+
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="good",
+        prompt=1e-06,
+        completion=2e-06,
+        enabled=True,
+        pricing_source="litellm",
+    )
+    integration_session.add(
+        ModelRow(
+            id="unreadable",
+            name="unreadable",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": "not-a-number", "completion": 2e-06}),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="unreadable",
+            pricing_source="litellm",
+        )
+    )
+    await integration_session.commit()
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+    assert served == {"good"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_model_listing_survives_a_non_finite_stored_rate(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """The operator must be able to open the page that shows the broken row.
+
+    The admin listing deliberately includes disabled models, so it is the one
+    view that still carries a row the money backstop keeps out of the served
+    catalog. FastAPI's encoder rendered a stored ``Infinity`` rate as ``null``,
+    which is indistinguishable from a rate the row never carried — the operator
+    could see the row but not the reason it was held back. Render the offending
+    value as text instead, as the 422 handler already does.
+    """
+    provider_id = await _make_provider(integration_session)
+    integration_session.add(
+        ModelRow(
+            id="inf-rate",
+            name="inf-rate",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": float("inf"), "completion": 2e-06}),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="inf-rate",
+            pricing_source="litellm",
+        )
+    )
+    await integration_session.commit()
+
+    resp = await integration_client.get(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+    )
+
+    assert resp.status_code == 200
+    listed = {m["id"]: m for m in resp.json()["db_models"]}
+    assert "inf-rate" in listed
+    assert listed["inf-rate"]["pricing"]["prompt"] == "inf"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_negative_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A negative rate is not a valid price — accepting it would persist a row
+    that bills a negative amount (and, being truthy, reads as chargeable). Reject
+    at the edge with a 422 rather than force-disable or silently store it."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="neg-price",
+            pricing={
+                "prompt": -1.0,
+                "completion": 2.8e-7,
+                "request": 0.0,
+                "image": 0.0,
+                "web_search": 0.0,
+                "internal_reasoning": 0.0,
+                "input_cache_read": 0.0,
+                "input_cache_write": 0.0,
+            },
+        ),
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_malformed_price_string_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A present non-numeric rate is a client bug: it silently coerces to $0
+    today (an unpriced-looking row). Surface it as a 422 instead of accepting a
+    junk value that masquerades as a deliberate free price."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="bad-price",
+            pricing={
+                "prompt": "oops",
+                "completion": 2.8e-7,
+                "request": 0.0,
+                "image": 0.0,
+                "web_search": 0.0,
+                "internal_reasoning": 0.0,
+                "input_cache_read": 0.0,
+                "input_cache_write": 0.0,
+            },
+        ),
+    )
+    assert resp.status_code == 422
+
+
+def test_non_finite_price_is_rejected() -> None:
+    """``NaN``/``inf`` are not billable rates: the ``ModelCreate`` validator must
+    reject them before they can be persisted and read back as chargeable."""
+    from pydantic import ValidationError
+
+    from routstr.core.admin import ModelCreate
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValidationError):
+            ModelCreate.model_validate(
+                _payload(
+                    1,
+                    model_id="nonfinite",
+                    pricing={"prompt": bad, "completion": 1e-7},
+                )
+            )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_oversized_integer_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A JSON integer too large for a float is still a client bug, not a server
+    fault: ``float()`` raises ``OverflowError``, which pydantic does not convert
+    into a validation error, so it escapes the validator as a 500. It must be
+    rejected with the same 422 as every other unusable rate."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers={**_admin_headers(), "Content-Type": "application/json"},
+        content=(
+            '{"id": "huge-price", "name": "huge", "description": "d", "created": 0,'
+            ' "context_length": 8192, "architecture": {"modality": "text"},'
+            ' "pricing": {"prompt": ' + "9" * 400 + ', "completion": 2.8e-7},'
+            f' "upstream_provider_id": {provider_id}}}'
+        ),
+    )
+    assert resp.status_code == 422
+
+
+async def test_non_finite_literal_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A bare ``Infinity``/``NaN`` literal must be answered with the same 422 as
+    any other unusable rate.
+
+    ``json`` accepts both literals, so the validator sees a real float and
+    rejects it — but pydantic echoes the offending value back in the error's
+    ``input`` field, and serializing that reply raises "Out of range float
+    values are not JSON compliant". The 422 then escapes as a 500, hiding a
+    client bug behind a server fault.
+    """
+    provider_id = await _make_provider(integration_session)
+    for literal in ("Infinity", "-Infinity", "NaN"):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider_id}/models",
+            headers={**_admin_headers(), "Content-Type": "application/json"},
+            content=(
+                '{"id": "odd-price", "name": "odd", "description": "d", "created": 0,'
+                ' "context_length": 8192, "architecture": {"modality": "text"},'
+                f' "pricing": {{"prompt": {literal}, "completion": 2.8e-7}},'
+                f' "upstream_provider_id": {provider_id}}}'
+            ),
+        )
+        assert resp.status_code == 422, literal
+
+
+async def test_non_finite_literal_price_is_rejected_in_batch_override(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The batch path shares the edge, so it must answer 422 too."""
+    provider_id = await _make_provider(integration_session)
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers={**_admin_headers(), "Content-Type": "application/json"},
+        content=(
+            '{"models": [{"id": "odd-batch", "name": "odd", "description": "d",'
+            ' "created": 0, "context_length": 8192,'
+            ' "architecture": {"modality": "text"},'
+            ' "pricing": {"prompt": Infinity, "completion": 2.8e-7},'
+            f' "upstream_provider_id": {provider_id}}}]}}'
+        ),
+    )
+    assert resp.status_code == 422

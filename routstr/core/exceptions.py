@@ -1,4 +1,8 @@
+import math
+
 from fastapi import Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .logging import get_logger
@@ -56,6 +60,48 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
         status_code=status_code,
         content={
             "detail": detail,
+            "request_id": request_id,
+        },
+    )
+
+
+def json_compliant(value: object) -> object:
+    """Render non-finite floats as text so a reply carrying them can serialize.
+
+    ``json`` parses the bare ``NaN``/``Infinity``/``-Infinity`` literals into
+    real floats, so a request body may hold one anywhere. ``JSONResponse``
+    encodes with ``allow_nan=False`` and raises on them, which would turn a
+    reply that merely *quotes* the offending value into a 500. FastAPI's own
+    encoder does not raise but silently substitutes ``null``, which is worse for
+    a diagnostic view: the operator cannot tell a missing value from a malformed
+    one. Both callers want the offending value shown, so it is named here rather
+    than reimplemented per response.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, dict):
+        return {key: json_compliant(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_compliant(item) for item in value]
+    return value
+
+
+async def validation_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Answer a request-validation failure with a 422 that always serializes.
+
+    Pydantic echoes the rejected value back in each error's ``input`` field. A
+    non-finite float there breaks the encoder, so the 422 escapes as a 500 and
+    reports a client's bad rate as a server fault.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": json_compliant(jsonable_encoder(errors)),
             "request_id": request_id,
         },
     )

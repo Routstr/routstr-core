@@ -15,7 +15,12 @@ from routstr.algorithm import (  # noqa: E402
     create_model_mappings,
     get_provider_penalty,
 )
-from routstr.payment.models import Architecture, Model, Pricing  # noqa: E402
+from routstr.payment.models import (  # noqa: E402
+    Architecture,
+    Model,
+    Pricing,
+    PricingSource,
+)
 
 
 def create_test_model(
@@ -252,3 +257,195 @@ def test_create_model_mappings_disables_only_matching_provider() -> None:
     )
 
     assert [p for _, p in provider_map["same-id"]] == [provider_a]
+
+
+def test_create_model_mappings_excludes_unchargeable_unresolved_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted override enabled at $0 whose price no source vouches for
+    (``unresolved``/None) must not become a routable candidate — it would bill
+    every request at nothing. Mirrors the served-catalog backstop in
+    ``list_models`` so routing and serving agree."""
+    provider = create_test_provider(
+        "azure",
+        "https://example.openai.azure.com/openai/v1",
+        db_id=7,
+        models=[],
+    )
+    free_unresolved = create_test_model(
+        "azure/free", prompt_price=0.0, completion_price=0.0
+    )
+    free_unresolved.pricing_source = PricingSource.UNRESOLVED
+
+    monkeypatch.setattr(
+        "routstr.payment.models._row_to_model", lambda *a, **k: free_unresolved
+    )
+    override_row = SimpleNamespace(
+        id="azure/free", upstream_provider_id=7, enabled=True
+    )
+
+    model_instances, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("azure/free", 7): (override_row, 1.01)},
+        disabled_model_keys=set(),
+    )
+
+    assert "azure/free" not in model_instances
+    assert "azure/free" not in provider_map
+    assert "free" not in unique_models
+
+
+def test_create_model_mappings_routes_manual_free_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-vouched free (``manual``) $0 override is a deliberate choice
+    and stays routable — only unvouched free rows are held back."""
+    provider = create_test_provider(
+        "azure",
+        "https://example.openai.azure.com/openai/v1",
+        db_id=7,
+        models=[],
+    )
+    free_manual = create_test_model(
+        "azure/free", prompt_price=0.0, completion_price=0.0
+    )
+    free_manual.pricing_source = PricingSource.MANUAL
+
+    monkeypatch.setattr(
+        "routstr.payment.models._row_to_model", lambda *a, **k: free_manual
+    )
+    override_row = SimpleNamespace(
+        id="azure/free", upstream_provider_id=7, enabled=True
+    )
+
+    model_instances, provider_map, _ = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("azure/free", 7): (override_row, 1.01)},
+        disabled_model_keys=set(),
+    )
+
+    assert "azure/free" in model_instances
+    assert [p for _, p in provider_map["azure/free"]] == [provider]
+
+
+def test_create_model_mappings_excludes_manual_model_with_malformed_price() -> None:
+    """``manual`` vouches for a *free* price, never for a malformed one.
+
+    The routing backstop exempts operator-vouched rows so a deliberately free
+    model stays routable. Zero is a real price and that exemption is right for
+    it, but a negative or non-finite rate is not a price at all. Routing one
+    bills every request on it at the maximum reservation instead, since the cost
+    calculation refuses to price on an unusable rate.
+    """
+    malformed_manual = create_test_model(
+        "tinfoil/broken", prompt_price=float("nan"), completion_price=0.002
+    )
+    malformed_manual.pricing_source = PricingSource.MANUAL
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh",
+        db_id=9,
+        models=[malformed_manual],
+    )
+
+    model_instances, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert "tinfoil/broken" not in model_instances
+    assert "tinfoil/broken" not in provider_map
+    assert "broken" not in unique_models
+
+
+def test_create_model_mappings_survives_an_unreadable_override_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable override row must not take the whole routing map with it.
+
+    Stored pricing is JSON from whatever wrote the row, so a legacy import or a
+    foreign writer can leave a field that will not parse. Converting the row
+    while walking a provider's catalog let that raise out of the map build
+    entirely: at boot the node comes up routing nothing, and on a later refresh
+    the map it already had goes permanently stale.
+    """
+    healthy = create_test_model("azure/gpt", prompt_price=0.001)
+    unreadable = create_test_model("azure/broken", prompt_price=0.001)
+    provider = create_test_provider(
+        "azure",
+        "https://example.openai.azure.com/openai/v1",
+        db_id=7,
+        models=[healthy, unreadable],
+    )
+
+    def _convert(row: SimpleNamespace, *a: object, **k: object) -> Model:
+        if row.id == "azure/broken":
+            raise ValueError("could not parse stored pricing")
+        return healthy
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", _convert)
+
+    model_instances, provider_map, _ = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={
+            ("azure/gpt", 7): (SimpleNamespace(id="azure/gpt"), 1.01),
+            ("azure/broken", 7): (SimpleNamespace(id="azure/broken"), 1.01),
+        },
+        disabled_model_keys=set(),
+    )
+
+    assert "azure/gpt" in model_instances
+    assert [p for _, p in provider_map["azure/gpt"]] == [provider]
+    assert "azure/broken" not in provider_map
+
+
+def test_create_model_mappings_excludes_unchargeable_discovered_model() -> None:
+    """A provider-discovered model with no override row gets no guard from the
+    override branch, yet it can arrive unchargeable at $0 with no provenance (a
+    provider whose catalog ships pricing fields defaulting to zero). Routing it
+    would serve and bill every request at nothing, so the backstop must cover the
+    discovered path too — not only persisted overrides."""
+    free_discovered = create_test_model(
+        "tinfoil/free", prompt_price=0.0, completion_price=0.0
+    )
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh",
+        db_id=9,
+        models=[free_discovered],
+    )
+
+    model_instances, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert "tinfoil/free" not in model_instances
+    assert "tinfoil/free" not in provider_map
+    assert "free" not in unique_models
+
+
+def test_create_model_mappings_routes_manual_free_discovered_model() -> None:
+    """An operator-vouched free (``manual``) discovered model is a deliberate
+    choice and stays routable — only unvouched free models are held back."""
+    free_manual = create_test_model(
+        "tinfoil/free", prompt_price=0.0, completion_price=0.0
+    )
+    free_manual.pricing_source = PricingSource.MANUAL
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh",
+        db_id=9,
+        models=[free_manual],
+    )
+
+    model_instances, provider_map, _ = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert "tinfoil/free" in model_instances
+    assert [p for _, p in provider_map["tinfoil/free"]] == [provider]

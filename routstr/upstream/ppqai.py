@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Optional
 
 import httpx
 from pydantic.v1 import BaseModel, Field
 
 from ..core.logging import get_logger
-from ..payment.models import Architecture, Model, Pricing, async_fetch_openrouter_models
+from ..payment.models import (
+    Architecture,
+    Model,
+    Pricing,
+    PricingSource,
+    async_fetch_openrouter_models,
+    pricing_metadata,
+)
 from .base import BaseUpstreamProvider, TopupData
 from .ehbp import EHBPForwardingTarget
 
@@ -14,6 +22,21 @@ if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
 
 logger = get_logger(__name__)
+
+
+def _positive_rate(value: object) -> float | None:
+    """A PPQ per-1M rate only if it is a finite, positive number, else ``None``.
+
+    PPQ's feed can carry ``0`` (absent-as-zero), negatives, or non-finite junk;
+    all of those are *not* a real price. Treating only a finite ``> 0`` value as
+    priced stops a negative/``NaN`` rate from overwriting a matched OpenRouter
+    price or mislabelling a model ``native``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    rate = float(value)
+    if not math.isfinite(rate) or rate <= 0:
+        return None
+    return rate
 
 
 class PPQAIModelPricing(BaseModel):
@@ -155,6 +178,11 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                         )
 
                         if or_model:
+                            # Two PPQ ids can tail-match the same OpenRouter
+                            # entry; copy before mutating so each keeps its own
+                            # price/provenance instead of aliasing one shared row
+                            # where the last writer clobbers the rest.
+                            or_model = or_model.copy(deep=True)
                             input_price = None
                             if ppqai_model.pricing.api:
                                 input_price = ppqai_model.pricing.api.get(
@@ -163,6 +191,13 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.input_per_1M_tokens:
                                 input_price = ppqai_model.pricing.input_per_1M_tokens
 
+                            # A price of 0 means PPQ did not really price this
+                            # side (absent-as-zero), and a negative/non-finite
+                            # value is malformed — neither is a real price.
+                            # Overlaying one would corrupt the matched OpenRouter
+                            # rate (zeroing or negating it) and bill wrongly, so
+                            # only a finite, positive PPQ price overrides it.
+                            input_price = _positive_rate(input_price)
                             if input_price is not None:
                                 or_model.pricing.prompt = input_price / 1_000_000
 
@@ -174,28 +209,71 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
 
+                            output_price = _positive_rate(output_price)
                             if output_price is not None:
                                 or_model.pricing.completion = output_price / 1_000_000
+
+                            # Only a model PPQ priced on *both* sides is fully
+                            # native; if PPQ supplied one side, the other is
+                            # still OpenRouter-derived, so the whole-Pricing tag
+                            # stays whatever the OR feed carried (openrouter).
+                            #
+                            # PPQ publishes token rates and nothing else, so a
+                            # native tag has to describe a price built only from
+                            # those. Overlaying the two token rates onto the
+                            # matched OpenRouter entry left its request, image,
+                            # web-search, reasoning and cache rates in place:
+                            # provenance then claimed every rate was the
+                            # provider's own while five or six of them came from
+                            # a different feed, and requests were billed
+                            # auxiliary fees PPQ never charges. Rebuild the price
+                            # from what PPQ actually published instead.
+                            if input_price is not None and output_price is not None:
+                                or_model.pricing = Pricing(
+                                    prompt=input_price / 1_000_000,
+                                    completion=output_price / 1_000_000,
+                                )
+                                for key, value in pricing_metadata(
+                                    PricingSource.NATIVE
+                                ).items():
+                                    setattr(or_model, key, value)
 
                             if cl := ppqai_model.context_length:
                                 or_model.context_length = cl
                             models.append(or_model)
                         else:
-                            input_price = 0.0
+                            input_price = None
                             if ppqai_model.pricing.api:
                                 input_price = ppqai_model.pricing.api.get(
-                                    "input_per_1M", 0.0
+                                    "input_per_1M"
                                 )
                             elif ppqai_model.pricing.input_per_1M_tokens:
                                 input_price = ppqai_model.pricing.input_per_1M_tokens
 
-                            output_price = 0.0
+                            output_price = None
                             if ppqai_model.pricing.api:
                                 output_price = ppqai_model.pricing.api.get(
-                                    "output_per_1M", 0.0
+                                    "output_per_1M"
                                 )
                             elif ppqai_model.pricing.output_per_1M_tokens:
                                 output_price = ppqai_model.pricing.output_per_1M_tokens
+
+                            # PPQ's catalog price is native USD only when it
+                            # prices *both* sides with a finite, positive rate; a
+                            # partial, zero, or malformed (negative/non-finite)
+                            # side would bill at nothing or a nonsensical amount,
+                            # so it — like a fully-unpriced model — is unresolved
+                            # and imported disabled.
+                            input_price = _positive_rate(input_price)
+                            output_price = _positive_rate(output_price)
+                            has_complete_ppq_price = (
+                                input_price is not None and output_price is not None
+                            )
+                            source = (
+                                PricingSource.NATIVE
+                                if has_complete_ppq_price
+                                else PricingSource.UNRESOLVED
+                            )
 
                             models.append(
                                 Model(
@@ -212,13 +290,15 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                                         instruct_type=None,
                                     ),
                                     pricing=Pricing(
-                                        prompt=input_price / 1_000_000,
-                                        completion=output_price / 1_000_000,
+                                        prompt=(input_price or 0.0) / 1_000_000,
+                                        completion=(output_price or 0.0) / 1_000_000,
                                         request=0.0,
                                         image=0.0,
                                         web_search=0.0,
                                         internal_reasoning=0.0,
                                     ),
+                                    enabled=has_complete_ppq_price,
+                                    **pricing_metadata(source),
                                 )
                             )
                     except Exception as e:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import httpx
@@ -9,7 +10,7 @@ from pydantic.v1 import BaseModel
 
 from ..core.exceptions import UpstreamError
 from ..core.logging import get_logger
-from ..payment.models import Architecture, Model, Pricing
+from ..payment.models import Architecture, Model, Pricing, pricing_metadata
 from .base import BaseUpstreamProvider
 from .ehbp import (
     _ENCLAVE_URL_HEADER,
@@ -18,6 +19,7 @@ from .ehbp import (
     ConfidentialInferenceProfile,
     EHBPForwardingTarget,
 )
+from .pricing_resolver import FallbackPricingResolver, ResolvedPricing
 
 if TYPE_CHECKING:
     from ..core.db import UpstreamProviderRow
@@ -164,11 +166,36 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
             profile=self.confidential_inference_profile,
         )
 
+    @staticmethod
+    def _native_pricing(tf: TinfoilModel) -> tuple[float, float, float] | None:
+        """Tinfoil's own per-1M rates, or ``None`` when it published no usable price.
+
+        ``TinfoilModelPricing`` defaults every rate to ``0.0``, so a model whose
+        catalog entry carries no pricing is indistinguishable from a free one:
+        published as-is it would be served enabled and bill every request at
+        nothing. Non-finite (``inf``/``NaN`` — ``json.loads`` accepts the bare
+        literals and overflows ``1e999``) and negative rates are junk, not prices.
+        Either way the caller falls through to the shared resolution chain rather
+        than claiming ``native`` for a price Tinfoil did not give.
+        """
+        rates = (
+            tf.pricing.inputTokenPricePer1M,
+            tf.pricing.outputTokenPricePer1M,
+            tf.pricing.requestPrice,
+        )
+        if any(not math.isfinite(rate) or rate < 0 for rate in rates):
+            return None
+        if not any(rate > 0 for rate in rates):
+            return None
+        return rates
+
     async def fetch_models(self) -> list[Model]:
         """Fetch models from the public Tinfoil models endpoint.
 
         ``GET /v1/models`` is unauthenticated and returns all available models
-        with their pricing in USD per 1M tokens.
+        with their pricing in USD per 1M tokens. A model Tinfoil did not price
+        falls through to the shared litellm→OpenRouter chain and wears that
+        source, or imports disabled as ``unresolved`` when nothing can price it.
         """
         url = f"{self.base_url}/v1/models"
         try:
@@ -179,12 +206,44 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                 models_data = data.get("data", [])
 
                 models: list[Model] = []
+                resolver = FallbackPricingResolver()
                 for model_data in models_data:
                     try:
                         tf = TinfoilModel.parse_obj(model_data)
-                        input_price = tf.pricing.inputTokenPricePer1M
-                        output_price = tf.pricing.outputTokenPricePer1M
-                        request_price = tf.pricing.requestPrice
+                        native = self._native_pricing(tf)
+                        enabled = True
+                        if native is not None:
+                            input_1m, output_1m, request_price = native
+                            prompt_price = input_1m / 1_000_000
+                            completion_price = output_1m / 1_000_000
+                            cache_read = cache_write = 0.0
+                            source = "native"
+                        else:
+                            resolved = await resolver.resolve(tf.id)
+                            if resolved is None:
+                                # Fail closed: never invent a price, and never
+                                # publish Tinfoil's zero defaults as a real one.
+                                logger.warning(
+                                    f"No pricing source resolved for Tinfoil model "
+                                    f"'{tf.id}'; importing it disabled",
+                                    extra={
+                                        "model_id": tf.id,
+                                        "base_url": self.base_url,
+                                    },
+                                )
+                                resolved = ResolvedPricing(
+                                    prompt=0.0,
+                                    completion=0.0,
+                                    context_length=None,
+                                    source="unresolved",
+                                )
+                                enabled = False
+                            prompt_price = resolved.prompt
+                            completion_price = resolved.completion
+                            request_price = 0.0
+                            cache_read = resolved.input_cache_read
+                            cache_write = resolved.input_cache_write
+                            source = resolved.source
 
                         modality = "text->text"
                         input_modalities = ["text"]
@@ -208,13 +267,17 @@ class TinfoilUpstreamProvider(BaseUpstreamProvider):
                                     instruct_type=None,
                                 ),
                                 pricing=Pricing(
-                                    prompt=input_price / 1_000_000,
-                                    completion=output_price / 1_000_000,
+                                    prompt=prompt_price,
+                                    completion=completion_price,
                                     request=request_price,
                                     image=0.0,
                                     web_search=0.0,
                                     internal_reasoning=0.0,
+                                    input_cache_read=cache_read,
+                                    input_cache_write=cache_write,
                                 ),
+                                enabled=enabled,
+                                **pricing_metadata(source),
                             )
                         )
                     except Exception as e:

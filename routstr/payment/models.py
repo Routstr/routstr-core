@@ -1,6 +1,9 @@
 import asyncio
 import json
+import math
 import random
+from enum import StrEnum
+from typing import TypedDict
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,6 +19,55 @@ from .price import sats_usd_price
 logger = get_logger(__name__)
 
 models_router = APIRouter()
+
+
+class PricingSource(StrEnum):
+    """Where a model's advertised price came from, in decreasing trust order.
+
+    ``native`` is the provider's own API (the only fully-trustworthy source);
+    ``litellm`` and ``openrouter`` are curated/resale estimates; ``manual`` is
+    an operator-entered price; ``unresolved`` means no source could price it
+    (imported disabled, fail-closed). Stored as plain text on ``ModelRow`` so a
+    future value never needs a schema change.
+    """
+
+    NATIVE = "native"
+    LITELLM = "litellm"
+    OPENROUTER = "openrouter"
+    MANUAL = "manual"
+    UNRESOLVED = "unresolved"
+
+
+class PricingProvenance(TypedDict):
+    """The provenance field stamped onto a ``Model`` at resolve time."""
+
+    pricing_source: PricingSource
+
+
+def pricing_metadata(source: PricingSource | str) -> PricingProvenance:
+    """The provenance field for a freshly resolved price.
+
+    Freshness anchoring (when the price was resolved, and the dist version of a
+    static source) is deferred to the follow-up that consumes it in a freshness
+    policy; this PR only records where the price came from.
+    """
+    return {"pricing_source": PricingSource(source)}
+
+
+def _coerce_pricing_source(value: object) -> "PricingSource | None":
+    """Coerce a stored pricing-source string to the enum, tolerating junk.
+
+    Runs on every DB read via ``_row_to_model``; an unknown or empty value must
+    yield ``None`` rather than raise, or one malformed row would blank the whole
+    served catalog (the same failure class as a non-numeric stored price).
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return PricingSource(value)  # type: ignore[arg-type]
+    except ValueError:
+        logger.warning("Unknown pricing_source %r on model row; treating as None", value)
+        return None
 
 _MODEL_TEST_ENDPOINT_PATHS = {
     "chat-completions": "chat/completions",
@@ -42,6 +94,7 @@ class Architecture(BaseModel):
     output_modalities: list[str]
     tokenizer: str
     instruct_type: str | None
+    supports_function_calling: bool | None = None
 
 
 class Pricing(BaseModel):
@@ -56,6 +109,75 @@ class Pricing(BaseModel):
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
+
+
+# The rates whose positive value makes a request bill something. Derived fields
+# (max_*_cost) are excluded — they are computed carriers, not charged rates.
+# One definition, shared by the write guard, the served-map filter, and (as a
+# frozen copy) the provenance migration.
+BILLABLE_PRICING_FIELDS = (
+    "prompt",
+    "completion",
+    "request",
+    "image",
+    "web_search",
+    "internal_reasoning",
+    "input_cache_read",
+    "input_cache_write",
+)
+
+
+def is_usable_rate(rate: float) -> bool:
+    """True if a single billable rate is a number a request could be billed on.
+
+    The one definition of a usable rate, so every guard that asks the question
+    answers it identically. A rate qualifies only when it is finite and
+    non-negative; zero is usable (it means "free", which is a real price) but
+    ``NaN``, ``±inf`` and negatives are not prices at all.
+
+    Non-finite: ``inf > 0`` is True, so an infinite rate reads as chargeable and
+    would be served, routed and billed as ``inf``; ``NaN`` poisons every total it
+    enters and defeats ordinary comparisons, since ``NaN > 0``, ``NaN < 0`` and
+    ``NaN == 0`` are all False. Negative: a negative rate produces a negative
+    cost, which the settlement path subtracts from the balance — it pays the
+    caller to make requests.
+
+    Both reach a stored row from upstream catalogs as well as the admin edge
+    (``json.loads`` accepts the bare ``NaN``/``Infinity`` literals and overflows
+    ``1e999`` to ``inf``), so the check belongs in one shared place rather than
+    at each writer.
+    """
+    return math.isfinite(rate) and rate >= 0.0
+
+
+def has_usable_pricing(pricing: Pricing) -> bool:
+    """True if every billable rate is a number a request could be billed on.
+
+    Free is usable — a rate of zero is a real price. This asks only whether the
+    price is well-formed, which is the part no operator intent can override.
+    """
+    return all(
+        is_usable_rate(getattr(pricing, field)) for field in BILLABLE_PRICING_FIELDS
+    )
+
+
+def has_chargeable_price(pricing: Pricing) -> bool:
+    """True if every billable rate is usable and at least one is positive.
+
+    The money-safety invariant: an enabled model must be chargeable unless an
+    operator has explicitly vouched for it as free (``manual``). Checking every
+    billable field (not just prompt/completion) means a per-request-billed model
+    is correctly recognised as chargeable.
+
+    One unusable rate disqualifies the model even alongside a valid one, since a
+    request can bill on the bad field — a positive ``completion`` must not hide a
+    negative ``prompt``. Testing usability before the positivity check is what
+    makes that hold: ``any(rate > 0)`` on its own is satisfied by the good field
+    and never looks at the bad one.
+    """
+    if not has_usable_pricing(pricing):
+        return False
+    return any(getattr(pricing, field) > 0 for field in BILLABLE_PRICING_FIELDS)
 
 
 class TopProvider(BaseModel):
@@ -80,6 +202,7 @@ class Model(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
+    pricing_source: PricingSource | None = None
 
     def __hash__(self) -> int:
         return hash(self.id)
@@ -152,7 +275,12 @@ def _has_valid_pricing(model: dict) -> bool:
     try:
         prompt = float(pricing.get("prompt", 0))
         completion = float(pricing.get("completion", 0))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        return False
+
+    # `NaN`/`inf` are not prices, and `NaN` slips past both checks below (every
+    # comparison with it is False) into a model tagged with a real source.
+    if not math.isfinite(prompt) or not math.isfinite(completion):
         return False
 
     if prompt < 0 or completion < 0:
@@ -213,6 +341,11 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
                 if not _has_valid_pricing(model):
                     continue
 
+                # Every model from this feed is priced by OpenRouter; tag it so
+                # the provenance survives the ``Model(**model)`` spreads in the
+                # OR-fed providers. Pydantic ignores the extra keys until the
+                # ``Model`` fields exist.
+                model.update(pricing_metadata(PricingSource.OPENROUTER))
                 filtered_models.append(model)
 
             return filtered_models
@@ -272,6 +405,7 @@ def _row_to_model(
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
         forwarded_model_id=getattr(row, "forwarded_model_id", None) or row.id,
+        pricing_source=_coerce_pricing_source(getattr(row, "pricing_source", None)),
     )
 
     if apply_provider_fee:
@@ -309,21 +443,58 @@ async def list_models(
     rows = (await session.exec(query)).all()  # type: ignore
     provider_result = await session.exec(select(UpstreamProviderRow))
     providers_by_id = {p.id: p for p in provider_result.all()}
-    return [
-        _row_to_model(
-            r,
-            apply_provider_fee=apply_fees,
-            provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
-            if r.upstream_provider_id in providers_by_id
-            else 1.01,
-        )
-        for r in rows
-        if include_disabled
-        or (
+
+    models: list[Model] = []
+    for r in rows:
+        if not include_disabled and not (
             r.upstream_provider_id in providers_by_id
             and providers_by_id[r.upstream_provider_id].enabled
-        )
-    ]
+        ):
+            continue
+        try:
+            model = _row_to_model(
+                r,
+                apply_provider_fee=apply_fees,
+                provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
+                if r.upstream_provider_id in providers_by_id
+                else 1.01,
+            )
+        except Exception as e:
+            # Stored pricing/architecture is JSON from whatever wrote the row, so
+            # a legacy import or foreign writer can leave a field that will not
+            # parse. Converting inside this loop meant one such row raised out of
+            # the whole listing and the node advertised nothing at all. Drop the
+            # row we cannot read — it is unservable either way — and keep serving
+            # the rest.
+            logger.warning(
+                "Skipping model row that could not be read",
+                extra={
+                    "model_id": r.id,
+                    "upstream_provider_id": r.upstream_provider_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+            continue
+        # Served-map money-safety backstop for legacy rows and writers that
+        # bypass the admin upsert: never serve an unchargeable price unless an
+        # operator vouched for it as free (``manual``); it would bill at nothing.
+        #
+        # The ``manual`` exemption covers a *free* price, never a malformed one:
+        # zero is a real price an operator can stand behind, but a negative or
+        # non-finite rate is not a price at all, and serving one bills a negative
+        # amount or poisons the total. So a well-formedness failure drops the row
+        # whatever its provenance says.
+        if not include_disabled and (
+            not has_usable_pricing(model.pricing)
+            or (
+                model.pricing_source != PricingSource.MANUAL
+                and not has_chargeable_price(model.pricing)
+            )
+        ):
+            continue
+        models.append(model)
+    return models
 
 
 def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:
@@ -425,6 +596,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
             canonical_slug=model.canonical_slug,
             alias_ids=model.alias_ids,
             forwarded_model_id=model.forwarded_model_id,
+            pricing_source=model.pricing_source,
         )
     except Exception as e:
         logger.error(

@@ -15,6 +15,7 @@ it into the base provider unchanged.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -40,6 +41,7 @@ class ResolvedPricing:
     tokenizer: str = "unknown"
     instruct_type: str | None = None
     is_moderated: bool | None = None
+    supports_function_calling: bool | None = None
 
 
 def estimate_context_length(model_id: str) -> int:
@@ -65,11 +67,18 @@ def estimate_context_length(model_id: str) -> int:
 
 
 def _as_float(value: object) -> float | None:
-    """OpenRouter reports prices as strings; coerce, ``None`` if unparseable."""
+    """OpenRouter reports prices as strings; coerce, ``None`` if not a real number.
+
+    Non-finite values are rejected as unparseable: ``float("Infinity")`` and
+    ``float("NaN")`` parse happily from a feed string, and ``json.loads`` accepts
+    the bare literals and overflows ``1e999`` to ``inf``. An oversized integer
+    raises ``OverflowError`` rather than ``ValueError``, so that is caught too.
+    """
     try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _as_int(value: object) -> int | None:
@@ -94,6 +103,11 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
     # moderation/rerank tiers do this) — treating 0/0 as resolved would serve
     # the model for free. Reject it (and any negative) so the caller falls
     # through, mirroring async_fetch_openrouter_models' _has_valid_pricing.
+    # A non-finite entry is junk, not a price: `inf` would bill an infinite
+    # amount and `NaN` poisons every total it enters (and defeats the `< 0` and
+    # `== 0` guards below, since both comparisons are False for `NaN`).
+    if not math.isfinite(prompt) or not math.isfinite(completion):
+        return None
     if prompt < 0 or completion < 0 or (prompt == 0 and completion == 0):
         return None
 
@@ -114,6 +128,7 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
         input_cache_read=float(info.get("cache_read_input_token_cost") or 0.0),
         input_cache_write=float(info.get("cache_creation_input_token_cost") or 0.0),
         input_modalities=input_modalities,
+        supports_function_calling=info.get("supports_function_calling"),
     )
 
 
