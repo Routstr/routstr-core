@@ -203,6 +203,7 @@ async def test_failed_final_commit_rolls_back_claim_and_credit_for_retry(
 @pytest.mark.asyncio
 async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
     integration_engine: AsyncEngine,
+    patched_db_engine: None,
 ) -> None:
     key_hash = uuid.uuid4().hex
     invoice = _lightning_invoice(
@@ -237,19 +238,12 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
     async with AsyncSession(integration_engine, expire_on_commit=False) as failed:
         stored = await failed.get(LightningInvoice, invoice.id)
         assert stored is not None
-        real_commit = failed.commit
-        commit_count = 0
-
-        async def fail_final_commit() -> None:
-            nonlocal commit_count
-            commit_count += 1
-            if commit_count == 2:
-                raise Exception("db unavailable")
-            await real_commit()
-
         with (
             patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
-            patch.object(failed, "commit", AsyncMock(side_effect=fail_final_commit)),
+            patch(
+                "routstr.lightning._finalize_invoice_settlement",
+                AsyncMock(side_effect=Exception("db unavailable")),
+            ),
         ):
             await check_invoice_payment(stored, failed)
 

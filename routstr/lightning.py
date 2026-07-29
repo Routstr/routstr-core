@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import col, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -57,6 +58,14 @@ class _InvoiceSettlement:
             balance_limit_reset=invoice.balance_limit_reset,
             validity_date=invoice.validity_date,
         )
+
+
+def _publish_invoice_value(invoice: LightningInvoice, key: str, value: Any) -> None:
+    """Update a caller view without marking a mapped object dirty."""
+    try:
+        set_committed_value(invoice, key, value)
+    except AttributeError:
+        setattr(invoice, key, value)
 
 
 class InvoiceCreateRequest(BaseModel):
@@ -212,10 +221,12 @@ async def create_invoice(
         allowed_mints = None
         if request.purpose == "topup":
             assert topup_api_key is not None
-            # Top-ups are not pinned to the key's previous/backing mint. Use any
-            # currently available trusted mint so rate limits/cooldowns on one
-            # mint do not block Lightning top-ups.
-            allowed_mints = _trusted_mint_candidates()
+            # A key's liabilities are attributed to a single refund mint. Keep
+            # top-up collateral on that same mint so balances and payouts cannot
+            # misclassify funds held by another mint as owner profit.
+            allowed_mints = [
+                topup_api_key.refund_mint_url or settings.primary_mint
+            ]
         bolt11, payment_hash, mint_url = await generate_lightning_invoice(
             request.amount_sats, description, allowed_mints=allowed_mints
         )
@@ -342,10 +353,11 @@ async def check_invoice_payment(
 ) -> None:
     lock = _invoice_settlement_locks.setdefault(invoice.id, asyncio.Lock())
     async with lock:
+        minted = False
         try:
-            # Refresh and snapshot the row, then close the read transaction before
-            # any wallet or mint network I/O. The final DB mutations use a new,
-            # short transaction and a conditional status update as their fence.
+            # Snapshot the row and end the caller's read transaction before any
+            # potentially slow mint I/O. All final DB mutations use owned,
+            # short-lived sessions below.
             await session.refresh(invoice)
             if invoice.status != "pending":
                 await session.commit()
@@ -363,18 +375,54 @@ async def check_invoice_payment(
             if not mint_status.paid:
                 return
 
+            # Reject a paid top-up whose target was pruned before redeeming its
+            # single-use quote. The validation session is closed before mint I/O.
+            if settlement.purpose == "topup":
+                if not settlement.api_key_hash:
+                    raise ValueError("No API key associated with topup invoice")
+                async with create_session() as validation_session:
+                    target = await validation_session.get(
+                        ApiKey, settlement.api_key_hash
+                    )
+                    if target is None:
+                        terminal = await validation_session.exec(  # type: ignore[call-overload]
+                            update(LightningInvoice)
+                            .where(
+                                col(LightningInvoice.id) == settlement.id,
+                                col(LightningInvoice.status) == "pending",
+                            )
+                            .values(status="reconciliation_required")
+                        )
+                        await validation_session.commit()
+                        if terminal.rowcount == 1:
+                            _publish_invoice_value(
+                                invoice, "status", "reconciliation_required"
+                            )
+                        else:
+                            await _reload_invoice_view(invoice, session)
+                        logger.critical(
+                            "Paid topup invoice target API key was not found; reconciliation required",
+                            extra={"invoice_id": settlement.id},
+                        )
+                        return
+
+            # Quote-linked proof verification makes an ambiguous mint response
+            # retryable without crediting unrelated wallet balance growth.
             await _mint_invoice_quote(wallet, settlement)
+            minted = True
+
             paid_at = int(time.time())
-            settled, api_key_hash = await _finalize_invoice_settlement(
-                settlement, session, paid_at
-            )
+            async with create_session() as finalization_session:
+                settled, api_key_hash = await _finalize_invoice_settlement(
+                    settlement, finalization_session, paid_at
+                )
             if not settled:
                 await _reload_invoice_view(invoice, session)
                 return
 
-            invoice.status = "paid"
-            invoice.paid_at = paid_at
-            invoice.api_key_hash = api_key_hash
+            _publish_invoice_value(invoice, "status", "paid")
+            _publish_invoice_value(invoice, "paid_at", paid_at)
+            _publish_invoice_value(invoice, "api_key_hash", api_key_hash)
             logger.info(
                 "Lightning invoice paid",
                 extra={
@@ -386,14 +434,21 @@ async def check_invoice_payment(
                     else None,
                 },
             )
-
-        except Exception as e:
-            await session.rollback()
+        except BaseException as error:
+            # Never roll back the caller-owned session: doing so expires invoice
+            # and sibling ORM objects. Owned sessions roll themselves back.
+            if minted:
+                logger.critical(
+                    "Invoice mint succeeded but DB finalization failed; reconciliation required",
+                    extra={"invoice_id": invoice.id, "purpose": invoice.purpose},
+                )
             try:
                 await _reload_invoice_view(invoice, session)
             except Exception:
                 pass
-            logger.error(f"Failed to check invoice payment: {e}")
+            if not isinstance(error, Exception):
+                raise
+            logger.error(f"Failed to check invoice payment: {error}")
 
 
 def _is_outputs_already_signed(error: BaseException) -> bool:
@@ -448,11 +503,11 @@ async def _mint_invoice_quote(
             ) from error
     else:
         await wallet.load_proofs(reload=True)
-        minted = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
-        if minted < invoice.amount_sats:
+        minted_amount = _invoice_quote_proof_amount(wallet, invoice.payment_hash)
+        if minted_amount < invoice.amount_sats:
             raise RuntimeError(
                 "Invoice mint succeeded but quote-linked proofs total "
-                f"{minted} sats; expected at least {invoice.amount_sats}"
+                f"{minted_amount} sats; expected at least {invoice.amount_sats}"
             )
 
 
@@ -497,7 +552,7 @@ async def _topup_api_key_record(
 async def _finalize_invoice_settlement(
     invoice: _InvoiceSettlement, session: AsyncSession, paid_at: int
 ) -> tuple[bool, str | None]:
-    """Atomically fence and apply one invoice credit across all processes."""
+    """Atomically fence and apply one invoice credit in the provided owned session."""
     api_key_hash = (
         _invoice_api_key_hash(invoice)
         if invoice.purpose == "create"
@@ -514,46 +569,36 @@ async def _finalize_invoice_settlement(
         await session.rollback()
         return False, None
 
-    try:
-        if invoice.purpose == "create":
-            await _create_api_key_record(invoice, session)
-        elif invoice.purpose == "topup":
-            await _topup_api_key_record(invoice, session)
-        else:
-            raise ValueError(f"Unsupported invoice purpose: {invoice.purpose}")
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        raise
+    if invoice.purpose == "create":
+        await _create_api_key_record(invoice, session)
+    elif invoice.purpose == "topup":
+        await _topup_api_key_record(invoice, session)
+    else:
+        raise ValueError(f"Unsupported invoice purpose: {invoice.purpose}")
+    await session.commit()
     return True, api_key_hash
 
 
 async def _reload_invoice_view(
-    invoice: LightningInvoice, session: AsyncSession
+    invoice: LightningInvoice, _caller_session: AsyncSession
 ) -> None:
-    stored = await session.get(LightningInvoice, invoice.id)
-    if stored is not None:
-        invoice.status = stored.status
-        invoice.paid_at = stored.paid_at
-        invoice.api_key_hash = stored.api_key_hash
-    await session.commit()
+    """Publish committed invoice state without touching the caller transaction."""
+    async with create_session() as reload_session:
+        stored = await reload_session.get(LightningInvoice, invoice.id)
+        if stored is None:
+            return
+        status = stored.status
+        paid_at = stored.paid_at
+        api_key_hash = stored.api_key_hash
+        await reload_session.commit()
+    _publish_invoice_value(invoice, "status", status)
+    _publish_invoice_value(invoice, "paid_at", paid_at)
+    _publish_invoice_value(invoice, "api_key_hash", api_key_hash)
 
 
-async def create_api_key_from_invoice(
-    invoice: LightningInvoice, session: AsyncSession
-) -> ApiKey:
-    mint_url = invoice.mint_url or settings.primary_mint
-    wallet = await get_wallet(mint_url, "sat")
-    await _mint_invoice_quote(wallet, invoice)
-    return await _create_api_key_record(invoice, session)
-
-
-async def topup_api_key_from_invoice(
-    invoice: LightningInvoice, session: AsyncSession
+async def _credit_topup_record(
+    invoice: LightningInvoice | _InvoiceSettlement, session: AsyncSession
 ) -> None:
-    mint_url = invoice.mint_url or settings.primary_mint
-    wallet = await get_wallet(mint_url, "sat")
-    await _mint_invoice_quote(wallet, invoice)
     await _topup_api_key_record(invoice, session)
 
 

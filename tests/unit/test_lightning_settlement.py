@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -173,7 +174,7 @@ async def test_ambiguous_invoice_mint_timeout_does_not_expose_paid() -> None:
         await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
 
     assert invoice.status == "pending"
-    session.rollback.assert_awaited_once()
+    session.rollback.assert_not_awaited()
     # One commit closes the initial read transaction before external I/O.
     session.commit.assert_awaited_once()
 
@@ -189,8 +190,14 @@ async def test_concurrent_invoice_checks_finalize_once_in_process() -> None:
         return None
 
     session.refresh = AsyncMock(side_effect=refresh)
+
+    @asynccontextmanager
+    async def owned_session():
+        yield AsyncMock()
+
     with (
         patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning.create_session", owned_session),
         patch("routstr.lightning._mint_invoice_quote", AsyncMock()),
         patch(
             "routstr.lightning._finalize_invoice_settlement",

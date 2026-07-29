@@ -33,6 +33,22 @@ _CashuMintInfo.model_rebuild(force=True)
 logger = get_logger(__name__)
 
 
+def _sats_to_msats(amount: int) -> int:
+    return amount * 1000
+
+
+def _msats_to_sats(amount: int) -> int:
+    return amount // 1000
+
+
+def _mints_to_inspect() -> list[str]:
+    """Return configured mints plus the primary mint, without duplicates."""
+    mint_urls = list(settings.cashu_mints)
+    if settings.primary_mint and settings.primary_mint not in mint_urls:
+        mint_urls.append(settings.primary_mint)
+    return mint_urls
+
+
 class MintConnectionError(Exception):
     """The mint could not be reached (network transport failure).
 
@@ -751,10 +767,10 @@ def _net_minted_amount(amount_msat: int, token_unit: str, fees: int) -> int:
     Convert the token value minus fees (given in the token unit) into an
     amount in the primary mint's unit.
     """
-    fee_msat = fees * 1000 if token_unit == "sat" else fees
+    fee_msat = _sats_to_msats(fees) if token_unit == "sat" else fees
     remaining_msat = amount_msat - fee_msat
     if settings.primary_mint_unit == "sat":
-        return int(remaining_msat // 1000)
+        return _msats_to_sats(remaining_msat)
     return int(remaining_msat)
 
 
@@ -926,7 +942,7 @@ async def _calculate_swap_amount(
     melt fees and NUT-02 input fees on the foreign mint.
     """
     if settings.primary_mint_unit == "sat":
-        receive_amount = amount_msat // 1000
+        receive_amount = _msats_to_sats(amount_msat)
     else:
         receive_amount = amount_msat
 
@@ -996,7 +1012,7 @@ async def _calculate_swap_amount(
         logger.info(
             "swap_to_primary_mint: fee estimation result",
             extra={
-                "token_amount_sat": amount_msat // 1000,
+                "token_amount_sat": _msats_to_sats(amount_msat),
                 "estimated_fee": total_fees,
                 "estimated_fee_unit": token_unit,
                 "input_fees": input_fees,
@@ -1064,7 +1080,7 @@ async def swap_to_trusted_mint(
         token_amount = token_obj.amount
 
     if token_obj.unit == "sat":
-        amount_msat = token_amount * 1000
+        amount_msat = _sats_to_msats(token_amount)
     elif token_obj.unit == "msat":
         amount_msat = token_amount
     else:
@@ -1414,7 +1430,7 @@ async def credit_balance(
         )
 
         if unit == "sat":
-            amount = amount * 1000
+            amount = _sats_to_msats(amount)
             logger.info(
                 "credit_balance: Converted to msat", extra={"amount_msat": amount}
             )
@@ -1666,19 +1682,74 @@ def _balance_error(
 async def fetch_all_balances(
     units: list[str] | None = None,
 ) -> tuple[list[BalanceDetail], int, int, int]:
-    """
-    Fetch balances for all trusted mints and units concurrently.
+    """Fetch balances for all trusted mints without holding DB connections during I/O."""
+    mint_urls = _mints_to_inspect()
 
-    Returns:
-        - List of balance details for each mint/unit combination
-        - Total wallet balance in sats
-        - Total user balance in sats
-        - Owner balance in sats (wallet - user)
-    """
+    mint_units: dict[str, list[str]] = {}
+    discovery_errors: list[BalanceDetail] = []
+    if units is not None:
+        mint_units = {mint_url: units for mint_url in mint_urls}
+    else:
+        for mint_url in mint_urls:
+            try:
+                mint_units[mint_url] = await _get_supported_mint_units(mint_url)
+            except Exception as error:
+                connection_failure = is_mint_connection_error(error)
+                rate_limited = _is_mint_rate_limited(error)
+                error_code = (
+                    "rate_limited"
+                    if rate_limited
+                    else "unreachable"
+                    if connection_failure
+                    else "mint_error"
+                )
+                if connection_failure:
+                    _MintRateGuard.get(mint_url).apply_cooldown(
+                        _BALANCE_FETCH_RETRY_SECONDS, reason="unreachable"
+                    )
+                retry_delay = max(
+                    _BALANCE_FETCH_RETRY_SECONDS,
+                    _mint_cooldown_remaining(mint_url),
+                )
+                discovery_errors.append(
+                    _balance_error(
+                        mint_url,
+                        settings.primary_mint_unit,
+                        str(error),
+                        error_code=error_code,
+                        retry_after_seconds=retry_delay,
+                    )
+                )
+                mint_units[mint_url] = []
+                if not connection_failure and not rate_limited:
+                    logger.warning(
+                        "Unable to discover mint units",
+                        extra={
+                            "mint_url": mint_url,
+                            "error": str(error),
+                            "error_type": type(error).__name__,
+                        },
+                    )
 
-    async def fetch_balance(
-        session: db.AsyncSession, mint_url: str, unit: str
-    ) -> BalanceDetail:
+    # Read all liabilities in one short-lived transaction, then release the
+    # connection before starting concurrent mint network requests.
+    user_balances: dict[tuple[str, str], int] = {}
+    liabilities_error: str | None = None
+    query_units = list(
+        dict.fromkeys(unit for mint_url in mint_urls for unit in mint_units[mint_url])
+    )
+    try:
+        async with db.create_session() as session:
+            user_balances = await db.balances_by_mint_and_unit(
+                session, mint_urls, query_units
+            )
+    except Exception as error:
+        logger.error("Error reading user balances", extra={"error": str(error)})
+        liabilities_error = str(error)
+
+    mint_check_limit = asyncio.Semaphore(settings.mint_operation_concurrency)
+
+    async def fetch_balance(mint_url: str, unit: str) -> BalanceDetail:
         key = (mint_url, unit)
         lock = _balance_fetch_locks.setdefault(mint_url, asyncio.Lock())
         async with lock:
@@ -1700,11 +1771,7 @@ async def fetch_all_balances(
                     "rate_limited": "Mint is rate limited",
                     "unreachable": "Mint is unreachable",
                 }.get(error_code, "Mint cooldown is active")
-                _balance_fetch_failures[key] = (
-                    now + cooldown,
-                    error,
-                    error_code,
-                )
+                _balance_fetch_failures[key] = (now + cooldown, error, error_code)
                 return _balance_error(
                     mint_url,
                     unit,
@@ -1714,16 +1781,14 @@ async def fetch_all_balances(
                 )
 
             try:
-                wallet = await get_wallet(mint_url, unit, retry_on_rate_limit=False)
-                proofs = get_proofs_per_mint_and_unit(
-                    wallet, mint_url, unit, not_reserved=True
-                )
-                proofs = await slow_filter_spend_proofs(
-                    proofs, wallet, retry_on_rate_limit=False
-                )
-                user_balance = await db.balances_for_mint_and_unit(
-                    session, mint_url, unit
-                )
+                async with mint_check_limit:
+                    wallet = await get_wallet(
+                        mint_url, unit, retry_on_rate_limit=False
+                    )
+                    proofs = get_proofs_per_mint_and_unit(
+                        wallet, mint_url, unit, not_reserved=True
+                    )
+                    proofs = await slow_filter_spend_proofs(proofs, wallet)
             except Exception as error:
                 connection_failure = is_mint_connection_error(error)
                 rate_limited = _is_mint_rate_limited(error)
@@ -1746,8 +1811,11 @@ async def fetch_all_balances(
                     _BALANCE_FETCH_RETRY_SECONDS,
                     _mint_cooldown_remaining(mint_url),
                 )
-                retry_at = time.monotonic() + retry_delay
-                _balance_fetch_failures[key] = (retry_at, str(error), error_code)
+                _balance_fetch_failures[key] = (
+                    time.monotonic() + retry_delay,
+                    str(error),
+                    error_code,
+                )
                 logger.warning(
                     "Unable to refresh mint balance",
                     extra={
@@ -1769,8 +1837,9 @@ async def fetch_all_balances(
                 )
 
             _balance_fetch_failures.pop(key, None)
+            user_balance = user_balances.get((mint_url, unit), 0)
             if unit == "sat":
-                user_balance = user_balance // 1000
+                user_balance = _msats_to_sats(user_balance)
             proofs_balance = sum(proof.amount for proof in proofs)
             return {
                 "mint_url": mint_url,
@@ -1780,77 +1849,39 @@ async def fetch_all_balances(
                 "owner_balance": proofs_balance - user_balance,
             }
 
-    # Build the set of mints to inspect. Received tokens are stored against
-    # ``primary_mint`` (which defaults to a real mint even when ``cashu_mints``
-    # is empty), so include it as a fallback — otherwise a node that accepts
-    # payments would still report empty balances when ``cashu_mints`` is unset.
-    mint_urls: list[str] = list(settings.cashu_mints)
-    if settings.primary_mint and settings.primary_mint not in mint_urls:
-        mint_urls.append(settings.primary_mint)
+    tasks = [
+        fetch_balance(mint_url, unit)
+        for mint_url in mint_urls
+        for unit in mint_units[mint_url]
+    ]
+    balance_details = discovery_errors + list(await asyncio.gather(*tasks))
 
-    async with db.create_session() as session:
-
-        async def fetch_mint_balances(mint_url: str) -> list[BalanceDetail]:
-            mint_units = units
-            if mint_units is None:
-                try:
-                    mint_units = await _get_supported_mint_units(mint_url)
-                except Exception as error:
-                    connection_failure = is_mint_connection_error(error)
-                    rate_limited = _is_mint_rate_limited(error)
-                    if connection_failure:
-                        _MintRateGuard.get(mint_url).apply_cooldown(
-                            _BALANCE_FETCH_RETRY_SECONDS, reason="unreachable"
-                        )
-                    # _mint_operation already records rate-limit cooldowns.
-                    # Fetching the configured unit turns a known cooldown into
-                    # a structured error without another mint request.
-                    mint_units = [settings.primary_mint_unit]
-                    if not connection_failure and not rate_limited:
-                        logger.warning(
-                            "Unable to discover mint units",
-                            extra={
-                                "mint_url": mint_url,
-                                "error": str(error),
-                                "error_type": type(error).__name__,
-                            },
-                        )
-            return list(
-                await asyncio.gather(
-                    *(fetch_balance(session, mint_url, unit) for unit in mint_units)
-                )
-            )
-
-        grouped_details = await asyncio.gather(
-            *(fetch_mint_balances(mint_url) for mint_url in mint_urls)
-        )
-        balance_details = [
-            detail for mint_details in grouped_details for detail in mint_details
-        ]
-
-    # Calculate totals
     total_wallet_balance_sats = 0
     total_user_balance_sats = 0
-
     for detail in balance_details:
-        if not detail.get("error"):
-            # Convert to sats for total calculation
-            unit = detail["unit"]
-            proofs_balance_sats = (
-                detail["wallet_balance"]
-                if unit == "sat"
-                else detail["wallet_balance"] // 1000
-            )
-            user_balance_sats = (
+        if detail.get("error"):
+            continue
+        unit = detail["unit"]
+        total_wallet_balance_sats += (
+            detail["wallet_balance"]
+            if unit == "sat"
+            else _msats_to_sats(detail["wallet_balance"])
+        )
+        if liabilities_error is None:
+            total_user_balance_sats += (
                 detail["user_balance"]
                 if unit == "sat"
-                else detail["user_balance"] // 1000
+                else _msats_to_sats(detail["user_balance"])
             )
 
-            total_wallet_balance_sats += proofs_balance_sats
-            total_user_balance_sats += user_balance_sats
-
-    owner_balance = total_wallet_balance_sats - total_user_balance_sats
+    if liabilities_error is None:
+        owner_balance = total_wallet_balance_sats - total_user_balance_sats
+    else:
+        owner_balance = 0
+        for detail in balance_details:
+            detail["user_balance"] = 0
+            detail["owner_balance"] = 0
+            detail.setdefault("error", liabilities_error)
 
     return (
         balance_details,
@@ -1870,61 +1901,87 @@ async def periodic_payout() -> None:
             # Include the primary mint even if it is not listed in cashu_mints,
             # matching fetch_all_balances(); otherwise primary-mint funds never
             # auto-payout.
-            mint_urls: list[str] = list(settings.cashu_mints)
-            if settings.primary_mint and settings.primary_mint not in mint_urls:
-                mint_urls.append(settings.primary_mint)
+            mint_urls = _mints_to_inspect()
 
-            async with db.create_session() as session:
-                for mint_url in mint_urls:
-                    for unit in ["sat", "msat"]:
-                        # Isolate failures per mint/unit so one slow or failing
-                        # mint does not abort payout for every other mint/unit.
-                        try:
-                            wallet = await get_wallet(mint_url, unit)
-                            proofs = get_proofs_per_mint_and_unit(
-                                wallet, mint_url, unit, not_reserved=True
-                            )
-                            proofs = await slow_filter_spend_proofs(proofs, wallet)
-                            await asyncio.sleep(5)
-                            user_balance = await db.balances_for_mint_and_unit(
+            for mint_url in mint_urls:
+                for unit in ["sat", "msat"]:
+                    # Isolate failures per mint/unit so one slow or failing
+                    # mint does not abort payout for every other mint/unit.
+                    try:
+                        wallet = await get_wallet(mint_url, unit)
+                        proofs = get_proofs_per_mint_and_unit(
+                            wallet, mint_url, unit, not_reserved=True
+                        )
+                        proofs = await slow_filter_spend_proofs(proofs, wallet)
+                        await asyncio.sleep(5)
+                    except Exception as e:
+                        logger.error(
+                            f"Error sending payout: {type(e).__name__}",
+                            extra={
+                                "error": str(e),
+                                "mint_url": mint_url,
+                                "unit": unit,
+                            },
+                        )
+                        continue
+
+                    # Fetch the liability AFTER the proofs snapshot and the
+                    # settle delay: a concurrent top-up then only inflates the
+                    # liability, shrinking the payout — never sending
+                    # customer-backed funds as profit.
+                    try:
+                        async with db.create_session() as session:
+                            user_balance = await db.balance_for_mint_and_unit(
                                 session, mint_url, unit
                             )
-                            if unit == "sat":
-                                user_balance = user_balance // 1000
-                            proofs_balance = sum(proof.amount for proof in proofs)
-                            available_balance = proofs_balance - user_balance
-                            # Threshold is configured in sats; convert for msat wallets.
-                            min_amount = (
-                                settings.min_payout_sat
-                                if unit == "sat"
-                                else settings.min_payout_sat * 1000
+                    except Exception as e:
+                        logger.error(
+                            f"Error in periodic payout cycle: {type(e).__name__}",
+                            extra={
+                                "error": str(e),
+                                "mint_url": mint_url,
+                                "unit": unit,
+                            },
+                        )
+                        continue
+
+                    try:
+                        if unit == "sat":
+                            user_balance = _msats_to_sats(user_balance)
+                        proofs_balance = sum(proof.amount for proof in proofs)
+                        available_balance = proofs_balance - user_balance
+                        # Threshold is configured in sats; convert for msat wallets.
+                        min_amount = (
+                            settings.min_payout_sat
+                            if unit == "sat"
+                            else _sats_to_msats(settings.min_payout_sat)
+                        )
+                        if available_balance > min_amount:
+                            amount_received = await raw_send_to_lnurl(
+                                wallet,
+                                proofs,
+                                settings.receive_ln_address,
+                                unit,
+                                amount=available_balance,
                             )
-                            if available_balance > min_amount:
-                                amount_received = await raw_send_to_lnurl(
-                                    wallet,
-                                    proofs,
-                                    settings.receive_ln_address,
-                                    unit,
-                                    amount=available_balance,
-                                )
-                                logger.info(
-                                    "Payout sent successfully",
-                                    extra={
-                                        "mint_url": mint_url,
-                                        "unit": unit,
-                                        "balance": available_balance,
-                                        "amount_received": amount_received,
-                                    },
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"Error sending payout: {type(e).__name__}",
+                            logger.info(
+                                "Payout sent successfully",
                                 extra={
-                                    "error": str(e),
                                     "mint_url": mint_url,
                                     "unit": unit,
+                                    "balance": available_balance,
+                                    "amount_received": amount_received,
                                 },
                             )
+                    except Exception as e:
+                        logger.error(
+                            f"Error sending payout: {type(e).__name__}",
+                            extra={
+                                "error": str(e),
+                                "mint_url": mint_url,
+                                "unit": unit,
+                            },
+                        )
         except Exception as e:
             logger.error(
                 f"Error in periodic payout cycle: {type(e).__name__}",
@@ -1932,22 +1989,65 @@ async def periodic_payout() -> None:
             )
 
 
+async def _set_refund_sweep_state(
+    refund_id: str,
+    *,
+    predicates: tuple[typing.Any, ...] = (),
+    **values: object,
+) -> int:
+    async with db.create_session() as session:
+        result = await session.exec(  # type: ignore[call-overload]
+            update(db.CashuTransaction)
+            .where(col(db.CashuTransaction.id) == refund_id, *predicates)
+            .values(**values)
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
+
+
 async def _refund_sweep_once(cutoff: int) -> None:
+    claim_cutoff = int(time.time()) - settings.refund_sweep_claim_timeout_seconds
+    claim_available = col(db.CashuTransaction.sweep_started_at).is_(None) | (
+        col(db.CashuTransaction.sweep_started_at) < claim_cutoff
+    )
     async with db.create_session() as session:
         stmt = select(db.CashuTransaction).where(
             db.CashuTransaction.type == "out",
             db.CashuTransaction.collected == False,  # noqa: E712
             db.CashuTransaction.swept == False,  # noqa: E712
             db.CashuTransaction.created_at < cutoff,
+            claim_available,
         )
         results = await session.exec(stmt)
         refunds = results.all()
 
-        for refund in refunds:
-            try:
-                await recieve_token(refund.token)
-                refund.swept = True
-                session.add(refund)
+    for refund in refunds:
+        reclaimed_stale_claim = refund.sweep_started_at is not None
+        claim_started_at = int(time.time())
+        claimed = await _set_refund_sweep_state(
+            refund.id,
+            predicates=(
+                col(db.CashuTransaction.swept) == False,  # noqa: E712
+                col(db.CashuTransaction.collected) == False,  # noqa: E712
+                claim_available,
+            ),
+            sweep_started_at=claim_started_at,
+        )
+        if claimed != 1:
+            continue
+
+        claim_owned = col(db.CashuTransaction.sweep_started_at) == claim_started_at
+        redeemed = False
+        try:
+            await recieve_token(refund.token)
+            redeemed = True
+            finalized = await _set_refund_sweep_state(
+                refund.id,
+                predicates=(claim_owned,),
+                swept=True,
+                sweep_started_at=None,
+            )
+            if finalized == 1:
                 logger.info(
                     "Swept uncollected refund",
                     extra={
@@ -1956,26 +2056,70 @@ async def _refund_sweep_once(cutoff: int) -> None:
                         "unit": refund.unit,
                     },
                 )
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "already spent" in error_msg:
-                    refund.collected = True
-                    session.add(refund)
+            else:
+                logger.critical(
+                    "Refund token swept after claim ownership changed; manual reconciliation required",
+                    extra={"id": refund.id},
+                )
+        except BaseException as e:
+            if redeemed or isinstance(e, TokenConsumedError):
+                # The token was spent, or the redemption outcome is known to be
+                # post-spend. Retain the claim so a stale retry classifies
+                # "already spent" as swept, never as a client collection.
+                logger.critical(
+                    "Refund token spent but sweep checkpoint was not completed; manual reconciliation required",
+                    extra={"id": refund.id},
+                    exc_info=isinstance(e, Exception),
+                )
+                if not isinstance(e, Exception):
+                    raise
+                continue
+
+            error_msg = str(e).lower()
+            if isinstance(e, Exception) and "already spent" in error_msg:
+                if reclaimed_stale_claim:
+                    # A prior worker may have redeemed the token and crashed
+                    # before finalizing. Treat the ambiguous stale claim as a
+                    # completed sweep rather than misreporting client collection.
+                    updated = await _set_refund_sweep_state(
+                        refund.id,
+                        predicates=(claim_owned,),
+                        swept=True,
+                        sweep_started_at=None,
+                    )
+                else:
+                    updated = await _set_refund_sweep_state(
+                        refund.id,
+                        predicates=(claim_owned,),
+                        collected=True,
+                        swept=False,
+                        sweep_started_at=None,
+                    )
+                if updated == 1:
                     logger.info(
-                        "Refund already spent (client collected), marking swept",
+                        "Refund token was already spent",
                         extra={
                             "id": refund.id,
+                            "reclaimed_stale_claim": reclaimed_stale_claim,
                         },
                     )
                 else:
                     logger.warning(
-                        "Failed to sweep refund",
-                        extra={
-                            "id": refund.id,
-                            "error": str(e),
-                        },
+                        "Refund claim ownership changed before spent-token checkpoint",
+                        extra={"id": refund.id},
                     )
-        await session.commit()
+            else:
+                # Once redemption starts, an exception cannot prove the token
+                # was not spent (for example, a melt may land before the
+                # response is lost). Retain the claim so a stale retry treats
+                # an "already spent" result as a completed sweep.
+                logger.critical(
+                    "Refund token redemption outcome is unknown; retaining sweep claim for reconciliation",
+                    extra={"id": refund.id, "error": str(e)},
+                    exc_info=isinstance(e, Exception),
+                )
+                if not isinstance(e, Exception):
+                    raise
 
 
 async def refund_sweep_once() -> None:
@@ -2021,53 +2165,71 @@ async def periodic_routstr_fee_payout() -> None:
                     )
                     continue
 
-                accumulated_sats = fee.accumulated_msats // 1000
-                if accumulated_sats >= ROUTSTR_FEE_DEFAULT_PAYOUT:
-                    wallet = await get_wallet(settings.primary_mint, "sat")
-                    proofs = get_proofs_per_mint_and_unit(
-                        wallet, settings.primary_mint, "sat", not_reserved=True
-                    )
-                    paid_msats = accumulated_sats * 1000
-                    payout_checkpointed = await db.reset_routstr_fee(
-                        session, paid_msats
-                    )
-                    if not payout_checkpointed:
-                        logger.warning("Routstr fee payout was already claimed")
-                        continue
+                accumulated_sats = _msats_to_sats(fee.accumulated_msats)
+                if accumulated_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
+                    continue
+                paid_msats = _sats_to_msats(accumulated_sats)
 
-                    try:
-                        amount_received = await raw_send_to_lnurl(
-                            wallet,
-                            proofs,
-                            ROUTSTR_LN_ADDRESS,
-                            "sat",
-                            amount=accumulated_sats,
-                        )
-                    except Exception:
-                        logger.critical(
-                            "Routstr fee payout outcome is unknown; manual reconciliation required",
-                            extra={"payout_in_progress_msats": paid_msats},
-                            exc_info=True,
-                        )
-                        continue
+            # Wallet/proof preparation cannot send funds, so do it before the
+            # durable checkpoint. A preparation failure must not strand an
+            # in-progress payout that requires manual reconciliation.
+            wallet = await get_wallet(settings.primary_mint, "sat")
+            proofs = get_proofs_per_mint_and_unit(
+                wallet, settings.primary_mint, "sat", not_reserved=True
+            )
 
+            async with db.create_session() as session:
+                payout_checkpointed = await db.reset_routstr_fee(session, paid_msats)
+            if not payout_checkpointed:
+                logger.warning("Routstr fee payout was already claimed")
+                continue
+
+            try:
+                amount_received = await raw_send_to_lnurl(
+                    wallet,
+                    proofs,
+                    ROUTSTR_LN_ADDRESS,
+                    "sat",
+                    amount=accumulated_sats,
+                )
+            except BaseException as e:
+                logger.critical(
+                    "Routstr fee payout outcome is unknown; manual reconciliation required",
+                    extra={"payout_in_progress_msats": paid_msats},
+                    exc_info=isinstance(e, Exception),
+                )
+                if not isinstance(e, Exception):
+                    raise
+                continue
+
+            try:
+                async with db.create_session() as session:
                     payout_completed = await db.complete_routstr_fee_payout(
                         session, paid_msats
                     )
-                    if not payout_completed:
-                        logger.critical(
-                            "Routstr fee payout sent but checkpoint was not completed",
-                            extra={"payout_in_progress_msats": paid_msats},
-                        )
-                        continue
+            except BaseException as e:
+                logger.critical(
+                    "Routstr fee payout sent but checkpoint was not completed",
+                    extra={"payout_in_progress_msats": paid_msats},
+                    exc_info=isinstance(e, Exception),
+                )
+                if not isinstance(e, Exception):
+                    raise
+                continue
+            if not payout_completed:
+                logger.critical(
+                    "Routstr fee payout sent but checkpoint was not completed",
+                    extra={"payout_in_progress_msats": paid_msats},
+                )
+                continue
 
-                    logger.info(
-                        "Routstr fee payout sent",
-                        extra={
-                            "accumulated_sats": accumulated_sats,
-                            "amount_received": amount_received,
-                        },
-                    )
+            logger.info(
+                "Routstr fee payout sent",
+                extra={
+                    "accumulated_sats": accumulated_sats,
+                    "amount_received": amount_received,
+                },
+            )
         except Exception as e:
             logger.error(
                 f"Error in Routstr fee payout: {type(e).__name__}",

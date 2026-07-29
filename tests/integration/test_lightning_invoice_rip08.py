@@ -16,7 +16,6 @@ from httpx import AsyncClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey
-from routstr.core.settings import settings
 
 RIP08_PATH = "/lightning/invoice"
 LEGACY_PATH = "/v1/balance/lightning/invoice"
@@ -102,10 +101,8 @@ async def test_topup_with_authorization_header(
     body = resp.json()
     assert body["amount_sats"] == 500
     assert body["bolt11"].startswith("lnbc")
-    expected_mints = [settings.primary_mint, *settings.cashu_mints]
     allowed_mints = patch_invoice_generation.call_args.kwargs["allowed_mints"]
-    assert allowed_mints == list(dict.fromkeys(mint for mint in expected_mints if mint))
-    assert allowed_mints[0] == settings.primary_mint
+    assert allowed_mints == ["http://localhost:3338"]
 
 
 @pytest.mark.integration

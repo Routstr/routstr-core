@@ -32,12 +32,12 @@ def test_mint_url_migration_upgrades_and_downgrades_from_main_head(
     root = Path(__file__).resolve().parents[2]
     database_path = tmp_path / "mint-url-migration.db"
     database_url = f"sqlite+aiosqlite:///{database_path}"
-    previous_head = "9c4d8e2f1a6b"
+    previous_head = "aa50fde387a2"
 
     _run_alembic(root, database_url, "upgrade", previous_head)
     assert "mint_url" not in _lightning_invoice_columns(database_path)
 
-    _run_alembic(root, database_url, "upgrade", "c7d5f8638599")
+    _run_alembic(root, database_url, "upgrade", "bf76270b66c4")
     assert "mint_url" in _lightning_invoice_columns(database_path)
 
     _run_alembic(root, database_url, "downgrade", previous_head)
