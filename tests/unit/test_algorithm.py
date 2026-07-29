@@ -359,6 +359,47 @@ def test_create_model_mappings_excludes_manual_model_with_malformed_price() -> N
     assert "broken" not in unique_models
 
 
+def test_create_model_mappings_survives_an_unreadable_override_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable override row must not take the whole routing map with it.
+
+    Stored pricing is JSON from whatever wrote the row, so a legacy import or a
+    foreign writer can leave a field that will not parse. Converting the row
+    while walking a provider's catalog let that raise out of the map build
+    entirely: at boot the node comes up routing nothing, and on a later refresh
+    the map it already had goes permanently stale.
+    """
+    healthy = create_test_model("azure/gpt", prompt_price=0.001)
+    unreadable = create_test_model("azure/broken", prompt_price=0.001)
+    provider = create_test_provider(
+        "azure",
+        "https://example.openai.azure.com/openai/v1",
+        db_id=7,
+        models=[healthy, unreadable],
+    )
+
+    def _convert(row: SimpleNamespace, *a: object, **k: object) -> Model:
+        if row.id == "azure/broken":
+            raise ValueError("could not parse stored pricing")
+        return healthy
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", _convert)
+
+    model_instances, provider_map, _ = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={
+            ("azure/gpt", 7): (SimpleNamespace(id="azure/gpt"), 1.01),
+            ("azure/broken", 7): (SimpleNamespace(id="azure/broken"), 1.01),
+        },
+        disabled_model_keys=set(),
+    )
+
+    assert "azure/gpt" in model_instances
+    assert [p for _, p in provider_map["azure/gpt"]] == [provider]
+    assert "azure/broken" not in provider_map
+
+
 def test_create_model_mappings_excludes_unchargeable_discovered_model() -> None:
     """A provider-discovered model with no override row gets no guard from the
     override branch, yet it can arrive unchargeable at $0 with no provenance (a
