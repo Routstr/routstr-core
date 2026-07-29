@@ -182,3 +182,136 @@ async def test_non_finite_reported_cost_is_not_a_cost() -> None:
     assert isinstance(cost, CostData)
     assert math.isfinite(cost.total_usd)
     assert cost.total_msats == 2
+
+
+class _ExchangeResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _ExchangeClient:
+    """Answers each exchange endpoint with a caller-supplied quote."""
+
+    def __init__(self, quotes: dict[str, Any]) -> None:
+        self._quotes = quotes
+
+    async def get(self, url: str) -> _ExchangeResponse:
+        if "kraken" in url:
+            return _ExchangeResponse(
+                {"result": {"XXBTZUSD": {"c": [self._quotes["kraken"]]}}}
+            )
+        if "coinbase" in url:
+            return _ExchangeResponse({"data": {"amount": self._quotes["coinbase"]}})
+        return _ExchangeResponse({"price": self._quotes["binance"]})
+
+
+class _AsyncCtx:
+    def __init__(self, client: _ExchangeClient) -> None:
+        self._client = client
+
+    async def __aenter__(self) -> _ExchangeClient:
+        return self._client
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+@pytest.fixture
+def refresh_price_with() -> Iterator[Any]:
+    """Refresh the node's BTC/USD price from caller-supplied exchange quotes.
+
+    Restores the module's cached price afterwards so one test cannot set the
+    rate another one bills at.
+    """
+    import routstr.payment.price as price_module
+
+    previous = (price_module.BTC_USD_PRICE, price_module.SATS_USD_PRICE)
+
+    async def _run(quotes: dict[str, Any], last_good: float | None = None) -> None:
+        price_module.BTC_USD_PRICE = last_good
+        price_module.SATS_USD_PRICE = (
+            None if last_good is None else last_good / 100_000_000
+        )
+        with patch.object(
+            price_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _AsyncCtx(_ExchangeClient(quotes)),
+        ):
+            await price_module._update_prices()
+
+    yield _run
+
+    price_module.BTC_USD_PRICE, price_module.SATS_USD_PRICE = previous
+
+
+@pytest.mark.parametrize(
+    "bad_quote",
+    ["0", "0.00000000", "-1", "NaN", "Infinity", "N/A"],
+    ids=["zero", "zero-padded", "negative", "nan", "infinity", "non-numeric"],
+)
+@pytest.mark.asyncio
+async def test_unusable_exchange_quote_does_not_set_the_node_price(
+    bad_quote: str, refresh_price_with: Any
+) -> None:
+    """One exchange returning junk must not set the price the node bills at.
+
+    The feed takes the ``min()`` of the quotes it collects, so an unusable quote
+    does not merely join the sample — it *wins*, and poisons the rate every model
+    and every request is priced at until the next refresh. Zero then divides by
+    zero on the USD path, ``NaN`` raises out of the integer conversion, and a
+    negative rate produces a negative charge that settlement credits back to the
+    caller.
+
+    The two healthy quotes must still price the node.
+    """
+    from routstr.payment.price import btc_usd_price
+
+    await refresh_price_with(
+        {"kraken": bad_quote, "coinbase": "100000.0", "binance": "100000.0"}
+    )
+
+    assert btc_usd_price() == pytest.approx(100000.0)
+
+
+@pytest.mark.asyncio
+async def test_boolean_exchange_quote_does_not_set_the_node_price(
+    refresh_price_with: Any,
+) -> None:
+    """A boolean in the price field is a shape change, not a $1 bitcoin.
+
+    ``float(True)`` is ``1.0``, which is finite and positive, so a payload whose
+    price field turned into a boolean passes every numeric guard — and then
+    *wins* the ``min()``, pricing the whole node at one dollar per bitcoin. The
+    node's other coercions all reject ``bool`` before the numeric check for this
+    reason; this one is the exception.
+    """
+    from routstr.payment.price import btc_usd_price
+
+    await refresh_price_with(
+        {"kraken": True, "coinbase": "100000.0", "binance": "100000.0"}
+    )
+
+    assert btc_usd_price() == pytest.approx(100000.0)
+
+
+@pytest.mark.asyncio
+async def test_all_quotes_unusable_keeps_the_last_good_price(
+    refresh_price_with: Any,
+) -> None:
+    """When every quote is junk the node keeps the last price it trusted.
+
+    Adopting ``0`` or ``NaN`` because it was the only thing on offer would take
+    out billing for every model at once; skipping the update degrades to a stale
+    rate, which is the safe direction and what an unreachable exchange already
+    does.
+    """
+    from routstr.payment.price import btc_usd_price
+
+    await refresh_price_with(
+        {"kraken": "0", "coinbase": "NaN", "binance": "-3"}, last_good=90000.0
+    )
+
+    assert btc_usd_price() == pytest.approx(90000.0)
