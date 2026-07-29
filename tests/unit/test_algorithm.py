@@ -328,6 +328,37 @@ def test_create_model_mappings_routes_manual_free_override(
     assert [p for _, p in provider_map["azure/free"]] == [provider]
 
 
+def test_create_model_mappings_excludes_manual_model_with_malformed_price() -> None:
+    """``manual`` vouches for a *free* price, never for a malformed one.
+
+    The routing backstop exempts operator-vouched rows so a deliberately free
+    model stays routable. Zero is a real price and that exemption is right for
+    it, but a negative or non-finite rate is not a price at all. Routing one
+    bills every request on it at the maximum reservation instead, since the cost
+    calculation refuses to price on an unusable rate.
+    """
+    malformed_manual = create_test_model(
+        "tinfoil/broken", prompt_price=float("nan"), completion_price=0.002
+    )
+    malformed_manual.pricing_source = PricingSource.MANUAL
+    provider = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh",
+        db_id=9,
+        models=[malformed_manual],
+    )
+
+    model_instances, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert "tinfoil/broken" not in model_instances
+    assert "tinfoil/broken" not in provider_map
+    assert "broken" not in unique_models
+
+
 def test_create_model_mappings_excludes_unchargeable_discovered_model() -> None:
     """A provider-discovered model with no override row gets no guard from the
     override branch, yet it can arrive unchargeable at $0 with no provenance (a
