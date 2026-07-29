@@ -218,9 +218,22 @@ async def calculate_cost(
     else:
         input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
 
-    if not (input_rate and output_rate):
+    # Local import mirrors this module's existing lazy pricing imports.
+    from .models import is_usable_rate
+
+    # An unusable rate is not "no pricing" to Python's truthiness: `NaN` and a
+    # negative float are both truthy, so they sailed past this gate — the one
+    # guard meant to catch a rate that cannot be billed on — and reached the
+    # token math, which raises `ValueError` on `NaN` and `OverflowError` on
+    # `inf` *after* the response was served (the streaming handlers swallow
+    # that, so the request goes unbilled), while a negative produced a negative
+    # charge. Ask whether each rate is usable rather than whether it is truthy.
+    rates = (input_rate, output_rate, cache_read_rate, cache_creation_rate)
+    if not all(is_usable_rate(rate) for rate in rates) or not (
+        input_rate and output_rate
+    ):
         logger.warning(
-            "No token pricing configured — billing at flat MaxCostData. "
+            "No usable token pricing — billing at flat MaxCostData. "
             "Token counts %s in the upstream response but cannot be "
             "priced; the request will appear in dashboards with the "
             "raw counts and a fixed max-cost charge.",
@@ -232,6 +245,8 @@ async def calculate_cost(
                 "model": response_data.get("model", "unknown"),
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "input_rate": input_rate,
+                "output_rate": output_rate,
             },
         )
         return MaxCostData(
