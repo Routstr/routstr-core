@@ -8,6 +8,7 @@ Create Date: 2026-07-16 00:00:00.000000
 from __future__ import annotations
 
 import json
+import math
 
 import sqlalchemy as sa
 from alembic import op
@@ -46,10 +47,19 @@ def _backfill_pricing_source(conn: sa.Connection) -> None:
 
 
 def _row_is_chargeable(pricing_json: object) -> bool:
-    """True if the stored pricing JSON has any positive billable rate.
+    """True if every stored billable rate is usable and at least one is positive.
 
-    Unparseable / missing pricing fails closed (treated as unchargeable), the
-    safe direction for a money guard.
+    The frozen counterpart of ``routstr.payment.models.has_chargeable_price``,
+    and it must answer identically: a row this migration leaves enabled is one
+    the running node will bill on. Returning ``True`` on the first positive rate
+    is what let a malformed row through — a positive ``completion`` hid a
+    negative ``prompt``, and ``Infinity`` (which ``json.loads`` accepts as a bare
+    literal) is greater than zero, so both survived the very sweep meant to
+    fail-close them.
+
+    Every field is therefore checked before any of them can vouch for the row.
+    Unparseable, missing or non-numeric pricing fails closed — the safe
+    direction for a money guard.
     """
     if not isinstance(pricing_json, str):
         return False
@@ -59,13 +69,18 @@ def _row_is_chargeable(pricing_json: object) -> bool:
         return False
     if not isinstance(pricing, dict):
         return False
+    has_positive = False
     for field in _BILLABLE_FIELDS:
         try:
-            if float(pricing.get(field, 0) or 0) > 0:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+            # An oversized JSON integer raises OverflowError, not ValueError.
+            rate = float(pricing.get(field, 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(rate) or rate < 0:
+            return False
+        if rate > 0:
+            has_positive = True
+    return has_positive
 
 
 def _disable_unchargeable_enabled_rows(conn: sa.Connection) -> None:

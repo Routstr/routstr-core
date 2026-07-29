@@ -55,6 +55,18 @@ def test_backfill_assigns_unresolved_and_preserves_existing() -> None:
     assert rows == [("a", "unresolved"), ("b", "manual")]
 
 
+def test_row_is_chargeable_rejects_mixed_negative_and_positive_rates() -> None:
+    """A positive field must not hide a negative field that can still be billed."""
+    assert (
+        migration._row_is_chargeable('{"prompt": -1, "completion": 1}') is False
+    )
+
+
+def test_row_is_chargeable_rejects_infinity() -> None:
+    """Python's JSON parser accepts ``Infinity``, but it is not a usable price."""
+    assert migration._row_is_chargeable('{"prompt": Infinity}') is False
+
+
 def test_disables_enabled_unchargeable_rows_only() -> None:
     """Legacy rows that motivated the change — enabled but priced at nothing —
     are fail-closed by the migration itself, not only when re-saved through the
