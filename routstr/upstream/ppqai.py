@@ -217,7 +217,22 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                             # native; if PPQ supplied one side, the other is
                             # still OpenRouter-derived, so the whole-Pricing tag
                             # stays whatever the OR feed carried (openrouter).
+                            #
+                            # PPQ publishes token rates and nothing else, so a
+                            # native tag has to describe a price built only from
+                            # those. Overlaying the two token rates onto the
+                            # matched OpenRouter entry left its request, image,
+                            # web-search, reasoning and cache rates in place:
+                            # provenance then claimed every rate was the
+                            # provider's own while five or six of them came from
+                            # a different feed, and requests were billed
+                            # auxiliary fees PPQ never charges. Rebuild the price
+                            # from what PPQ actually published instead.
                             if input_price is not None and output_price is not None:
+                                or_model.pricing = Pricing(
+                                    prompt=input_price / 1_000_000,
+                                    completion=output_price / 1_000_000,
+                                )
                                 for key, value in pricing_metadata(
                                     PricingSource.NATIVE
                                 ).items():
