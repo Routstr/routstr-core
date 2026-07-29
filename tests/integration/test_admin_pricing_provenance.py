@@ -873,6 +873,59 @@ async def test_one_unreadable_stored_price_does_not_blank_the_catalog(
     served = {m.id for m in await list_models(integration_session, provider_id)}
     assert served == {"good"}
 
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_model_listing_survives_a_non_finite_stored_rate(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """The operator must be able to open the page that shows the broken row.
+
+    The admin listing deliberately includes disabled models, so it is the one
+    view that still carries a row the money backstop keeps out of the served
+    catalog. FastAPI's encoder rendered a stored ``Infinity`` rate as ``null``,
+    which is indistinguishable from a rate the row never carried — the operator
+    could see the row but not the reason it was held back. Render the offending
+    value as text instead, as the 422 handler already does.
+    """
+    provider_id = await _make_provider(integration_session)
+    integration_session.add(
+        ModelRow(
+            id="inf-rate",
+            name="inf-rate",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": float("inf"), "completion": 2e-06}),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="inf-rate",
+            pricing_source="litellm",
+        )
+    )
+    await integration_session.commit()
+
+    resp = await integration_client.get(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+    )
+
+    assert resp.status_code == 200
+    listed = {m["id"]: m for m in resp.json()["db_models"]}
+    assert "inf-rate" in listed
+    assert listed["inf-rate"]["pricing"]["prompt"] == "inf"
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_negative_price_is_rejected(

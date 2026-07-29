@@ -65,20 +65,24 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     )
 
 
-def _json_compliant(value: object) -> object:
+def json_compliant(value: object) -> object:
     """Render non-finite floats as text so a reply carrying them can serialize.
 
     ``json`` parses the bare ``NaN``/``Infinity``/``-Infinity`` literals into
     real floats, so a request body may hold one anywhere. ``JSONResponse``
     encodes with ``allow_nan=False`` and raises on them, which would turn a
-    reply that merely *quotes* the offending value into a 500.
+    reply that merely *quotes* the offending value into a 500. FastAPI's own
+    encoder does not raise but silently substitutes ``null``, which is worse for
+    a diagnostic view: the operator cannot tell a missing value from a malformed
+    one. Both callers want the offending value shown, so it is named here rather
+    than reimplemented per response.
     """
     if isinstance(value, float) and not math.isfinite(value):
         return repr(value)
     if isinstance(value, dict):
-        return {key: _json_compliant(item) for key, item in value.items()}
+        return {key: json_compliant(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_compliant(item) for item in value]
+        return [json_compliant(item) for item in value]
     return value
 
 
@@ -97,7 +101,7 @@ async def validation_exception_handler(
     return JSONResponse(
         status_code=422,
         content={
-            "detail": _json_compliant(jsonable_encoder(errors)),
+            "detail": json_compliant(jsonable_encoder(errors)),
             "request_id": request_id,
         },
     )
