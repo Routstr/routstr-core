@@ -382,7 +382,8 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     description: str = Field(description="Invoice description")
     payment_hash: str = Field(description="Payment hash for tracking", unique=True)
     status: str = Field(
-        default="pending", description="pending, paid, expired, cancelled"
+        default="pending",
+        description="pending, paid, expired, cancelled, reconciliation_required",
     )
     api_key_hash: str | None = Field(
         default=None, description="Associated API key hash for topup operations"

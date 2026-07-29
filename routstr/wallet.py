@@ -1116,12 +1116,12 @@ async def _refund_sweep_once(cutoff: int) -> None:
                     extra={"id": refund.id},
                 )
         except BaseException as e:
-            if redeemed:
-                # The token is already in the node wallet. Retain the claim so
-                # a stale retry classifies "already spent" as swept, never as a
-                # client collection.
+            if redeemed or isinstance(e, TokenConsumedError):
+                # The token was spent, or the redemption outcome is known to be
+                # post-spend. Retain the claim so a stale retry classifies
+                # "already spent" as swept, never as a client collection.
                 logger.critical(
-                    "Refund token swept but checkpoint was not completed; manual reconciliation required",
+                    "Refund token spent but sweep checkpoint was not completed; manual reconciliation required",
                     extra={"id": refund.id},
                     exc_info=isinstance(e, Exception),
                 )
@@ -1163,25 +1163,17 @@ async def _refund_sweep_once(cutoff: int) -> None:
                         extra={"id": refund.id},
                     )
             else:
-                # Cancellation or a transient pre-redemption failure is a
-                # known-no-send outcome, so release the lease for a later retry.
-                released = await asyncio.shield(
-                    _set_refund_sweep_state(
-                        refund.id,
-                        predicates=(claim_owned,),
-                        sweep_started_at=None,
-                    )
+                # Once redemption starts, an exception cannot prove the token
+                # was not spent (for example, a melt may land before the
+                # response is lost). Retain the claim so a stale retry treats
+                # an "already spent" result as a completed sweep.
+                logger.critical(
+                    "Refund token redemption outcome is unknown; retaining sweep claim for reconciliation",
+                    extra={"id": refund.id, "error": str(e)},
+                    exc_info=isinstance(e, Exception),
                 )
                 if not isinstance(e, Exception):
                     raise
-                logger.warning(
-                    "Failed to sweep refund",
-                    extra={
-                        "id": refund.id,
-                        "error": str(e),
-                        "claim_released": released == 1,
-                    },
-                )
 
 
 async def refund_sweep_once() -> None:
@@ -1254,12 +1246,14 @@ async def periodic_routstr_fee_payout() -> None:
                     "sat",
                     amount=accumulated_sats,
                 )
-            except Exception:
+            except BaseException as e:
                 logger.critical(
                     "Routstr fee payout outcome is unknown; manual reconciliation required",
                     extra={"payout_in_progress_msats": paid_msats},
-                    exc_info=True,
+                    exc_info=isinstance(e, Exception),
                 )
+                if not isinstance(e, Exception):
+                    raise
                 continue
 
             try:

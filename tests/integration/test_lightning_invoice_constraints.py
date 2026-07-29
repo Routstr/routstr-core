@@ -255,6 +255,40 @@ async def test_failed_mint_keeps_invoice_pending_for_retry(
 
 
 @pytest.mark.asyncio
+async def test_unpaid_topup_does_not_query_target_key(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    invoice = _make_invoice(
+        id="inv_unpaid_topup",
+        status="pending",
+        paid_at=None,
+        purpose="topup",
+        api_key_hash="target-key",
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
+        setup.add(invoice)
+        await setup.commit()
+
+    wallet = MagicMock()
+    wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=False))
+    create_session = MagicMock(side_effect=RuntimeError("target lookup should not run"))
+    async with AsyncSession(integration_engine, expire_on_commit=False) as session:
+        stored = await session.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        with (
+            patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+            patch("routstr.lightning.create_session", create_session),
+        ):
+            from routstr.lightning import check_invoice_payment
+
+            await check_invoice_payment(stored, session)
+
+    wallet.get_mint_quote.assert_awaited_once_with(invoice.payment_hash)
+    create_session.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_missing_topup_target_is_rejected_before_mint(
     integration_engine: AsyncEngine,
     patched_db_engine: None,
@@ -265,25 +299,36 @@ async def test_missing_topup_target_is_rejected_before_mint(
         paid_at=None,
         purpose="topup",
         api_key_hash="pruned-key",
+        expires_at=int(time.time()) - 1,
     )
     async with AsyncSession(integration_engine, expire_on_commit=False) as setup:
         setup.add(invoice)
         await setup.commit()
 
-    get_wallet = AsyncMock()
+    wallet = MagicMock()
+    wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
+    wallet.mint = AsyncMock()
     async with AsyncSession(integration_engine, expire_on_commit=False) as session:
         stored = await session.get(LightningInvoice, invoice.id)
         assert stored is not None
-        with patch("routstr.lightning.get_wallet", get_wallet):
-            from routstr.lightning import check_invoice_payment
+        with (
+            patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+            patch("routstr.lightning.logger.critical") as critical,
+        ):
+            from routstr.lightning import get_invoice_status
 
-            await check_invoice_payment(stored, session)
+            response = await get_invoice_status(invoice.id, session)
 
-    get_wallet.assert_not_awaited()
+        assert response.status == "reconciliation_required"
+        assert stored.status == "reconciliation_required"
+        assert stored not in session.dirty
+        critical.assert_called_once()
+
+    wallet.mint.assert_not_awaited()
     async with AsyncSession(integration_engine) as verify:
         stored = await verify.get(LightningInvoice, invoice.id)
         assert stored is not None
-        assert stored.status == "pending"
+        assert stored.status == "reconciliation_required"
 
 
 @pytest.mark.asyncio
@@ -424,6 +469,8 @@ async def test_db_guard_credits_once_when_both_mints_succeed(
         assert second_invoice.id == invoice.id
         assert first_invoice.status == "paid"
         assert second_invoice.status == "paid"
+        assert first_invoice not in first.dirty
+        assert second_invoice not in second.dirty
 
     assert wallet.mint.await_count == 2
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:

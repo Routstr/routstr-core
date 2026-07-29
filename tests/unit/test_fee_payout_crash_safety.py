@@ -253,6 +253,45 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
 
 
 @pytest.mark.asyncio
+async def test_fee_payout_cancellation_during_send_alerts_and_propagates() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=5_000,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+    complete = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch("routstr.wallet.asyncio.sleep", AsyncMock(return_value=None)),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", AsyncMock(return_value=True)),
+        patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch(
+            "routstr.wallet.raw_send_to_lnurl",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ),
+        patch("routstr.wallet.logger.critical") as critical,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    complete.assert_not_awaited()
+    critical.assert_called_once()
+    assert critical.call_args.args[0] == (
+        "Routstr fee payout outcome is unknown; manual reconciliation required"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_site", ["session", "completion"])
 async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
     failure_site: str,

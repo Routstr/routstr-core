@@ -130,14 +130,17 @@ async def test_refund_sweep_only_processes_expired_eligible_outgoing_tokens(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error", "collected"),
+    ("error", "collected", "claim_started_at"),
     [
-        (RuntimeError("token already spent"), True),
-        (RuntimeError("mint unavailable"), False),
+        (RuntimeError("token already spent"), True, None),
+        (RuntimeError("mint unavailable"), False, 1000),
     ],
 )
-async def test_refund_sweep_records_terminal_but_not_transient_failures(
-    session_factory: async_sessionmaker[AsyncSession], error: Exception, collected: bool
+async def test_refund_sweep_records_spent_and_unknown_outcomes_safely(
+    session_factory: async_sessionmaker[AsyncSession],
+    error: Exception,
+    collected: bool,
+    claim_started_at: int | None,
 ) -> None:
     await _insert(
         session_factory,
@@ -156,11 +159,64 @@ async def test_refund_sweep_records_terminal_but_not_transient_failures(
     refund = (await _load(session_factory))["refund"]
     assert refund.collected is collected
     assert refund.swept is False
-    assert refund.sweep_started_at is None
+    assert refund.sweep_started_at == claim_started_at
 
 
 @pytest.mark.asyncio
-async def test_refund_sweep_releases_claim_on_cancellation(
+async def test_post_spend_failure_retains_claim_and_stale_retry_records_sweep(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert(
+        session_factory,
+        CashuTransaction(
+            token="post-spend-failure",
+            amount=1,
+            unit="sat",
+            type="out",
+            created_at=800,
+        ),
+    )
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.settings.refund_sweep_claim_timeout_seconds", 200),
+        patch("routstr.wallet.time.time", return_value=1000),
+        patch(
+            "routstr.wallet.recieve_token",
+            AsyncMock(
+                side_effect=wallet.TokenConsumedError(
+                    "Mint on primary failed after successful melt"
+                )
+            ),
+        ),
+    ):
+        await refund_sweep_once()
+
+    retained = (await _load(session_factory))["post-spend-failure"]
+    assert retained.swept is False
+    assert retained.collected is False
+    assert retained.sweep_started_at == 1000
+
+    with (
+        patch("routstr.wallet.db.create_session", side_effect=session_factory),
+        patch("routstr.wallet.settings.refund_sweep_ttl_seconds", 100),
+        patch("routstr.wallet.settings.refund_sweep_claim_timeout_seconds", 200),
+        patch("routstr.wallet.time.time", return_value=1300),
+        patch(
+            "routstr.wallet.recieve_token",
+            AsyncMock(side_effect=RuntimeError("token already spent")),
+        ),
+    ):
+        await refund_sweep_once()
+
+    recovered = (await _load(session_factory))["post-spend-failure"]
+    assert recovered.swept is True
+    assert recovered.collected is False
+    assert recovered.sweep_started_at is None
+
+
+@pytest.mark.asyncio
+async def test_refund_sweep_retains_claim_on_cancellation_during_redemption(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _insert(
@@ -183,7 +239,7 @@ async def test_refund_sweep_releases_claim_on_cancellation(
 
     refund = (await _load(session_factory))["cancelled"]
     assert refund.swept is False
-    assert refund.sweep_started_at is None
+    assert refund.sweep_started_at == 1000
 
 
 @pytest.mark.asyncio

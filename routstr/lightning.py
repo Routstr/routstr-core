@@ -5,6 +5,7 @@ import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import col, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -233,25 +234,46 @@ async def check_invoice_payment(
         # potentially slow mint request so it cannot pin a pool connection.
         await session.commit()
 
+        wallet = await get_wallet(settings.primary_mint, "sat")
+        mint_status = await wallet.get_mint_quote(invoice_payment_hash)
+        if not mint_status.paid:
+            return
+
         # Do not redeem a paid top-up quote if its target has already been
         # pruned. This validation owns a short-lived session and releases its
-        # connection before any mint I/O starts.
+        # connection before mint redemption starts.
         if invoice_purpose == "topup":
             if not finalized_api_key_hash:
                 raise ValueError("No API key associated with topup invoice")
             async with create_session() as validation_session:
                 target = await validation_session.get(ApiKey, finalized_api_key_hash)
-            if target is None:
-                logger.error(
-                    "Topup invoice target API key was not found; skipping mint",
-                    extra={"invoice_id": invoice_id},
-                )
-                return
-
-        wallet = await get_wallet(settings.primary_mint, "sat")
-        mint_status = await wallet.get_mint_quote(invoice_payment_hash)
-        if not mint_status.paid:
-            return
+                if target is None:
+                    terminal = await validation_session.exec(  # type: ignore[call-overload]
+                        update(LightningInvoice)
+                        .where(
+                            col(LightningInvoice.id) == invoice_id,
+                            col(LightningInvoice.status) == "pending",
+                        )
+                        .values(status="reconciliation_required")
+                    )
+                    await validation_session.commit()
+                    if terminal.rowcount == 1:
+                        set_committed_value(
+                            invoice, "status", "reconciliation_required"
+                        )
+                    else:
+                        committed_invoice = await validation_session.get(
+                            LightningInvoice, invoice_id
+                        )
+                        if committed_invoice is not None:
+                            set_committed_value(
+                                invoice, "status", committed_invoice.status
+                            )
+                    logger.critical(
+                        "Paid topup invoice target API key was not found; reconciliation required",
+                        extra={"invoice_id": invoice_id},
+                    )
+                    return
 
         # The mint enforces single-use quotes, so a concurrent checker that
         # races us here fails inside wallet.mint rather than double-minting.
@@ -294,17 +316,19 @@ async def check_invoice_payment(
                     # A concurrent finalizer won the CAS. Publish only the
                     # state observed from the database after ending the owned
                     # read transaction; never refresh the caller's session.
-                    invoice.api_key_hash = committed_invoice.api_key_hash
-                    invoice.status = committed_invoice.status
-                    invoice.paid_at = committed_invoice.paid_at
+                    set_committed_value(
+                        invoice, "api_key_hash", committed_invoice.api_key_hash
+                    )
+                    set_committed_value(invoice, "status", committed_invoice.status)
+                    set_committed_value(invoice, "paid_at", committed_invoice.paid_at)
                 return
             await finalization_session.commit()
 
         # Only publish finalized values to the caller-owned object after the
         # owned transaction has committed successfully.
-        invoice.api_key_hash = finalized_api_key_hash
-        invoice.status = "paid"
-        invoice.paid_at = paid_at
+        set_committed_value(invoice, "api_key_hash", finalized_api_key_hash)
+        set_committed_value(invoice, "status", "paid")
+        set_committed_value(invoice, "paid_at", paid_at)
 
         logger.info(
             "Lightning invoice paid",
