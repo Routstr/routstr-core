@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -192,7 +193,7 @@ async def test_concurrent_invoice_checks_finalize_once_in_process() -> None:
     session.refresh = AsyncMock(side_effect=refresh)
 
     @asynccontextmanager
-    async def owned_session():
+    async def owned_session() -> AsyncIterator[AsyncMock]:
         yield AsyncMock()
 
     with (
