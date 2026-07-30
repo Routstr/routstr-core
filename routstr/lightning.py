@@ -22,6 +22,7 @@ from .wallet import (
     _mint_operation,
     get_wallet,
     is_mint_connection_error,
+    wallet_operation_guard,
 )
 
 logger = get_logger(__name__)
@@ -352,7 +353,7 @@ async def check_invoice_payment(
     invoice: LightningInvoice, session: AsyncSession
 ) -> None:
     lock = _invoice_settlement_locks.setdefault(invoice.id, asyncio.Lock())
-    async with lock:
+    async with lock, wallet_operation_guard():
         minted = False
         try:
             # Snapshot the row and end the caller's read transaction before any

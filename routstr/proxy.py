@@ -50,6 +50,13 @@ _provider_map: dict[
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
 
 
+async def _finish_read_transaction(session: AsyncSession) -> None:
+    """Release a read transaction without assuming a particular session mock."""
+    commit_result = session.commit()
+    if inspect.isawaitable(commit_result):
+        await commit_result
+
+
 async def initialize_upstreams() -> None:
     """Initialize upstream providers from database during application startup."""
     global _upstreams
@@ -464,6 +471,9 @@ async def _proxy(
     if is_ehbp or request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
         reservation_snapshot = await get_reservation_snapshot(key, session)
+        # Snapshot validation performs SELECTs after pay_for_request commits.
+        # End that read transaction before waiting on upstream response headers.
+        await _finish_read_transaction(session)
 
     # Tracks request params already removed in response to upstream rejections,
     # shared across providers so a stripped param stays stripped on failover and
@@ -497,8 +507,10 @@ async def _proxy(
                         raise
                     await pay_for_request(key, max_cost_for_model, session)
                     reservation_snapshot = await get_reservation_snapshot(key, session)
+                    await _finish_read_transaction(session)
                     continue
                 reservation_snapshot = await get_reservation_snapshot(key, session)
+                await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
         headers = upstream.prepare_headers(dict(request.headers))

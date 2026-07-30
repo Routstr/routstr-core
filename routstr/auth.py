@@ -33,6 +33,7 @@ from .wallet import (
     classify_redemption_error,
     credit_balance,
     deserialize_token_from_string,
+    wallet_operation_guard,
 )
 
 if TYPE_CHECKING:
@@ -166,6 +167,29 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
 
 
 async def validate_bearer_key(
+    bearer_key: str,
+    session: AsyncSession,
+    refund_address: Optional[str] = None,
+    key_expiry_time: Optional[int] = None,
+    min_cost: int = 0,
+) -> ApiKey:
+    if bearer_key.startswith("cashu"):
+        # Acquire before the first lookup/flush so concurrent token creation
+        # cannot hold SQLite write transactions while waiting to mutate proofs.
+        async with wallet_operation_guard():
+            return await _validate_bearer_key_locked(
+                bearer_key,
+                session,
+                refund_address,
+                key_expiry_time,
+                min_cost,
+            )
+    return await _validate_bearer_key_locked(
+        bearer_key, session, refund_address, key_expiry_time, min_cost
+    )
+
+
+async def _validate_bearer_key_locked(
     bearer_key: str,
     session: AsyncSession,
     refund_address: Optional[str] = None,
