@@ -1,9 +1,14 @@
 import asyncio
+import fcntl
+import os
 import re
 import socket
 import time
 import typing
-from typing import TypedDict
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from pathlib import Path
+from typing import AsyncGenerator, TypedDict
 
 import httpx
 from cashu.core.base import Proof, Token
@@ -31,6 +36,46 @@ for _name, _field in _CashuMintInfo.model_fields.items():
 _CashuMintInfo.model_rebuild(force=True)
 
 logger = get_logger(__name__)
+
+# Preserve the real scheduler yield even when payout tests patch asyncio.sleep.
+_scheduler_sleep = asyncio.sleep
+_WALLET_OPERATION_LOCK = Path(".wallet") / ".routstr-operation.lock"
+_wallet_operation_depth: ContextVar[int] = ContextVar(
+    "wallet_operation_depth", default=0
+)
+
+
+@asynccontextmanager
+async def wallet_operation_guard() -> AsyncGenerator[None, None]:
+    """Serialize proof mutation and owner payout across local worker processes."""
+    depth = _wallet_operation_depth.get()
+    if depth:
+        token = _wallet_operation_depth.set(depth + 1)
+        try:
+            yield
+        finally:
+            _wallet_operation_depth.reset(token)
+        return
+
+    _WALLET_OPERATION_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(_WALLET_OPERATION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    depth_token = None
+    try:
+        while not acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                await _scheduler_sleep(0.05)
+        depth_token = _wallet_operation_depth.set(1)
+        yield
+    finally:
+        if depth_token is not None:
+            _wallet_operation_depth.reset(depth_token)
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _sats_to_msats(amount: int) -> int:
@@ -687,6 +732,13 @@ async def swap_to_primary_mint(
 async def credit_balance(
     cashu_token: str, key: db.ApiKey, session: db.AsyncSession
 ) -> int:
+    async with wallet_operation_guard():
+        return await _credit_balance_locked(cashu_token, key, session)
+
+
+async def _credit_balance_locked(
+    cashu_token: str, key: db.ApiKey, session: db.AsyncSession
+) -> int:
     logger.info(
         "credit_balance: Starting token redemption",
         extra={"token_preview": cashu_token[:50]},
@@ -747,6 +799,9 @@ async def credit_balance(
                 )
             await session.commit()
             await session.refresh(key)
+            # refresh() starts a read transaction; release it before the
+            # transaction-history write opens its own session below.
+            await session.commit()
         except TokenConsumedError:
             raise
         except Exception as db_error:
@@ -945,6 +1000,70 @@ async def fetch_all_balances(
     )
 
 
+async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
+    """Send only conservatively proven owner funds for one wallet."""
+    try:
+        wallet = await get_wallet(mint_url, unit)
+        proofs = get_proofs_per_mint_and_unit(
+            wallet, mint_url, unit, not_reserved=True
+        )
+        proofs = await slow_filter_spend_proofs(proofs, wallet)
+        await asyncio.sleep(5)
+    except Exception as e:
+        logger.error(
+            f"Error sending payout: {type(e).__name__}",
+            extra={"error": str(e), "mint_url": mint_url, "unit": unit},
+        )
+        return
+
+    try:
+        async with db.create_session() as session:
+            # ApiKey stores a refund preference, not funding provenance. Until
+            # liabilities have a durable per-credit ledger, subtract the total
+            # liability from every wallet rather than risk calling customer
+            # funds owner profit on the wrong mint.
+            user_balance = await db.total_user_liability(session)
+    except Exception as e:
+        logger.error(
+            f"Error in periodic payout cycle: {type(e).__name__}",
+            extra={"error": str(e), "mint_url": mint_url, "unit": unit},
+        )
+        return
+
+    try:
+        if unit == "sat":
+            user_balance = _msats_to_sats(user_balance)
+        proofs_balance = sum(proof.amount for proof in proofs)
+        available_balance = proofs_balance - user_balance
+        min_amount = (
+            settings.min_payout_sat
+            if unit == "sat"
+            else _sats_to_msats(settings.min_payout_sat)
+        )
+        if available_balance > min_amount:
+            amount_received = await raw_send_to_lnurl(
+                wallet,
+                proofs,
+                settings.receive_ln_address,
+                unit,
+                amount=available_balance,
+            )
+            logger.info(
+                "Payout sent successfully",
+                extra={
+                    "mint_url": mint_url,
+                    "unit": unit,
+                    "balance": available_balance,
+                    "amount_received": amount_received,
+                },
+            )
+    except Exception as e:
+        logger.error(
+            f"Error sending payout: {type(e).__name__}",
+            extra={"error": str(e), "mint_url": mint_url, "unit": unit},
+        )
+
+
 async def periodic_payout() -> None:
     while True:
         await asyncio.sleep(settings.payout_interval_seconds)
@@ -952,90 +1071,13 @@ async def periodic_payout() -> None:
             if not settings.receive_ln_address:
                 continue
 
-            # Include the primary mint even if it is not listed in cashu_mints,
-            # matching fetch_all_balances(); otherwise primary-mint funds never
-            # auto-payout.
-            mint_urls = _mints_to_inspect()
-
-            for mint_url in mint_urls:
+            for mint_url in _mints_to_inspect():
                 for unit in ["sat", "msat"]:
-                    # Isolate failures per mint/unit so one slow or failing
-                    # mint does not abort payout for every other mint/unit.
-                    try:
-                        wallet = await get_wallet(mint_url, unit)
-                        proofs = get_proofs_per_mint_and_unit(
-                            wallet, mint_url, unit, not_reserved=True
-                        )
-                        proofs = await slow_filter_spend_proofs(proofs, wallet)
-                        await asyncio.sleep(5)
-                    except Exception as e:
-                        logger.error(
-                            f"Error sending payout: {type(e).__name__}",
-                            extra={
-                                "error": str(e),
-                                "mint_url": mint_url,
-                                "unit": unit,
-                            },
-                        )
-                        continue
-
-                    # Fetch the liability AFTER the proofs snapshot and the
-                    # settle delay: a concurrent top-up then only inflates the
-                    # liability, shrinking the payout — never sending
-                    # customer-backed funds as profit.
-                    try:
-                        async with db.create_session() as session:
-                            user_balance = await db.balance_for_mint_and_unit(
-                                session, mint_url, unit
-                            )
-                    except Exception as e:
-                        logger.error(
-                            f"Error in periodic payout cycle: {type(e).__name__}",
-                            extra={
-                                "error": str(e),
-                                "mint_url": mint_url,
-                                "unit": unit,
-                            },
-                        )
-                        continue
-
-                    try:
-                        if unit == "sat":
-                            user_balance = _msats_to_sats(user_balance)
-                        proofs_balance = sum(proof.amount for proof in proofs)
-                        available_balance = proofs_balance - user_balance
-                        # Threshold is configured in sats; convert for msat wallets.
-                        min_amount = (
-                            settings.min_payout_sat
-                            if unit == "sat"
-                            else _sats_to_msats(settings.min_payout_sat)
-                        )
-                        if available_balance > min_amount:
-                            amount_received = await raw_send_to_lnurl(
-                                wallet,
-                                proofs,
-                                settings.receive_ln_address,
-                                unit,
-                                amount=available_balance,
-                            )
-                            logger.info(
-                                "Payout sent successfully",
-                                extra={
-                                    "mint_url": mint_url,
-                                    "unit": unit,
-                                    "balance": available_balance,
-                                    "amount_received": amount_received,
-                                },
-                            )
-                    except Exception as e:
-                        logger.error(
-                            f"Error sending payout: {type(e).__name__}",
-                            extra={
-                                "error": str(e),
-                                "mint_url": mint_url,
-                                "unit": unit,
-                            },
-                        )
+                    # Proof mutation, liability observation, and sending are one
+                    # cross-process critical section. A credit takes the same
+                    # lock from before redemption through its liability commit.
+                    async with wallet_operation_guard():
+                        await _payout_mint_and_unit(mint_url, unit)
         except Exception as e:
             logger.error(
                 f"Error in periodic payout cycle: {type(e).__name__}",

@@ -12,7 +12,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from .core.db import ApiKey, LightningInvoice, create_session, get_session
 from .core.logging import get_logger
 from .core.settings import settings
-from .wallet import get_wallet
+from .wallet import get_wallet, wallet_operation_guard
 
 logger = get_logger(__name__)
 
@@ -221,6 +221,16 @@ async def recover_invoice(
 
 
 async def check_invoice_payment(
+    invoice: LightningInvoice, session: AsyncSession
+) -> None:
+    # Minting makes proofs visible before database finalization. Share the
+    # cross-process wallet guard with owner payout so that visibility and the
+    # corresponding liability commit are observed atomically by the payout loop.
+    async with wallet_operation_guard():
+        await _check_invoice_payment_locked(invoice, session)
+
+
+async def _check_invoice_payment_locked(
     invoice: LightningInvoice, session: AsyncSession
 ) -> None:
     minted = False

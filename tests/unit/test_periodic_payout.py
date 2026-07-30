@@ -77,7 +77,7 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balance_for_mint_and_unit",
+            "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
@@ -131,7 +131,7 @@ async def test_periodic_payout_releases_session_before_slow_mint_send() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balance_for_mint_and_unit",
+            "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(side_effect=raw_send)),
@@ -173,7 +173,7 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
             AsyncMock(side_effect=lambda proofs, wallet: proofs),
         ),
         patch(
-            "routstr.wallet.db.balance_for_mint_and_unit",
+            "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=0),
         ),
         patch("routstr.wallet.raw_send_to_lnurl", raw_send),
