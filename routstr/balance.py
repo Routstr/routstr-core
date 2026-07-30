@@ -312,6 +312,36 @@ async def _lookup_key_no_create(
     return None
 
 
+async def _get_persisted_api_key_refund(
+    key: ApiKey, session: AsyncSession
+) -> dict[str, str] | None:
+    result = await session.exec(
+        select(CashuTransaction)
+        .where(
+            CashuTransaction.api_key_hashed_key == key.hashed_key,
+            CashuTransaction.type == "out",
+            CashuTransaction.source == "apikey",
+        )
+        .order_by(col(CashuTransaction.created_at).desc())
+    )
+    refund = result.first()
+    if refund is None:
+        return None
+    if refund.swept:
+        raise HTTPException(status_code=410, detail="Refund has been swept")
+
+    refund.collected = True
+    session.add(refund)
+    await session.commit()
+
+    persisted = {"token": refund.token}
+    if refund.unit == "sat":
+        persisted["sats"] = str(refund.amount)
+    else:
+        persisted["msats"] = str(refund.amount)
+    return persisted
+
+
 async def _restore_balance(
     session: AsyncSession,
     hashed_key: str,
@@ -414,6 +444,8 @@ async def refund_wallet_endpoint(
     if key.total_balance <= 0:
         if cached := await _refund_cache_get(bearer_value):
             return cached
+        if persisted := await _get_persisted_api_key_refund(key, session):
+            return persisted
 
     if key.parent_key_hash:
         raise HTTPException(
