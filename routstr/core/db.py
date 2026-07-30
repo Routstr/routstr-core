@@ -784,6 +784,12 @@ async def complete_routstr_fee_payout(
     return result.rowcount == 1
 
 
+async def total_user_liability(db_session: AsyncSession) -> int:
+    """Return all outstanding API-key balances in millisatoshis."""
+    result = await db_session.exec(select(func.sum(ApiKey.balance)))
+    return int(result.one() or 0)
+
+
 async def balance_for_mint_and_unit(
     db_session: AsyncSession, mint_url: str, unit: str
 ) -> int:
