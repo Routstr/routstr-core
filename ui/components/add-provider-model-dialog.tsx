@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQuery } from '@tanstack/react-query';
@@ -107,7 +108,7 @@ export function AddProviderModelDialog({
   const [isPresetOpen, setIsPresetOpen] = useState(false);
   const [selectedPresetLabel, setSelectedPresetLabel] =
     useState('Select a preset');
-  const [forwardedModelIdCopied, setForwardedModelIdCopied] = useState(false);
+  const { copied: forwardedModelIdCopied, copy } = useCopyToClipboard(1500);
 
   const form = useForm<FormData>({
     resolver: zodResolver(FormSchema) as never,
@@ -546,9 +547,7 @@ export function AddProviderModelDialog({
                   const handleCopy = () => {
                     const value = field.value || form.getValues('id');
                     if (!value) return;
-                    navigator.clipboard.writeText(value);
-                    setForwardedModelIdCopied(true);
-                    setTimeout(() => setForwardedModelIdCopied(false), 1500);
+                    void copy(value);
                   };
                   return (
                     <FormItem>

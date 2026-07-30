@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
 import {
@@ -374,7 +375,7 @@ export default function TransactionsPage() {
   const [search, setSearch] = useState('');
   const [type, setType] = useState<string>('all');
   const [status, setStatus] = useState<string>('all');
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const { copiedKey: copiedId, copy } = useCopyToClipboard();
 
   // Load filters from localStorage on mount
   useEffect(() => {
@@ -482,11 +483,10 @@ export default function TransactionsPage() {
     setLightningPage(0);
   };
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    toast.success('Copied to clipboard');
-    setTimeout(() => setCopiedId(null), 2000);
+  const copyToClipboard = async (text: string, id: string) => {
+    if (await copy(text, id)) {
+      toast.success('Copied to clipboard');
+    }
   };
 
   const getStatusBadge = (tx: Transaction) => {
