@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from typing import Any
 
@@ -47,6 +48,13 @@ _provider_map: dict[
     str, list[tuple[Model, BaseUpstreamProvider]]
 ] = {}  # All aliases -> sorted [(candidate Model, its Provider)]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
+
+
+async def _finish_read_transaction(session: AsyncSession) -> None:
+    """Release a read transaction without assuming a particular session mock."""
+    commit_result = session.commit()
+    if inspect.isawaitable(commit_result):
+        await commit_result
 
 
 async def initialize_upstreams() -> None:
@@ -220,6 +228,20 @@ _API_PATH_PREFIXES = (
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
+) -> Response | StreamingResponse:
+    """Run proxy setup in a short request session, never across response streaming."""
+    try:
+        return await _proxy(request, path, session)
+    finally:
+        # FastAPI yield dependencies normally close after the response body is
+        # sent. Close explicitly so a long stream cannot retain DB resources.
+        close_result = session.close()
+        if inspect.isawaitable(close_result):
+            await close_result
+
+
+async def _proxy(
+    request: Request, path: str, session: AsyncSession
 ) -> Response | StreamingResponse:
     # GET requests must hit a known API prefix; otherwise return a 404 (HTML
     # for browsers, JSON for API clients). POST requests are always forwarded
@@ -450,6 +472,9 @@ async def proxy(
     if is_ehbp or request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
         reservation_snapshot = await get_reservation_snapshot(key, session)
+        # Snapshot validation performs SELECTs after pay_for_request commits.
+        # End that read transaction before waiting on upstream response headers.
+        await _finish_read_transaction(session)
 
     # Tracks request params already removed in response to upstream rejections,
     # shared across providers so a stripped param stays stripped on failover and
@@ -481,8 +506,10 @@ async def proxy(
                         raise
                     await pay_for_request(key, max_cost_for_model, session)
                     reservation_snapshot = await get_reservation_snapshot(key, session)
+                    await _finish_read_transaction(session)
                     continue
                 reservation_snapshot = await get_reservation_snapshot(key, session)
+                await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
         headers = upstream.prepare_headers(dict(request.headers))
