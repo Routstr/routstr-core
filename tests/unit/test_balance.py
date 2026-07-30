@@ -222,6 +222,78 @@ def _make_api_key(
 
 
 @pytest.mark.asyncio
+async def test_apikey_refund_returns_persisted_token_after_cache_loss() -> None:
+    key = _make_api_key(balance=0, refund_currency="sat")
+    refund_token = "cashuApersisted_refund_token"
+    refund_tx = _make_cashu_tx(
+        token=refund_token,
+        amount=5,
+        unit="sat",
+        type="out",
+        request_id=None,
+    )
+    refund_tx.source = "apikey"
+    refund_tx.api_key_hashed_key = key.hashed_key
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.exec = AsyncMock(return_value=_exec_result(refund_tx))
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance.send_token", AsyncMock()) as mock_send_token,
+    ):
+        result = await refund_wallet_endpoint(
+            authorization="Bearer sk-testhash",
+            x_cashu=None,
+            session=session,
+        )
+
+    assert result == {"token": refund_token, "sats": "5"}
+    assert refund_tx.collected is True
+    session.add.assert_called_once_with(refund_tx)
+    session.commit.assert_awaited_once()
+    mock_send_token.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_rejects_persisted_token_after_sweep() -> None:
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=0, refund_currency="sat")
+    refund_tx = _make_cashu_tx(
+        token="cashuAswept_apikey_refund",
+        amount=5,
+        unit="sat",
+        request_id=None,
+        swept=True,
+    )
+    refund_tx.source = "apikey"
+    refund_tx.api_key_hashed_key = key.hashed_key
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.exec = AsyncMock(return_value=_exec_result(refund_tx))
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    with patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.detail == "Refund has been swept"
+    session.add.assert_not_called()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> None:
     key = _make_api_key(balance=5000, refund_currency="sat")
     refund_token = "cashuArefund_apikey_token"
