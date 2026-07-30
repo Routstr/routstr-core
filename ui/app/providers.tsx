@@ -3,7 +3,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { useState, type ReactNode } from 'react';
-import { AuthProvider } from '@/lib/auth/auth-context';
 import { ProtectedRoute } from '@/lib/auth/protected-route';
 import { ThemeProvider } from '@/components/theme-provider';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -36,12 +35,10 @@ export function Providers({ children }: ProvidersProps) {
         disableTransitionOnChange
       >
         <TooltipProvider>
-          <AuthProvider>
-            <ProtectedRoute>
-              {children}
-              <Toaster position='top-right' />
-            </ProtectedRoute>
-          </AuthProvider>
+          <ProtectedRoute>
+            {children}
+            <Toaster position='top-right' />
+          </ProtectedRoute>
         </TooltipProvider>
         <ReactQueryDevtools initialIsOpen={false} />
       </ThemeProvider>
