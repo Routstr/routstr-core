@@ -3,8 +3,9 @@ import hashlib
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -15,11 +16,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from .core.db import ApiKey, LightningInvoice, create_session, get_session
 from .core.logging import get_logger
 from .core.settings import settings
+from .mint import (
+    is_mint_rate_limited,
+    mint_cooldown_remaining,
+    run_mint_operation,
+)
 from .wallet import (
     MintConnectionError,
-    _is_mint_rate_limited,
-    _mint_cooldown_remaining,
-    _mint_operation,
     get_wallet,
     is_mint_connection_error,
     wallet_operation_guard,
@@ -31,7 +34,31 @@ lightning_router = APIRouter(prefix="/lightning")
 
 # Avoid duplicate work within one process. Cross-process credit fencing is done
 # by the conditional pending -> paid update in _finalize_invoice_settlement().
-_invoice_settlement_locks: dict[str, asyncio.Lock] = {}
+@dataclass
+class _InvoiceLockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+
+
+_invoice_settlement_locks: dict[str, _InvoiceLockEntry] = {}
+
+
+@asynccontextmanager
+async def _invoice_settlement_lock(invoice_id: str) -> AsyncGenerator[None, None]:
+    """Serialize one invoice and remove its lock after the last waiter leaves."""
+
+    entry = _invoice_settlement_locks.get(invoice_id)
+    if entry is None:
+        entry = _InvoiceLockEntry(asyncio.Lock())
+        _invoice_settlement_locks[invoice_id] = entry
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if entry.users == 0 and _invoice_settlement_locks.get(invoice_id) is entry:
+            del _invoice_settlement_locks[invoice_id]
 
 
 @dataclass(frozen=True)
@@ -142,11 +169,11 @@ async def _request_mint_with_fallback(
     configured = allowed_mints or [settings.primary_mint, *settings.cashu_mints]
     candidates = list(dict.fromkeys(configured))
     for mint_url in candidates:
-        cooldown = _mint_cooldown_remaining(mint_url)
+        cooldown = mint_cooldown_remaining(mint_url)
         if cooldown > 0:
             tried.append(f"{mint_url}: cooling down")
             logger.info(
-                "Skipping rate-limited mint",
+                "Skipping mint during cooldown",
                 extra={
                     "mint_url": mint_url,
                     "cooldown_seconds": round(cooldown, 2),
@@ -156,7 +183,7 @@ async def _request_mint_with_fallback(
             continue
         try:
             wallet = await get_wallet(mint_url, "sat", retry_on_rate_limit=False)
-            quote = await _mint_operation(
+            quote = await run_mint_operation(
                 lambda: wallet.request_mint(amount_sats),
                 op_name="request_mint_invoice",
                 mint_url=mint_url,
@@ -165,7 +192,7 @@ async def _request_mint_with_fallback(
             return quote.request, quote.quote, mint_url
         except Exception as e:
             tried.append(f"{mint_url}: {type(e).__name__}")
-            if not is_mint_connection_error(e) and not _is_mint_rate_limited(e):
+            if not is_mint_connection_error(e) and not is_mint_rate_limited(e):
                 raise
             logger.warning(
                 "request_mint failed, trying fallback mint",
@@ -352,8 +379,7 @@ async def recover_invoice(
 async def check_invoice_payment(
     invoice: LightningInvoice, session: AsyncSession
 ) -> None:
-    lock = _invoice_settlement_locks.setdefault(invoice.id, asyncio.Lock())
-    async with lock, wallet_operation_guard():
+    async with _invoice_settlement_lock(invoice.id), wallet_operation_guard():
         minted = False
         try:
             # Snapshot the row and end the caller's read transaction before any
@@ -368,7 +394,7 @@ async def check_invoice_payment(
 
             mint_url = settlement.mint_url or settings.primary_mint
             wallet = await get_wallet(mint_url, "sat")
-            mint_status = await _mint_operation(
+            mint_status = await run_mint_operation(
                 lambda: wallet.get_mint_quote(settlement.payment_hash),
                 op_name="get_mint_quote",
                 mint_url=mint_url,
@@ -483,7 +509,7 @@ async def _mint_invoice_quote(
         return
 
     try:
-        await _mint_operation(
+        await run_mint_operation(
             lambda: wallet.mint(invoice.amount_sats, quote_id=invoice.payment_hash),
             op_name=f"invoice_mint_{invoice.purpose}",
             mint_url=mint_url,

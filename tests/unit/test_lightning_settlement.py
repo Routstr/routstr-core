@@ -155,6 +155,7 @@ async def test_non_pending_invoice_is_not_minted() -> None:
 
     get_wallet.assert_not_awaited()
     session.commit.assert_awaited_once()
+    assert _invoice_settlement_locks == {}
 
 
 @pytest.mark.asyncio
@@ -212,3 +213,4 @@ async def test_concurrent_invoice_checks_finalize_once_in_process() -> None:
 
     assert invoice.status == "paid"
     finalize.assert_awaited_once()
+    assert _invoice_settlement_locks == {}

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
+from cashu.core.base import MeltQuoteState
 
 from routstr.core.db import ApiKey
 from routstr.wallet import (
@@ -639,7 +640,9 @@ def _make_swap_mocks(
             quote=f"melt_quote_{invoice}", amount=invoice, fee_reserve=_next_fee()
         )
     )
-    mock_token_wallet.melt = AsyncMock(return_value=Mock())
+    mock_token_wallet.melt = AsyncMock(
+        return_value=Mock(state=MeltQuoteState.paid)
+    )
 
     return mock_token, mock_token_wallet, mock_primary_wallet
 
@@ -770,7 +773,7 @@ async def test_swap_retries_when_melt_demands_more_than_quoted() -> None:
             "Mint Error: not enough inputs provided for melt. "
             "Provided: 179, needed: 180 (Code: 11000)"
         ),
-        Mock(),
+        Mock(state=MeltQuoteState.paid),
     ]
 
     from routstr.core.settings import settings
@@ -801,7 +804,7 @@ async def test_swap_retries_on_cdk_unbalanced_error() -> None:
     )
     mock_token_wallet.melt.side_effect = [
         Exception("Mint Error: Transaction unbalanced: 179, 178, 2 (Code: 11005)"),
-        Mock(),
+        Mock(state=MeltQuoteState.paid),
     ]
 
     from routstr.core.settings import settings
@@ -1522,22 +1525,32 @@ async def test_swap_fee_estimation_transport_error_raises_mint_connection_error(
 
 
 @pytest.mark.asyncio
-async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
-    """A transport failure during melt is surfaced as MintConnectionError and
-    is NOT retried — the mint is down, not demanding higher fees."""
+async def test_swap_melt_transport_error_is_never_reported_reusable() -> None:
+    """A timed-out melt remains ambiguous even when an immediate snapshot says
+    UNPAID/UNSPENT, so callers must not receive the original token for retry."""
     from routstr.wallet import swap_to_primary_mint
 
     mock_token, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
         1000, fee_reserves=[10, 10]
     )
     mock_token_wallet.melt = AsyncMock(side_effect=httpx.ConnectTimeout("timed out"))
+    from cashu.core.base import MeltQuoteState, ProofSpentState
+
+    mock_token_wallet.get_melt_quote = AsyncMock(
+        return_value=Mock(state=MeltQuoteState.unpaid)
+    )
+    mock_token_wallet.check_proof_state = AsyncMock(
+        return_value=Mock(
+            states=[Mock(state=ProofSpentState.unspent) for _ in mock_token.proofs]
+        )
+    )
 
     from routstr.core.settings import settings
 
     with patch.object(settings, "primary_mint", "http://primary:3338"):
         with patch.object(settings, "primary_mint_unit", "sat"):
             with patch("routstr.wallet.get_wallet", return_value=mock_primary_wallet):
-                with pytest.raises(MintConnectionError):
+                with pytest.raises(TokenConsumedError, match="ambiguous"):
                     await swap_to_primary_mint(mock_token, mock_token_wallet)
 
     assert mock_token_wallet.melt.call_count == 1
@@ -1595,8 +1608,8 @@ async def test_mint_rate_guard_waits_for_adaptive_cooldown() -> None:
     guard._cooldown_until = 15.0
     operation = AsyncMock(return_value="ok")
 
-    with patch("routstr.wallet.time.monotonic", return_value=10.0):
-        with patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep:
+    with patch("routstr.mint.time.monotonic", return_value=10.0):
+        with patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep:
             assert await guard.run(operation) == "ok"
 
     sleep.assert_awaited_once_with(5.0)
@@ -1611,7 +1624,7 @@ async def test_mint_rate_guard_exponentially_backs_off_repeated_429s() -> None:
     expected_delays = [60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 25200]
     now = 0.0
 
-    with patch("routstr.wallet.time.monotonic") as monotonic:
+    with patch("routstr.mint.time.monotonic") as monotonic:
         for index, expected in enumerate(expected_delays, start=1):
             monotonic.return_value = now
             assert guard.apply_rate_limit_cooldown(60) == expected
@@ -1682,8 +1695,8 @@ async def test_mint_rate_guard_keeps_cooldown_when_concurrency_is_unlimited() ->
     operation = AsyncMock(return_value="ok")
     with (
         patch.object(settings, "mint_max_concurrency", 0),
-        patch("routstr.wallet.time.monotonic", return_value=0),
-        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+        patch("routstr.mint.time.monotonic", return_value=0),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
     ):
         guard = _MintRateGuard.get("http://mint:3338")
         guard.apply_cooldown(5)
@@ -1715,8 +1728,8 @@ async def test_mint_operation_honors_retry_after_as_minimum() -> None:
     with patch.object(settings, "mint_retry_max_attempts", 1):
         with patch.object(settings, "mint_operation_timeout_seconds", 0):
             with patch.object(settings, "mint_max_concurrency", 1):
-                with patch("routstr.wallet.time.monotonic", return_value=0.1):
-                    with patch("routstr.wallet.asyncio.sleep", sleep):
+                with patch("routstr.mint.time.monotonic", return_value=0.1):
+                    with patch("routstr.mint.asyncio.sleep", sleep):
                         result = await _mint_operation(
                             factory, mint_url="http://mint:3338"
                         )
@@ -1734,7 +1747,7 @@ async def test_mint_operation_timeout_excludes_adaptive_cooldown() -> None:
     with (
         patch.object(settings, "mint_max_concurrency", 1),
         patch.object(settings, "mint_operation_timeout_seconds", 0.01),
-        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
     ):
         guard = _MintRateGuard.get("http://mint:3338")
         guard.apply_cooldown(60)
@@ -1763,7 +1776,7 @@ async def test_default_timeout_allows_retry_after_rate_limit_cooldown() -> None:
         patch.object(settings, "mint_retry_max_attempts", 3),
         patch.object(settings, "mint_operation_timeout_seconds", 30),
         patch.object(settings, "mint_max_concurrency", 1),
-        patch("routstr.wallet.asyncio.sleep", AsyncMock()),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()),
     ):
         assert await _mint_operation(operation, mint_url="http://mint:3338") == "ok"
 
@@ -1780,7 +1793,7 @@ async def test_mint_operation_retries_httpx_timeout_only_when_safe() -> None:
 
     with patch.object(settings, "mint_retry_max_attempts", 2):
         with patch.object(settings, "mint_operation_timeout_seconds", 0):
-            with patch("routstr.wallet.asyncio.sleep", AsyncMock()):
+            with patch("routstr.mint.asyncio.sleep", AsyncMock()):
                 assert await _mint_operation(retrying) == "ok"
                 with pytest.raises(httpx.TimeoutException):
                     await _mint_operation(non_retrying, retry_timeouts=False)
@@ -1802,7 +1815,7 @@ async def test_get_wallet_initializes_and_loads_once_concurrently() -> None:
     ) as create:
         # A fresh wallet must load even when the host has been up for less than
         # the reload interval.
-        with patch("routstr.wallet.time.monotonic", return_value=10.0):
+        with patch("routstr.mint.time.monotonic", return_value=10.0):
             first, second = await asyncio.gather(
                 get_wallet("http://mint:3338"), get_wallet("http://mint:3338")
             )
@@ -1833,7 +1846,7 @@ async def test_get_wallet_can_surface_429_without_retrying() -> None:
         patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=wallet)),
         patch.object(settings, "mint_retry_max_attempts", 3),
         patch.object(settings, "mint_operation_timeout_seconds", 0),
-        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
     ):
         with pytest.raises(httpx.HTTPStatusError):
             await get_wallet("http://mint:3338", retry_on_rate_limit=False)
@@ -1965,7 +1978,7 @@ async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
         melt_quote=AsyncMock(
             return_value=Mock(quote="melt_q", amount=990, fee_reserve=10)
         ),
-        melt=AsyncMock(return_value=Mock()),
+        melt=AsyncMock(return_value=Mock(state=MeltQuoteState.paid)),
     )
 
     mint_quote = Mock(quote="mint_q_secondary", request="lnbc1secondary")
@@ -1994,6 +2007,7 @@ async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
         patch("asyncio.sleep", AsyncMock()),
         patch("routstr.wallet.get_wallet", side_effect=mock_get),
         patch("routstr.wallet.logger.warning") as warning,
+        patch("routstr.wallet.logger.info") as info,
     ):
         amount, unit, mint_url = await swap_to_primary_mint(token, source_wallet)
 
@@ -2003,7 +2017,7 @@ async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
     assert any(call.args[0] == secondary for call in mock_get.await_args_list)
     events = {
         call.kwargs["extra"]["event"]
-        for call in warning.call_args_list
+        for call in [*warning.call_args_list, *info.call_args_list]
         if "extra" in call.kwargs and "event" in call.kwargs["extra"]
     }
     assert "cashu_destination_failed" in events
@@ -2181,8 +2195,8 @@ async def test_wallet_fallback_skips_mint_during_cooldown() -> None:
         patch.object(settings, "cashu_mints", [primary, secondary]),
         patch.object(settings, "mint_max_concurrency", 0),
         patch.object(settings, "mint_operation_timeout_seconds", 0),
-        patch("routstr.wallet.time.monotonic", return_value=10),
-        patch("routstr.wallet.asyncio.sleep", AsyncMock()) as sleep,
+        patch("routstr.mint.time.monotonic", return_value=10),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
         patch(
             "routstr.wallet.get_wallet",
             AsyncMock(side_effect=lambda mint, *args, **kwargs: wallets[mint]),
@@ -2378,49 +2392,28 @@ def test_classify_500_with_rate_limit_text_is_not_mint_rate_limited() -> None:
 
 @pytest.mark.asyncio
 async def test_probe_does_not_escalate_consecutive_rate_limits() -> None:
-    """When a probe fails with a rate limit, _consecutive_rate_limits should
-    NOT increment — the probe is a recovery check, not a new request."""
-    from routstr.wallet import _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, _MintRateGuard
+    from routstr.mint import MintRateGuard
 
-    guard = _MintRateGuard("http://mint", max_concurrency=0)
-
-    # Simulate initial rate limit: apply_rate_limit_cooldown increments counter
+    guard = MintRateGuard("http://mint", max_concurrency=0)
     guard.apply_rate_limit_cooldown()
-    assert guard._consecutive_rate_limits == 1
-    cooldown_before = guard._cooldown_until
-    assert cooldown_before > 0
+    guard._cooldown_until = 0.0
 
-    # Simulate probe failure: _run_probe uses apply_cooldown, NOT
-    # apply_rate_limit_cooldown, so the counter stays at 1.
-    guard.apply_cooldown(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, reason="rate_limited")
-    assert guard._consecutive_rate_limits == 1  # unchanged!
+    with pytest.raises(httpx.HTTPStatusError):
+        await guard.run(AsyncMock(side_effect=_http_429_error()))
+
+    assert guard._consecutive_rate_limits == 1
     assert guard._needs_probe is True
 
 
 @pytest.mark.asyncio
 async def test_probe_recovery_resets_consecutive_rate_limits() -> None:
-    """A successful probe resets _consecutive_rate_limits to 0."""
-    from routstr.wallet import _MintRateGuard
+    from routstr.mint import MintRateGuard
 
-    guard = _MintRateGuard("http://mint", max_concurrency=0)
-
-    # First rate limit: increments to 1, sets 60s cooldown.
+    guard = MintRateGuard("http://mint", max_concurrency=0)
     guard.apply_rate_limit_cooldown()
-    assert guard._consecutive_rate_limits == 1
-
-    # Manually expire the cooldown so the next call creates a fresh one.
     guard._cooldown_until = 0.0
-    guard._cooldown_reason = None
 
-    # Second rate limit (after cooldown expired): increments to 2.
-    guard.apply_rate_limit_cooldown()
-    assert guard._consecutive_rate_limits == 2
-
-    # Simulate a successful probe by resetting (as _run_probe does)
-    guard._needs_probe = False
-    guard._cooldown_until = 0.0
-    guard._cooldown_reason = None
-    guard._consecutive_rate_limits = 0
+    assert await guard.run(AsyncMock(return_value="ok")) == "ok"
 
     assert guard._consecutive_rate_limits == 0
     assert guard._needs_probe is False

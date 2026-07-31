@@ -136,12 +136,21 @@ Use environment variables for:
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
+| `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
+| `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
+| `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
+| `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
 | `PAYOUT_INTERVAL_SECONDS` | Payout loop interval (seconds) | `900`                            |
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |
 | `CORS_ORIGINS`       | Allowed CORS origins              | `*`                                  |
 | `RELAYS`             | Nostr relays (comma-separated)    | (default set)                        |
+
+Mint HTTP 429 responses create a per-mint cooldown. Operations that already hold
+Routstr's wallet mutation lock fail fast during that cooldown instead of waiting
+while blocking every other wallet mutation. Callers receive an error and may retry
+later; the current response does not include the cooldown duration.
 
 ### Priority
 

@@ -161,7 +161,7 @@ async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
         patch.object(settings, "primary_mint", "http://mint:3338"),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.db.create_session", _fake_session),
-        patch("routstr.wallet.time.monotonic", return_value=10),
+        patch("routstr.mint.time.monotonic", return_value=10),
         patch("routstr.wallet.logger.warning") as warning,
     ):
         first = await fetch_all_balances(units=["sat"])
@@ -180,7 +180,7 @@ async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
         patch.object(settings, "primary_mint", "http://mint:3338"),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.db.create_session", _fake_session),
-        patch("routstr.wallet.time.monotonic", return_value=71),
+        patch("routstr.mint.time.monotonic", return_value=71),
         patch("routstr.wallet.logger.warning"),
     ):
         await fetch_all_balances(units=["sat"])
@@ -219,7 +219,7 @@ async def test_balance_failure_applies_mint_cooldown_to_other_units() -> None:
         patch.object(settings, "primary_mint", mint),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.db.create_session", _fake_session),
-        patch("routstr.wallet.time.monotonic", return_value=10),
+        patch("routstr.mint.time.monotonic", return_value=10),
         patch("routstr.wallet.logger.warning") as warning,
     ):
         details, *_ = await fetch_all_balances(units=["sat", "msat"])

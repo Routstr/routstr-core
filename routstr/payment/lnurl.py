@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import math
 from typing import TypedDict
 
 import httpx
+from cashu.core.base import MeltQuoteState
 from cashu.wallet.wallet import Proof, Wallet
 
-# The Cashu library issues POST /v1/melt/bolt11 with timeout=None, so a hung or
-# very slow mint can block a melt (and any caller, e.g. the payout loop)
-# indefinitely. _mint_operation (imported lazily in raw_send_to_lnurl to avoid
-# a circular import with wallet.py) bounds it via MINT_OPERATION_TIMEOUT_SECONDS.
-MELT_TIMEOUT_SECONDS = 60
+from ..mint import MINT_TRANSPORT_EXCEPTIONS, run_mint_operation
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -222,9 +218,7 @@ async def raw_send_to_lnurl(
         lnurl_data["callback_url"], final_amount
     )
 
-    from ..wallet import _mint_operation
-
-    melt_quote_resp = await _mint_operation(
+    melt_quote_resp = await run_mint_operation(
         lambda: wallet.melt_quote(invoice=bolt11_invoice),
         op_name="lnurl_melt_quote",
         mint_url=str(wallet.url),
@@ -234,22 +228,44 @@ async def raw_send_to_lnurl(
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
     try:
-        _ = await asyncio.wait_for(
-            _mint_operation(
-                lambda: wallet.melt(
-                    proofs=proofs,
-                    invoice=bolt11_invoice,
-                    fee_reserve_sat=melt_quote_resp.fee_reserve,
-                    quote_id=melt_quote_resp.quote,
-                ),
-                op_name="lnurl_melt",
-                mint_url=str(wallet.url),
-                retry_timeouts=False,
+        melt_response = await run_mint_operation(
+            lambda: wallet.melt(
+                proofs=proofs,
+                invoice=bolt11_invoice,
+                fee_reserve_sat=melt_quote_resp.fee_reserve,
+                quote_id=melt_quote_resp.quote,
             ),
-            timeout=MELT_TIMEOUT_SECONDS,
+            op_name="lnurl_melt",
+            mint_url=str(wallet.url),
+            retry_timeouts=False,
         )
-    except (httpx.TimeoutException, asyncio.TimeoutError) as e:
+    except MINT_TRANSPORT_EXCEPTIONS as error:
+        melt_response = None
+        melt_error: BaseException | None = error
+    else:
+        melt_error = None
+
+    if getattr(melt_response, "state", None) == MeltQuoteState.paid:
+        return final_amount
+
+    try:
+        quote = await run_mint_operation(
+            lambda: wallet.get_melt_quote(melt_quote_resp.quote),
+            op_name="reconcile_lnurl_melt_quote",
+            mint_url=str(wallet.url),
+            retry_timeouts=False,
+        )
+    except Exception as reconciliation_error:
         raise LNURLError(
-            f"Melt timed out after {MELT_TIMEOUT_SECONDS}s (mint unresponsive)"
-        ) from e
-    return final_amount
+            "Melt outcome is ambiguous; quote reconciliation failed and proofs "
+            "must not be retried"
+        ) from reconciliation_error
+
+    if quote is not None and quote.state == MeltQuoteState.paid:
+        return final_amount
+
+    state = getattr(getattr(quote, "state", None), "value", "unknown")
+    raise LNURLError(
+        "Melt outcome is ambiguous; proofs must not be retried "
+        f"(quote_state={state})"
+    ) from melt_error

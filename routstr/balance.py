@@ -215,7 +215,7 @@ async def topup_wallet_endpoint(
         raise HTTPException(status_code=400, detail="Invalid token format")
 
     source_mint = token_mint_url(cashu_token, "unknown")
-    logger.warning(
+    logger.info(
         "Cashu wallet top-up started",
         extra={
             "event": "cashu_topup_started",
@@ -259,7 +259,7 @@ async def topup_wallet_endpoint(
         )
         raise HTTPException(status_code=status_code, detail=message)
 
-    logger.warning(
+    logger.info(
         "Cashu wallet top-up completed",
         extra={
             "event": "cashu_topup_completed",

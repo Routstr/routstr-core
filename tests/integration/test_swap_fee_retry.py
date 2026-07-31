@@ -20,6 +20,7 @@ from collections.abc import Callable
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from cashu.core.base import MeltQuoteState
 from httpx import AsyncClient, Response
 
 from routstr.core.settings import settings
@@ -81,7 +82,9 @@ def _make_swap_mocks(
             quote=f"melt_quote_{invoice}", amount=invoice, fee_reserve=_next_fee()
         )
     )
-    mock_token_wallet.melt = AsyncMock(return_value=Mock())
+    mock_token_wallet.melt = AsyncMock(
+        return_value=Mock(state=MeltQuoteState.paid)
+    )
 
     return mock_token, mock_token_wallet, mock_primary_wallet
 
@@ -144,7 +147,7 @@ async def test_topup_retries_when_melt_demands_more_than_quoted(
             "Mint Error: not enough inputs provided for melt. "
             "Provided: 179, needed: 180 (Code: 11000)"
         ),
-        Mock(),
+        Mock(state=MeltQuoteState.paid),
     ]
 
     response = await _post_topup(

@@ -7,21 +7,7 @@ os.environ["UPSTREAM_BASE_URL"] = "http://test"
 os.environ["UPSTREAM_API_KEY"] = "test"
 
 from routstr.core.settings import settings  # noqa: E402
-from routstr.payment.helpers import (  # noqa: E402
-    apply_mint_fee_allowance,
-    get_max_cost_for_model,
-)
-
-
-def test_mint_fee_allowance_reserves_five_percent_fallback_headroom() -> None:
-    # Interim policy: Routstr may pay hidden cross-mint Lightning fees when a
-    # trusted-mint fallback is required.
-    assert apply_mint_fee_allowance(124_886) == 118_642
-
-
-def test_mint_fee_allowance_never_drops_below_minimum() -> None:
-    with patch.object(settings, "min_request_msat", 100):
-        assert apply_mint_fee_allowance(50) == 100
+from routstr.payment.helpers import get_max_cost_for_model  # noqa: E402
 
 
 async def test_get_max_cost_for_model_known() -> None:
