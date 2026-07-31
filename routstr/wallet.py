@@ -244,7 +244,9 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 
     all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
     proof_summary = {
-        f"{k.mint_url}/{k.unit.name}": sum(p.amount for p in wallet.proofs if p.id == k.id)
+        f"{k.mint_url}/{k.unit.name}": sum(
+            p.amount for p in wallet.proofs if p.id == k.id
+        )
         for k in wallet.keysets.values()
     }
     # Show ALL proofs in DB by keyset_id, regardless of whether the loaded wallet
@@ -326,14 +328,41 @@ class Bolt11PaymentPlan:
         return maximum if self.unit == "sat" else (maximum + 999) // 1000
 
 
-async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
-    """Choose the sufficiently funded configured mint with most balance.
+async def _owner_balance_for_mint_and_unit(
+    mint_url: str, unit: str, proofs_balance: int
+) -> int:
+    """Return spendable node-owned funds without crossing user liabilities."""
+    async with db.create_session() as session:
+        user_liability = await db.balances_for_mint_and_unit(session, mint_url, unit)
+    # API-key balances are stored in msats. Cashu ``sat`` proofs are not.
+    if unit == "sat":
+        user_liability = (user_liability + 999) // 1000
+    return max(0, proofs_balance - user_liability)
 
-    Candidate discovery only reads balances and melt quotes. Coin selection,
-    which may split proofs, is deferred until the winning mint is known.
+
+async def maximum_owner_cashu_balance_sats() -> int:
+    """Return the largest liability-adjusted balance held by one mint/unit."""
+    details, _, _, _ = await fetch_all_balances()
+    balances = [
+        detail["owner_balance"]
+        if detail["unit"] == "sat"
+        else detail["owner_balance"] // 1000
+        for detail in details
+        if not detail.get("error")
+    ]
+    return max([0, *balances])
+
+
+async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
+    """Choose the sufficiently funded configured mint with most owner funds.
+
+    Candidate discovery reads balances, user liabilities, and melt quotes. Coin
+    selection, which may split proofs, is deferred until the winner is known.
     """
     mint_urls = list(dict.fromkeys([*settings.cashu_mints, settings.primary_mint]))
     candidates: list[tuple[int, Wallet, list[Proof], MeltQuote, str, str]] = []
+    failures: list[dict[str, str]] = []
+    evaluated = 0
 
     for mint_url in mint_urls:
         if not mint_url:
@@ -345,11 +374,13 @@ async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
                     wallet, mint_url, unit, not_reserved=True
                 )
                 proofs = await slow_filter_spend_proofs(proofs, wallet)
-                balance = sum(proof.amount for proof in proofs)
-                if balance <= 0:
+                proofs_balance = sum(proof.amount for proof in proofs)
+                if proofs_balance <= 0:
+                    evaluated += 1
                     continue
 
                 quote = await wallet.melt_quote(invoice=invoice)
+                evaluated += 1
                 # select_to_send runs with include_fees=True, so the input fee
                 # has to be part of sufficiency too. Without it a mint passes
                 # this filter and then fails coin selection.
@@ -358,24 +389,37 @@ async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
                     + quote.fee_reserve
                     + wallet.get_fees_for_proofs(proofs)
                 )
-                if balance < required:
+                owner_balance = await _owner_balance_for_mint_and_unit(
+                    mint_url, unit, proofs_balance
+                )
+                if owner_balance < required:
                     continue
-                balance_msats = balance * 1000 if unit == "sat" else balance
+                owner_balance_msats = (
+                    owner_balance * 1000 if unit == "sat" else owner_balance
+                )
                 candidates.append(
-                    (balance_msats, wallet, proofs, quote, mint_url, unit)
+                    (owner_balance_msats, wallet, proofs, quote, mint_url, unit)
                 )
             except Exception as e:
+                failures.append({"mint_url": mint_url, "unit": unit, "error": str(e)})
                 logger.debug(
                     "Cashu mint cannot fund BOLT11 invoice",
                     extra={"mint_url": mint_url, "unit": unit, "error": str(e)},
                 )
 
     if not candidates:
-        raise ValueError("No configured Cashu mint has enough balance to pay invoice")
-
-    _, wallet, proofs, quote, mint_url, unit = max(
-        candidates, key=lambda item: item[0]
+        if failures:
+            logger.warning(
+                "No Cashu mint could fund the BOLT11 invoice",
+                extra={"evaluated": evaluated, "failures": failures},
     )
+        if evaluated == 0 and failures:
+            raise RuntimeError("Every configured Cashu mint refused the payment")
+        raise ValueError(
+            "No configured Cashu mint has enough balance after user liabilities to pay invoice"
+        )
+
+    _, wallet, proofs, quote, mint_url, unit = max(candidates, key=lambda item: item[0])
     return Bolt11PaymentPlan(invoice, wallet, proofs, quote, mint_url, unit)
 
 
@@ -410,22 +454,27 @@ async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str
             ),
             timeout=60,
         )
-    except Exception as e:
+    except BaseException as e:
         # The mint may still be settling with these proofs, so they must stay
         # reserved — but cashu's melt() un-reserves them itself on a mint
         # transport error, the exact ambiguous case. Re-reserve with the melt
         # quote id, not as a send: get_melt_quote() finds the proofs to settle
         # by melt_id, so a send-style reservation would strand them — paid
-        # proofs never invalidated, unpaid ones never released.
+        # proofs never invalidated, unpaid ones never released. BaseException
+        # includes task cancellation after the melt was submitted.
         try:
-            await plan.wallet.set_reserved_for_melt(
+            await asyncio.shield(
+                plan.wallet.set_reserved_for_melt(
                 selected, reserved=True, quote_id=plan.quote.quote
             )
-        except Exception:
+            )
+        except BaseException:
             logger.critical(
                 "Could not re-reserve proofs after an ambiguous melt",
                 extra={"mint_url": plan.mint_url, "quote_id": plan.quote.quote},
             )
+        if isinstance(e, asyncio.CancelledError):
+            raise
         raise Bolt11PaymentAmbiguous(f"Cashu melt did not return: {e}") from e
 
     raw_state = getattr(result, "state", None)
@@ -452,9 +501,7 @@ async def pay_bolt11_invoice(invoice: str) -> tuple[int, str, str]:
     return await execute_bolt11_payment(await prepare_bolt11_payment(invoice))
 
 
-async def check_bolt11_payment_status(
-    mint_url: str, unit: str, quote_id: str
-) -> str:
+async def check_bolt11_payment_status(mint_url: str, unit: str, quote_id: str) -> str:
     """Ask the mint what became of an earlier melt attempt.
 
     Returns ``"paid"``, ``"unpaid"``, ``"pending"``, or ``"unknown"``. This is
@@ -796,11 +843,16 @@ async def swap_to_primary_mint(
             # advance the counter so the next request derives fresh secrets.
             logger.warning(
                 "swap_to_primary_mint: outputs already signed — recovering orphaned proofs",
-                extra={"mint_quote_id": mint_quote.quote, "minted_amount": minted_amount},
+                extra={
+                    "mint_quote_id": mint_quote.quote,
+                    "minted_amount": minted_amount,
+                },
             )
             try:
                 for keyset_id in primary_wallet.keysets:
-                    await primary_wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
+                    await primary_wallet.restore_tokens_for_keyset(
+                        keyset_id, to=1, batch=25
+                    )
                 await primary_wallet.load_proofs(reload=True)
                 post_recovery_balance = primary_wallet.available_balance.amount
                 balance_gained = post_recovery_balance - pre_mint_balance
@@ -1034,18 +1086,20 @@ async def fetch_all_balances(
     if units is None:
         units = ["sat", "msat"]
 
-    async def fetch_balance(
-        session: db.AsyncSession, mint_url: str, unit: str
-    ) -> BalanceDetail:
+    async def fetch_balance(mint_url: str, unit: str) -> BalanceDetail:
         try:
             wallet = await get_wallet(mint_url, unit)
             proofs = get_proofs_per_mint_and_unit(
                 wallet, mint_url, unit, not_reserved=True
             )
             proofs = await slow_filter_spend_proofs(proofs, wallet)
-            user_balance = await db.balances_for_mint_and_unit(session, mint_url, unit)
+            # AsyncSession cannot be shared by concurrent gather tasks.
+            async with db.create_session() as session:
+                user_balance = await db.balances_for_mint_and_unit(
+                    session, mint_url, unit
+                )
             if unit == "sat":
-                user_balance = user_balance // 1000
+                user_balance = (user_balance + 999) // 1000
             proofs_balance = sum(proof.amount for proof in proofs)
 
             result: BalanceDetail = {
@@ -1076,16 +1130,9 @@ async def fetch_all_balances(
     if settings.primary_mint and settings.primary_mint not in mint_urls:
         mint_urls.append(settings.primary_mint)
 
-    # Create tasks for all mint/unit combinations
-    async with db.create_session() as session:
-        tasks = [
-            fetch_balance(session, mint_url, unit)
-            for mint_url in mint_urls
-            for unit in units
-        ]
-
-        # Run all tasks concurrently
-        balance_details = list(await asyncio.gather(*tasks))
+    # Run mint/unit combinations concurrently; each task owns its DB session.
+    tasks = [fetch_balance(mint_url, unit) for mint_url in mint_urls for unit in units]
+    balance_details = list(await asyncio.gather(*tasks))
 
     # Calculate totals
     total_wallet_balance_sats = 0
@@ -1149,7 +1196,7 @@ async def periodic_payout() -> None:
                                 session, mint_url, unit
                             )
                             if unit == "sat":
-                                user_balance = user_balance // 1000
+                                user_balance = (user_balance + 999) // 1000
                             proofs_balance = sum(proof.amount for proof in proofs)
                             available_balance = proofs_balance - user_balance
                             # Threshold is configured in sats; convert for msat wallets.
@@ -1197,10 +1244,11 @@ async def _refund_sweep_once(cutoff: int) -> None:
             db.CashuTransaction.type == "out",
             db.CashuTransaction.collected == False,  # noqa: E712
             db.CashuTransaction.swept == False,  # noqa: E712
-            # NULL != 'x' is NULL in SQL, so legacy rows with no source would
-            # drop out of the sweep without the explicit IS NULL arm.
-            (db.CashuTransaction.source != "ppq_auto_topup")
-            | (db.CashuTransaction.source == None),  # noqa: E711
+            # PPQ rows describe a Lightning spend or its claim lock, not a
+            # refundable Cashu token. ``source`` is non-null by schema.
+            col(db.CashuTransaction.source).notin_(
+                ["ppq_auto_topup", "ppq_auto_topup_claim"]
+            ),
             db.CashuTransaction.created_at < cutoff,
         )
         results = await session.exec(stmt)

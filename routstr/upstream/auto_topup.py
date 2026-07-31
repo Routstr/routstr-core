@@ -7,6 +7,7 @@ import uuid
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, or_, select, update
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
 from ..core.db import CashuTransaction, UpstreamProviderRow, create_session
@@ -15,9 +16,11 @@ from ..core.db import (
 )
 from ..payment.price import sats_usd_price
 from ..wallet import (
+    Bolt11PaymentAmbiguous,
     Bolt11PaymentNotAttempted,
     check_bolt11_payment_status,
     execute_bolt11_payment,
+    maximum_owner_cashu_balance_sats,
     prepare_bolt11_payment,
     send_token,
 )
@@ -61,7 +64,7 @@ async def periodic_auto_topup() -> None:
 
 async def _run_auto_topup_cycle() -> None:
     """Check all eligible providers once, isolating failures by provider."""
-    await _reconcile_all_ppq_claims()
+    reconciled_ppq_provider_ids = await _reconcile_all_ppq_claims()
 
     async with create_session() as session:
         query = select(UpstreamProviderRow).where(
@@ -71,6 +74,12 @@ async def _run_auto_topup_cycle() -> None:
         providers = (await session.exec(query)).all()
 
     for row in providers:
+        # A claim that was active at cycle start suppresses a new payment for
+        # the whole cycle. PPQ may report an invoice settled before its balance
+        # endpoint reflects the credit, so immediately rechecking can duplicate
+        # the top-up. This also avoids reconciling the same claim twice.
+        if row.id is not None and row.id in reconciled_ppq_provider_ids:
+            continue
         try:
             await _check_and_topup(row)
         except Exception as e:
@@ -86,8 +95,8 @@ async def _run_auto_topup_cycle() -> None:
             )
 
 
-async def _reconcile_all_ppq_claims() -> None:
-    """Reconcile every active PPQ claim, ignoring top-up eligibility.
+async def _reconcile_all_ppq_claims() -> set[int]:
+    """Reconcile active PPQ claims and return providers suppressed this cycle.
 
     A claim tracks money already committed, so it must keep reconciling even
     after the provider is disabled, auto top-up is switched off, or the API
@@ -103,6 +112,7 @@ async def _reconcile_all_ppq_claims() -> None:
             )
         ).all()
 
+    active_provider_ids: set[int] = set()
     for row in rows:
         try:
             if row.id is None:
@@ -110,17 +120,17 @@ async def _reconcile_all_ppq_claims() -> None:
             state = await get_ppq_auto_topup_state(row.id)
             if not state.get("active"):
                 continue
+            active_provider_ids.add(row.id)
             # Without an API key the PPQ side cannot be polled, but mint
             # reconciliation still can — pass provider as None.
-            provider = (
-                PPQAIUpstreamProvider.from_db_row(row) if row.api_key else None
-            )
+            provider = PPQAIUpstreamProvider.from_db_row(row) if row.api_key else None
             await _reconcile_ppq_state(row, provider)
         except Exception as e:
             logger.error(
                 "PPQ claim reconciliation failed",
                 extra={"provider_id": row.id, "error": str(e)},
             )
+    return active_provider_ids
 
 
 def _invalid_number(value: object, *, integer: bool = False) -> bool:
@@ -203,9 +213,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         await _check_and_topup_ppq(row, settings)
 
 
-async def _check_and_topup_routstr(
-    row: UpstreamProviderRow, settings: dict
-) -> None:
+async def _check_and_topup_routstr(row: UpstreamProviderRow, settings: dict) -> None:
     threshold = float(settings["topup_threshold"])
     amount = int(settings["topup_amount_limit"])
     mint_url = settings.get("topup_mint_url")
@@ -313,6 +321,10 @@ def _ppq_state_id(row: UpstreamProviderRow) -> str:
 
 def _ppq_state_id_for_provider(provider_id: int | str) -> str:
     return f"ppq-auto-topup-{provider_id}"
+
+
+def _ppq_payment_id(operation_id: str) -> str:
+    return f"ppq-payment-{operation_id}"
 
 
 class PPQClaim(typing.NamedTuple):
@@ -437,7 +449,9 @@ async def release_ppq_auto_topup_state(
             update(CashuTransaction)
             .where(
                 col(CashuTransaction.id) == state_id,
-                col(CashuTransaction.source) == "ppq_auto_topup",
+                col(CashuTransaction.source).in_(
+                    ["ppq_auto_topup", "ppq_auto_topup_claim"]
+                ),
                 # Fence on the token itself, not the row read above: a change
                 # between the read and this write must lose the race.
                 col(CashuTransaction.request_id) == state_token,
@@ -446,9 +460,19 @@ async def release_ppq_auto_topup_state(
             )
             .values(swept=True)
         )
-        await session.commit()
         if (getattr(result, "rowcount", 0) or 0) == 1:
+            claim = _parse_ppq_request_id(state_token)
+            if claim is not None:
+                await session.exec(  # type: ignore[call-overload]
+                    update(CashuTransaction)
+                    .where(
+                        col(CashuTransaction.id) == _ppq_payment_id(claim.operation_id)
+                    )
+                    .values(swept=True)
+                )
+            await session.commit()
             return PPQReleaseOutcome(True, "released")
+        await session.rollback()
         return PPQReleaseOutcome(False, "claim_changed")
 
 
@@ -471,8 +495,17 @@ async def _set_ppq_state_terminal(
             )
             .values(collected=collected, swept=swept)
         )
-        await session.commit()
-        return (getattr(result, "rowcount", 0) or 0) == 1
+        updated = (getattr(result, "rowcount", 0) or 0) == 1
+        if updated:
+            await session.exec(  # type: ignore[call-overload]
+                update(CashuTransaction)
+                .where(col(CashuTransaction.id) == _ppq_payment_id(operation_id))
+                .values(collected=collected, swept=swept)
+            )
+            await session.commit()
+        else:
+            await session.rollback()
+        return updated
 
 
 async def _reconcile_ppq_state(
@@ -497,9 +530,7 @@ async def _reconcile_ppq_state(
         return True
 
     if claim.invoice_id != "pending":
-        if provider is not None and await provider.check_topup_status(
-            claim.invoice_id
-        ):
+        if provider is not None and await provider.check_topup_status(claim.invoice_id):
             if not await _set_ppq_state_terminal(
                 row, claim.operation_id, collected=True, swept=False
             ):
@@ -554,7 +585,7 @@ async def _reconcile_ppq_state(
 
 
 async def _ppq_provider_is_claimable(
-    session: object, provider_id: int | None
+    session: AsyncSession, provider_id: int | None
 ) -> bool:
     """Re-read the provider inside the claim transaction.
 
@@ -567,7 +598,7 @@ async def _ppq_provider_is_claimable(
     """
     if provider_id is None:
         return False
-    current = await session.get(UpstreamProviderRow, provider_id)  # type: ignore[attr-defined]
+    current = await session.get(UpstreamProviderRow, provider_id)
     return current is not None and current.provider_type == "ppqai"
 
 
@@ -576,9 +607,7 @@ async def _claim_ppq_topup(row: UpstreamProviderRow) -> str | None:
     state_id = _ppq_state_id(row)
     operation_id = uuid.uuid4().hex
     expires_at = int(time.time()) + PPQ_PENDING_TTL_SECONDS
-    request_id = _ppq_request_id(
-        operation_id, expires_at, PPQ_PHASE_CLAIMED, "pending"
-    )
+    request_id = _ppq_request_id(operation_id, expires_at, PPQ_PHASE_CLAIMED, "pending")
 
     async with create_session() as session:
         if not await _ppq_provider_is_claimable(session, row.id):
@@ -603,6 +632,7 @@ async def _claim_ppq_topup(row: UpstreamProviderRow) -> str | None:
                     collected=False,
                     swept=False,
                     created_at=int(time.time()),
+                    source="ppq_auto_topup_claim",
                 )
             )
             await session.commit()
@@ -625,7 +655,7 @@ async def _claim_ppq_topup(row: UpstreamProviderRow) -> str | None:
                     type="out",
                     request_id=request_id,
                     collected=False,
-                    source="ppq_auto_topup",
+                    source="ppq_auto_topup_claim",
                 )
             )
             await session.commit()
@@ -681,10 +711,39 @@ async def _record_ppq_invoice(
                 mint_url=mint_url,
             )
         )
+        if (getattr(result, "rowcount", 0) or 0) != 1:
+            await session.rollback()
+            raise RuntimeError("PPQ auto top-up claim ownership was lost")
+        session.add(
+            CashuTransaction(
+                id=_ppq_payment_id(operation_id),
+                # Do not expose the raw BOLT11 through the transaction API.
+                token=f"ppq-invoice:{invoice_id}",
+                amount=amount,
+                unit=unit,
+                type="out",
+                request_id=invoice_id,
+                mint_url=mint_url,
+                collected=False,
+                swept=False,
+                source="ppq_auto_topup",
+            )
+        )
+        await session.commit()
+    return lease_expires_at
+
+
+async def _record_ppq_payment_spent(operation_id: str, paid_amount: int) -> None:
+    """Persist the irreversible wallet spend before polling PPQ settlement."""
+    async with create_session() as session:
+        result = await session.exec(  # type: ignore[call-overload]
+            update(CashuTransaction)
+            .where(col(CashuTransaction.id) == _ppq_payment_id(operation_id))
+            .values(amount=paid_amount)
+        )
         await session.commit()
         if (getattr(result, "rowcount", 0) or 0) != 1:
-            raise RuntimeError("PPQ auto top-up claim ownership was lost")
-    return lease_expires_at
+            raise RuntimeError("PPQ payment audit row is missing")
 
 
 async def _mark_ppq_reconcile(
@@ -751,6 +810,23 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
         return
     if balance >= threshold_usd:
         return
+
+    # Perform local pricing and owner-funds checks before asking PPQ to create
+    # an invoice. The exact mint quote still has to be checked afterward, but
+    # predictable local failures should not leave abandoned PPQ invoices.
+    price = sats_usd_price()
+    minimum_invoice_sats = math.ceil(amount_usd / price)
+    max_invoice_sats = math.ceil(minimum_invoice_sats * PPQ_MAX_INVOICE_PREMIUM)
+    if await maximum_owner_cashu_balance_sats() < minimum_invoice_sats:
+        logger.warning(
+            "PPQ auto top-up skipped because no mint has enough owner funds",
+            extra={
+                "provider_id": row.id,
+                "minimum_invoice_sats": minimum_invoice_sats,
+            },
+        )
+        return
+
     operation_id = await _claim_ppq_topup(row)
     if operation_id is None:
         return
@@ -780,9 +856,6 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
             raise ValueError("PPQ returned an expired Lightning invoice")
 
         plan = await prepare_bolt11_payment(topup.payment_request)
-        max_invoice_sats = math.ceil(
-            amount_usd / sats_usd_price() * PPQ_MAX_INVOICE_PREMIUM
-        )
         if plan.maximum_spend_sats > max_invoice_sats:
             raise ValueError("PPQ Lightning invoice exceeds the USD spending cap")
 
@@ -828,7 +901,7 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
             exc_info=True,
         )
         raise
-    except Exception:
+    except Bolt11PaymentAmbiguous:
         await _mark_ppq_reconcile(
             row,
             operation_id,
@@ -846,14 +919,59 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
             exc_info=True,
         )
         raise
+    except BaseException:
+        # Cancellation or an unexpected error after execution began is also
+        # ambiguous. Preserve the claim before propagating it.
+        await asyncio.shield(
+            _mark_ppq_reconcile(
+                row,
+                operation_id,
+                lease_expires_at,
+                topup.invoice_id,
+                str(plan.quote.quote),
+            )
+        )
+        logger.critical(
+            "Unexpected failure while paying PPQ invoice; payment requires reconciliation",
+            extra={"provider_id": row.id, "invoice_id": topup.invoice_id},
+            exc_info=True,
+        )
+        raise
 
-    settled = False
-    for attempt in range(PPQ_SETTLEMENT_ATTEMPTS):
-        if await provider.check_topup_status(topup.invoice_id):
-            settled = True
-            break
-        if attempt + 1 < PPQ_SETTLEMENT_ATTEMPTS:
-            await asyncio.sleep(PPQ_SETTLEMENT_POLL_SECONDS)
+    try:
+        # The melt is irreversible now. Persist the actual spend before any
+        # fallible PPQ status call so operators retain an audit trail.
+        await _record_ppq_payment_spent(operation_id, paid_amount)
+        settled = False
+        for attempt in range(PPQ_SETTLEMENT_ATTEMPTS):
+            if await provider.check_topup_status(topup.invoice_id):
+                settled = True
+                break
+            if attempt + 1 < PPQ_SETTLEMENT_ATTEMPTS:
+                await asyncio.sleep(PPQ_SETTLEMENT_POLL_SECONDS)
+    except BaseException as error:
+        await asyncio.shield(
+            _mark_ppq_reconcile(
+                row,
+                operation_id,
+                lease_expires_at,
+                topup.invoice_id,
+                str(plan.quote.quote),
+            )
+        )
+        logger.critical(
+            "PPQ Lightning payment completed but settlement polling failed; reconciliation required",
+            extra={
+                "provider_id": row.id,
+                "invoice_id": topup.invoice_id,
+                "error": str(error),
+                "error_type": type(error).__name__,
+            },
+            exc_info=True,
+        )
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        return
 
     if not settled:
         # The payment left the wallet, so the claim must stay. Flag it for

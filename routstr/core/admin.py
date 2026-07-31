@@ -68,7 +68,9 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+        if cli_token and (
+            cli_token.expires_at is None or cli_token.expires_at > now_ts
+        ):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -255,16 +257,12 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
         secret = await get_secret(session)
 
         if not secret.admin_password_hash:
-            raise HTTPException(
-                status_code=500, detail="Admin password not configured"
-            )
+            raise HTTPException(status_code=500, detail="Admin password not configured")
 
         if not vault.verify_password(
             password_update.current_password, secret.admin_password_hash
         ):
-            raise HTTPException(
-                status_code=401, detail="Current password is incorrect"
-            )
+            raise HTTPException(status_code=401, detail="Current password is incorrect")
 
         # Validate new password
         new_password = password_update.new_password.strip()
@@ -863,9 +861,7 @@ class UpstreamProviderUpdateBySlug(BaseModel):
     provider_settings: dict | None = None
 
 
-async def _active_ppq_claim_in_session(
-    session: AsyncSession, provider_id: int
-) -> bool:
+async def _active_ppq_claim_in_session(session: AsyncSession, provider_id: int) -> bool:
     """Check for an active claim inside the caller's transaction.
 
     Must share the transaction of whatever destructive write it is guarding —
@@ -874,9 +870,7 @@ async def _active_ppq_claim_in_session(
     """
     from ..upstream.auto_topup import _ppq_state_id_for_provider
 
-    claim = await session.get(
-        CashuTransaction, _ppq_state_id_for_provider(provider_id)
-    )
+    claim = await session.get(CashuTransaction, _ppq_state_id_for_provider(provider_id))
     return claim is not None and not claim.collected and not claim.swept
 
 
@@ -900,9 +894,12 @@ async def _apply_provider_update(
         await _ensure_unique_slug(session, validated, exclude_id=provider.id)
         provider.slug = validated
 
-    if (
+    provider_type_changed = (
         payload.provider_type is not None
         and payload.provider_type != provider.provider_type
+    )
+    if (
+        provider_type_changed
         and provider.provider_type == "ppqai"
         and provider.id is not None
         and await _active_ppq_claim_in_session(session, provider.id)
@@ -930,9 +927,28 @@ async def _apply_provider_update(
     if payload.provider_fee is not None:
         provider.provider_fee = payload.provider_fee
 
-    # Validate against the effective type and effective settings: a type
-    # change without new settings must not leave stored settings that the
-    # worker will refuse, and new settings must fit the new type.
+    # Auto-top-up fields have provider-specific units and meaning. Reusing
+    # enabled Routstr settings for PPQ (or vice versa) can silently reinterpret
+    # sats as USD, so a type change must provide settings for the new type.
+    if (
+        provider_type_changed
+        and payload.provider_settings is None
+        and provider.provider_settings
+    ):
+        try:
+            stored_settings = json.loads(provider.provider_settings)
+        except (json.JSONDecodeError, TypeError):
+            stored_settings = None
+        if isinstance(stored_settings, dict) and stored_settings.get("auto_topup"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Changing provider type requires explicit auto-top-up "
+                    "settings because the units are provider-specific"
+                ),
+            )
+
+    # Validate against the effective type and effective settings.
     effective_settings = payload.provider_settings
     if effective_settings is None and payload.provider_type is not None:
         try:
@@ -1041,9 +1057,7 @@ async def update_upstream_provider_by_slug(
     lookup = _validate_slug(payload.slug)
     async with create_session() as session:
         result = await session.exec(
-            select(UpstreamProviderRow).where(
-                UpstreamProviderRow.slug == lookup
-            )
+            select(UpstreamProviderRow).where(UpstreamProviderRow.slug == lookup)
         )
         provider = result.first()
         if not provider:
@@ -1703,16 +1717,13 @@ async def get_log_dates_api(request: Request) -> dict[str, object]:
 
 _PPQ_RELEASE_ERRORS = {
     "no_active_claim": "No active PPQ claim to release",
-    "stale_state": (
-        "The claim changed since it was reviewed; reload and check again"
-    ),
+    "stale_state": ("The claim changed since it was reviewed; reload and check again"),
     "payment_in_flight": (
         "A Lightning payment is still in flight for this claim. Wait for it to "
         "finish or expire before releasing"
     ),
     "claim_changed": (
-        "The claim changed while the release was being applied; reload and "
-        "check again"
+        "The claim changed while the release was being applied; reload and check again"
     ),
 }
 
@@ -1767,9 +1778,7 @@ async def release_ppq_auto_topup_api(
         provider_id, state_token=payload.state_token
     )
     if not outcome.released:
-        raise HTTPException(
-            status_code=409, detail=_PPQ_RELEASE_ERRORS[outcome.reason]
-        )
+        raise HTTPException(status_code=409, detail=_PPQ_RELEASE_ERRORS[outcome.reason])
 
     logger.warning(
         "Admin released PPQ auto top-up claim after manual reconciliation",
@@ -1790,18 +1799,16 @@ async def get_transactions_api(
     async with create_session() as session:
         from sqlmodel import col, func
 
+        # Hide only the deterministic PPQ claim-lock rows. Append-only PPQ
+        # payment rows remain visible as the audit trail for irreversible melts.
         base = select(CashuTransaction).where(
-            (CashuTransaction.source != "ppq_auto_topup")
-            | (CashuTransaction.source == None)  # noqa: E711
+            ~col(CashuTransaction.id).like("ppq-auto-topup-%")
         )
         if type:
             base = base.where(CashuTransaction.type == type)
         if source:
             if source == "x-cashu":
-                base = base.where(
-                    (CashuTransaction.source == "x-cashu")
-                    | (CashuTransaction.source == None)  # noqa: E711
-                )
+                base = base.where(CashuTransaction.source == "x-cashu")
             else:
                 base = base.where(CashuTransaction.source == source)
         if status:
@@ -1829,7 +1836,11 @@ async def get_transactions_api(
         )
         total = count_result.one()
 
-        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
+        stmt = (
+            base.order_by(col(CashuTransaction.created_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
         results = await session.exec(stmt)
         transactions = results.all()
 
@@ -1839,9 +1850,7 @@ async def get_transactions_api(
         }
 
 
-@admin_router.get(
-    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
-)
+@admin_router.get("/api/lightning-invoices", dependencies=[Depends(require_admin_api)])
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,

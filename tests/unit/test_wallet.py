@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import socket
@@ -34,8 +35,9 @@ async def test_get_balance() -> None:
 
     # Reset the module-level wallet cache so a real wallet cached by an earlier
     # test (e.g. an unmocked admin-withdraw path) can't shadow the mock here.
-    with patch("routstr.wallet._wallets", {}), patch(
-        "routstr.wallet.Wallet.with_db", return_value=mock_wallet
+    with (
+        patch("routstr.wallet._wallets", {}),
+        patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet),
     ):
         balance = await get_balance("sat")
         assert balance == 50000
@@ -801,9 +803,7 @@ async def test_calculate_swap_amount_same_mint_short_circuit() -> None:
     quotes are requested."""
     from routstr.wallet import _calculate_swap_amount
 
-    _, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
-        1000, fee_reserves=[]
-    )
+    _, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(1000, fee_reserves=[])
 
     from routstr.core.settings import settings
 
@@ -828,9 +828,7 @@ async def test_calculate_swap_amount_msat_primary_unit() -> None:
     """With an msat primary mint the dummy quote and result stay in msats."""
     from routstr.wallet import _calculate_swap_amount
 
-    _, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
-        179, fee_reserves=[2]
-    )
+    _, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(179, fee_reserves=[2])
 
     from routstr.core.settings import settings
 
@@ -878,12 +876,8 @@ async def test_calculate_swap_amount_wraps_estimation_failure() -> None:
     """Estimation infrastructure failures surface as a single clear ValueError."""
     from routstr.wallet import _calculate_swap_amount
 
-    _, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
-        179, fee_reserves=[]
-    )
-    mock_primary_wallet.request_mint = AsyncMock(
-        side_effect=Exception("mint offline")
-    )
+    _, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(179, fee_reserves=[])
+    mock_primary_wallet.request_mint = AsyncMock(side_effect=Exception("mint offline"))
 
     from routstr.core.settings import settings
 
@@ -1231,7 +1225,9 @@ def test_is_mint_connection_error_detects_transport_failures(
         ValueError("Invalid Cashu token"),
         # Mint answered with an error status — reachable, so NOT a connection error.
         httpx.HTTPStatusError(
-            "500", request=httpx.Request("POST", "http://m"), response=httpx.Response(500)
+            "500",
+            request=httpx.Request("POST", "http://m"),
+            response=httpx.Response(500),
         ),
         RuntimeError("some internal fault"),
     ],
@@ -1286,7 +1282,9 @@ def test_classify_zero_value(error: ValueError) -> None:
 def test_classify_generic_valueerror_is_not_zero_value() -> None:
     """A generic wallet ValueError still falls to the generic bucket — the
     zero-value match must not over-trigger."""
-    classified = classify_redemption_error(ValueError("some unexpected wallet condition"))
+    classified = classify_redemption_error(
+        ValueError("some unexpected wallet condition")
+    )
     assert classified is not None
     type_, status, _msg, code = classified
     assert (type_, status, code) == (
@@ -1349,7 +1347,9 @@ async def test_credit_balance_db_transport_error_is_token_consumed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_swap_fee_estimation_transport_error_raises_mint_connection_error() -> None:
+async def test_swap_fee_estimation_transport_error_raises_mint_connection_error() -> (
+    None
+):
     """A transport failure while estimating fees is surfaced as
     MintConnectionError (→ 503), not a generic fee ValueError (→ 422)."""
     from routstr.wallet import swap_to_primary_mint
@@ -1381,9 +1381,7 @@ async def test_swap_melt_transport_error_raises_mint_connection_error() -> None:
     mock_token, mock_token_wallet, mock_primary_wallet = _make_swap_mocks(
         1000, fee_reserves=[10, 10]
     )
-    mock_token_wallet.melt = AsyncMock(
-        side_effect=httpx.ConnectTimeout("timed out")
-    )
+    mock_token_wallet.melt = AsyncMock(side_effect=httpx.ConnectTimeout("timed out"))
 
     from routstr.core.settings import settings
 
@@ -1416,9 +1414,7 @@ async def test_pay_bolt11_invoice_uses_sufficient_mint_with_highest_balance() ->
             side_effect=lambda proofs, *args, **kwargs: (proofs, 0)
         )
         wallet.melt = AsyncMock(
-            return_value=MagicMock(
-                state="PAID", change=[MagicMock(amount=399)]
-            )
+            return_value=MagicMock(state="PAID", change=[MagicMock(amount=399)])
         )
         wallet.set_reserved_for_send = AsyncMock()
 
@@ -1567,3 +1563,99 @@ async def test_prepare_bolt11_payment_counts_input_fees_in_sufficiency() -> None
         pytest.raises(ValueError, match="enough balance"),
     ):
         await prepare_bolt11_payment("lnbc-invoice")
+
+
+@pytest.mark.asyncio
+async def test_prepare_bolt11_payment_does_not_spend_user_liabilities() -> None:
+    from routstr.core.settings import settings
+
+    wallet = MagicMock()
+    wallet.proofs = [MagicMock(amount=500)]
+    wallet.melt_quote = AsyncMock(
+        return_value=MagicMock(amount=100, fee_reserve=2, quote="quote-1")
+    )
+    wallet.get_fees_for_proofs = Mock(return_value=0)
+
+    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+        if unit == "msat":
+            raise ValueError("unit unsupported")
+        return wallet
+
+    with (
+        patch.object(settings, "cashu_mints", ["https://only.test"]),
+        patch.object(settings, "primary_mint", "https://only.test"),
+        patch("routstr.wallet.get_wallet", side_effect=get_wallet),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            side_effect=lambda wallet, *args, **kwargs: wallet.proofs,
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            side_effect=lambda proofs, wallet: proofs,
+        ),
+        patch(
+            "routstr.wallet._owner_balance_for_mint_and_unit",
+            AsyncMock(return_value=90),
+        ),
+        pytest.raises(ValueError, match="user liabilities"),
+    ):
+        await prepare_bolt11_payment("lnbc-invoice")
+
+
+@pytest.mark.asyncio
+async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -> None:
+    from routstr.core.settings import settings
+
+    wallet = MagicMock()
+    wallet.proofs = [MagicMock(amount=100)]
+    wallet.melt_quote = AsyncMock(
+        return_value=MagicMock(amount=1, fee_reserve=0, quote="quote-1")
+    )
+    wallet.get_fees_for_proofs = Mock(return_value=0)
+
+    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+        if unit == "msat":
+            raise ValueError("unit unsupported")
+        return wallet
+
+    with (
+        patch.object(settings, "cashu_mints", ["https://only.test"]),
+        patch.object(settings, "primary_mint", "https://only.test"),
+        patch("routstr.wallet.get_wallet", side_effect=get_wallet),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            side_effect=lambda wallet, *args, **kwargs: wallet.proofs,
+        ),
+        patch(
+            "routstr.wallet.slow_filter_spend_proofs",
+            side_effect=lambda proofs, wallet: proofs,
+        ),
+        patch(
+            "routstr.wallet.db.balances_for_mint_and_unit",
+            AsyncMock(return_value=99_999),
+        ),
+        pytest.raises(ValueError, match="user liabilities"),
+    ):
+        await prepare_bolt11_payment("lnbc-invoice")
+
+
+@pytest.mark.asyncio
+async def test_execute_bolt11_payment_rereserves_when_cancelled() -> None:
+    plan = MagicMock()
+    plan.proofs = [MagicMock(amount=110)]
+    plan.quote.amount = 100
+    plan.quote.fee_reserve = 10
+    plan.quote.quote = "quote-1"
+    plan.invoice = "lnbc-invoice"
+    plan.mint_url = "https://mint.test"
+    plan.wallet.select_to_send = AsyncMock(return_value=(plan.proofs, 0))
+    plan.wallet.set_reserved_for_send = AsyncMock()
+    plan.wallet.set_reserved_for_melt = AsyncMock()
+    plan.wallet.melt = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_bolt11_payment(plan)
+
+    plan.wallet.set_reserved_for_melt.assert_awaited_once_with(
+        plan.proofs, reserved=True, quote_id="quote-1"
+    )

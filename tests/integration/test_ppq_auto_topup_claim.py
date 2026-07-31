@@ -18,6 +18,7 @@ from routstr.upstream.auto_topup import (
     PPQ_PHASE_IN_FLIGHT,
     PPQ_PHASE_RECONCILE,
     _claim_ppq_topup,
+    _ppq_payment_id,
     _ppq_request_id,
     _ppq_state_id_for_provider,
     _record_ppq_invoice,
@@ -108,9 +109,7 @@ async def test_claim_is_reusable_once_the_previous_attempt_finished(
     await _seed_provider()
     first = await _claim_ppq_topup(_row())
     assert first is not None
-    assert await _set_ppq_state_terminal(
-        _row(), first, collected=True, swept=False
-    )
+    assert await _set_ppq_state_terminal(_row(), first, collected=True, swept=False)
 
     second = await _claim_ppq_topup(_row())
     assert second is not None and second != first
@@ -189,9 +188,7 @@ async def test_expired_in_flight_claim_becomes_releasable(
     patched_db_engine: Any,
 ) -> None:
     # A worker that died mid-payment must not lock the provider forever.
-    token = await _seed_claim(
-        1, PPQ_PHASE_IN_FLIGHT, "invoice-1", int(time.time()) - 1
-    )
+    token = await _seed_claim(1, PPQ_PHASE_IN_FLIGHT, "invoice-1", int(time.time()) - 1)
 
     assert (await get_ppq_auto_topup_state(1))["releasable"] is True
     outcome = await release_ppq_auto_topup_state(1, state_token=token)
@@ -233,6 +230,7 @@ async def test_ppq_claim_rows_are_excluded_from_the_admin_transaction_list(
 ) -> None:
     from routstr.core.admin import get_transactions_api
 
+    await _seed_provider()
     await _claim_ppq_topup(_row())
     async with create_session() as session:
         session.add(
@@ -252,6 +250,43 @@ async def test_ppq_claim_rows_are_excluded_from_the_admin_transaction_list(
     ids = {t["id"] for t in result["transactions"]}  # type: ignore[index,union-attr]
     assert "real-transaction" in ids
     assert _ppq_state_id_for_provider(1) not in ids
+
+
+async def test_ppq_payment_audit_row_is_visible_and_survives_next_claim(
+    patched_db_engine: Any,
+) -> None:
+    from routstr.core.admin import get_transactions_api
+
+    await _seed_provider()
+    operation_id = await _claim_ppq_topup(_row())
+    assert operation_id is not None
+    await _record_ppq_invoice(
+        _row(),
+        operation_id,
+        invoice="lnbc-secret-invoice",
+        invoice_id="invoice-1",
+        quote_id="quote-1",
+        amount=102,
+        unit="sat",
+        mint_url="https://mint.test",
+    )
+    assert await _set_ppq_state_terminal(
+        _row(), operation_id, collected=True, swept=False
+    )
+
+    result = await get_transactions_api(source="ppq_auto_topup")
+    transactions = result["transactions"]
+    assert len(transactions) == 1
+    audit = transactions[0]
+    assert audit["id"] == _ppq_payment_id(operation_id)
+    assert audit["token"] == "ppq-invoice:invoice-1"
+    assert audit["collected"] is True
+    assert "lnbc-secret-invoice" not in audit["token"]
+
+    # Reusing the deterministic claim lock must not overwrite history.
+    assert await _claim_ppq_topup(_row()) is not None
+    async with create_session() as session:
+        assert await session.get(CashuTransaction, audit["id"]) is not None
 
 
 async def test_reconcile_settles_a_recorded_invoice(patched_db_engine: Any) -> None:
