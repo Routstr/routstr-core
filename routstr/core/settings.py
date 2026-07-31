@@ -106,14 +106,14 @@ class Settings(BaseSettings):
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
     )
 
-    # Database connection-pool controls (advanced). Capacity defaults match
-    # SQLAlchemy's established queue-pool behavior. Pre-ping is enabled by the
-    # engine factory for networked backends; SQLite can explicitly opt in.
-    # These fields are env-only below.
-    database_pool_size: int = Field(default=5, ge=1, env="DATABASE_POOL_SIZE")
-    database_max_overflow: int = Field(default=10, ge=0, env="DATABASE_MAX_OVERFLOW")
+    # Database connection-pool controls (advanced). Capacity defaults provide
+    # headroom for Routstr's concurrent request and background-payment workload.
+    # Pre-ping is enabled by the engine factory for networked backends; SQLite
+    # can explicitly opt in. These fields are env-only below.
+    database_pool_size: int = Field(default=10, ge=1, env="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=20, ge=0, env="DATABASE_MAX_OVERFLOW")
     database_pool_timeout: float = Field(
-        default=30.0, gt=0, env="DATABASE_POOL_TIMEOUT"
+        default=15.0, gt=0, env="DATABASE_POOL_TIMEOUT"
     )
     database_pool_recycle: int = Field(default=1800, ge=0, env="DATABASE_POOL_RECYCLE")
     database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
