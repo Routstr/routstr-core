@@ -1845,7 +1845,9 @@ async def get_transactions_api(
         transactions = results.all()
 
         return {
-            "transactions": [tx.dict() for tx in transactions],
+            "transactions": [
+                tx.dict(exclude={"sweep_started_at"}) for tx in transactions
+            ],
             "total": total,
         }
 

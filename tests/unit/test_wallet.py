@@ -1631,7 +1631,7 @@ async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -
             side_effect=lambda proofs, wallet: proofs,
         ),
         patch(
-            "routstr.wallet.db.balances_for_mint_and_unit",
+            "routstr.wallet.db.total_user_liability",
             AsyncMock(return_value=99_999),
         ),
         pytest.raises(ValueError, match="user liabilities"),
