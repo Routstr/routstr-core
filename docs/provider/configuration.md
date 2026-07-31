@@ -48,6 +48,68 @@ Connect to your AI provider(s):
 | **Upstream URL** | API endpoint (e.g., `https://api.openai.com/v1`) |
 | **API Key**      | Your provider's API key                          |
 
+### PPQ Auto Top-up
+
+PPQ providers can automatically purchase more credits when their USD balance
+falls below a configured threshold. Configure this per provider in the Admin
+Dashboard by editing a **PPQ.AI** provider and opening **PPQ Auto Top-up**.
+There are no environment variables for this feature.
+
+#### Requirements
+
+Before enabling auto top-up, make sure that:
+
+- the PPQ provider has a valid API key;
+- at least one trusted Cashu mint is configured;
+- the node wallet has enough **node-owned** funds at one mint to pay the
+  Lightning invoice; client balances are never used; and
+- the node has a current BTC/USD price for validating the invoice amount.
+
+| Setting | Description |
+| ------- | ----------- |
+| **Enable Auto Top-up** | Enables automatic PPQ credit purchases for this provider. |
+| **When credits are below (USD)** | Starts a top-up when the reported PPQ balance is below this positive USD value. |
+| **Purchase this amount (USD)** | Amount of PPQ credit to buy per top-up. Must be a whole number from **1 to 500 USD**. |
+
+For example, a threshold of `5` and purchase amount of `20` buys 20 USD of
+credit when the PPQ balance drops below 5 USD.
+
+#### How it works
+
+The worker checks eligible providers approximately once per minute. When the
+balance is below the threshold, it:
+
+1. verifies the node has enough owner funds before creating an invoice;
+2. requests a USD-denominated Lightning top-up invoice from PPQ;
+3. rejects expired, mismatched, or unexpectedly expensive invoices (more than
+   10% above the local BTC/USD estimate);
+4. pays from the configured Cashu mint with sufficient owner funds; and
+5. waits for PPQ to confirm that the credit settled.
+
+Only one attempt can be active for a provider. An attempt that was active at
+the start of a cycle suppresses another top-up for that entire cycle, even if
+PPQ reports it settled immediately. This prevents a temporarily stale PPQ
+balance from causing a duplicate purchase.
+
+Completed PPQ payments appear in the dashboard transaction history with source
+`ppq_auto_topup`. The payment record is separate from the internal claim used
+to prevent concurrent attempts.
+
+#### Payment recovery
+
+If the Cashu mint paid the invoice but PPQ settlement cannot be confirmed, the
+provider card shows **Auto top-up needs review**. A payment still owned by a
+running worker is shown as **Payment in progress** and cannot be released.
+
+Before choosing **Release top-up**, manually verify both PPQ and the Cashu mint.
+Release the claim only when the previous Lightning payment is definitively
+unable to settle. Releasing an ambiguous payment allows the next cycle to try
+again and can therefore cause a duplicate top-up.
+
+Disabling auto top-up prevents new purchases, but the node continues to
+reconcile an already active payment until it reaches a safe terminal state or
+requires operator review.
+
 ### Node Identity
 
 How your node appears to clients:
