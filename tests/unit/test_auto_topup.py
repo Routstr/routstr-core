@@ -8,7 +8,7 @@ from routstr.upstream.auto_topup import (
     _check_and_topup,
     _parse_ppq_request_id,
     _run_auto_topup_cycle,
-    validate_auto_topup_settings,
+    validate_ppq_auto_topup_settings,
 )
 from routstr.upstream.ppqai import PPQAIUpstreamProvider
 from routstr.wallet import Bolt11PaymentAmbiguous, Bolt11PaymentNotAttempted
@@ -562,25 +562,6 @@ async def test_ppq_auto_topup_rejects_non_finite_balance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_routstr_threshold_is_compared_in_sats() -> None:
-    provider = MagicMock()
-    provider.get_balance = AsyncMock(return_value=100)
-    provider.topup = AsyncMock()
-
-    with (
-        patch(
-            "routstr.upstream.auto_topup.RoutstrUpstreamProvider.from_db_row",
-            return_value=provider,
-        ),
-        patch("routstr.upstream.auto_topup.send_token", AsyncMock()) as send,
-    ):
-        await _check_and_topup(_row())
-
-    send.assert_not_awaited()
-    provider.topup.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_settled_topup_alerts_when_its_claim_was_already_released() -> None:
     provider = MagicMock()
     provider.get_balance = AsyncMock(return_value=2.5)
@@ -644,66 +625,45 @@ async def test_settled_topup_alerts_when_its_claim_was_already_released() -> Non
 
 
 @pytest.mark.parametrize(
-    ("provider_type", "settings", "expected"),
+    ("settings", "expected"),
     [
-        ("ppqai", {"auto_topup": False, "topup_threshold": -1}, None),
+        ({"auto_topup": False, "topup_threshold": -1}, None),
         (
-            "ppqai",
             {"auto_topup": True, "topup_threshold": 5, "topup_amount_limit": 10},
             None,
         ),
         (
-            "ppqai",
             {"auto_topup": True, "topup_threshold": None, "topup_amount_limit": 10},
             "threshold",
         ),
         (
-            "ppqai",
             {"auto_topup": True, "topup_threshold": 5, "topup_amount_limit": 0.5},
             "whole number",
         ),
         (
-            "ppqai",
             {"auto_topup": True, "topup_threshold": 5, "topup_amount_limit": 5000},
             "between",
         ),
         (
-            "ppqai",
             {"auto_topup": True, "topup_threshold": True, "topup_amount_limit": 10},
             "threshold",
         ),
-        (
-            "routstr",
-            {"auto_topup": True, "topup_threshold": 5, "topup_amount_limit": 10},
-            "mint URL",
-        ),
-        (
-            "routstr",
-            {
-                "auto_topup": True,
-                "topup_threshold": 5,
-                "topup_amount_limit": 10,
-                "topup_mint_url": "https://mint.test",
-            },
-            None,
-        ),
     ],
 )
-def test_auto_topup_settings_validation(
-    provider_type: str, settings: dict, expected: str | None
+def test_ppq_auto_topup_settings_validation(
+    settings: dict, expected: str | None
 ) -> None:
-    problem = validate_auto_topup_settings(provider_type, settings)
+    problem = validate_ppq_auto_topup_settings(settings)
     if expected is None:
         assert problem is None
     else:
         assert problem is not None and expected in problem
 
 
-def test_auto_topup_settings_validation_survives_huge_json_integers() -> None:
+def test_ppq_auto_topup_settings_validation_survives_huge_json_integers() -> None:
     # json.loads happily produces integers past float range; float() raises
     # OverflowError there instead of returning inf.
-    problem = validate_auto_topup_settings(
-        "ppqai",
-        {"auto_topup": True, "topup_threshold": 10**400, "topup_amount_limit": 10},
+    problem = validate_ppq_auto_topup_settings(
+        {"auto_topup": True, "topup_threshold": 10**400, "topup_amount_limit": 10}
     )
     assert problem is not None and "threshold" in problem

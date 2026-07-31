@@ -10,7 +10,11 @@ from sqlmodel import col, or_, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core import get_logger
-from ..core.db import CashuTransaction, UpstreamProviderRow, create_session
+from ..core.db import (
+    CashuTransaction,
+    UpstreamProviderRow,
+    create_session,
+)
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
@@ -29,6 +33,7 @@ from .routstr import RoutstrUpstreamProvider
 
 logger = get_logger(__name__)
 
+# Check every 60 seconds
 AUTO_TOPUP_INTERVAL_SECONDS = 60
 # Claim lifecycle. "claimed" holds the slot while the invoice is being created
 # and priced; nothing has been spent yet, so it is always safe to release.
@@ -47,7 +52,8 @@ PPQ_MAX_TOPUP_USD = 500
 
 
 async def periodic_auto_topup() -> None:
-    """Monitor enabled Routstr and PPQ providers and fund low balances."""
+    """Background task that monitors Routstr and PPQ provider balances."""
+    # Wait for initial startup to complete
     await asyncio.sleep(30)
     logger.info("Auto top-up worker started")
 
@@ -59,11 +65,12 @@ async def periodic_auto_topup() -> None:
                 "Auto top-up cycle failed",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
+
         await asyncio.sleep(AUTO_TOPUP_INTERVAL_SECONDS)
 
 
 async def _run_auto_topup_cycle() -> None:
-    """Check all eligible providers once, isolating failures by provider."""
+    """Single cycle: check all eligible providers and top up if needed."""
     reconciled_ppq_provider_ids = await _reconcile_all_ppq_claims()
 
     async with create_session() as session:
@@ -71,13 +78,12 @@ async def _run_auto_topup_cycle() -> None:
             col(UpstreamProviderRow.provider_type).in_(["routstr", "ppqai"]),
             UpstreamProviderRow.enabled == True,  # noqa: E712
         )
-        providers = (await session.exec(query)).all()
+        result = await session.exec(query)
+        providers = result.all()
 
     for row in providers:
-        # A claim that was active at cycle start suppresses a new payment for
-        # the whole cycle. PPQ may report an invoice settled before its balance
-        # endpoint reflects the credit, so immediately rechecking can duplicate
-        # the top-up. This also avoids reconciling the same claim twice.
+        # Do not immediately retry a PPQ claim reconciled this cycle: PPQ's
+        # balance endpoint may lag its invoice status and cause a duplicate.
         if row.id is not None and row.id in reconciled_ppq_provider_ids:
             continue
         try:
@@ -87,7 +93,6 @@ async def _run_auto_topup_cycle() -> None:
                 "Auto top-up failed for provider",
                 extra={
                     "provider_id": row.id,
-                    "provider_type": row.provider_type,
                     "base_url": row.base_url,
                     "error": str(e),
                     "error_type": type(e).__name__,
@@ -96,13 +101,7 @@ async def _run_auto_topup_cycle() -> None:
 
 
 async def _reconcile_all_ppq_claims() -> set[int]:
-    """Reconcile active PPQ claims and return providers suppressed this cycle.
-
-    A claim tracks money already committed, so it must keep reconciling even
-    after the provider is disabled, auto top-up is switched off, or the API
-    key is removed — none of which change what happened to the payment. Only
-    new top-ups depend on eligibility.
-    """
+    """Reconcile active PPQ claims and return providers suppressed this cycle."""
     async with create_session() as session:
         rows = (
             await session.exec(
@@ -121,8 +120,6 @@ async def _reconcile_all_ppq_claims() -> set[int]:
             if not state.get("active"):
                 continue
             active_provider_ids.add(row.id)
-            # Without an API key the PPQ side cannot be polled, but mint
-            # reconciliation still can — pass provider as None.
             provider = PPQAIUpstreamProvider.from_db_row(row) if row.api_key else None
             await _reconcile_ppq_state(row, provider)
         except Exception as e:
@@ -133,117 +130,122 @@ async def _reconcile_all_ppq_claims() -> set[int]:
     return active_provider_ids
 
 
-def _invalid_number(value: object, *, integer: bool = False) -> bool:
+def _invalid_ppq_number(value: object, *, integer: bool = False) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return True
     try:
-        # JSON accepts arbitrarily large integers; float() raises
-        # OverflowError past ~1e308 rather than returning inf.
-        as_float = float(value)
+        number = float(value)
     except OverflowError:
         return True
-    if not math.isfinite(as_float) or value <= 0:
-        return True
-    return integer and not as_float.is_integer()
+    return (
+        not math.isfinite(number)
+        or number <= 0
+        or (integer and not number.is_integer())
+    )
 
 
-def validate_auto_topup_settings(
-    provider_type: str, settings: dict | None
-) -> str | None:
-    """Return why these auto top-up settings are unusable, or None if they are.
-
-    Shared by the admin write path and the worker so a configuration that the
-    UI accepted cannot silently fail to top up hours later. Settings with
-    auto top-up switched off are always valid.
-    """
+def validate_ppq_auto_topup_settings(settings: dict | None) -> str | None:
+    """Return why enabled PPQ auto top-up settings are invalid, if anything."""
     if not settings or not settings.get("auto_topup"):
         return None
 
-    if _invalid_number(settings.get("topup_threshold")):
-        return "Auto top-up threshold must be a positive number"
-    if _invalid_number(settings.get("topup_amount_limit"), integer=True):
-        return "Auto top-up amount must be a positive whole number"
-
-    if provider_type == "routstr":
-        mint_url = settings.get("topup_mint_url")
-        if not isinstance(mint_url, str) or not mint_url.strip():
-            return "Auto top-up requires a mint URL"
-    elif provider_type == "ppqai":
-        amount = int(settings["topup_amount_limit"])
-        if not PPQ_MIN_TOPUP_USD <= amount <= PPQ_MAX_TOPUP_USD:
-            return (
-                f"PPQ auto top-up amount must be between {PPQ_MIN_TOPUP_USD} "
-                f"and {PPQ_MAX_TOPUP_USD} USD"
-            )
+    threshold = settings.get("topup_threshold")
+    amount = settings.get("topup_amount_limit")
+    if _invalid_ppq_number(threshold):
+        return "PPQ auto top-up threshold must be a positive number"
+    if _invalid_ppq_number(amount, integer=True):
+        return "PPQ auto top-up amount must be a positive whole number"
+    amount_usd = int(typing.cast(int | float, amount))
+    if not PPQ_MIN_TOPUP_USD <= amount_usd <= PPQ_MAX_TOPUP_USD:
+        return (
+            f"PPQ auto top-up amount must be between {PPQ_MIN_TOPUP_USD} "
+            f"and {PPQ_MAX_TOPUP_USD} USD"
+        )
     return None
 
 
-def _get_auto_topup_settings(row: UpstreamProviderRow) -> dict | None:
+async def _check_and_topup_ppq_from_row(row: UpstreamProviderRow) -> None:
     settings: dict = {}
     if row.provider_settings:
         try:
             settings = json.loads(row.provider_settings)
         except (json.JSONDecodeError, TypeError):
-            return None
-
+            return
     if not isinstance(settings, dict) or not settings.get("auto_topup"):
-        return None
+        return
 
-    # Re-checked here even though the admin API validates on write: rows
-    # predate that check, and the database is not the only way in.
-    problem = validate_auto_topup_settings(row.provider_type, settings)
+    problem = validate_ppq_auto_topup_settings(settings)
     if problem is not None:
         logger.warning(
-            "Auto top-up enabled but its configuration is invalid",
+            "PPQ auto top-up enabled but its configuration is invalid",
             extra={"provider_id": row.id, "problem": problem},
         )
-        return None
-    return settings
+        return
+    if not row.api_key:
+        return
+    await _check_and_topup_ppq(row, settings)
 
 
 async def _check_and_topup(row: UpstreamProviderRow) -> None:
-    """Dispatch one provider row to its funding strategy."""
-    settings = _get_auto_topup_settings(row)
-    if settings is None or not row.api_key:
+    """Check a single provider's balance and top up if below threshold."""
+    if row.provider_type == "ppqai":
+        await _check_and_topup_ppq_from_row(row)
         return
 
-    if row.provider_type == "routstr":
-        await _check_and_topup_routstr(row, settings)
-    elif row.provider_type == "ppqai":
-        await _check_and_topup_ppq(row, settings)
+    # Parse provider settings
+    settings: dict = {}
+    if row.provider_settings:
+        try:
+            settings = json.loads(row.provider_settings)
+        except (json.JSONDecodeError, TypeError):
+            return
 
+    if not settings.get("auto_topup"):
+        return
 
-async def _check_and_topup_routstr(row: UpstreamProviderRow, settings: dict) -> None:
-    threshold = float(settings["topup_threshold"])
-    amount = int(settings["topup_amount_limit"])
+    threshold = settings.get("topup_threshold")
+    amount = settings.get("topup_amount_limit")
     mint_url = settings.get("topup_mint_url")
-    if not isinstance(mint_url, str) or not mint_url:
+
+    if not threshold or not amount or not mint_url:
         logger.warning(
-            "Routstr auto top-up enabled but no mint is configured",
-            extra={"provider_id": row.id},
+            "Auto top-up enabled but missing configuration",
+            extra={
+                "provider_id": row.id,
+                "has_threshold": bool(threshold),
+                "has_amount": bool(amount),
+                "has_mint": bool(mint_url),
+            },
         )
         return
 
+    if not row.api_key:
+        return
+
+    # Instantiate provider and check balance
     provider = RoutstrUpstreamProvider.from_db_row(row)
     if provider is None:
         return
     balance = await provider.get_balance()
+
     if balance is None:
         logger.warning(
-            "Could not fetch Routstr balance for auto top-up",
+            "Could not fetch balance for auto top-up",
             extra={"provider_id": row.id, "base_url": row.base_url},
         )
         return
-    if balance >= threshold:
+
+    if balance >= threshold * 1000:
         return
 
+    # Balance is below threshold - create token and top up
     logger.info(
-        "Routstr auto top-up triggered",
+        "Auto top-up triggered",
         extra={
             "provider_id": row.id,
-            "balance_sats": balance,
-            "threshold_sats": threshold,
-            "topup_sats": amount,
+            "balance": balance,
+            "threshold": threshold,
+            "topup_amount": amount,
             "mint_url": mint_url,
         },
     )
@@ -252,8 +254,13 @@ async def _check_and_topup_routstr(row: UpstreamProviderRow, settings: dict) -> 
         token = await send_token(amount, "sat", mint_url)
     except Exception as e:
         logger.error(
-            "Failed to create Cashu token for Routstr auto top-up",
-            extra={"provider_id": row.id, "mint_url": mint_url, "error": str(e)},
+            "Failed to create cashu token for auto top-up",
+            extra={
+                "provider_id": row.id,
+                "amount": amount,
+                "mint_url": mint_url,
+                "error": str(e),
+            },
         )
         return
 
@@ -269,48 +276,50 @@ async def _check_and_topup_routstr(row: UpstreamProviderRow, settings: dict) -> 
         )
     except Exception:
         logger.critical(
-            "Aborting Routstr auto top-up because its token was not persisted",
+            "Aborting auto top-up because its cashu token could not be persisted",
             extra={"provider_id": row.id, "mint_url": mint_url},
         )
         return
 
     result = await provider.topup(token)
+
     if "error" in result:
         logger.error(
-            "Routstr auto top-up call failed",
-            extra={"provider_id": row.id, "error": result["error"]},
+            "Auto top-up upstream call failed",
+            extra={
+                "provider_id": row.id,
+                "error": result["error"],
+            },
         )
-        return
-
-    await _mark_routstr_topup_collected(row, token, mint_url)
-    logger.info(
-        "Routstr auto top-up completed",
-        extra={"provider_id": row.id, "amount_sats": amount},
-    )
-
-
-async def _mark_routstr_topup_collected(
-    row: UpstreamProviderRow, token: str, mint_url: str
-) -> None:
-    async with create_session() as session:
-        transaction = (
-            await session.exec(
-                select(CashuTransaction).where(
-                    CashuTransaction.token == token,
-                    CashuTransaction.type == "out",
-                    CashuTransaction.source == "auto_topup",
+    else:
+        async with create_session() as session:
+            transaction = (
+                await session.exec(
+                    select(CashuTransaction).where(
+                        CashuTransaction.token == token,
+                        CashuTransaction.type == "out",
+                        CashuTransaction.source == "auto_topup",
+                    )
                 )
-            )
-        ).first()
-        if transaction is None:
-            logger.critical(
-                "Completed Routstr auto top-up is missing from the database",
-                extra={"provider_id": row.id, "mint_url": mint_url},
-            )
-            return
-        transaction.collected = True
-        session.add(transaction)
-        await session.commit()
+            ).first()
+            if transaction is None:
+                logger.critical(
+                    "Completed auto top-up transaction is missing from the database",
+                    extra={"provider_id": row.id, "mint_url": mint_url},
+                )
+            else:
+                transaction.collected = True
+                session.add(transaction)
+                await session.commit()
+
+        logger.info(
+            "Auto top-up completed successfully",
+            extra={
+                "provider_id": row.id,
+                "amount": amount,
+                "new_balance_approx": balance + amount,
+            },
+        )
 
 
 def _ppq_state_id(row: UpstreamProviderRow) -> str:

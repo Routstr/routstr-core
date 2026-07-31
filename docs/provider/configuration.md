@@ -99,7 +99,7 @@ to prevent concurrent attempts.
 
 If the Cashu mint paid the invoice but PPQ settlement cannot be confirmed, the
 provider card shows **Auto top-up needs review**. A payment still owned by a
-running worker is shown as **Payment in progress** and cannot be released.
+running worker is shown as **Paying invoice** and cannot be released.
 
 Before choosing **Release top-up**, manually verify both PPQ and the Cashu mint.
 Release the claim only when the previous Lightning payment is definitively

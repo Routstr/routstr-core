@@ -68,9 +68,7 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (
-            cli_token.expires_at is None or cli_token.expires_at > now_ts
-        ):
+        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -257,12 +255,16 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
         secret = await get_secret(session)
 
         if not secret.admin_password_hash:
-            raise HTTPException(status_code=500, detail="Admin password not configured")
+            raise HTTPException(
+                status_code=500, detail="Admin password not configured"
+            )
 
         if not vault.verify_password(
             password_update.current_password, secret.admin_password_hash
         ):
-            raise HTTPException(status_code=401, detail="Current password is incorrect")
+            raise HTTPException(
+                status_code=401, detail="Current password is incorrect"
+            )
 
         # Validate new password
         new_password = password_update.new_password.strip()
@@ -874,11 +876,16 @@ async def _active_ppq_claim_in_session(session: AsyncSession, provider_id: int) 
     return claim is not None and not claim.collected and not claim.swept
 
 
-def _require_valid_auto_topup(provider_type: str, settings: dict | None) -> None:
-    """Reject auto top-up settings the worker would later refuse to act on."""
-    from ..upstream.auto_topup import validate_auto_topup_settings
+def _require_valid_ppq_auto_topup(
+    provider_type: str, settings: dict | None
+) -> None:
+    """Reject PPQ auto top-up settings the worker would later refuse."""
+    if provider_type != "ppqai":
+        return
 
-    problem = validate_auto_topup_settings(provider_type, settings)
+    from ..upstream.auto_topup import validate_ppq_auto_topup_settings
+
+    problem = validate_ppq_auto_topup_settings(settings)
     if problem is not None:
         raise HTTPException(status_code=400, detail=problem)
 
@@ -897,6 +904,9 @@ async def _apply_provider_update(
     provider_type_changed = (
         payload.provider_type is not None
         and payload.provider_type != provider.provider_type
+    )
+    ppq_type_changed = provider_type_changed and (
+        provider.provider_type == "ppqai" or payload.provider_type == "ppqai"
     )
     if (
         provider_type_changed
@@ -931,7 +941,7 @@ async def _apply_provider_update(
     # enabled Routstr settings for PPQ (or vice versa) can silently reinterpret
     # sats as USD, so a type change must provide settings for the new type.
     if (
-        provider_type_changed
+        ppq_type_changed
         and payload.provider_settings is None
         and provider.provider_settings
     ):
@@ -960,7 +970,7 @@ async def _apply_provider_update(
         except (json.JSONDecodeError, TypeError):
             effective_settings = None
     if effective_settings is not None:
-        _require_valid_auto_topup(provider.provider_type, effective_settings)
+        _require_valid_ppq_auto_topup(provider.provider_type, effective_settings)
     if payload.provider_settings is not None:
         provider.provider_settings = json.dumps(payload.provider_settings)
 
@@ -1000,7 +1010,9 @@ async def create_upstream_provider(
         else:
             slug = await allocate_unique_provider_slug(session, payload.provider_type)
 
-        _require_valid_auto_topup(payload.provider_type, payload.provider_settings)
+        _require_valid_ppq_auto_topup(
+            payload.provider_type, payload.provider_settings
+        )
 
         provider = UpstreamProviderRow(
             slug=slug,
@@ -1057,7 +1069,9 @@ async def update_upstream_provider_by_slug(
     lookup = _validate_slug(payload.slug)
     async with create_session() as session:
         result = await session.exec(
-            select(UpstreamProviderRow).where(UpstreamProviderRow.slug == lookup)
+            select(UpstreamProviderRow).where(
+                UpstreamProviderRow.slug == lookup
+            )
         )
         provider = result.first()
         if not provider:
@@ -1808,7 +1822,10 @@ async def get_transactions_api(
             base = base.where(CashuTransaction.type == type)
         if source:
             if source == "x-cashu":
-                base = base.where(CashuTransaction.source == "x-cashu")
+                base = base.where(
+                    (CashuTransaction.source == "x-cashu")
+                    | (CashuTransaction.source == None)  # noqa: E711
+                )
             else:
                 base = base.where(CashuTransaction.source == source)
         if status:
@@ -1852,7 +1869,9 @@ async def get_transactions_api(
         }
 
 
-@admin_router.get("/api/lightning-invoices", dependencies=[Depends(require_admin_api)])
+@admin_router.get(
+    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
+)
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,

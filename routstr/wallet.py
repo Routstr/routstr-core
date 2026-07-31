@@ -310,9 +310,7 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 
     all_mint_urls = list({k.mint_url for k in wallet.keysets.values()})
     proof_summary = {
-        f"{k.mint_url}/{k.unit.name}": sum(
-            p.amount for p in wallet.proofs if p.id == k.id
-        )
+        f"{k.mint_url}/{k.unit.name}": sum(p.amount for p in wallet.proofs if p.id == k.id)
         for k in wallet.keysets.values()
     }
     # Show ALL proofs in DB by keyset_id, regardless of whether the loaded wallet
@@ -565,11 +563,6 @@ async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str
     raise Bolt11PaymentAmbiguous(
         f"Cashu melt did not reach a final state: {state or 'unknown'}"
     )
-
-
-async def pay_bolt11_invoice(invoice: str) -> tuple[int, str, str]:
-    """Prepare and pay a BOLT11 invoice from the best-funded Cashu mint."""
-    return await execute_bolt11_payment(await prepare_bolt11_payment(invoice))
 
 
 async def check_bolt11_payment_status(mint_url: str, unit: str, quote_id: str) -> str:
@@ -921,9 +914,7 @@ async def swap_to_primary_mint(
             )
             try:
                 for keyset_id in primary_wallet.keysets:
-                    await primary_wallet.restore_tokens_for_keyset(
-                        keyset_id, to=1, batch=25
-                    )
+                    await primary_wallet.restore_tokens_for_keyset(keyset_id, to=1, batch=25)
                 await primary_wallet.load_proofs(reload=True)
                 post_recovery_balance = primary_wallet.available_balance.amount
                 balance_gained = post_recovery_balance - pre_mint_balance
@@ -1194,7 +1185,7 @@ async def fetch_all_balances(
                 proofs = await slow_filter_spend_proofs(proofs, wallet)
             user_balance = user_balances.get((mint_url, unit), 0)
             if unit == "sat":
-                user_balance = _msats_to_sats_ceil(user_balance)
+                user_balance = _msats_to_sats(user_balance)
             proofs_balance = sum(proof.amount for proof in proofs)
 
             result: BalanceDetail = {
@@ -1289,7 +1280,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
 
     try:
         if unit == "sat":
-            user_balance = _msats_to_sats_ceil(user_balance)
+            user_balance = _msats_to_sats(user_balance)
         proofs_balance = sum(proof.amount for proof in proofs)
         available_balance = proofs_balance - user_balance
         min_amount = (
@@ -1368,9 +1359,10 @@ async def _refund_sweep_once(cutoff: int) -> None:
             db.CashuTransaction.type == "out",
             db.CashuTransaction.collected == False,  # noqa: E712
             db.CashuTransaction.swept == False,  # noqa: E712
-            # PPQ rows describe a Lightning spend or its claim lock, not a
-            # refundable Cashu token. ``source`` is non-null by schema.
-            col(db.CashuTransaction.source).notin_(
+            # PPQ rows describe a Lightning spend or claim lock, not a
+            # refundable Cashu token. Preserve legacy rows without a source.
+            col(db.CashuTransaction.source).is_(None)
+            | col(db.CashuTransaction.source).notin_(
                 ["ppq_auto_topup", "ppq_auto_topup_claim"]
             ),
             db.CashuTransaction.created_at < cutoff,
