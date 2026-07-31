@@ -1439,6 +1439,12 @@ async def test_pay_bolt11_invoice_uses_sufficient_mint_with_highest_balance() ->
             "routstr.wallet.slow_filter_spend_proofs",
             side_effect=lambda proofs, wallet: proofs,
         ),
+        # This unit test is about mint selection, not shared DB liabilities.
+        # Keep it deterministic regardless of earlier test-created API keys.
+        patch(
+            "routstr.wallet.db.total_user_liability",
+            AsyncMock(return_value=0),
+        ),
     ):
         amount, mint_url, unit = await pay_bolt11_invoice("lnbc-invoice")
 
