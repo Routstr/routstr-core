@@ -4,6 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
 
 def _run_alembic(root: Path, database_url: str, revision: str) -> None:
     env = os.environ.copy()
@@ -37,7 +40,10 @@ def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
             "payout_in_progress_msats, payout_started_at FROM routstr_fees"
         ).fetchone()
 
-    assert version == ("bf76270b66c4",)
+    migration_config = Config(str(root / "alembic.ini"))
+    assert version == (
+        ScriptDirectory.from_config(migration_config).get_current_head(),
+    )
     assert {
         "id",
         "accumulated_msats",

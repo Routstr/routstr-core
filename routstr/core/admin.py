@@ -51,6 +51,13 @@ ADMIN_SESSION_DURATION = 3600
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
 
 
+async def _refresh_provider_model_paths(upstream_provider_id: int) -> None:
+    """Queue discovery sync without blocking the committed admin mutation."""
+    from ..upstream.model_paths import schedule_model_paths_refresh_for_provider
+
+    await schedule_model_paths_refresh_for_provider(upstream_provider_id)
+
+
 async def require_admin_api(request: Request) -> None:
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
@@ -579,6 +586,7 @@ async def upsert_provider_model(
             await session.refresh(row)
 
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return _row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
@@ -633,6 +641,7 @@ async def delete_provider_model(provider_id: str, model_id: str) -> dict[str, ob
         await session.delete(row)
         await session.commit()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {"ok": True, "deleted_id": model_id}
 
 
@@ -652,6 +661,7 @@ async def delete_all_provider_models(provider_id: str) -> dict[str, object]:
             await session.delete(row)  # type: ignore
         await session.commit()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {"ok": True, "deleted": len(rows)}
 
 
@@ -743,6 +753,7 @@ async def batch_override_provider_models(
         await session.commit()
 
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {
         "ok": True,
         "count": overridden_count,
@@ -943,6 +954,7 @@ async def create_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -968,6 +980,7 @@ async def update_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -1003,6 +1016,7 @@ async def update_upstream_provider_by_slug(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
