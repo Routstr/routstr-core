@@ -462,9 +462,7 @@ async def test_disabling_model_on_one_provider_keeps_other_provider(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {
-        _expected_path(1, "shared-model")
-    }
+    assert _paths_of(payload, "shared-model") == {_expected_path(1, "shared-model")}
 
 
 @pytest.mark.asyncio
@@ -498,12 +496,8 @@ async def test_override_alias_not_applied_across_providers(
     await mp.refresh_model_paths([p1, p2])
 
     payload = await mp.get_all_model_paths()
-    assert _paths_of(payload, "shared-model") == {
-        _expected_path(1, "shared-model")
-    }
-    assert _paths_of(payload, "private-alias") == {
-        _expected_path(2, "private-alias")
-    }
+    assert _paths_of(payload, "shared-model") == {_expected_path(1, "shared-model")}
+    assert _paths_of(payload, "private-alias") == {_expected_path(2, "private-alias")}
 
 
 @pytest.mark.asyncio
@@ -1134,7 +1128,7 @@ async def test_get_paths_for_model_falls_back_to_provider_prefixed_id(
 
 
 @pytest.mark.asyncio
-async def test_get_paths_for_model_requires_exact_advertised_id(
+async def test_get_paths_for_model_accepts_provider_prefixed_alias(
     patched_session: AsyncEngine,
 ) -> None:
     p1 = _FakeProvider(
@@ -1158,15 +1152,14 @@ async def test_get_paths_for_model_requires_exact_advertised_id(
         _path_entry(4, "deepseek-v4-pro"),
         _path_entry(7, "deepseek-v4-pro"),
     ]
-    assert prefixed_paths == []
+    assert prefixed_paths == short_paths
 
 
 @pytest.mark.asyncio
 async def test_get_paths_for_model_multi_segment_id_matches_models_listing(
     patched_session: AsyncEngine,
 ) -> None:
-    """For three-segment ids the discovery id must be the same base id the
-    rest of the system exposes (first-slash rule), not the last segment."""
+    """Three-segment upstream IDs resolve to the same first-slash public ID."""
     provider = _FakeProvider(
         provider_type="generic",
         base_url="https://x/v1",
@@ -1181,7 +1174,7 @@ async def test_get_paths_for_model_multi_segment_id_matches_models_listing(
     ]
     assert (await mp.get_paths_for_model("accounts/fireworks/models/glm-5"))[
         "data"
-    ] == []
+    ] == [_path_entry(1, "fireworks/models/glm-5")]
 
 
 # --------------------------------------------------------------------------- #

@@ -31,6 +31,8 @@ from ..core.db import ModelPathRow, ModelRow, UpstreamProviderRow, create_sessio
 from ..core.logging import get_logger
 
 if TYPE_CHECKING:
+    from sqlmodel.ext.asyncio.session import AsyncSession
+
     from .base import BaseUpstreamProvider
 
 logger = get_logger(__name__)
@@ -782,18 +784,28 @@ async def get_all_model_paths() -> dict:
 
 
 async def get_paths_for_model(model_id: str) -> dict:
-    """Return paths only for the exact model ID advertised by ``/v1/models``."""
-    async with create_session() as session:
-        rows = (
-            await session.exec(
-                select(ModelPathRow)
-                .where(col(ModelPathRow.model_id) == model_id)
-                .order_by(
-                    col(ModelPathRow.path),
-                    col(ModelPathRow.upstream_provider_id),
+    """Return paths for an advertised ID or its provider-prefixed alias."""
+
+    async def load_rows(session: AsyncSession, lookup_id: str) -> list[ModelPathRow]:
+        return list(
+            (
+                await session.exec(
+                    select(ModelPathRow)
+                    .where(col(ModelPathRow.model_id) == lookup_id)
+                    .order_by(
+                        col(ModelPathRow.path),
+                        col(ModelPathRow.upstream_provider_id),
+                    )
                 )
-            )
-        ).all()
+            ).all()
+        )
+
+    async with create_session() as session:
+        rows = await load_rows(session, model_id)
+        if not rows:
+            unprefixed_id = public_model_id(model_id)
+            if unprefixed_id != model_id:
+                rows = await load_rows(session, unprefixed_id)
 
     seen: set[str] = set()
     paths: list[dict] = []
