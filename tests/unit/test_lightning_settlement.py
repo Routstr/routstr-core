@@ -6,13 +6,16 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
-from cashu.core.base import Proof
+from cashu.core.base import MintQuoteState, Proof
 
 from routstr.lightning import (
+    InvoiceRecoverRequest,
     _invoice_settlement_locks,
     _is_outputs_already_signed,
     _mint_invoice_quote,
     check_invoice_payment,
+    get_invoice_status,
+    recover_invoice,
 )
 from routstr.wallet import Wallet
 
@@ -30,6 +33,8 @@ def _invoice(**overrides: object) -> SimpleNamespace:
         "balance_limit": None,
         "balance_limit_reset": None,
         "validity_date": None,
+        "created_at": 1,
+        "expires_at": 2,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -159,14 +164,21 @@ async def test_non_pending_invoice_is_not_minted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_invoice_mint_timeout_does_not_expose_paid() -> None:
+async def test_ambiguous_invoice_mint_timeout_remains_recoverable() -> None:
     _invoice_settlement_locks.clear()
     invoice = _invoice()
     session = AsyncMock()
     wallet = Mock(get_mint_quote=AsyncMock(return_value=Mock(paid=True)))
+    state_session = AsyncMock()
+    state_session.exec.return_value.rowcount = 1
+
+    @asynccontextmanager
+    async def owned_session() -> AsyncIterator[AsyncMock]:
+        yield state_session
 
     with (
         patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning.create_session", owned_session),
         patch(
             "routstr.lightning._mint_invoice_quote",
             AsyncMock(side_effect=httpx.TimeoutException("response lost")),
@@ -175,10 +187,150 @@ async def test_ambiguous_invoice_mint_timeout_does_not_expose_paid() -> None:
     ):
         await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
 
-    assert invoice.status == "pending"
+    assert invoice.status == "settlement_pending"
+    state_session.commit.assert_awaited_once()
     session.rollback.assert_not_awaited()
     # One commit closes the initial read transaction before external I/O.
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_quote_lookup_timeout_is_not_definitively_unpaid() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(side_effect=httpx.TimeoutException("quote timeout"))
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_overdue_invoice_does_not_expire_after_ambiguous_quote_lookup() -> None:
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    session.get.return_value = invoice
+    check = AsyncMock(return_value=False)
+
+    with patch("routstr.lightning.check_invoice_payment", check):
+        response = await get_invoice_status(invoice.id, session)  # type: ignore[arg-type]
+
+    assert response.status == "pending"
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_overdue_invoice_expires_only_after_definitive_unpaid_quote() -> None:
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    session.get.return_value = invoice
+    check = AsyncMock(return_value=True)
+
+    async def expire(
+        candidate: SimpleNamespace, _session: AsyncMock, definitive: bool
+    ) -> bool:
+        assert definitive is True
+        candidate.status = "expired"
+        return True
+
+    with (
+        patch("routstr.lightning.check_invoice_payment", check),
+        patch(
+            "routstr.lightning._expire_invoice_if_authoritatively_unpaid",
+            side_effect=expire,
+        ) as expire_invoice,
+    ):
+        response = await get_invoice_status(invoice.id, session)  # type: ignore[arg-type]
+
+    assert response.status == "expired"
+    expire_invoice.assert_awaited_once_with(invoice, session, True)
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recover_applies_authoritative_expiry_helper() -> None:
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    result = Mock()
+    result.first.return_value = invoice
+    session.exec.return_value = result
+    check = AsyncMock(return_value=True)
+
+    async def expire(
+        candidate: SimpleNamespace, _session: AsyncMock, definitive: bool
+    ) -> bool:
+        assert definitive is True
+        candidate.status = "expired"
+        return True
+
+    with (
+        patch("routstr.lightning.check_invoice_payment", check),
+        patch(
+            "routstr.lightning._expire_invoice_if_authoritatively_unpaid",
+            side_effect=expire,
+        ) as expire_invoice,
+    ):
+        response = await recover_invoice(
+            InvoiceRecoverRequest(bolt11="lnbc-test"), session  # type: ignore[arg-type]
+        )
+
+    assert response.status == "expired"
+    expire_invoice.assert_awaited_once_with(invoice, session, True)
+
+
+@pytest.mark.asyncio
+async def test_paid_state_write_failure_still_reports_non_expirable_outcome() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            return_value=Mock(paid=True, state=MintQuoteState.paid)
+        )
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch(
+            "routstr.lightning._mint_invoice_quote",
+            AsyncMock(side_effect=httpx.TimeoutException("response lost")),
+        ),
+        patch(
+            "routstr.lightning.create_session",
+            side_effect=RuntimeError("database unavailable"),
+        ),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        definitively_unpaid = await check_invoice_payment(
+            invoice, session  # type: ignore[arg-type]
+        )
+
+    assert definitively_unpaid is False
+    assert invoice.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_settlement_pending_invoice_does_not_expire() -> None:
+    invoice = _invoice(status="settlement_pending", expires_at=0)
+    session = AsyncMock()
+    session.get.return_value = invoice
+    check = AsyncMock()
+
+    with patch("routstr.lightning.check_invoice_payment", check):
+        response = await get_invoice_status(
+            invoice.id, session  # type: ignore[arg-type]
+        )
+
+    check.assert_awaited_once_with(invoice, session)
+    assert response.status == "settlement_pending"
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -195,7 +347,9 @@ async def test_concurrent_invoice_checks_finalize_once_in_process() -> None:
 
     @asynccontextmanager
     async def owned_session() -> AsyncIterator[AsyncMock]:
-        yield AsyncMock()
+        owned = AsyncMock()
+        owned.exec.return_value.rowcount = 1
+        yield owned
 
     with (
         patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),

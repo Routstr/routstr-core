@@ -72,7 +72,15 @@ class MintRateGuard:
         concurrency = settings.mint_max_concurrency
         guard = cls._guards.get(mint_url)
         if guard is None or guard._max_concurrency != concurrency:
+            previous = guard
             guard = cls(mint_url, concurrency)
+            if previous is not None:
+                # Concurrency changed at runtime: keep the live cooldown/backoff
+                # state so an active 429 cooldown is not silently discarded.
+                guard._cooldown_until = previous._cooldown_until
+                guard._cooldown_reason = previous._cooldown_reason
+                guard._consecutive_rate_limits = previous._consecutive_rate_limits
+                guard._needs_probe = previous._needs_probe
             cls._guards[mint_url] = guard
         return guard
 
@@ -124,10 +132,9 @@ class MintRateGuard:
         return self._cooldown_reason if self.cooldown_remaining() > 0 else None
 
     def _raise_if_wait_forbidden(self) -> None:
-        if _fail_fast_depth.get() and (
-            self._needs_probe or self.cooldown_remaining() > 0
-        ):
-            raise MintCooldownError(self._mint_url, self.cooldown_remaining())
+        remaining = self.cooldown_remaining()
+        if _fail_fast_depth.get() and remaining > 0:
+            raise MintCooldownError(self._mint_url, remaining)
 
     async def _wait_for_cooldown(self) -> None:
         while True:
@@ -157,11 +164,7 @@ class MintRateGuard:
                 retry_after = None
                 if isinstance(error, httpx.HTTPStatusError):
                     retry_after = parse_retry_after(error.response.headers)
-                delay = max(
-                    _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS,
-                    retry_after or 0.0,
-                )
-                self.apply_cooldown(delay, reason="rate_limited")
+                self.apply_rate_limit_cooldown(retry_after)
             else:
                 self.apply_cooldown(1.0)
             logger.warning(
@@ -194,6 +197,8 @@ class MintRateGuard:
         while True:
             self._raise_if_wait_forbidden()
             if self._needs_probe or self.cooldown_remaining() > 0:
+                if _fail_fast_depth.get() and self._probe_lock.locked():
+                    raise MintCooldownError(self._mint_url, self.cooldown_remaining())
                 async with self._probe_lock:
                     self._raise_if_wait_forbidden()
                     if self.cooldown_remaining() > 0:

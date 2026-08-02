@@ -271,6 +271,54 @@ async def test_internal_error_with_invalid_keyword_does_not_masquerade(
 
 
 @pytest.mark.asyncio
+async def test_primary_msat_token_sets_provenance_without_cashu_mint_duplicate(
+    session: AsyncSession,
+) -> None:
+    token = "cashuAprimary_msat_token"
+    token_obj = SimpleNamespace(mint="http://primary:3338", unit="msat")
+    credit = AsyncMock(return_value=1_000)
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "primary_mint", token_obj.mint),
+        patch.object(settings, "primary_mint_unit", "msat"),
+        patch.object(settings, "cashu_mints", []),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch("routstr.auth.credit_balance", new=credit),
+    ):
+        key = await validate_bearer_key(token, session)
+
+    assert key.refund_mint_url == token_obj.mint
+    assert key.refund_currency == "msat"
+    credit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_primary_token_unit_mismatch_is_rejected_before_redemption(
+    session: AsyncSession,
+) -> None:
+    token = "cashuAprimary_wrong_unit"
+    token_obj = SimpleNamespace(mint="http://primary:3338", unit="sat")
+    credit = AsyncMock(return_value=1_000)
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "primary_mint", token_obj.mint),
+        patch.object(settings, "primary_mint_unit", "msat"),
+        patch.object(settings, "cashu_mints", []),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch("routstr.auth.credit_balance", new=credit),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await validate_bearer_key(token, session)
+
+    assert exc_info.value.status_code == 400
+    credit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_malformed_cashu_token_returns_400_invalid_token(
     session: AsyncSession,
 ) -> None:

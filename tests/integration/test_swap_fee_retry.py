@@ -29,7 +29,9 @@ from routstr.core.settings import settings
 # with the testmint stub that bypasses swapping (see conftest.py).
 from routstr.wallet import recieve_token as _real_recieve_token
 
-PRIMARY_MINT = "http://primary:3338"
+# Match the authenticated fixture's persisted refund mint: existing-key topups
+# are intentionally constrained to that mint for collateral provenance.
+PRIMARY_MINT = "http://localhost:3338"
 
 
 def _make_swap_mocks(

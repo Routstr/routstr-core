@@ -42,6 +42,7 @@ export interface BalanceDetail {
 
 export interface WithdrawResponse {
   token: string;
+  mint_url: string;
 }
 
 export interface CreateChildKeyResponse {

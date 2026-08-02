@@ -387,11 +387,23 @@ async def _validate_bearer_key_locked(
                     "has_expiry_time": bool(key_expiry_time),
                 },
             )
-            if token_obj.mint in settings.cashu_mints:
+            if token_obj.mint == settings.primary_mint:
+                if token_obj.unit != settings.primary_mint_unit:
+                    raise redemption_error_to_http_exception(
+                        ValueError(
+                            "Cashu token unit does not match the configured primary "
+                            f"mint unit: expected {settings.primary_mint_unit}, "
+                            f"got {token_obj.unit}"
+                        )
+                    )
+                refund_currency = token_obj.unit
+                refund_mint_url = settings.primary_mint
+            elif token_obj.mint in settings.cashu_mints:
                 refund_currency = token_obj.unit
                 refund_mint_url = token_obj.mint
             else:
-                refund_currency = "sat"
+                # Foreign tokens are swapped into the configured primary mint.
+                refund_currency = settings.primary_mint_unit
                 refund_mint_url = settings.primary_mint
 
             new_key = ApiKey(

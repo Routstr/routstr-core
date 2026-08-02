@@ -242,7 +242,7 @@ async def calculate_discounted_max_cost(
         },
     )
 
-    return max(0, adjusted)
+    return max(settings.min_request_msat, adjusted)
 
 
 def estimate_tokens(messages: list) -> int:

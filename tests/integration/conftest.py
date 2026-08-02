@@ -203,8 +203,13 @@ class TestmintWallet:
         token_base64 = base64.urlsafe_b64encode(token_json.encode()).decode()
         return f"cashuA{token_base64}"
 
-    async def redeem_token(self, token: str) -> Tuple[int, str, str]:
-        """Redeem a Cashu token - compatible with wallet.recieve_token"""
+    async def redeem_token(
+        self,
+        token: str,
+        destination_mint: str | None = None,
+        destination_unit: str | None = None,
+    ) -> Tuple[int, str, str]:
+        """Redeem a Cashu token - compatible with wallet.recieve_token."""
         if not self.wallet:
             await self.init()
 

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
+from cashu.core.base import MintQuoteState
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm.attributes import set_committed_value
@@ -32,8 +33,8 @@ logger = get_logger(__name__)
 
 lightning_router = APIRouter(prefix="/lightning")
 
-# Avoid duplicate work within one process. Cross-process credit fencing is done
-# by the conditional pending -> paid update in _finalize_invoice_settlement().
+# Avoid duplicate work within one process. Cross-process settlement is fenced
+# by claiming a paid quote before minting and by the final conditional update.
 @dataclass
 class _InvoiceLockEntry:
     lock: asyncio.Lock
@@ -138,6 +139,9 @@ class InvoiceStatusResponse(BaseModel):
     expires_at: int
 
 
+_RETRYABLE_INVOICE_STATUSES = ("pending", "settlement_pending")
+
+
 class InvoiceRecoverRequest(BaseModel):
     bolt11: str = Field(description="BOLT11 invoice string")
 
@@ -166,8 +170,11 @@ async def _request_mint_with_fallback(
             f"generate_lightning_invoice: amount_sats must be > 0, got {amount_sats}."
         )
     tried: list[str] = []
-    configured = allowed_mints or [settings.primary_mint, *settings.cashu_mints]
-    candidates = list(dict.fromkeys(configured))
+    candidates = (
+        list(dict.fromkeys(allowed_mints))
+        if allowed_mints
+        else _trusted_mint_candidates()
+    )
     for mint_url in candidates:
         cooldown = mint_cooldown_remaining(mint_url)
         if cooldown > 0:
@@ -317,12 +324,12 @@ async def get_invoice_status(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    if invoice.status == "pending":
-        await check_invoice_payment(invoice, session)
-
-    if invoice.status == "pending" and int(time.time()) > invoice.expires_at:
-        invoice.status = "expired"
-        await session.commit()
+    definitively_unpaid = False
+    if invoice.status in _RETRYABLE_INVOICE_STATUSES:
+        definitively_unpaid = await check_invoice_payment(invoice, session)
+    await _expire_invoice_if_authoritatively_unpaid(
+        invoice, session, definitively_unpaid
+    )
 
     api_key = None
     if invoice.status == "paid" and invoice.purpose == "create":
@@ -356,8 +363,12 @@ async def recover_invoice(
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    if invoice.status == "pending":
-        await check_invoice_payment(invoice, session)
+    definitively_unpaid = False
+    if invoice.status in _RETRYABLE_INVOICE_STATUSES:
+        definitively_unpaid = await check_invoice_payment(invoice, session)
+    await _expire_invoice_if_authoritatively_unpaid(
+        invoice, session, definitively_unpaid
+    )
 
     api_key = None
     if invoice.status == "paid":
@@ -376,19 +387,58 @@ async def recover_invoice(
     )
 
 
+async def _claim_paid_invoice_for_settlement(
+    invoice: LightningInvoice,
+    caller_session: AsyncSession,
+    observed_status: str,
+) -> bool:
+    """Claim an authoritative paid quote before consuming it at the mint."""
+    if observed_status == "settlement_pending":
+        return True
+    if observed_status != "pending":
+        await _reload_invoice_view(invoice, caller_session)
+        return False
+
+    async with create_session() as claim_session:
+        claim = await claim_session.exec(  # type: ignore[call-overload]
+            update(LightningInvoice)
+            .where(
+                col(LightningInvoice.id) == invoice.id,
+                col(LightningInvoice.status) == "pending",
+            )
+            .values(status="settlement_pending")
+            .execution_options(synchronize_session=False)
+        )
+        await claim_session.commit()
+
+    if claim.rowcount != 1:
+        await _reload_invoice_view(invoice, caller_session)
+        return False
+
+    _publish_invoice_value(invoice, "status", "settlement_pending")
+    return True
+
+
 async def check_invoice_payment(
     invoice: LightningInvoice, session: AsyncSession
-) -> None:
+) -> bool:
+    """Settle an invoice and report whether its quote is definitively unpaid.
+
+    False covers paid, pending, and ambiguous transport/DB outcomes so callers
+    never expire a quote merely because reconciliation could not complete.
+    """
     async with _invoice_settlement_lock(invoice.id), wallet_operation_guard():
         minted = False
+        payment_confirmed = False
         try:
             # Snapshot the row and end the caller's read transaction before any
             # potentially slow mint I/O. All final DB mutations use owned,
             # short-lived sessions below.
             await session.refresh(invoice)
-            if invoice.status != "pending":
+            if invoice.status not in _RETRYABLE_INVOICE_STATUSES:
                 await session.commit()
-                return
+                return False
+            observed_status = invoice.status
             settlement = _InvoiceSettlement.from_invoice(invoice)
             await session.commit()
 
@@ -400,7 +450,15 @@ async def check_invoice_payment(
                 mint_url=mint_url,
             )
             if not mint_status.paid:
-                return
+                return getattr(mint_status, "state", None) == MintQuoteState.unpaid
+            payment_confirmed = True
+
+            # Fence expiry and other workers before consuming the paid quote.
+            # If a concurrent expiry/finalization won, this worker must not mint.
+            if not await _claim_paid_invoice_for_settlement(
+                invoice, session, observed_status
+            ):
+                return False
 
             # Reject a paid top-up whose target was pruned before redeeming its
             # single-use quote. The validation session is closed before mint I/O.
@@ -416,7 +474,9 @@ async def check_invoice_payment(
                             update(LightningInvoice)
                             .where(
                                 col(LightningInvoice.id) == settlement.id,
-                                col(LightningInvoice.status) == "pending",
+                                col(LightningInvoice.status).in_(
+                                    _RETRYABLE_INVOICE_STATUSES
+                                ),
                             )
                             .values(status="reconciliation_required")
                         )
@@ -431,7 +491,7 @@ async def check_invoice_payment(
                             "Paid topup invoice target API key was not found; reconciliation required",
                             extra={"invoice_id": settlement.id},
                         )
-                        return
+                        return False
 
             # Quote-linked proof verification makes an ambiguous mint response
             # retryable without crediting unrelated wallet balance growth.
@@ -445,7 +505,7 @@ async def check_invoice_payment(
                 )
             if not settled:
                 await _reload_invoice_view(invoice, session)
-                return
+                return False
 
             _publish_invoice_value(invoice, "status", "paid")
             _publish_invoice_value(invoice, "paid_at", paid_at)
@@ -461,9 +521,33 @@ async def check_invoice_payment(
                     else None,
                 },
             )
+            return False
         except BaseException as error:
             # Never roll back the caller-owned session: doing so expires invoice
             # and sibling ORM objects. Owned sessions roll themselves back.
+            if payment_confirmed and invoice.status != "settlement_pending":
+                try:
+                    async with create_session() as state_session:
+                        pending = await state_session.exec(  # type: ignore[call-overload]
+                            update(LightningInvoice)
+                            .where(
+                                col(LightningInvoice.id) == invoice.id,
+                                col(LightningInvoice.status).in_(
+                                    _RETRYABLE_INVOICE_STATUSES
+                                ),
+                            )
+                            .values(status="settlement_pending")
+                        )
+                        await state_session.commit()
+                    if pending.rowcount == 1:
+                        _publish_invoice_value(
+                            invoice, "status", "settlement_pending"
+                        )
+                except Exception as state_error:
+                    logger.critical(
+                        "Paid invoice reconciliation state could not be persisted",
+                        extra={"invoice_id": invoice.id, "error": str(state_error)},
+                    )
             if minted:
                 logger.critical(
                     "Invoice mint succeeded but DB finalization failed; reconciliation required",
@@ -476,6 +560,7 @@ async def check_invoice_payment(
             if not isinstance(error, Exception):
                 raise
             logger.error(f"Failed to check invoice payment: {error}")
+            return False
 
 
 def _is_outputs_already_signed(error: BaseException) -> bool:
@@ -588,7 +673,9 @@ async def _finalize_invoice_settlement(
     claim = await session.exec(  # type: ignore[call-overload]
         update(LightningInvoice)
         .where(col(LightningInvoice.id) == invoice.id)
-        .where(col(LightningInvoice.status) == "pending")
+        .where(
+            col(LightningInvoice.status).in_(_RETRYABLE_INVOICE_STATUSES)
+        )
         .values(status="paid", paid_at=paid_at, api_key_hash=api_key_hash)
         .execution_options(synchronize_session=False)
     )
@@ -623,6 +710,39 @@ async def _reload_invoice_view(
     _publish_invoice_value(invoice, "api_key_hash", api_key_hash)
 
 
+async def _expire_invoice_if_authoritatively_unpaid(
+    invoice: LightningInvoice,
+    caller_session: AsyncSession,
+    definitively_unpaid: bool,
+) -> bool:
+    """Expire one overdue unpaid invoice without overwriting concurrent settlement."""
+    if (
+        not definitively_unpaid
+        or invoice.status != "pending"
+        or int(time.time()) <= invoice.expires_at
+    ):
+        return False
+
+    async with create_session() as expiry_session:
+        expired = await expiry_session.exec(  # type: ignore[call-overload]
+            update(LightningInvoice)
+            .where(
+                col(LightningInvoice.id) == invoice.id,
+                col(LightningInvoice.status) == "pending",
+            )
+            .values(status="expired")
+            .execution_options(synchronize_session=False)
+        )
+        await expiry_session.commit()
+
+    if expired.rowcount == 1:
+        _publish_invoice_value(invoice, "status", "expired")
+        return True
+
+    await _reload_invoice_view(invoice, caller_session)
+    return False
+
+
 async def _credit_topup_record(
     invoice: LightningInvoice | _InvoiceSettlement, session: AsyncSession
 ) -> None:
@@ -635,32 +755,33 @@ INVOICE_WATCH_INTERVAL_SECONDS = 10
 INVOICE_WATCH_BATCH_LIMIT = 100
 
 
-async def periodic_invoice_watcher() -> None:
-    """Background task: detect paid Lightning invoices and credit balances.
+async def _process_invoice_watch_batch(session: AsyncSession) -> None:
+    result = await session.exec(
+        select(LightningInvoice)
+        .where(
+            col(LightningInvoice.status).in_(_RETRYABLE_INVOICE_STATUSES)
+        )
+        .limit(INVOICE_WATCH_BATCH_LIMIT)
+    )
+    for invoice in result.all():
+        try:
+            definitively_unpaid = await check_invoice_payment(invoice, session)
+            await _expire_invoice_if_authoritatively_unpaid(
+                invoice, session, definitively_unpaid
+            )
+        except Exception as e:
+            logger.error(
+                "Invoice watcher failed for invoice",
+                extra={"invoice_id": invoice.id, "error": str(e)},
+            )
 
-    Removes the need for clients to poll the status endpoint after paying.
-    """
+
+async def periodic_invoice_watcher() -> None:
+    """Background task: detect paid Lightning invoices and credit balances."""
     while True:
         try:
             async with create_session() as session:
-                now = int(time.time())
-                result = await session.exec(
-                    select(LightningInvoice)
-                    .where(
-                        LightningInvoice.status == "pending",
-                        col(LightningInvoice.expires_at) > now,
-                    )
-                    .limit(INVOICE_WATCH_BATCH_LIMIT)
-                )
-                pending = result.all()
-                for invoice in pending:
-                    try:
-                        await check_invoice_payment(invoice, session)
-                    except Exception as e:
-                        logger.error(
-                            "Invoice watcher failed for invoice",
-                            extra={"invoice_id": invoice.id, "error": str(e)},
-                        )
+                await _process_invoice_watch_batch(session)
         except asyncio.CancelledError:
             raise
         except Exception as e:

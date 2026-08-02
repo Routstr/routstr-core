@@ -7,7 +7,11 @@ import httpx
 from cashu.core.base import MeltQuoteState
 from cashu.wallet.wallet import Proof, Wallet
 
-from ..mint import MINT_TRANSPORT_EXCEPTIONS, run_mint_operation
+from ..mint import (
+    MINT_TRANSPORT_EXCEPTIONS,
+    is_mint_rate_limited,
+    run_mint_operation,
+)
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -239,7 +243,15 @@ async def raw_send_to_lnurl(
             mint_url=str(wallet.url),
             retry_timeouts=False,
         )
-    except MINT_TRANSPORT_EXCEPTIONS as error:
+    except Exception as error:
+        if is_mint_rate_limited(error):
+            # Cooldown failures happen before dispatch, and HTTP 429 means the
+            # mint rejected the request. Neither outcome may keep proofs
+            # reserved as though a Lightning payment could still settle.
+            await wallet.set_reserved_for_send(proofs, reserved=False)
+            raise
+        if not isinstance(error, MINT_TRANSPORT_EXCEPTIONS):
+            raise
         melt_response = None
         melt_error: BaseException | None = error
     else:

@@ -2,7 +2,8 @@ import asyncio
 import base64
 import json
 import socket
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -59,6 +60,49 @@ async def test_get_balance() -> None:
     ):
         balance = await get_balance("sat")
         assert balance == 50000
+
+
+@pytest.mark.asyncio
+async def test_get_wallet_force_reload_bypasses_reload_interval() -> None:
+    from routstr.wallet import get_wallet
+
+    mock_wallet = Mock(load_mint=AsyncMock(), load_proofs=AsyncMock())
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        await get_wallet("http://mint:3338", "sat")
+        await get_wallet("http://mint:3338", "sat", force_reload=True)
+
+    assert mock_wallet.load_mint.await_count == 2
+    assert mock_wallet.load_proofs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_public_recieve_token_holds_wallet_operation_guard() -> None:
+    inside_guard = False
+
+    @asynccontextmanager
+    async def operation_guard() -> AsyncIterator[None]:
+        nonlocal inside_guard
+        inside_guard = True
+        try:
+            yield
+        finally:
+            inside_guard = False
+
+    async def receive_locked(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
+        assert inside_guard
+        return 1, "sat", "https://mint.example"
+
+    with (
+        patch("routstr.wallet.wallet_operation_guard", operation_guard),
+        patch("routstr.wallet._recieve_token_locked", side_effect=receive_locked),
+    ):
+        assert await recieve_token("cashuAtoken") == (
+            1,
+            "sat",
+            "https://mint.example",
+        )
+
+    assert inside_guard is False
 
 
 @pytest.mark.asyncio
@@ -168,6 +212,78 @@ async def test_recieve_token_trusted_mint_deducts_input_fee() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recieve_token_uses_only_requested_destination_mint() -> None:
+    from routstr.core.settings import settings
+
+    source = "http://foreign:3338"
+    destination = "http://key-mint:3338"
+    token = Mock(
+        mint=source,
+        unit="sat",
+        amount=100,
+        keysets=["keyset1"],
+        proofs=[Mock(amount=100)],
+    )
+    source_wallet = Mock()
+    swap = AsyncMock(return_value=(99, "sat", destination))
+
+    with (
+        patch.object(settings, "primary_mint", destination),
+        patch.object(settings, "cashu_mints", [destination]),
+        patch("routstr.wallet.deserialize_token_from_string", return_value=token),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=source_wallet)),
+        patch("routstr.wallet.swap_to_trusted_mint", swap),
+    ):
+        result = await recieve_token(
+            "cashuAtoken", destination_mint=destination, destination_unit="sat"
+        )
+
+    assert result == (99, "sat", destination)
+    swap.assert_awaited_once_with(
+        token, source_wallet, destination_mints=[destination]
+    )
+
+
+@pytest.mark.asyncio
+async def test_recieve_token_rejects_unit_mismatch_before_wallet_mutation() -> None:
+    token = Mock(mint="http://key-mint:3338", unit="msat", keysets=["keyset"])
+    get_wallet = AsyncMock()
+
+    with (
+        patch("routstr.wallet.deserialize_token_from_string", return_value=token),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        pytest.raises(ValueError, match="liability unit"),
+    ):
+        await recieve_token(
+            "cashuAtoken",
+            destination_mint="http://key-mint:3338",
+            destination_unit="sat",
+        )
+
+    get_wallet.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recieve_token_cross_mint_output_unit_must_match() -> None:
+    token = Mock(mint="http://foreign:3338", unit="msat", keysets=["keyset"])
+    get_wallet = AsyncMock()
+
+    with (
+        patch("routstr.wallet.deserialize_token_from_string", return_value=token),
+        patch("routstr.wallet.settings.primary_mint_unit", "sat"),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        pytest.raises(ValueError, match="liability unit"),
+    ):
+        await recieve_token(
+            "cashuAtoken",
+            destination_mint="http://key-mint:3338",
+            destination_unit="msat",
+        )
+
+    get_wallet.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_primary_mint_failure_does_not_try_another_mint() -> None:
     from routstr.core.settings import settings
     from routstr.wallet import SourceMintConnectionError
@@ -208,6 +324,54 @@ async def test_primary_mint_failure_does_not_try_another_mint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_same_mint_split_timeout_is_non_retryable() -> None:
+    from routstr.wallet import _redeem_same_mint
+
+    token = Mock(
+        keysets=["keyset1"],
+        mint="http://mint:3338",
+        unit="sat",
+        amount=1000,
+        proofs=[Mock(amount=1000)],
+    )
+    wallet = Mock(
+        load_mint=AsyncMock(),
+        split=AsyncMock(side_effect=httpx.ReadTimeout("response lost")),
+        get_fees_for_proofs=Mock(return_value=0),
+    )
+
+    with pytest.raises(TokenConsumedError, match="outcome is ambiguous") as caught:
+        await _redeem_same_mint(wallet, token)
+
+    classified = classify_redemption_error(caught.value)
+    assert classified is not None
+    assert classified[0] == "token_consumed"
+    assert classified[1] == 500
+    assert classified[3] == "cashu_token_consumed"
+
+
+@pytest.mark.asyncio
+async def test_same_mint_split_connect_error_remains_retryable() -> None:
+    from routstr.wallet import SourceMintConnectionError, _redeem_same_mint
+
+    token = Mock(
+        keysets=["keyset1"],
+        mint="http://mint:3338",
+        unit="sat",
+        amount=1000,
+        proofs=[Mock(amount=1000)],
+    )
+    wallet = Mock(
+        load_mint=AsyncMock(),
+        split=AsyncMock(side_effect=httpx.ConnectError("connect failed")),
+        get_fees_for_proofs=Mock(return_value=0),
+    )
+
+    with pytest.raises(SourceMintConnectionError):
+        await _redeem_same_mint(wallet, token)
+
+
+@pytest.mark.asyncio
 async def test_send_token() -> None:
     mock_wallet = Mock()
 
@@ -224,7 +388,11 @@ async def test_release_token_reservation_unreserves_local_proofs() -> None:
     token_proof = Mock(secret="proof-secret", reserved=True)
     cached_proof = Mock(secret="proof-secret", reserved=True)
     token = Mock(mint="http://mint:3338", unit="sat", proofs=[token_proof])
-    wallet = Mock(proofs=[cached_proof], set_reserved_for_send=AsyncMock())
+    wallet = Mock(
+        proofs=[cached_proof],
+        load_proofs=AsyncMock(),
+        set_reserved_for_send=AsyncMock(),
+    )
     with (
         patch("routstr.wallet.deserialize_token_from_string", return_value=token),
         patch(
@@ -234,6 +402,7 @@ async def test_release_token_reservation_unreserves_local_proofs() -> None:
         await release_token_reservation("cashu-token")
 
     get_wallet.assert_awaited_once_with("http://mint:3338", "sat", load=False)
+    wallet.load_proofs.assert_awaited_once_with(reload=True)
     wallet.set_reserved_for_send.assert_awaited_once_with(token.proofs, reserved=False)
     assert token_proof.reserved is False
     assert cached_proof.reserved is False
@@ -268,6 +437,64 @@ async def test_refund_mint_falls_back_to_trusted_mint_with_funds() -> None:
         mint = await find_trusted_mint_with_funds(100, "sat", primary)
 
     assert mint == secondary
+
+
+@pytest.mark.asyncio
+async def test_send_refreshes_reservations_inside_wallet_guard() -> None:
+    mint = "http://mint:3338"
+    proof = Mock(amount=1000, reserved=False)
+    wallet = Mock(
+        keysets={},
+        proofs=[proof],
+        select_to_send=AsyncMock(return_value=([proof], None)),
+        serialize_proofs=AsyncMock(return_value="token"),
+        set_reserved_for_send=AsyncMock(),
+    )
+    inside_guard = False
+
+    @asynccontextmanager
+    async def operation_guard() -> AsyncIterator[None]:
+        nonlocal inside_guard
+        inside_guard = True
+        try:
+            yield
+        finally:
+            inside_guard = False
+
+    async def find_mint(
+        amount: int,
+        unit: str,
+        preferred_mint: str | None,
+        *,
+        force_reload: bool,
+    ) -> str:
+        assert inside_guard
+        assert (amount, unit, preferred_mint, force_reload) == (
+            1000,
+            "sat",
+            mint,
+            True,
+        )
+        return mint
+
+    async def get_loaded_wallet(*_: object, **__: object) -> Mock:
+        assert inside_guard
+        return wallet
+
+    with (
+        patch("routstr.wallet.wallet_operation_guard", operation_guard),
+        patch("routstr.wallet.find_trusted_mint_with_funds", side_effect=find_mint),
+        patch("routstr.wallet.get_wallet", side_effect=get_loaded_wallet),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            return_value=[proof],
+        ),
+    ):
+        assert await send(1000, "sat", mint) == (1000, "token")
+
+    wallet.set_reserved_for_send.assert_awaited_once_with(
+        [proof], reserved=True
+    )
 
 
 @pytest.mark.asyncio
@@ -393,6 +620,27 @@ async def test_credit_balance() -> None:
             assert mock_session.exec.called  # Atomic UPDATE statement
             assert mock_session.commit.called
             assert mock_session.refresh.called
+
+
+@pytest.mark.asyncio
+async def test_credit_balance_constrains_redemption_to_key_mint() -> None:
+    key_mint = "http://key-mint:3338"
+    mock_key = Mock(
+        balance=1_000_000,
+        hashed_key="test_hash",
+        refund_mint_url=key_mint,
+        refund_currency="sat",
+    )
+    mock_session = AsyncMock()
+    mock_session.exec.return_value.rowcount = 1
+    receive = AsyncMock(return_value=(1000, "sat", key_mint))
+
+    with patch("routstr.wallet.recieve_token", receive):
+        await credit_balance("cashuAtoken", mock_key, mock_session)
+
+    receive.assert_awaited_once_with(
+        "cashuAtoken", destination_mint=key_mint, destination_unit="sat"
+    )
 
 
 @pytest.mark.asyncio
@@ -2386,12 +2634,12 @@ def test_classify_500_with_rate_limit_text_is_not_mint_rate_limited() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _MintRateGuard — probe does NOT escalate cooldown counter
+# _MintRateGuard — probe backoff escalation and recovery
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_probe_does_not_escalate_consecutive_rate_limits() -> None:
+async def test_probe_escalates_consecutive_rate_limits() -> None:
     from routstr.mint import MintRateGuard
 
     guard = MintRateGuard("http://mint", max_concurrency=0)
@@ -2401,8 +2649,9 @@ async def test_probe_does_not_escalate_consecutive_rate_limits() -> None:
     with pytest.raises(httpx.HTTPStatusError):
         await guard.run(AsyncMock(side_effect=_http_429_error()))
 
-    assert guard._consecutive_rate_limits == 1
+    assert guard._consecutive_rate_limits == 2
     assert guard._needs_probe is True
+    assert guard.cooldown_remaining() > 60
 
 
 @pytest.mark.asyncio

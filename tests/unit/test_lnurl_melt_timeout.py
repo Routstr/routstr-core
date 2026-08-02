@@ -4,10 +4,12 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from cashu.core.base import MeltQuoteState
 
 from routstr.core.settings import settings
+from routstr.mint import MintCooldownError, MintRateGuard
 from routstr.payment.lnurl import LNURLError, raw_send_to_lnurl
 
 LNURL_DATA = {
@@ -109,6 +111,76 @@ async def test_raw_send_to_lnurl_pending_response_stays_ambiguous() -> None:
         await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
 
     wallet.get_melt_quote.assert_awaited_once_with("q")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate_error", ["cooldown", "http_429"])
+async def test_raw_send_to_lnurl_rate_rejection_unreserves_proofs(
+    rate_error: str,
+) -> None:
+    wallet, proofs = _wallet()
+    wallet.melt = AsyncMock()
+    wallet.set_reserved_for_send = AsyncMock()
+    data_patch, invoice_patch = _lnurl_patches()
+
+    async def run_operation(factory: Any, *, op_name: str, **_: object) -> Any:
+        if op_name == "lnurl_melt":
+            if rate_error == "cooldown":
+                raise MintCooldownError(str(wallet.url), 60)
+            request = httpx.Request("POST", f"{wallet.url}/v1/melt/bolt11")
+            response = httpx.Response(429, request=request)
+            raise httpx.HTTPStatusError(
+                "rate limited", request=request, response=response
+            )
+        return await factory()
+
+    with (
+        data_patch,
+        invoice_patch,
+        patch(
+            "routstr.payment.lnurl.run_mint_operation",
+            side_effect=run_operation,
+        ),
+        pytest.raises((MintCooldownError, httpx.HTTPStatusError)),
+    ):
+        await raw_send_to_lnurl(
+            wallet, proofs, "owner@ln.tld", "sat", amount=1000
+        )
+
+    wallet.melt.assert_not_awaited()
+    wallet.set_reserved_for_send.assert_awaited_once_with(
+        proofs, reserved=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_mint_wrapper_http_429_unreserves_proofs() -> None:
+    wallet, proofs = _wallet()
+    request = httpx.Request("POST", f"{wallet.url}/v1/melt/bolt11")
+    response = httpx.Response(429, request=request)
+    wallet.melt = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "rate limited", request=request, response=response
+        )
+    )
+    wallet.set_reserved_for_send = AsyncMock()
+    data_patch, invoice_patch = _lnurl_patches()
+
+    with (
+        patch.object(settings, "mint_retry_max_attempts", 0),
+        data_patch,
+        invoice_patch,
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await raw_send_to_lnurl(
+            wallet, proofs, "owner@ln.tld", "sat", amount=1000
+        )
+
+    wallet.melt.assert_awaited_once()
+    wallet.set_reserved_for_send.assert_awaited_once_with(
+        proofs, reserved=False
+    )
+    MintRateGuard._guards.pop(str(wallet.url), None)
 
 
 @pytest.mark.asyncio

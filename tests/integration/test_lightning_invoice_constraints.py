@@ -246,7 +246,7 @@ async def test_concurrent_payment_checks_mint_and_credit_invoice_once(
 
 
 @pytest.mark.asyncio
-async def test_failed_mint_keeps_invoice_pending_for_retry(
+async def test_failed_mint_marks_invoice_for_settlement_retry(
     integration_engine: AsyncEngine,
     patched_db_engine: None,
 ) -> None:
@@ -270,7 +270,7 @@ async def test_failed_mint_keeps_invoice_pending_for_retry(
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored = await verify.get(LightningInvoice, invoice.id)
         assert stored is not None
-        assert stored.status == "pending"
+        assert stored.status == "settlement_pending"
 
 
 @pytest.mark.asyncio
@@ -399,14 +399,14 @@ async def test_post_mint_db_failure_keeps_invoice_pending_for_reconciliation(
         assert sibling_state is not None
         assert stored_state.expired is False
         assert sibling_state.expired is False
-        assert stored.status == "pending"
+        assert stored.status == "settlement_pending"
         assert stored_sibling.id == sibling.id
 
     assert wallet.mint.await_count == 1
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored = await verify.get(LightningInvoice, invoice.id)
         assert stored is not None
-        assert stored.status == "pending"
+        assert stored.status == "settlement_pending"
 
 
 @pytest.mark.asyncio

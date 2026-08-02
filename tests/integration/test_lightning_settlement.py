@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey, LightningInvoice
 from routstr.lightning import (
+    _expire_invoice_if_authoritatively_unpaid,
     _finalize_invoice_settlement,
     _InvoiceSettlement,
     check_invoice_payment,
@@ -251,7 +252,7 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
         pending = await verify.get(LightningInvoice, invoice.id)
         unchanged = await verify.get(ApiKey, key_hash)
         assert pending is not None
-        assert pending.status == "pending"
+        assert pending.status == "settlement_pending"
         assert unchanged is not None
         assert unchanged.balance == 100_000
 
@@ -271,3 +272,94 @@ async def test_check_invoice_payment_retries_after_mint_success_and_db_failure(
 
     wallet.mint.assert_awaited_once_with(100, quote_id=invoice.payment_hash)
     wallet.restore_tokens_for_keyset.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expiry_cas_cannot_overwrite_concurrent_paid_invoice(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    invoice = _lightning_invoice(expires_at=0)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add(invoice)
+        await seed.commit()
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as caller:
+        stale = await caller.get(LightningInvoice, invoice.id)
+        assert stale is not None
+        await caller.commit()
+
+        async with AsyncSession(integration_engine, expire_on_commit=False) as paid:
+            result = await paid.exec(  # type: ignore[call-overload]
+                update(LightningInvoice)
+                .where(col(LightningInvoice.id) == invoice.id)
+                .values(status="paid", paid_at=123)
+            )
+            assert result.rowcount == 1
+            await paid.commit()
+
+        expired = await _expire_invoice_if_authoritatively_unpaid(
+            stale, caller, True
+        )
+
+    assert expired is False
+    assert stale.status == "paid"
+    assert stale.paid_at == 123
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "paid"
+        assert stored.paid_at == 123
+
+
+@pytest.mark.asyncio
+async def test_paid_quote_worker_does_not_mint_after_expiry_claim_wins(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    invoice = _lightning_invoice(expires_at=0)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add(invoice)
+        await seed.commit()
+
+    quote_started = asyncio.Event()
+    release_quote = asyncio.Event()
+
+    async def paid_quote_after_expiry(*_args: object, **_kwargs: object) -> Mock:
+        quote_started.set()
+        await release_quote.wait()
+        return Mock(paid=True)
+
+    wallet = Mock(
+        get_mint_quote=AsyncMock(side_effect=paid_quote_after_expiry),
+        mint=AsyncMock(),
+    )
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as worker:
+        observed_pending = await worker.get(LightningInvoice, invoice.id)
+        assert observed_pending is not None
+
+        with patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)):
+            settlement_task = asyncio.create_task(
+                check_invoice_payment(observed_pending, worker)
+            )
+            await quote_started.wait()
+
+            async with AsyncSession(
+                integration_engine, expire_on_commit=False
+            ) as expirer:
+                expiry_view = await expirer.get(LightningInvoice, invoice.id)
+                assert expiry_view is not None
+                await expirer.commit()
+                assert await _expire_invoice_if_authoritatively_unpaid(
+                    expiry_view, expirer, True
+                )
+
+            release_quote.set()
+            assert await settlement_task is False
+
+    wallet.mint.assert_not_awaited()
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "expired"
