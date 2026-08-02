@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     receive_ln_address: str = Field(default="", env="RECEIVE_LN_ADDRESS")
     primary_mint: str = Field(default="", env="PRIMARY_MINT_URL")
     primary_mint_unit: str = Field(default="sat", env="PRIMARY_MINT_UNIT")
+    mint_operation_concurrency: int = Field(
+        default=4, ge=1, env="MINT_OPERATION_CONCURRENCY"
+    )
 
     # Lightning payout configuration
     # Minimum available balance (in satoshis) before profit is paid out over
@@ -107,6 +110,24 @@ class Settings(BaseSettings):
     refund_sweep_ttl_seconds: int = Field(
         default=604800, env="REFUND_SWEEP_TTL_SECONDS"
     )
+    refund_sweep_claim_timeout_seconds: int = Field(
+        default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
+    )
+
+    # Database connection-pool controls (advanced). Capacity defaults provide
+    # headroom for Routstr's concurrent request and background-payment workload.
+    # Pre-ping is enabled by the engine factory for networked backends; SQLite
+    # can explicitly opt in. These fields are env-only below.
+    database_pool_size: int = Field(default=10, ge=1, env="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=20, ge=0, env="DATABASE_MAX_OVERFLOW")
+    database_pool_timeout: float = Field(
+        default=15.0, gt=0, env="DATABASE_POOL_TIMEOUT"
+    )
+    database_pool_recycle: int = Field(default=1800, ge=0, env="DATABASE_POOL_RECYCLE")
+    database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
+    database_pool_hold_warn_seconds: float = Field(
+        default=10.0, gt=0, env="DATABASE_POOL_HOLD_WARN_SECONDS"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
@@ -151,10 +172,32 @@ def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
 # ``routstr.core.vault``.
 SECRET_FIELDS = frozenset({"admin_password", "nsec"})
 
+# Infrastructure the node needs *before* it can open a DB session — so it can
+# never be configured from the DB (chicken-and-egg) and stays env-only. Unlike
+# secrets (owned by bootstrap), these are excluded so the DB settings blob can
+# neither store nor shadow them; env is always authoritative.
+ENV_ONLY_FIELDS = frozenset(
+    {
+        "database_pool_size",
+        "database_max_overflow",
+        "database_pool_timeout",
+        "database_pool_recycle",
+        "database_pool_pre_ping",
+        "database_pool_hold_warn_seconds",
+    }
+)
+
+_NON_PERSISTED_FIELDS = SECRET_FIELDS | ENV_ONLY_FIELDS
+
 
 def _strip_secret_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``data`` without any secret fields (for persistence)."""
-    return {k: v for k, v in data.items() if k not in SECRET_FIELDS}
+    """Return a copy of ``data`` without secret or env-only fields.
+
+    Both are kept out of the persisted settings blob: secrets for confidentiality,
+    env-only fields (e.g. DB pool sizing) because they must never be sourced from
+    the database.
+    """
+    return {k: v for k, v in data.items() if k not in _NON_PERSISTED_FIELDS}
 
 
 def _apply_to_live_settings(data: dict[str, Any]) -> None:
@@ -337,7 +380,9 @@ class SettingsService:
                 {
                     k: v
                     for k, v in db_json.items()
-                    if v not in (None, "", [], {}) and k in valid_fields
+                    if v not in (None, "", [], {})
+                    and k in valid_fields
+                    and k not in ENV_ONLY_FIELDS
                 }
             )
             merged_dict = Settings(**merged_dict).dict()
@@ -405,8 +450,13 @@ class SettingsService:
                 )
             )
             await db_session.commit()
-            # Update in-place
+            # Update in-place. Env-only fields (e.g. DB pool sizing) are never
+            # applied here: the engine pool is already built at boot from env,
+            # so letting an update mutate the live value would only make it
+            # diverge from the running pool.
             for k, v in candidate.dict().items():
+                if k in ENV_ONLY_FIELDS:
+                    continue
                 setattr(settings, k, v)
             cls._current = settings
             return settings
