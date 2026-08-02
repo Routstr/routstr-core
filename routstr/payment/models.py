@@ -455,7 +455,9 @@ async def _update_sats_pricing_once() -> None:
             for m in upstream.get_cached_models()
         ]
         upstream._models_cache = updated_models
-        upstream._models_by_id = {m.forwarded_model_id or m.id: m for m in updated_models}
+        upstream._models_by_id = {
+            m.forwarded_model_id or m.id: m for m in updated_models
+        }
         updated_count += len(updated_models)
 
     if updated_count > 0:
@@ -510,9 +512,7 @@ class ModelTestRequest(V2BaseModel):
     request_data: dict
 
 
-@models_router.post(
-    "/api/models/test", dependencies=[Depends(_require_admin_api)]
-)
+@models_router.post("/api/models/test", dependencies=[Depends(_require_admin_api)])
 async def test_model(
     payload: ModelTestRequest,
     session: AsyncSession = Depends(get_session),
@@ -593,6 +593,37 @@ async def test_model(
             "error": str(e),
             "status_code": 500,
         }
+
+
+@models_router.get("/v1/models/paths")
+@models_router.get("/v1/models/paths/", include_in_schema=False)
+async def model_paths() -> dict:
+    """All models with every upstream provider path they are reachable through."""
+    from ..upstream.model_paths import get_all_model_paths
+
+    return await get_all_model_paths()
+
+
+@models_router.get("/v1/models/paths/model")
+@models_router.get("/v1/models/paths/model/", include_in_schema=False)
+async def model_paths_for_model(model_id: str) -> dict:
+    """Paths for a single model.
+
+    Uses a query parameter (``?model_id=...``) under a fully static route so
+    model ids containing ``/`` (e.g. ``anthropic/claude-opus-4.6``) need no URL
+    encoding and there is no dynamic-route ambiguity.
+    """
+    from ..proxy import get_unique_models
+    from ..upstream.model_paths import get_paths_for_model
+
+    result = await get_paths_for_model(model_id)
+    if not result["data"]:
+        advertised_ids = {
+            model.forwarded_model_id or model.id for model in get_unique_models()
+        }
+        if model_id not in advertised_ids:
+            raise HTTPException(status_code=404, detail="Model not found")
+    return result
 
 
 @models_router.get("/v1/models")

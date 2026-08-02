@@ -327,6 +327,62 @@ GET /v1/models
 }
 ```
 
+### List Model Paths
+
+Get the selectable upstream routes for each advertised model. This endpoint is
+discovery-only; request-side selection will be added separately.
+
+```http
+GET /v1/models/paths
+```
+
+**Response:**
+
+```json
+{
+  "data": [
+    {
+      "id": "anthropic/claude-sonnet-4",
+      "paths": [
+        {
+          "path": "url=https%3A%2F%2Fapi.anthropic.com%2Fv1&provider-id=12&model-id=anthropic%2Fclaude-sonnet-4",
+          "provider": {"id": 12, "slug": "anthropic-primary", "type": "anthropic"},
+          "endpoint": null
+        },
+        {
+          "path": "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&provider-id=42&model-id=anthropic%2Fclaude-sonnet-4&endpoint=google-vertex%2Fus",
+          "provider": {"id": 42, "slug": "openrouter-main", "type": "openrouter"},
+          "endpoint": {"tag": "google-vertex/us", "name": "Google"}
+        }
+      ]
+    }
+  ],
+  "updated_at": 1753500000
+}
+```
+
+`path` is an opaque, percent-encoded selector. Clients must store and return it
+unchanged rather than parsing or reconstructing it. It identifies the exact
+configured route with `url`, `provider-id`, and `model-id`. To avoid exposing
+private network details, a configured private IP address or any URL with an
+explicit port is advertised as `http://localhost`. OpenRouter routes additionally
+preserve the exact machine-readable endpoint `tag`. Provider slugs/types and
+endpoint names remain display data. When request-side selection is implemented,
+an endpoint tag must not silently fall back to another backend.
+
+### List Paths for One Model
+
+Use the exact model ID advertised by `/v1/models`. The query parameter safely
+supports IDs containing `/`.
+
+```http
+GET /v1/models/paths/model?model_id=anthropic/claude-sonnet-4
+```
+
+The response uses the same path objects and `updated_at` field as the collection
+endpoint. An unknown model returns `404 Model not found`. A known model whose
+paths have not been discovered yet returns `200` with an empty `data` array.
+
 ## Wallet Management
 
 ### Create Wallet (Coming Soon)

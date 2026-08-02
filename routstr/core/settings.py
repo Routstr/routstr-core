@@ -98,10 +98,18 @@ class Settings(BaseSettings):
     models_refresh_interval_seconds: int = Field(
         default=360, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
+    model_paths_refresh_interval_seconds: int = Field(
+        default=600, env="MODEL_PATHS_REFRESH_INTERVAL_SECONDS"
+    )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
+    enable_model_paths_refresh: bool = Field(
+        default=True, env="ENABLE_MODEL_PATHS_REFRESH"
+    )
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
-    refund_sweep_ttl_seconds: int = Field(default=604800, env="REFUND_SWEEP_TTL_SECONDS")
+    refund_sweep_ttl_seconds: int = Field(
+        default=604800, env="REFUND_SWEEP_TTL_SECONDS"
+    )
     refund_sweep_claim_timeout_seconds: int = Field(
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
     )
@@ -138,9 +146,8 @@ class Settings(BaseSettings):
 
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
-    enable_analytics_sharing: bool = Field(
-        default=True, env="ENABLE_ANALYTICS_SHARING"
-    )
+    enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+
 
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
     """Discard unknown keys from persisted settings."""

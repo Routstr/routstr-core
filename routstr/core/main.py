@@ -58,6 +58,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     providers_task = None
     models_refresh_task = None
     model_maps_refresh_task = None
+    model_paths_refresh_task = None
     key_reset_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
@@ -130,6 +131,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 refresh_upstreams_models_periodically(get_upstreams)
             )
         model_maps_refresh_task = asyncio.create_task(refresh_model_maps_periodically())
+        # Always started: the loop re-reads the enable flag and interval every
+        # iteration, so 0 -> N (or re-enabling) takes effect without a restart.
+        from ..upstream.model_paths import refresh_model_paths_periodically
+
+        model_paths_refresh_task = asyncio.create_task(
+            refresh_model_paths_periodically(get_upstreams)
+        )
         payout_task = asyncio.create_task(periodic_payout())
         if global_settings.nsec:
             nip91_task = asyncio.create_task(announce_provider())
@@ -137,9 +145,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
         key_reset_task = asyncio.create_task(periodic_key_reset())
-        stale_reservation_task = asyncio.create_task(
-            periodic_stale_reservation_sweep()
-        )
+        stale_reservation_task = asyncio.create_task(periodic_stale_reservation_sweep())
         dead_key_prune_task = asyncio.create_task(periodic_dead_key_prune())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
@@ -176,6 +182,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             models_refresh_task.cancel()
         if model_maps_refresh_task is not None:
             model_maps_refresh_task.cancel()
+        if model_paths_refresh_task is not None:
+            model_paths_refresh_task.cancel()
         if key_reset_task is not None:
             key_reset_task.cancel()
         if stale_reservation_task is not None:
@@ -209,6 +217,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(models_refresh_task)
             if model_maps_refresh_task is not None:
                 tasks_to_wait.append(model_maps_refresh_task)
+            if model_paths_refresh_task is not None:
+                tasks_to_wait.append(model_paths_refresh_task)
             if key_reset_task is not None:
                 tasks_to_wait.append(key_reset_task)
             if stale_reservation_task is not None:
@@ -245,9 +255,7 @@ class _ImmutableStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope: Scope) -> StarletteResponse:
         response = await super().get_response(path, scope)
         if response.status_code == 200:
-            response.headers["Cache-Control"] = (
-                "public, max-age=31536000, immutable"
-            )
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 
 
@@ -321,9 +329,7 @@ if UI_DIST_PATH.exists() and UI_DIST_PATH.is_dir():
     # Serve the App Router RSC payload for the home page.
     @app.get("/index.txt", include_in_schema=False)
     async def serve_root_rsc() -> FileResponse:
-        return FileResponse(
-            UI_DIST_PATH / "index.txt", media_type="text/x-component"
-        )
+        return FileResponse(UI_DIST_PATH / "index.txt", media_type="text/x-component")
 
     # Next.js is built with `trailingSlash: true`, so all UI page URLs end
     # with a slash (e.g. `/login/`). The proxy router catches `/{path:path}`
