@@ -1,8 +1,8 @@
 """add model paths table
 
-Revision ID: 4f2a4f3f62e0
-Revises: bf76270b66c4
-Create Date: 2026-08-02 23:28:24.760061
+Revision ID: 64ed5594df1f
+Revises: aa50fde387a2
+Create Date: 2026-08-02 22:26:33.280409
 """
 
 import sqlalchemy as sa
@@ -10,8 +10,8 @@ import sqlmodel
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "4f2a4f3f62e0"
-down_revision = "bf76270b66c4"
+revision = "64ed5594df1f"
+down_revision = "aa50fde387a2"
 branch_labels = None
 depends_on = None
 
