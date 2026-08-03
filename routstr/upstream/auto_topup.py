@@ -26,7 +26,9 @@ from ..wallet import (
     execute_bolt11_payment,
     maximum_owner_cashu_balance_sats,
     prepare_bolt11_payment,
+    release_token_reservation,
     send_token,
+    token_mint_url,
 )
 from .ppqai import PPQAIUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
@@ -264,12 +266,13 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
+    actual_mint_url = token_mint_url(token, mint_url)
     try:
         await store_cashu_transaction(
             token=token,
             amount=amount,
             unit="sat",
-            mint_url=mint_url,
+            mint_url=actual_mint_url,
             typ="out",
             collected=False,
             source="auto_topup",
@@ -277,8 +280,24 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
     except Exception:
         logger.critical(
             "Aborting auto top-up because its cashu token could not be persisted",
-            extra={"provider_id": row.id, "mint_url": mint_url},
+            extra={"provider_id": row.id, "mint_url": actual_mint_url},
         )
+        try:
+            await release_token_reservation(token)
+        except Exception as error:
+            logger.critical(
+                "Failed to release untracked auto-topup token",
+                extra={
+                    "provider_id": row.id,
+                    "mint_url": actual_mint_url,
+                    "error": str(error),
+                },
+            )
+        else:
+            logger.warning(
+                "Auto-topup token was released after persistence failed",
+                extra={"provider_id": row.id, "mint_url": actual_mint_url},
+            )
         return
 
     result = await provider.topup(token)

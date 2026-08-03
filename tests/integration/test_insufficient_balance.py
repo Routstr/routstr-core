@@ -207,8 +207,35 @@ async def test_pay_for_request_succeeds_when_balance_equals_cost(
     assert key.balance == model_cost   # balance unchanged, only reserved goes up
 
 
+@pytest.mark.asyncio
+async def test_full_model_maximum_is_required_and_reserved(
+    integration_session: AsyncSession,
+) -> None:
+    from routstr.auth import pay_for_request, validate_bearer_key
+
+    short_key = _key(balance=95_000)
+    exact_key = _key(balance=100_000)
+    integration_session.add(short_key)
+    integration_session.add(exact_key)
+    await integration_session.commit()
+
+    with pytest.raises(HTTPException) as insufficient:
+        await validate_bearer_key(
+            f"sk-{short_key.hashed_key}", integration_session, min_cost=100_000
+        )
+    assert insufficient.value.status_code == 402
+
+    validated = await validate_bearer_key(
+        f"sk-{exact_key.hashed_key}", integration_session, min_cost=100_000
+    )
+    await pay_for_request(validated, 100_000, integration_session)
+
+    await integration_session.refresh(exact_key)
+    assert exact_key.reserved_balance == 100_000
+
+
 # ---------------------------------------------------------------------------
-# Test 6 — HTTP layer returns 402 JSON with the right shape
+# HTTP layer returns 402 JSON with the right shape
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -266,8 +293,8 @@ async def test_http_402_response_shape_on_insufficient_balance(
     error = body["detail"]["error"]
     assert error["code"] == "insufficient_balance"
     assert error["type"] == "insufficient_quota"
-    assert str(model_cost) in error["message"]
-    assert str(user_balance) in error["message"]
+    assert "622.888 sats (622888 msats) required" in error["message"]
+    assert "20.32 sats (20320 msats) available" in error["message"]
 
     # Balance must be completely untouched
     await integration_session.refresh(key)

@@ -110,7 +110,11 @@ async def test_payout_does_not_send_proofs_whose_liability_commit_is_in_flight(
     finish_redemption = asyncio.Event()
     liability_read = asyncio.Event()
 
-    async def redeem_token(token: str) -> tuple[int, str, str]:
+    async def redeem_token(
+        token: str,
+        destination_mint: str | None = None,
+        destination_unit: str | None = None,
+    ) -> tuple[int, str, str]:
         proofs.append(MagicMock(amount=200))
         proof_visible.set()
         await finish_redemption.wait()

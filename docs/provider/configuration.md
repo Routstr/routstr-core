@@ -198,12 +198,23 @@ Use environment variables for:
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
+| `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
+| `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
+| `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
+| `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
 | `PAYOUT_INTERVAL_SECONDS` | Payout loop interval (seconds) | `900`                            |
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |
 | `CORS_ORIGINS`       | Allowed CORS origins              | `*`                                  |
 | `RELAYS`             | Nostr relays (comma-separated)    | (default set)                        |
+| `MODEL_PATHS_REFRESH_INTERVAL_SECONDS` | How often to refresh `/v1/models/paths` discovery data; set `0` to pause the refresh (previously discovered paths keep being served) | `600` |
+| `ENABLE_MODEL_PATHS_REFRESH` | Kill switch for the background model-path refresh (OpenRouter endpoint fan-out) | `true` |
+
+Mint HTTP 429 responses create a per-mint cooldown. Operations that already hold
+Routstr's wallet mutation lock fail fast during that cooldown instead of waiting
+while blocking every other wallet mutation. Callers receive an error and may retry
+later; the current response does not include the cooldown duration.
 
 ### Priority
 
@@ -237,3 +248,8 @@ Manage which AI models you offer:
    - **Create aliases** — friendly names for models
 
 See [Pricing](pricing.md) for per-model pricing strategies.
+
+Model path discovery is refreshed in the background and exposed through
+`/v1/models/paths`. The response groups each client-visible model ID with the
+provider paths that may appear in chat-completion response metadata. Tune the
+refresh cadence with `MODEL_PATHS_REFRESH_INTERVAL_SECONDS`.
