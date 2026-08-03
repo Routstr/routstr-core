@@ -67,8 +67,13 @@ async def test_non_streaming_includes_cost_sats() -> None:
         )
 
     body = json.loads(response.body)
-    assert "cost_sats" in body["usage"]
     assert body["usage"]["cost_sats"] == 5  # 5000 msats // 1000
+    assert body["usage"]["cost"]["total_msats"] == 5000
+    assert body["usage"]["cost"]["input_msats"] == 3000
+    assert body["usage"]["cost"]["output_msats"] == 2000
+    assert response.headers["x-routstr-cost-msats"] == "5000"
+    assert response.headers["x-routstr-input-cost-msats"] == "3000"
+    assert response.headers["x-routstr-output-cost-msats"] == "2000"
 
 
 @pytest.mark.asyncio
@@ -96,7 +101,7 @@ async def test_non_streaming_cost_sats_value_rounds_down() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_preserves_existing_usage_fields() -> None:
+async def test_non_streaming_preserves_tokens_and_replaces_upstream_cost() -> None:
     provider = _make_provider()
     cost_data = _make_cost_data(total_msats=3000)
 
@@ -127,7 +132,8 @@ async def test_non_streaming_preserves_existing_usage_fields() -> None:
     assert usage["prompt_tokens"] == 100
     assert usage["completion_tokens"] == 50
     assert usage["total_tokens"] == 150
-    assert usage["cost"] == 0.00015
+    assert usage["cost"]["total_msats"] == 3000
+    assert usage["cost"]["total_usd"] == 0.00025
     assert usage["cost_sats"] == 3
 
 

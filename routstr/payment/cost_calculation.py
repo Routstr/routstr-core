@@ -183,6 +183,28 @@ async def calculate_cost(
                 cost_details.get("output_cost")
                 or cost_details.get("upstream_inference_completions_cost")
             )
+            cache_pricing_rates: tuple[float, float, float, float] | None = None
+            if cache_read_tokens > 0 or cache_creation_tokens > 0:
+                try:
+                    cache_pricing_rates = _get_pricing_rates(
+                        response_data, model_obj, provider_fee
+                    )
+                except ValueError:
+                    logger.warning(
+                        "Cache pricing unavailable for USD cost breakdown; "
+                        "leaving cache cost components unknown",
+                        extra={"model": response_data.get("model", "unknown")},
+                    )
+                if cache_pricing_rates is None and settings.fixed_pricing:
+                    fixed_input_rate = (
+                        float(settings.fixed_per_1k_input_tokens) * 1000.0
+                    )
+                    cache_pricing_rates = (
+                        fixed_input_rate,
+                        float(settings.fixed_per_1k_output_tokens) * 1000.0,
+                        fixed_input_rate,
+                        fixed_input_rate,
+                    )
             return _calculate_from_usd_cost(
                 usd_cost,
                 input_usd,
@@ -193,6 +215,7 @@ async def calculate_cost(
                 output_tokens,
                 response_data,
                 provider_fee,
+                cache_pricing_rates,
             )
         except Exception as e:
             logger.warning(
@@ -451,6 +474,7 @@ def _calculate_from_usd_cost(
     output_tokens: int,
     response_data: dict,
     provider_fee: float | None,
+    pricing_rates: tuple[float, float, float, float] | None = None,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     if provider_fee is None:
@@ -460,15 +484,20 @@ def _calculate_from_usd_cost(
     output_usd = output_usd * provider_fee
     sats_per_usd = 1.0 / sats_usd_price()
     cost_in_sats = usd_cost * sats_per_usd
-    cost_in_msats = math.ceil(cost_in_sats * 1000)
+    raw_cost_msats = cost_in_sats * 1000
+    cost_in_msats = math.ceil(raw_cost_msats)
+    raw_input_msats = 0.0
 
     if input_usd > 0 or output_usd > 0:
         # The total is the authoritative billed amount. Allocating that integer
         # total proportionally avoids losing sub-millisatoshi remainders when
         # input and output components are each truncated independently.
         component_usd = input_usd + output_usd
-        input_msats = math.floor(cost_in_msats * input_usd / component_usd)
-        output_msats = cost_in_msats - input_msats
+        # Match the token-priced path: truncate the visible output component
+        # and assign the authoritative total's rounding remainder to input.
+        output_msats = math.floor(cost_in_msats * output_usd / component_usd)
+        input_msats = cost_in_msats - output_msats
+        raw_input_msats = raw_cost_msats * input_usd / component_usd
     else:
         effective_input_tokens = (
             input_tokens + cache_read_tokens + cache_creation_tokens
@@ -480,6 +509,38 @@ def _calculate_from_usd_cost(
             else 0
         )
         output_msats = cost_in_msats - input_msats
+        raw_input_msats = (
+            raw_cost_msats * effective_input_tokens / total_tokens
+            if total_tokens > 0
+            else 0.0
+        )
+
+    # Preserve the same cache-rate ratios as the token-priced path while the
+    # upstream USD total remains authoritative. Cache values are informational
+    # subcomponents of the inclusive input cost.
+    cache_read_msats = 0
+    cache_creation_msats = 0
+    if pricing_rates is not None:
+        input_rate, _, cache_read_rate, cache_creation_rate = pricing_rates
+        regular_weight = input_tokens * input_rate
+        cache_read_weight = cache_read_tokens * cache_read_rate
+        cache_creation_weight = cache_creation_tokens * cache_creation_rate
+        total_input_weight = (
+            regular_weight + cache_read_weight + cache_creation_weight
+        )
+        if total_input_weight > 0:
+            cache_read_msats = int(
+                round(
+                    raw_input_msats * cache_read_weight / total_input_weight,
+                    3,
+                )
+            )
+            cache_creation_msats = int(
+                round(
+                    raw_input_msats * cache_creation_weight / total_input_weight,
+                    3,
+                )
+            )
 
     logger.info(
         "Using cost from usage data/details",
@@ -487,6 +548,8 @@ def _calculate_from_usd_cost(
             "usd_cost": usd_cost,
             "cost_in_sats": cost_in_sats,
             "cost_in_msats": cost_in_msats,
+            "cache_read_msats": cache_read_msats,
+            "cache_creation_msats": cache_creation_msats,
             "model": response_data.get("model", "unknown"),
         },
     )
@@ -501,8 +564,8 @@ def _calculate_from_usd_cost(
         output_tokens=output_tokens,
         cache_read_input_tokens=cache_read_tokens,
         cache_creation_input_tokens=cache_creation_tokens,
-        cache_read_msats=0,
-        cache_creation_msats=0,
+        cache_read_msats=cache_read_msats,
+        cache_creation_msats=cache_creation_msats,
     )
 
 
