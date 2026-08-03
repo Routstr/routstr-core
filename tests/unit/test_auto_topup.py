@@ -233,6 +233,10 @@ async def test_ppq_auto_topup_pays_invoice_and_confirms_settlement() -> None:
             AsyncMock(return_value=10_000),
         ),
         patch(
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_usd",
+            AsyncMock(return_value=0.0),
+        ),
+        patch(
             "routstr.upstream.auto_topup.prepare_bolt11_payment",
             AsyncMock(return_value=plan),
         ) as prepare,
@@ -294,6 +298,10 @@ async def test_ppq_ambiguous_melt_keeps_claim_and_emits_critical_alert() -> None
         patch(
             "routstr.upstream.auto_topup.maximum_owner_cashu_balance_sats",
             AsyncMock(return_value=10_000),
+        ),
+        patch(
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_usd",
+            AsyncMock(return_value=0.0),
         ),
         patch(
             "routstr.upstream.auto_topup.prepare_bolt11_payment",
@@ -360,6 +368,10 @@ async def test_ppq_payment_not_attempted_releases_claim_for_retry() -> None:
             AsyncMock(return_value=10_000),
         ),
         patch(
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_usd",
+            AsyncMock(return_value=0.0),
+        ),
+        patch(
             "routstr.upstream.auto_topup._claim_ppq_topup",
             AsyncMock(return_value="operation-1"),
         ),
@@ -419,6 +431,10 @@ async def test_ppq_status_error_after_payment_marks_reconcile_and_alerts() -> No
         patch(
             "routstr.upstream.auto_topup.maximum_owner_cashu_balance_sats",
             AsyncMock(return_value=10_000),
+        ),
+        patch(
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_usd",
+            AsyncMock(return_value=0.0),
         ),
         patch(
             "routstr.upstream.auto_topup._claim_ppq_topup",
@@ -649,6 +665,10 @@ async def test_settled_topup_alerts_when_its_claim_was_already_released() -> Non
         patch(
             "routstr.upstream.auto_topup.maximum_owner_cashu_balance_sats",
             AsyncMock(return_value=10_000),
+        ),
+        patch(
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_usd",
+            AsyncMock(return_value=0.0),
         ),
         patch(
             "routstr.upstream.auto_topup.execute_bolt11_payment",
