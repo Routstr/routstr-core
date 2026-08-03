@@ -30,7 +30,7 @@ import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
 import { RoutstrProviderService } from '@/lib/api/services/routstr-provider';
-import { ApiError } from '@/lib/api/client';
+import { getErrorStatus } from '@/lib/api/client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -143,7 +143,7 @@ export function ProviderCard({
       queryClient.invalidateQueries({
         queryKey: ['ppq-auto-topup-state', provider.id],
       });
-      if (error instanceof ApiError && error.status === 409) {
+      if (getErrorStatus(error) === 409) {
         // The claim changed since it was reviewed; the stale snapshot is
         // useless, so force a fresh review.
         setIsReleaseDialogOpen(false);
@@ -352,7 +352,13 @@ export function ProviderCard({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => releasePPQMutation.mutate()}
+              onClick={(e) => {
+                // Radix closes the dialog on action click by default; the
+                // mutation handlers decide whether it closes (kept open on
+                // transient errors so the admin can retry).
+                e.preventDefault();
+                releasePPQMutation.mutate();
+              }}
               disabled={releasePPQMutation.isPending}
             >
               {releasePPQMutation.isPending

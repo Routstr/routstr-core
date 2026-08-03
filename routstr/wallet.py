@@ -19,14 +19,19 @@ from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
-from .core.db import \
-    store_cashu_transaction_with_retry as store_cashu_transaction
+from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
-from .mint import (MINT_TRANSPORT_COOLDOWN_SECONDS, MINT_TRANSPORT_EXCEPTIONS,
-                   MintRateGuard, MintRateLimitedError,
-                   fail_fast_mint_operations, is_mint_rate_limited,
-                   mint_cooldown_reason, mint_cooldown_remaining,
-                   run_mint_operation)
+from .mint import (
+    MINT_TRANSPORT_COOLDOWN_SECONDS,
+    MINT_TRANSPORT_EXCEPTIONS,
+    MintRateGuard,
+    MintRateLimitedError,
+    fail_fast_mint_operations,
+    is_mint_rate_limited,
+    mint_cooldown_reason,
+    mint_cooldown_remaining,
+    run_mint_operation,
+)
 from .payment.lnurl import raw_send_to_lnurl
 
 # Backwards-compatible aliases for callers/tests that imported the former
@@ -593,7 +598,10 @@ async def _prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
             continue
         for unit in ("sat", "msat"):
             try:
-                wallet = await get_wallet(mint_url, unit)
+                # force_reload: the guard's flock only serializes access — a
+                # cached wallet can still hold proof state from before another
+                # process's reservation landed on disk.
+                wallet = await get_wallet(mint_url, unit, force_reload=True)
                 proofs = get_proofs_per_mint_and_unit(
                     wallet, mint_url, unit, not_reserved=True
                 )
@@ -736,10 +744,14 @@ async def check_bolt11_payment_status(mint_url: str, unit: str, quote_id: str) -
     ``get_melt_quote`` also settles the wallet database — invalidating the
     proofs on ``paid`` and releasing their reservation on ``unpaid`` — so a
     caller that sees ``"unpaid"`` may safely retry with the same funds.
+
+    Runs under ``wallet_operation_guard`` because of that side effect: it
+    mutates proof state and must not race other processes' wallet operations.
     """
     try:
-        wallet = await get_wallet(mint_url, unit)
-        quote = await wallet.get_melt_quote(quote_id)
+        async with wallet_operation_guard():
+            wallet = await get_wallet(mint_url, unit, force_reload=True)
+            quote = await wallet.get_melt_quote(quote_id)
     except Exception as e:
         logger.warning(
             "Could not query the mint for a melt quote's status",
@@ -2338,8 +2350,11 @@ async def periodic_refund_sweep() -> None:
 
 
 async def periodic_routstr_fee_payout() -> None:
-    from .auth import (ROUTSTR_FEE_DEFAULT_PAYOUT,
-                       ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS, ROUTSTR_LN_ADDRESS)
+    from .auth import (
+        ROUTSTR_FEE_DEFAULT_PAYOUT,
+        ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS,
+        ROUTSTR_LN_ADDRESS,
+    )
 
     if not ROUTSTR_LN_ADDRESS:
         logger.info("ROUTSTR_LN_ADDRESS not set, skipping fee payout")
@@ -2469,4 +2484,3 @@ async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
 
 #     def refund_partial(self, amount: int) -> None:
 #         raise NotImplementedError
-

@@ -707,6 +707,7 @@ async def _record_ppq_invoice(
     invoice_id: str,
     quote_id: str,
     amount: int,
+    amount_usd: int,
     unit: str,
     mint_url: str,
 ) -> int:
@@ -753,7 +754,10 @@ async def _record_ppq_invoice(
             CashuTransaction(
                 id=_ppq_payment_id(operation_id),
                 # Do not expose the raw BOLT11 through the transaction API.
-                token=f"ppq-invoice:{invoice_id}",
+                # The USD amount is stamped here so the daily spend cap can
+                # aggregate what each payment was worth when it was made,
+                # independent of later BTC price moves.
+                token=f"ppq-invoice:{invoice_id}:usd:{amount_usd}",
                 amount=amount,
                 unit=unit,
                 type="out",
@@ -829,25 +833,53 @@ async def _mark_ppq_reconcile(
             )
 
 
-async def _ppq_spent_last_24h_sats() -> int:
-    """Total sats committed to PPQ top-ups in the last 24 hours.
+def _ppq_payment_usd(amount: int, unit: str, token: str, price: float) -> float:
+    """USD value of one PPQ payment audit row.
 
-    Counts every payment audit row, including in-flight and ambiguous ones:
-    for spend-cap purposes an unresolved payment must be assumed spent.
+    Prefers the USD amount stamped into the token when the payment was
+    recorded: converting stored sats at today's price would undercount past
+    spend whenever the BTC price has fallen since. Falls back to a current
+    price conversion for rows recorded before the stamp existed.
+    """
+    marker = ":usd:"
+    if marker in token:
+        try:
+            return float(token.rsplit(marker, 1)[1])
+        except ValueError:
+            pass
+    sats = amount if unit == "sat" else math.ceil(amount / 1000)
+    return sats * price
+
+
+async def _ppq_spent_last_24h_usd(price: float) -> float:
+    """Total USD committed to PPQ top-ups in the last 24 hours.
+
+    Counts in-flight and ambiguous payments — for spend-cap purposes an
+    unresolved payment must be assumed spent — but not rows marked
+    ``collected=False, swept=True``, which record payments the mint provably
+    never attempted; those must not starve future top-ups for a day.
     """
     cutoff = int(time.time()) - 24 * 60 * 60
     async with create_session() as session:
         rows = (
             await session.exec(
-                select(CashuTransaction.amount, CashuTransaction.unit).where(
+                select(
+                    CashuTransaction.amount,
+                    CashuTransaction.unit,
+                    CashuTransaction.token,
+                ).where(
                     col(CashuTransaction.source) == "ppq_auto_topup",
                     col(CashuTransaction.type) == "out",
                     col(CashuTransaction.created_at) >= cutoff,
+                    or_(
+                        col(CashuTransaction.collected) == True,  # noqa: E712
+                        col(CashuTransaction.swept) == False,  # noqa: E712
+                    ),
                 )
             )
         ).all()
     return sum(
-        amount if unit == "sat" else math.ceil(amount / 1000) for amount, unit in rows
+        _ppq_payment_usd(amount, unit, token, price) for amount, unit, token in rows
     )
 
 
@@ -884,7 +916,10 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
         )
         return
 
-    spent_24h_usd = await _ppq_spent_last_24h_sats() * price
+    # Cheap early check to avoid claim and invoice churn; the authoritative
+    # re-check happens under the wallet guard just before payment, where no
+    # concurrent worker can move the total.
+    spent_24h_usd = await _ppq_spent_last_24h_usd(price)
     if spent_24h_usd + amount_usd > PPQ_MAX_DAILY_TOPUP_USD:
         logger.critical(
             "PPQ auto top-up skipped: rolling 24h spend cap reached",
@@ -942,6 +977,23 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
     # proofs between the two calls would invalidate the snapshot.
     async with wallet_operation_guard():
         try:
+            # Authoritative daily-cap check: the early check above is raceable
+            # across worker processes, but here the guard serializes every
+            # payment, so the total cannot move between this read and the
+            # melt.
+            spent_24h_usd = await _ppq_spent_last_24h_usd(price)
+            if spent_24h_usd + amount_usd > PPQ_MAX_DAILY_TOPUP_USD:
+                logger.critical(
+                    "PPQ auto top-up aborted: rolling 24h spend cap reached",
+                    extra={
+                        "provider_id": row.id,
+                        "spent_24h_usd": round(spent_24h_usd, 2),
+                        "topup_usd": amount_usd,
+                        "daily_cap_usd": PPQ_MAX_DAILY_TOPUP_USD,
+                    },
+                )
+                raise ValueError("PPQ auto top-up daily spend cap reached")
+
             plan = await prepare_bolt11_payment(topup.payment_request)
             if plan.maximum_spend_sats > max_invoice_sats:
                 raise ValueError("PPQ Lightning invoice exceeds the USD spending cap")
@@ -953,6 +1005,7 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
                 invoice_id=topup.invoice_id,
                 quote_id=str(plan.quote.quote),
                 amount=int(plan.quote.amount + plan.quote.fee_reserve),
+                amount_usd=amount_usd,
                 unit=plan.unit,
                 mint_url=plan.mint_url,
             )

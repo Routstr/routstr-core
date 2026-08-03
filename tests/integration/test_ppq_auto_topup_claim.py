@@ -19,7 +19,9 @@ from routstr.upstream.auto_topup import (
     PPQ_PHASE_RECONCILE,
     _claim_ppq_topup,
     _ppq_payment_id,
+    _ppq_payment_usd,
     _ppq_request_id,
+    _ppq_spent_last_24h_usd,
     _ppq_state_id_for_provider,
     _record_ppq_invoice,
     _set_ppq_state_terminal,
@@ -134,6 +136,7 @@ async def test_recording_the_invoice_moves_the_claim_in_flight(
         invoice_id="invoice-1",
         quote_id="quote-1",
         amount=102,
+        amount_usd=10,
         unit="sat",
         mint_url="https://mint.test",
     )
@@ -267,6 +270,7 @@ async def test_ppq_payment_audit_row_is_visible_and_survives_next_claim(
         invoice_id="invoice-1",
         quote_id="quote-1",
         amount=102,
+        amount_usd=10,
         unit="sat",
         mint_url="https://mint.test",
     )
@@ -279,7 +283,7 @@ async def test_ppq_payment_audit_row_is_visible_and_survives_next_claim(
     assert len(transactions) == 1
     audit = transactions[0]
     assert audit["id"] == _ppq_payment_id(operation_id)
-    assert audit["token"] == "ppq-invoice:invoice-1"
+    assert audit["token"] == "ppq-invoice:invoice-1:usd:10"
     assert audit["collected"] is True
     assert "lnbc-secret-invoice" not in audit["token"]
 
@@ -325,6 +329,7 @@ async def test_stale_token_from_before_a_phase_change_cannot_release(
         invoice_id="invoice-1",
         quote_id="quote-1",
         amount=102,
+        amount_usd=10,
         unit="sat",
         mint_url="https://mint.test",
     )
@@ -549,3 +554,49 @@ async def test_claim_without_api_key_still_reconciles_via_the_mint(
     status.assert_awaited_once()
     row = await _state_row()
     assert row is not None and row.swept is True
+
+
+def test_ppq_payment_usd_prefers_stamped_amount() -> None:
+    # Stamped rows must not move with the BTC price.
+    assert _ppq_payment_usd(102, "sat", "ppq-invoice:a:usd:10", 0.5) == 10.0
+
+
+def test_ppq_payment_usd_falls_back_to_current_price() -> None:
+    # Rows recorded before the stamp existed convert sats at today's price.
+    assert _ppq_payment_usd(2000, "sat", "ppq-invoice:legacy", 0.001) == 2.0
+    assert _ppq_payment_usd(2_000_000, "msat", "ppq-invoice:legacy", 0.001) == 2.0
+
+
+def test_ppq_payment_usd_survives_malformed_stamp() -> None:
+    assert _ppq_payment_usd(3000, "sat", "ppq-invoice:x:usd:oops", 0.001) == 3.0
+
+
+async def test_daily_spend_ignores_provably_unattempted_payments(
+    patched_db_engine: Any,
+) -> None:
+    def _payment(
+        id_: str, token: str, collected: bool, swept: bool
+    ) -> CashuTransaction:
+        return CashuTransaction(
+            id=id_,
+            token=token,
+            amount=1,
+            unit="sat",
+            type="out",
+            source="ppq_auto_topup",
+            collected=collected,
+            swept=swept,
+        )
+
+    async with create_session() as session:
+        # Settled, in-flight, and provably-unattempted payments plus a
+        # pre-stamp row: only the unattempted one must be excluded.
+        session.add(_payment("pay-usd-1", "ppq-invoice:a:usd:100", True, False))
+        session.add(_payment("pay-usd-2", "ppq-invoice:b:usd:50", False, False))
+        session.add(_payment("pay-usd-3", "ppq-invoice:c:usd:25", False, True))
+        legacy = _payment("pay-usd-4", "ppq-invoice:legacy", True, False)
+        legacy.amount = 2000
+        session.add(legacy)
+        await session.commit()
+
+    assert await _ppq_spent_last_24h_usd(0.001) == 152.0

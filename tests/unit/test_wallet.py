@@ -243,9 +243,7 @@ async def test_recieve_token_uses_only_requested_destination_mint() -> None:
         )
 
     assert result == (99, "sat", destination)
-    swap.assert_awaited_once_with(
-        token, source_wallet, destination_mints=[destination]
-    )
+    swap.assert_awaited_once_with(token, source_wallet, destination_mints=[destination])
 
 
 @pytest.mark.asyncio
@@ -496,9 +494,7 @@ async def test_send_refreshes_reservations_inside_wallet_guard() -> None:
     ):
         assert await send(1000, "sat", mint) == (1000, "token")
 
-    wallet.set_reserved_for_send.assert_awaited_once_with(
-        [proof], reserved=True
-    )
+    wallet.set_reserved_for_send.assert_awaited_once_with([proof], reserved=True)
 
 
 @pytest.mark.asyncio
@@ -892,9 +888,7 @@ def _make_swap_mocks(
             quote=f"melt_quote_{invoice}", amount=invoice, fee_reserve=_next_fee()
         )
     )
-    mock_token_wallet.melt = AsyncMock(
-        return_value=Mock(state=MeltQuoteState.paid)
-    )
+    mock_token_wallet.melt = AsyncMock(return_value=Mock(state=MeltQuoteState.paid))
 
     return mock_token, mock_token_wallet, mock_primary_wallet
 
@@ -1904,7 +1898,7 @@ async def test_prepare_bolt11_payment_counts_input_fees_in_sufficiency() -> None
     # Balance covers amount + fee_reserve (102) but not the 5 sat input fee.
     wallet.get_fees_for_proofs = Mock(return_value=5)
 
-    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+    async def get_wallet(mint_url: str, unit: str = "sat", **_: object) -> MagicMock:
         if unit == "msat":
             raise ValueError("unit unsupported")
         return wallet
@@ -1937,7 +1931,7 @@ async def test_prepare_bolt11_payment_does_not_spend_user_liabilities() -> None:
     )
     wallet.get_fees_for_proofs = Mock(return_value=0)
 
-    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+    async def get_wallet(mint_url: str, unit: str = "sat", **_: object) -> MagicMock:
         if unit == "msat":
             raise ValueError("unit unsupported")
         return wallet
@@ -1974,7 +1968,7 @@ async def test_prepare_bolt11_payment_rounds_user_liability_up_to_whole_sats() -
     )
     wallet.get_fees_for_proofs = Mock(return_value=0)
 
-    async def get_wallet(mint_url: str, unit: str = "sat") -> MagicMock:
+    async def get_wallet(mint_url: str, unit: str = "sat", **_: object) -> MagicMock:
         if unit == "msat":
             raise ValueError("unit unsupported")
         return wallet
@@ -2232,9 +2226,7 @@ async def test_default_timeout_allows_retry_after_rate_limit_cooldown() -> None:
     response = httpx.Response(429, request=request)
     operation = AsyncMock(
         side_effect=[
-            httpx.HTTPStatusError(
-                "rate limited", request=request, response=response
-            ),
+            httpx.HTTPStatusError("rate limited", request=request, response=response),
             "ok",
         ]
     )

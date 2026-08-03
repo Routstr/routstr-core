@@ -549,11 +549,11 @@ async def test_ppq_auto_topup_skips_when_daily_spend_cap_reached() -> None:
             "routstr.upstream.auto_topup.maximum_owner_cashu_balance_sats",
             AsyncMock(return_value=10_000_000),
         ),
-        # 1_000_000 sats * 0.001 USD/sat = 1000 USD, the daily cap: the next
-        # 10 USD top-up must be refused.
+        # 1000 USD already spent, exactly the daily cap: the next 10 USD
+        # top-up must be refused.
         patch(
-            "routstr.upstream.auto_topup._ppq_spent_last_24h_sats",
-            AsyncMock(return_value=1_000_000),
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_usd",
+            AsyncMock(return_value=1000.0),
         ),
         patch(
             "routstr.upstream.auto_topup._claim_ppq_topup",

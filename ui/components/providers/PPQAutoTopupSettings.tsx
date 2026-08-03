@@ -21,22 +21,34 @@ interface PPQAutoTopupSettingsProps {
  * Field-level validation shared with the dialog's submit gating. The server
  * enforces the same bounds authoritatively; this only keeps a knowingly
  * invalid form from being submitted.
+ *
+ * Validation only applies while auto top-up is enabled: a disabled toggle
+ * hides the fields, and stale out-of-range values behind it must not block
+ * submission invisibly. When enabled, both fields are required — a blank
+ * field would otherwise submit and fail server-side.
  */
 export function ppqAutoTopupSettingsErrors(settings: ProviderSettings): {
   thresholdError?: string;
   amountError?: string;
 } {
+  if (!settings.auto_topup) {
+    return {};
+  }
   const threshold = settings.topup_threshold;
   const amount = settings.topup_amount_limit;
   return {
     thresholdError:
-      threshold !== undefined && threshold <= 0
-        ? 'Must be greater than 0'
-        : undefined,
+      threshold === undefined
+        ? 'Required when auto top-up is enabled'
+        : threshold <= 0
+          ? 'Must be greater than 0'
+          : undefined,
     amountError:
-      amount !== undefined && (amount < 1 || amount > 500)
-        ? 'Must be between 1 and 500 USD'
-        : undefined,
+      amount === undefined
+        ? 'Required when auto top-up is enabled'
+        : amount < 1 || amount > 500
+          ? 'Must be between 1 and 500 USD'
+          : undefined,
   };
 }
 
