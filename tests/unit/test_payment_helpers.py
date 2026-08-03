@@ -125,3 +125,33 @@ async def test_get_max_cost_for_model_tolerance() -> None:
                 "gpt-4", session=mock_session, model_obj=mock_model
             )
             assert cost == 450000  # 500 sats * 1000 * 0.9 = 450000
+
+
+async def test_discounted_max_cost_floors_at_min_request_msat() -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 100.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(150_000, body, model_obj)
+
+    assert cost == 1000

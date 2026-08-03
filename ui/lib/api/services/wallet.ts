@@ -36,10 +36,13 @@ export interface BalanceDetail {
   user_balance: number;
   owner_balance: number;
   error?: string;
+  error_code?: 'rate_limited' | 'unreachable' | 'cooldown' | 'mint_error';
+  retry_after_seconds?: number;
 }
 
 export interface WithdrawResponse {
   token: string;
+  mint_url: string;
 }
 
 export interface CreateChildKeyResponse {

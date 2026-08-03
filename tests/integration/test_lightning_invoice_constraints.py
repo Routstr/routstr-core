@@ -14,12 +14,19 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from cashu.core.base import Proof
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey, LightningInvoice
 from routstr.lightning import _create_api_key_record
+
+
+def _configure_quote_proof_wallet(wallet: MagicMock) -> None:
+    wallet.proofs = []
+    wallet.keysets = {}
+    wallet.load_proofs = AsyncMock()
 
 
 def _make_invoice(**kwargs: object) -> LightningInvoice:
@@ -42,7 +49,15 @@ def _make_invoice(**kwargs: object) -> LightningInvoice:
 def mock_wallet_mint() -> object:
     with patch("routstr.lightning.get_wallet") as mock_get_wallet:
         wallet = AsyncMock()
-        wallet.mint = AsyncMock(return_value=[])
+        wallet.proofs = []
+        wallet.load_proofs = AsyncMock()
+
+        async def mint(amount: int, quote_id: str) -> list[Proof]:
+            proofs = [Proof(amount=amount, mint_id=quote_id)]
+            wallet.proofs.extend(proofs)
+            return proofs
+
+        wallet.mint = AsyncMock(side_effect=mint)
         mock_get_wallet.return_value = wallet
         yield mock_get_wallet
 
@@ -183,6 +198,7 @@ async def test_concurrent_payment_checks_mint_and_credit_invoice_once(
         await setup.commit()
 
     wallet = MagicMock()
+    _configure_quote_proof_wallet(wallet)
     wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
 
     mint_calls = 0
@@ -196,7 +212,9 @@ async def test_concurrent_payment_checks_mint_and_credit_invoice_once(
         await asyncio.sleep(0.05)
         if call_number > 1:
             raise Exception("quote already issued")
-        return []
+        proof = Proof(amount=invoice.amount_sats, mint_id=invoice.payment_hash)
+        wallet.proofs.append(proof)
+        return [proof]
 
     wallet.mint = AsyncMock(side_effect=single_use_mint)
 
@@ -228,7 +246,7 @@ async def test_concurrent_payment_checks_mint_and_credit_invoice_once(
 
 
 @pytest.mark.asyncio
-async def test_failed_mint_keeps_invoice_pending_for_retry(
+async def test_failed_mint_marks_invoice_for_settlement_retry(
     integration_engine: AsyncEngine,
     patched_db_engine: None,
 ) -> None:
@@ -238,6 +256,7 @@ async def test_failed_mint_keeps_invoice_pending_for_retry(
         await setup.commit()
 
     wallet = MagicMock()
+    _configure_quote_proof_wallet(wallet)
     wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
     wallet.mint = AsyncMock(side_effect=TimeoutError("mint unavailable"))
     async with AsyncSession(integration_engine, expire_on_commit=False) as session:
@@ -251,7 +270,7 @@ async def test_failed_mint_keeps_invoice_pending_for_retry(
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored = await verify.get(LightningInvoice, invoice.id)
         assert stored is not None
-        assert stored.status == "pending"
+        assert stored.status == "settlement_pending"
 
 
 @pytest.mark.asyncio
@@ -349,8 +368,15 @@ async def test_post_mint_db_failure_keeps_invoice_pending_for_reconciliation(
         await setup.commit()
 
     wallet = MagicMock()
+    _configure_quote_proof_wallet(wallet)
     wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
-    wallet.mint = AsyncMock(return_value=[])
+
+    async def successful_mint(*args: object, **kwargs: object) -> list[Proof]:
+        proof = Proof(amount=invoice.amount_sats, mint_id=invoice.payment_hash)
+        wallet.proofs.append(proof)
+        return [proof]
+
+    wallet.mint = AsyncMock(side_effect=successful_mint)
     async with AsyncSession(integration_engine, expire_on_commit=False) as session:
         stored = await session.get(LightningInvoice, invoice.id)
         stored_sibling = await session.get(LightningInvoice, sibling.id)
@@ -373,14 +399,14 @@ async def test_post_mint_db_failure_keeps_invoice_pending_for_reconciliation(
         assert sibling_state is not None
         assert stored_state.expired is False
         assert sibling_state.expired is False
-        assert stored.status == "pending"
+        assert stored.status == "settlement_pending"
         assert stored_sibling.id == sibling.id
 
     assert wallet.mint.await_count == 1
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored = await verify.get(LightningInvoice, invoice.id)
         assert stored is not None
-        assert stored.status == "pending"
+        assert stored.status == "settlement_pending"
 
 
 @pytest.mark.asyncio
@@ -428,11 +454,14 @@ async def test_db_guard_credits_once_when_both_mints_succeed(
         await setup.commit()
 
     wallet = MagicMock()
+    _configure_quote_proof_wallet(wallet)
     wallet.get_mint_quote = AsyncMock(return_value=MagicMock(paid=True))
 
-    async def always_succeeding_mint(*args: object, **kwargs: object) -> list[object]:
+    async def always_succeeding_mint(*args: object, **kwargs: object) -> list[Proof]:
         await asyncio.sleep(0.05)
-        return []
+        proof = Proof(amount=invoice.amount_sats, mint_id=invoice.payment_hash)
+        wallet.proofs.append(proof)
+        return [proof]
 
     wallet.mint = AsyncMock(side_effect=always_succeeding_mint)
 
@@ -472,7 +501,7 @@ async def test_db_guard_credits_once_when_both_mints_succeed(
         assert first_invoice not in first.dirty
         assert second_invoice not in second.dirty
 
-    assert wallet.mint.await_count == 2
+    assert wallet.mint.await_count == 1
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored_invoice = await verify.get(LightningInvoice, invoice.id)
         assert stored_invoice is not None

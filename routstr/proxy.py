@@ -26,7 +26,6 @@ from .core.db import (
 )
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
-from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -367,8 +366,6 @@ async def _proxy(
     max_cost_for_model = await calculate_discounted_max_cost(
         _max_cost_for_model, request_body_dict, model_obj=model_obj
     )
-    # Ensure max_cost_for_model is at least the minimum allowed request cost
-    max_cost_for_model = max(max_cost_for_model, settings.min_request_msat)
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
@@ -507,7 +504,6 @@ async def _proxy(
             candidate_max = await calculate_discounted_max_cost(
                 candidate_max, request_body_dict, model_obj=model_obj
             )
-            candidate_max = max(candidate_max, settings.min_request_msat)
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
@@ -807,17 +803,29 @@ async def get_bearer_token_key(
             },
         )
         return key
-    except Exception as e:
-        key_preview = bearer_key[:20] + "..." if len(bearer_key) > 20 else bearer_key
-        logger.error(
-            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} model={model_id!r} min_cost={min_cost} key={key_preview!r}",
+    except HTTPException as error:
+        detail: dict[str, Any] = error.detail if isinstance(error.detail, dict) else {}
+        raw_error = detail.get("error")
+        error_info = raw_error if isinstance(raw_error, dict) else {}
+        logger.warning(
+            "Bearer token rejected",
             extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
+                "status_code": error.status_code,
+                "error_code": error_info.get("code"),
                 "path": path,
                 "model_id": model_id,
-                "min_cost_msat": min_cost,
-                "bearer_key_preview": key_preview,
+                "required_msat": min_cost,
+            },
+        )
+        raise
+    except Exception as error:
+        logger.exception(
+            "Bearer token validation failed",
+            extra={
+                "error_type": type(error).__name__,
+                "path": path,
+                "model_id": model_id,
+                "required_msat": min_cost,
             },
         )
         raise

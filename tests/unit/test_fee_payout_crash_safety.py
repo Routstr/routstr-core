@@ -67,7 +67,7 @@ async def test_fee_payout_prepares_wallet_then_checkpoints_before_sending() -> N
     payout_wallet = Mock()
     events: list[str] = []
 
-    async def prepare(*_args: object) -> Mock:
+    async def prepare(*_args: object, **_kwargs: object) -> Mock:
         events.append("prepare")
         return payout_wallet
 

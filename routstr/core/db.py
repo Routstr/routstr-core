@@ -293,7 +293,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     """Delete dead parentless API keys; return the count removed.
 
     Dead = 0 balance/reservation/spend/requests, older than the grace period,
-    no parent, no children, no pending invoice. Cashu rows are unlinked (not
+    no parent, no children, no retryable invoice. Cashu rows are unlinked (not
     deleted) first to keep the audit trail.
     """
     cutoff = int(time.time()) - min_age_seconds
@@ -307,7 +307,9 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     pending_invoice = (
         select(LightningInvoice.id)
         .where(col(LightningInvoice.api_key_hash) == col(ApiKey.hashed_key))
-        .where(col(LightningInvoice.status) == "pending")
+        .where(
+            col(LightningInvoice.status).in_(("pending", "settlement_pending"))
+        )
     ).exists()
 
     eligible_hashes = (
@@ -435,12 +437,18 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     payment_hash: str = Field(description="Payment hash for tracking", unique=True)
     status: str = Field(
         default="pending",
-        description="pending, paid, expired, cancelled, reconciliation_required",
+        description=(
+            "pending, settlement_pending, paid, expired, cancelled, "
+            "reconciliation_required"
+        ),
     )
     api_key_hash: str | None = Field(
         default=None, description="Associated API key hash for topup operations"
     )
     purpose: str = Field(description="create or topup")
+    mint_url: str | None = Field(
+        default=None, description="Mint URL where the quote was created (fallback tracking)"
+    )
     created_at: int = Field(
         default_factory=lambda: int(time.time()), description="Unix timestamp"
     )

@@ -51,6 +51,24 @@ ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS: int = 900
 ROUTSTR_FEE_DEFAULT_PAYOUT: int = 200
 
 
+def _format_msat_amount(amount: int) -> str:
+    sats = f"{amount / 1000:.3f}".rstrip("0").rstrip(".")
+    return f"{sats} sats ({amount} msats)"
+
+
+def _model_balance_error(required: int, available: int) -> dict[str, dict[str, str]]:
+    return {
+        "error": {
+            "message": (
+                f"Insufficient balance: {_format_msat_amount(required)} required "
+                f"for this model; {_format_msat_amount(available)} available."
+            ),
+            "type": "insufficient_quota",
+            "code": "insufficient_balance",
+        }
+    }
+
+
 @dataclass(frozen=True)
 class ReservationSnapshot:
     release_id: str
@@ -264,13 +282,7 @@ async def _validate_bearer_key_locked(
                 )
                 raise HTTPException(
                     status_code=402,
-                    detail={
-                        "error": {
-                            "message": f"Insufficient balance: {min_cost} mSats required for this model. {billing_key.total_balance} available.",
-                            "type": "insufficient_quota",
-                            "code": "insufficient_balance",
-                        }
-                    },
+                    detail=_model_balance_error(min_cost, billing_key.total_balance),
                 )
 
             # Early check: Spending limit check (Child key limit)
@@ -360,13 +372,9 @@ async def _validate_bearer_key_locked(
                 if min_cost > 0 and existing_key.total_balance < min_cost:
                     raise HTTPException(
                         status_code=402,
-                        detail={
-                            "error": {
-                                "message": f"Insufficient balance: {min_cost} mSats required for this model. {existing_key.total_balance} available.",
-                                "type": "insufficient_quota",
-                                "code": "insufficient_balance",
-                            }
-                        },
+                        detail=_model_balance_error(
+                            min_cost, existing_key.total_balance
+                        ),
                     )
 
                 return existing_key
@@ -379,11 +387,23 @@ async def _validate_bearer_key_locked(
                     "has_expiry_time": bool(key_expiry_time),
                 },
             )
-            if token_obj.mint in settings.cashu_mints:
+            if token_obj.mint == settings.primary_mint:
+                if token_obj.unit != settings.primary_mint_unit:
+                    raise redemption_error_to_http_exception(
+                        ValueError(
+                            "Cashu token unit does not match the configured primary "
+                            f"mint unit: expected {settings.primary_mint_unit}, "
+                            f"got {token_obj.unit}"
+                        )
+                    )
+                refund_currency = token_obj.unit
+                refund_mint_url = settings.primary_mint
+            elif token_obj.mint in settings.cashu_mints:
                 refund_currency = token_obj.unit
                 refund_mint_url = token_obj.mint
             else:
-                refund_currency = "sat"
+                # Foreign tokens are swapped into the configured primary mint.
+                refund_currency = settings.primary_mint_unit
                 refund_mint_url = settings.primary_mint
 
             new_key = ApiKey(
