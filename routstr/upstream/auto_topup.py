@@ -29,6 +29,7 @@ from ..wallet import (
     release_token_reservation,
     send_token,
     token_mint_url,
+    wallet_operation_guard,
 )
 from .ppqai import PPQAIUpstreamProvider
 from .routstr import RoutstrUpstreamProvider
@@ -51,6 +52,12 @@ PPQ_PENDING_TTL_SECONDS = 15 * 60
 PPQ_MAX_INVOICE_PREMIUM = 1.10
 PPQ_MIN_TOPUP_USD = 1
 PPQ_MAX_TOPUP_USD = 500
+# Rolling 24h ceiling on total PPQ auto top-up spend across all providers.
+# Independent of PPQ's own balance endpoint: if that endpoint is buggy or
+# compromised and keeps reporting a below-threshold balance, this cap bounds
+# the damage instead of letting the worker drain the owner's mint funds one
+# per-transaction-capped payment at a time.
+PPQ_MAX_DAILY_TOPUP_USD = 1000
 
 
 async def periodic_auto_topup() -> None:
@@ -822,6 +829,28 @@ async def _mark_ppq_reconcile(
             )
 
 
+async def _ppq_spent_last_24h_sats() -> int:
+    """Total sats committed to PPQ top-ups in the last 24 hours.
+
+    Counts every payment audit row, including in-flight and ambiguous ones:
+    for spend-cap purposes an unresolved payment must be assumed spent.
+    """
+    cutoff = int(time.time()) - 24 * 60 * 60
+    async with create_session() as session:
+        rows = (
+            await session.exec(
+                select(CashuTransaction.amount, CashuTransaction.unit).where(
+                    col(CashuTransaction.source) == "ppq_auto_topup",
+                    col(CashuTransaction.type) == "out",
+                    col(CashuTransaction.created_at) >= cutoff,
+                )
+            )
+        ).all()
+    return sum(
+        amount if unit == "sat" else math.ceil(amount / 1000) for amount, unit in rows
+    )
+
+
 async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None:
     threshold_usd = float(settings["topup_threshold"])
     amount_usd = int(settings["topup_amount_limit"])
@@ -855,6 +884,19 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
         )
         return
 
+    spent_24h_usd = await _ppq_spent_last_24h_sats() * price
+    if spent_24h_usd + amount_usd > PPQ_MAX_DAILY_TOPUP_USD:
+        logger.critical(
+            "PPQ auto top-up skipped: rolling 24h spend cap reached",
+            extra={
+                "provider_id": row.id,
+                "spent_24h_usd": round(spent_24h_usd, 2),
+                "topup_usd": amount_usd,
+                "daily_cap_usd": PPQ_MAX_DAILY_TOPUP_USD,
+            },
+        )
+        return
+
     operation_id = await _claim_ppq_topup(row)
     if operation_id is None:
         return
@@ -882,21 +924,6 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
             invoice_expires_at //= 1000
         if invoice_expires_at <= now:
             raise ValueError("PPQ returned an expired Lightning invoice")
-
-        plan = await prepare_bolt11_payment(topup.payment_request)
-        if plan.maximum_spend_sats > max_invoice_sats:
-            raise ValueError("PPQ Lightning invoice exceeds the USD spending cap")
-
-        lease_expires_at = await _record_ppq_invoice(
-            row,
-            operation_id,
-            invoice=topup.payment_request,
-            invoice_id=topup.invoice_id,
-            quote_id=str(plan.quote.quote),
-            amount=int(plan.quote.amount + plan.quote.fee_reserve),
-            unit=plan.unit,
-            mint_url=plan.mint_url,
-        )
     except Exception:
         # Nothing has been paid yet, so the claim can be handed back. If the
         # release does not land, the claim is no longer ours to reason about.
@@ -910,61 +937,96 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
             )
         raise
 
-    try:
-        paid_amount, mint_url, unit = await execute_bolt11_payment(plan)
-    except Bolt11PaymentNotAttempted:
-        # The mint's own answer rules out a settlement and any reserved proofs
-        # were handed back, so this claim is safe to retry next cycle.
-        if not await _set_ppq_state_terminal(
-            row, operation_id, collected=False, swept=True
-        ):
-            logger.warning(
-                "Could not release the PPQ auto top-up claim after a payment "
-                "that was never attempted; it is owned by another attempt",
-                extra={"provider_id": row.id},
+    # Hold the wallet guard across planning and execution: the plan snapshots
+    # live proof state, and another worker process reserving or spending those
+    # proofs between the two calls would invalidate the snapshot.
+    async with wallet_operation_guard():
+        try:
+            plan = await prepare_bolt11_payment(topup.payment_request)
+            if plan.maximum_spend_sats > max_invoice_sats:
+                raise ValueError("PPQ Lightning invoice exceeds the USD spending cap")
+
+            lease_expires_at = await _record_ppq_invoice(
+                row,
+                operation_id,
+                invoice=topup.payment_request,
+                invoice_id=topup.invoice_id,
+                quote_id=str(plan.quote.quote),
+                amount=int(plan.quote.amount + plan.quote.fee_reserve),
+                unit=plan.unit,
+                mint_url=plan.mint_url,
             )
-        logger.warning(
-            "PPQ Lightning payment was not attempted; claim released for retry",
-            extra={"provider_id": row.id, "invoice_id": topup.invoice_id},
-            exc_info=True,
-        )
-        raise
-    except Bolt11PaymentAmbiguous:
-        await _mark_ppq_reconcile(
-            row,
-            operation_id,
-            lease_expires_at,
-            topup.invoice_id,
-            str(plan.quote.quote),
-        )
-        logger.critical(
-            "PPQ auto top-up payment outcome is ambiguous; claim remains locked until admin reconciliation",
-            extra={
-                "provider_id": row.id,
-                "invoice_id": topup.invoice_id,
-                "admin_action": f"POST /admin/api/upstream-providers/{row.id}/ppq-auto-topup/release",
-            },
-            exc_info=True,
-        )
-        raise
-    except BaseException:
-        # Cancellation or an unexpected error after execution began is also
-        # ambiguous. Preserve the claim before propagating it.
-        await asyncio.shield(
-            _mark_ppq_reconcile(
+        except Exception:
+            # Nothing has been paid yet, so the claim can be handed back. If
+            # the release does not land, the claim is no longer ours to reason
+            # about.
+            if not await _set_ppq_state_terminal(
+                row, operation_id, collected=False, swept=True
+            ):
+                logger.warning(
+                    "Could not release the PPQ auto top-up claim after a "
+                    "pre-payment failure; it is owned by another attempt",
+                    extra={"provider_id": row.id},
+                )
+            raise
+
+        try:
+            paid_amount, mint_url, unit = await execute_bolt11_payment(plan)
+        except Bolt11PaymentNotAttempted:
+            # The mint's own answer rules out a settlement and any reserved
+            # proofs were handed back, so this claim is safe to retry next
+            # cycle.
+            if not await _set_ppq_state_terminal(
+                row, operation_id, collected=False, swept=True
+            ):
+                logger.warning(
+                    "Could not release the PPQ auto top-up claim after a "
+                    "payment that was never attempted; it is owned by another "
+                    "attempt",
+                    extra={"provider_id": row.id},
+                )
+            logger.warning(
+                "PPQ Lightning payment was not attempted; claim released for retry",
+                extra={"provider_id": row.id, "invoice_id": topup.invoice_id},
+                exc_info=True,
+            )
+            raise
+        except Bolt11PaymentAmbiguous:
+            await _mark_ppq_reconcile(
                 row,
                 operation_id,
                 lease_expires_at,
                 topup.invoice_id,
                 str(plan.quote.quote),
             )
-        )
-        logger.critical(
-            "Unexpected failure while paying PPQ invoice; payment requires reconciliation",
-            extra={"provider_id": row.id, "invoice_id": topup.invoice_id},
-            exc_info=True,
-        )
-        raise
+            logger.critical(
+                "PPQ auto top-up payment outcome is ambiguous; claim remains locked until admin reconciliation",
+                extra={
+                    "provider_id": row.id,
+                    "invoice_id": topup.invoice_id,
+                    "admin_action": f"POST /admin/api/upstream-providers/{row.id}/ppq-auto-topup/release",
+                },
+                exc_info=True,
+            )
+            raise
+        except BaseException:
+            # Cancellation or an unexpected error after execution began is
+            # also ambiguous. Preserve the claim before propagating it.
+            await asyncio.shield(
+                _mark_ppq_reconcile(
+                    row,
+                    operation_id,
+                    lease_expires_at,
+                    topup.invoice_id,
+                    str(plan.quote.quote),
+                )
+            )
+            logger.critical(
+                "Unexpected failure while paying PPQ invoice; payment requires reconciliation",
+                extra={"provider_id": row.id, "invoice_id": topup.invoice_id},
+                exc_info=True,
+            )
+            raise
 
     try:
         # The melt is irreversible now. Persist the actual spend before any

@@ -19,19 +19,14 @@ from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
 from .core import db, get_logger
-from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
+from .core.db import \
+    store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
-from .mint import (
-    MINT_TRANSPORT_COOLDOWN_SECONDS,
-    MINT_TRANSPORT_EXCEPTIONS,
-    MintRateGuard,
-    MintRateLimitedError,
-    fail_fast_mint_operations,
-    is_mint_rate_limited,
-    mint_cooldown_reason,
-    mint_cooldown_remaining,
-    run_mint_operation,
-)
+from .mint import (MINT_TRANSPORT_COOLDOWN_SECONDS, MINT_TRANSPORT_EXCEPTIONS,
+                   MintRateGuard, MintRateLimitedError,
+                   fail_fast_mint_operations, is_mint_rate_limited,
+                   mint_cooldown_reason, mint_cooldown_remaining,
+                   run_mint_operation)
 from .payment.lnurl import raw_send_to_lnurl
 
 # Backwards-compatible aliases for callers/tests that imported the former
@@ -396,9 +391,7 @@ async def _recieve_token_locked(
         else list(dict.fromkeys([settings.primary_mint, *settings.cashu_mints]))
     )
     output_unit = (
-        token_obj.unit
-        if token_obj.mint in destinations
-        else settings.primary_mint_unit
+        token_obj.unit if token_obj.mint in destinations else settings.primary_mint_unit
     )
     if destination_unit is not None and output_unit != destination_unit:
         raise ValueError(
@@ -560,11 +553,13 @@ async def maximum_owner_cashu_balance_sats() -> int:
     """Return the largest conservatively owner-funded mint/unit balance."""
     details, _, _, _ = await fetch_all_balances()
     async with db.create_session() as session:
-        liability_sats = _msats_to_sats_ceil(
-            await db.total_user_liability(session)
-        )
+        liability_sats = _msats_to_sats_ceil(await db.total_user_liability(session))
     balances = [
-        (detail["wallet_balance"] if detail["unit"] == "sat" else _msats_to_sats(detail["wallet_balance"]))
+        (
+            detail["wallet_balance"]
+            if detail["unit"] == "sat"
+            else _msats_to_sats(detail["wallet_balance"])
+        )
         - liability_sats
         for detail in details
         if not detail.get("error")
@@ -577,7 +572,17 @@ async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
 
     Candidate discovery reads balances, user liabilities, and melt quotes. Coin
     selection, which may split proofs, is deferred until the winner is known.
+
+    Runs under ``wallet_operation_guard``: the plan snapshots live proof state,
+    which another worker process could otherwise mutate mid-read. Callers that
+    go on to execute the plan should hold the guard across both calls so the
+    snapshot stays valid.
     """
+    async with wallet_operation_guard():
+        return await _prepare_bolt11_payment(invoice)
+
+
+async def _prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
     mint_urls = list(dict.fromkeys([*settings.cashu_mints, settings.primary_mint]))
     candidates: list[tuple[int, Wallet, list[Proof], MeltQuote, str, str]] = []
     failures: list[dict[str, str]] = []
@@ -631,7 +636,7 @@ async def prepare_bolt11_payment(invoice: str) -> Bolt11PaymentPlan:
             logger.warning(
                 "No Cashu mint could fund the BOLT11 invoice",
                 extra={"evaluated": evaluated, "failures": failures},
-    )
+            )
         if evaluated == 0 and failures:
             raise RuntimeError("Every configured Cashu mint refused the payment")
         raise ValueError(
@@ -648,7 +653,15 @@ async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str
     Raises ``Bolt11PaymentNotAttempted`` when the invoice provably did not
     settle, and ``Bolt11PaymentAmbiguous`` when the outcome is unknown. Callers
     may safely retry the first and must never retry the second.
+
+    Runs under ``wallet_operation_guard``: coin selection and reservation must
+    not race another worker process spending the same proofs.
     """
+    async with wallet_operation_guard():
+        return await _execute_bolt11_payment(plan)
+
+
+async def _execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str]:
     # Select unreserved, mirroring send_token: a selection failure must not
     # strand proofs that were never handed to the mint.
     try:
@@ -684,8 +697,8 @@ async def execute_bolt11_payment(plan: Bolt11PaymentPlan) -> tuple[int, str, str
         try:
             await asyncio.shield(
                 plan.wallet.set_reserved_for_melt(
-                selected, reserved=True, quote_id=plan.quote.quote
-            )
+                    selected, reserved=True, quote_id=plan.quote.quote
+                )
             )
         except BaseException:
             logger.critical(
@@ -1972,9 +1985,7 @@ async def fetch_all_balances(
 
             try:
                 async with mint_check_limit:
-                    wallet = await get_wallet(
-                        mint_url, unit, retry_on_rate_limit=False
-                    )
+                    wallet = await get_wallet(mint_url, unit, retry_on_rate_limit=False)
                     proofs = get_proofs_per_mint_and_unit(
                         wallet, mint_url, unit, not_reserved=True
                     )
@@ -2088,9 +2099,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         # snapshot up to 30s stale from another process's reservation, so the
         # cross-process lock is only safe with a fresh reload.
         wallet = await get_wallet(mint_url, unit, force_reload=True)
-        proofs = get_proofs_per_mint_and_unit(
-            wallet, mint_url, unit, not_reserved=True
-        )
+        proofs = get_proofs_per_mint_and_unit(wallet, mint_url, unit, not_reserved=True)
         proofs = await slow_filter_spend_proofs(proofs, wallet)
         await asyncio.sleep(5)
     except Exception as e:
@@ -2329,11 +2338,8 @@ async def periodic_refund_sweep() -> None:
 
 
 async def periodic_routstr_fee_payout() -> None:
-    from .auth import (
-        ROUTSTR_FEE_DEFAULT_PAYOUT,
-        ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS,
-        ROUTSTR_LN_ADDRESS,
-    )
+    from .auth import (ROUTSTR_FEE_DEFAULT_PAYOUT,
+                       ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS, ROUTSTR_LN_ADDRESS)
 
     if not ROUTSTR_LN_ADDRESS:
         logger.info("ROUTSTR_LN_ADDRESS not set, skipping fee payout")
@@ -2434,16 +2440,10 @@ async def periodic_routstr_fee_payout() -> None:
 
 async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
     async with wallet_operation_guard():
-        mint = await find_trusted_mint_with_funds(
-            amount, unit, mint, force_reload=True
-        )
+        mint = await find_trusted_mint_with_funds(amount, unit, mint, force_reload=True)
         wallet = await get_wallet(mint, unit)
-        available = get_proofs_per_mint_and_unit(
-            wallet, mint, unit, not_reserved=True
-        )
-        proofs, _ = await wallet.select_to_send(
-            available, amount, set_reserved=True
-        )
+        available = get_proofs_per_mint_and_unit(wallet, mint, unit, not_reserved=True)
+        proofs, _ = await wallet.select_to_send(available, amount, set_reserved=True)
         return await raw_send_to_lnurl(wallet, proofs, address, unit)
 
 
@@ -2469,3 +2469,4 @@ async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
 
 #     def refund_partial(self, amount: int) -> None:
 #         raise NotImplementedError
+

@@ -531,6 +531,43 @@ async def test_ppq_auto_topup_skips_when_balance_meets_threshold() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ppq_auto_topup_skips_when_daily_spend_cap_reached() -> None:
+    provider = MagicMock()
+    provider.get_balance = AsyncMock(return_value=2.5)
+    provider.initiate_topup = AsyncMock()
+
+    with (
+        patch(
+            "routstr.upstream.auto_topup.PPQAIUpstreamProvider.from_db_row",
+            return_value=provider,
+        ),
+        patch(
+            "routstr.upstream.auto_topup._reconcile_ppq_state",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "routstr.upstream.auto_topup.maximum_owner_cashu_balance_sats",
+            AsyncMock(return_value=10_000_000),
+        ),
+        # 1_000_000 sats * 0.001 USD/sat = 1000 USD, the daily cap: the next
+        # 10 USD top-up must be refused.
+        patch(
+            "routstr.upstream.auto_topup._ppq_spent_last_24h_sats",
+            AsyncMock(return_value=1_000_000),
+        ),
+        patch(
+            "routstr.upstream.auto_topup._claim_ppq_topup",
+            AsyncMock(),
+        ) as claim,
+        patch("routstr.upstream.auto_topup.sats_usd_price", return_value=0.001),
+    ):
+        await _check_and_topup(_ppq_row())
+
+    claim.assert_not_awaited()
+    provider.initiate_topup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_ppq_pending_attempt_suppresses_duplicate_topup() -> None:
     provider = MagicMock()
     provider.get_balance = AsyncMock()

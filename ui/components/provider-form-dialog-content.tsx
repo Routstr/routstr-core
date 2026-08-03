@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ProviderFormFields } from '@/components/provider-form-fields';
+import { ppqAutoTopupSettingsInvalid } from '@/components/providers/PPQAutoTopupSettings';
 
 interface ProviderFormDialogContentProps {
   mode: 'create' | 'edit';
@@ -52,6 +53,11 @@ export function ProviderFormDialogContent({
   isSubmitting,
   availableMints,
 }: ProviderFormDialogContentProps) {
+  // The server re-validates these bounds; this only stops submitting a form
+  // whose inline errors are already visible.
+  const hasInvalidSettings =
+    formData.provider_type === 'ppqai' &&
+    ppqAutoTopupSettingsInvalid(formData.provider_settings || {});
   return (
     <DialogContent className='max-h-[90dvh] overflow-y-auto sm:max-w-[500px]'>
       <DialogHeader>
@@ -80,7 +86,7 @@ export function ProviderFormDialogContent({
         </Button>
         <Button
           onClick={onSubmit}
-          disabled={isSubmitting}
+          disabled={isSubmitting || hasInvalidSettings}
           className='w-full sm:w-auto'
         >
           {isSubmitting ? submittingLabel : submitLabel}

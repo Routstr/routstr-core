@@ -30,6 +30,7 @@ import { ProviderBalance } from '@/components/provider-balance';
 import { ProviderModelsPanel } from '@/components/provider-models-panel';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
 import { RoutstrProviderService } from '@/lib/api/services/routstr-provider';
+import { ApiError } from '@/lib/api/client';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -93,9 +94,11 @@ export function ProviderCard({
   const queryClient = useQueryClient();
   const [isKeyModalOpen, setIsKeyModalOpen] = useState(false);
   const [isReleaseDialogOpen, setIsReleaseDialogOpen] = useState(false);
-  // Snapshot of the claim as it looked when the admin opened the dialog.
-  // The mutation sends this token, never the live query data: a background
-  // refetch must not swap in a state the admin never reviewed.
+  // The claim as the query cache held it when the admin opened the dialog.
+  // The mutation sends this token rather than re-reading the query at submit
+  // time: a background refetch after the dialog opened must not swap in a
+  // state the admin never saw. The server rejects a stale token with a 409,
+  // which is the authoritative guard.
   const [reviewedState, setReviewedState] = useState<PPQAutoTopupState | null>(
     null
   );
@@ -103,7 +106,7 @@ export function ProviderCard({
   const isRoutstr = provider.provider_type === 'routstr';
   const isPPQ = provider.provider_type === 'ppqai';
 
-  const { data: ppqAutoTopupState } = useQuery({
+  const { data: ppqAutoTopupState, isError: ppqStateFetchFailed } = useQuery({
     queryKey: ['ppq-auto-topup-state', provider.id],
     queryFn: () => AdminService.getPPQAutoTopupState(provider.id),
     enabled: isPPQ,
@@ -137,12 +140,21 @@ export function ProviderCard({
       toast.success('PPQ auto top-up claim released');
     },
     onError: (error: Error) => {
-      // A 409 usually means the claim changed since it was reviewed.
       queryClient.invalidateQueries({
         queryKey: ['ppq-auto-topup-state', provider.id],
       });
-      setIsReleaseDialogOpen(false);
-      setReviewedState(null);
+      if (error instanceof ApiError && error.status === 409) {
+        // The claim changed since it was reviewed; the stale snapshot is
+        // useless, so force a fresh review.
+        setIsReleaseDialogOpen(false);
+        setReviewedState(null);
+        toast.error(
+          'PPQ claim changed since it was reviewed; reopen to see the new state'
+        );
+        return;
+      }
+      // Transient failure: keep the dialog and the reviewed snapshot so the
+      // admin can retry without re-navigating.
       toast.error(`Failed to release PPQ claim: ${error.message}`);
     },
   });
@@ -198,6 +210,15 @@ export function ProviderCard({
                   {isPPQPaymentInFlight
                     ? 'Paying invoice'
                     : 'Auto top-up needs review'}
+                </Badge>
+              )}
+              {isPPQ && ppqStateFetchFailed && (
+                <Badge
+                  variant='outline'
+                  className='border-destructive text-destructive w-fit gap-1'
+                >
+                  <AlertTriangle className='h-3 w-3' />
+                  Top-up status unavailable
                 </Badge>
               )}
             </div>

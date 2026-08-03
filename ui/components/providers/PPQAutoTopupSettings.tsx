@@ -17,6 +17,36 @@ interface PPQAutoTopupSettingsProps {
   idPrefix?: string;
 }
 
+/**
+ * Field-level validation shared with the dialog's submit gating. The server
+ * enforces the same bounds authoritatively; this only keeps a knowingly
+ * invalid form from being submitted.
+ */
+export function ppqAutoTopupSettingsErrors(settings: ProviderSettings): {
+  thresholdError?: string;
+  amountError?: string;
+} {
+  const threshold = settings.topup_threshold;
+  const amount = settings.topup_amount_limit;
+  return {
+    thresholdError:
+      threshold !== undefined && threshold <= 0
+        ? 'Must be greater than 0'
+        : undefined,
+    amountError:
+      amount !== undefined && (amount < 1 || amount > 500)
+        ? 'Must be between 1 and 500 USD'
+        : undefined,
+  };
+}
+
+export function ppqAutoTopupSettingsInvalid(
+  settings: ProviderSettings
+): boolean {
+  const { thresholdError, amountError } = ppqAutoTopupSettingsErrors(settings);
+  return Boolean(thresholdError || amountError);
+}
+
 export function PPQAutoTopupSettings({
   settings,
   onSettingsChange,
@@ -46,16 +76,7 @@ export function PPQAutoTopupSettings({
     onSettingsChange(next);
   };
 
-  const threshold = settings.topup_threshold;
-  const amount = settings.topup_amount_limit;
-  const thresholdError =
-    threshold !== undefined && threshold <= 0
-      ? 'Must be greater than 0'
-      : undefined;
-  const amountError =
-    amount !== undefined && (amount < 1 || amount > 500)
-      ? 'Must be between 1 and 500 USD'
-      : undefined;
+  const { thresholdError, amountError } = ppqAutoTopupSettingsErrors(settings);
 
   return (
     <div className='bg-muted/30 grid gap-4 rounded-lg border p-4'>
@@ -90,12 +111,22 @@ export function PPQAutoTopupSettings({
               placeholder='e.g. 5'
               value={settings.topup_threshold ?? ''}
               aria-invalid={Boolean(thresholdError)}
+              aria-describedby={
+                thresholdError
+                  ? `${prefix}ppq_topup_threshold_error`
+                  : undefined
+              }
               onChange={(e) =>
                 updateNumber('topup_threshold', e.target.value, parseFloat)
               }
             />
             {thresholdError && (
-              <p className='text-destructive text-[10px]'>{thresholdError}</p>
+              <p
+                id={`${prefix}ppq_topup_threshold_error`}
+                className='text-destructive text-[10px]'
+              >
+                {thresholdError}
+              </p>
             )}
           </div>
 
@@ -116,12 +147,24 @@ export function PPQAutoTopupSettings({
               placeholder='e.g. 10'
               value={settings.topup_amount_limit ?? ''}
               aria-invalid={Boolean(amountError)}
+              aria-describedby={
+                amountError
+                  ? `${prefix}ppq_topup_amount_limit_error`
+                  : undefined
+              }
               onChange={(e) =>
-                updateNumber('topup_amount_limit', e.target.value, parseInt)
+                updateNumber('topup_amount_limit', e.target.value, (v) =>
+                  parseInt(v, 10)
+                )
               }
             />
             {amountError && (
-              <p className='text-destructive text-[10px]'>{amountError}</p>
+              <p
+                id={`${prefix}ppq_topup_amount_limit_error`}
+                className='text-destructive text-[10px]'
+              >
+                {amountError}
+              </p>
             )}
           </div>
 
