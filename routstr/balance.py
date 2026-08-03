@@ -23,6 +23,7 @@ from .core.db import (
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
+from .payment.lnurl import MeltOutcomeAmbiguousError
 from .wallet import (
     classify_redemption_error,
     credit_balance,
@@ -30,6 +31,7 @@ from .wallet import (
     recieve_token,
     send_to_lnurl,
     send_token,
+    token_mint_url,
 )
 
 router = APIRouter()
@@ -109,13 +111,19 @@ async def account_info(
 # Note: validate_bearer_key already supports refund_address and key_expiry_time params
 
 
-@router.get("/create")
-async def create_balance(
+class BalanceCreateRequest(BaseModel):
+    initial_balance_token: str
+    balance_limit: int | None = None
+    balance_limit_reset: str | None = None
+    validity_date: int | None = None
+
+
+async def _create_balance(
     initial_balance_token: str,
-    balance_limit: int | None = None,
-    balance_limit_reset: str | None = None,
-    validity_date: int | None = None,
-    session: AsyncSession = Depends(get_session),
+    balance_limit: int | None,
+    balance_limit_reset: str | None,
+    validity_date: int | None,
+    session: AsyncSession,
 ) -> dict:
     key = await validate_bearer_key(initial_balance_token, session)
 
@@ -135,6 +143,37 @@ async def create_balance(
     }
 
 
+@router.post("/create")
+async def create_balance_from_body(
+    payload: BalanceCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _create_balance(
+        payload.initial_balance_token,
+        payload.balance_limit,
+        payload.balance_limit_reset,
+        payload.validity_date,
+        session,
+    )
+
+
+@router.get("/create")
+async def create_balance(
+    initial_balance_token: str,
+    balance_limit: int | None = None,
+    balance_limit_reset: str | None = None,
+    validity_date: int | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    return await _create_balance(
+        initial_balance_token,
+        balance_limit,
+        balance_limit_reset,
+        validity_date,
+        session,
+    )
+
+
 @router.get("/info")
 async def wallet_info(
     key: ApiKey = Depends(get_key_from_header),
@@ -145,6 +184,17 @@ async def wallet_info(
 
 class TopupRequest(BaseModel):
     cashu_token: str
+
+
+def _error_chain(error: BaseException) -> list[dict[str, str]]:
+    chain: list[dict[str, str]] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append({"type": type(current).__name__, "message": str(current)})
+        current = current.__cause__ or current.__context__
+    return chain
 
 
 @router.post("/topup")
@@ -164,6 +214,18 @@ async def topup_wallet_endpoint(
     cashu_token = cashu_token.replace("\n", "").replace("\r", "").replace("\t", "")
     if len(cashu_token) < 10 or "cashu" not in cashu_token:
         raise HTTPException(status_code=400, detail="Invalid token format")
+
+    source_mint = token_mint_url(cashu_token, "unknown")
+    logger.info(
+        "Cashu wallet top-up started",
+        extra={
+            "event": "cashu_topup_started",
+            "source_mint": source_mint,
+            "primary_mint": settings.primary_mint,
+            "trusted_mints": settings.cashu_mints,
+            "key_hash": billing_key.hashed_key[:8],
+        },
+    )
     try:
         amount_msats = await credit_balance(cashu_token, billing_key, session)
     except Exception as e:
@@ -172,12 +234,41 @@ async def topup_wallet_endpoint(
         classified = classify_redemption_error(e)
         if classified is None:
             logger.error(
-                "topup_wallet_endpoint: unhandled error",
-                extra={"error": str(e), "error_type": type(e).__name__},
+                "Cashu wallet top-up failed with an unhandled error",
+                extra={
+                    "event": "cashu_topup_failed",
+                    "source_mint": source_mint,
+                    "primary_mint": settings.primary_mint,
+                    "trusted_mints": settings.cashu_mints,
+                    "error_chain": _error_chain(e),
+                },
             )
             raise HTTPException(status_code=500, detail="Internal server error")
-        _type, status_code, message, _code = classified
+        error_type, status_code, message, error_code = classified
+        logger.warning(
+            "Cashu wallet top-up failed",
+            extra={
+                "event": "cashu_topup_failed",
+                "source_mint": source_mint,
+                "primary_mint": settings.primary_mint,
+                "trusted_mints": settings.cashu_mints,
+                "status_code": status_code,
+                "error_type": error_type,
+                "error_code": error_code,
+                "error_chain": _error_chain(e),
+            },
+        )
         raise HTTPException(status_code=status_code, detail=message)
+
+    logger.info(
+        "Cashu wallet top-up completed",
+        extra={
+            "event": "cashu_topup_completed",
+            "source_mint": source_mint,
+            "credited_msats": amount_msats,
+            "key_hash": billing_key.hashed_key[:8],
+        },
+    )
     return {"msats": amount_msats}
 
 
@@ -222,8 +313,42 @@ async def _lookup_key_no_create(
     return None
 
 
+async def _get_persisted_api_key_refund(
+    key: ApiKey, session: AsyncSession
+) -> dict[str, str] | None:
+    result = await session.exec(
+        select(CashuTransaction)
+        .where(
+            CashuTransaction.api_key_hashed_key == key.hashed_key,
+            CashuTransaction.type == "out",
+            CashuTransaction.source == "apikey",
+        )
+        .order_by(col(CashuTransaction.created_at).desc())
+    )
+    refund = result.first()
+    if refund is None:
+        return None
+    if refund.swept:
+        raise HTTPException(status_code=410, detail="Refund has been swept")
+
+    refund.collected = True
+    session.add(refund)
+    await session.commit()
+
+    persisted = {"token": refund.token}
+    if refund.unit == "sat":
+        persisted["sats"] = str(refund.amount)
+    else:
+        persisted["msats"] = str(refund.amount)
+    return persisted
+
+
 async def _restore_balance(
-    session: AsyncSession, hashed_key: str, balance: int, reserved_balance: int, mint_url: str
+    session: AsyncSession,
+    hashed_key: str,
+    balance: int,
+    reserved_balance: int,
+    mint_url: str,
 ) -> None:
     """Restore balance after a failed refund mint attempt."""
     restore_stmt = (
@@ -238,7 +363,11 @@ async def _restore_balance(
     await session.commit()
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
-        extra={"hashed_key": hashed_key, "restored_balance": balance, "mint_url": mint_url},
+        extra={
+            "hashed_key": hashed_key,
+            "restored_balance": balance,
+            "mint_url": mint_url,
+        },
     )
 
 
@@ -316,6 +445,8 @@ async def refund_wallet_endpoint(
     if key.total_balance <= 0:
         if cached := await _refund_cache_get(bearer_value):
             return cached
+        if persisted := await _get_persisted_api_key_refund(key, session):
+            return persisted
 
     if key.parent_key_hash:
         raise HTTPException(
@@ -381,15 +512,14 @@ async def refund_wallet_endpoint(
             detail="Balance changed concurrently. Please retry the refund.",
         )
 
-    # --- MINT: balance is locked at zero, safe to create the refund token ---
-    # Proofs from untrusted mints are swapped to primary_mint on receive.
-    # Use primary_mint unless key.refund_mint_url is an explicitly trusted mint.
+    # The balance is locked at zero, so it is safe to create the refund token.
     effective_refund_mint = (
         key.refund_mint_url
         if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints
         else settings.primary_mint
     )
     try:
+        refund_currency = key.refund_currency or "sat"
         if key.refund_address:
             await send_to_lnurl(
                 remaining_balance,
@@ -399,10 +529,10 @@ async def refund_wallet_endpoint(
             )
             result = {"recipient": key.refund_address}
         else:
-            refund_currency = key.refund_currency or "sat"
             token = await send_token(
                 remaining_balance, refund_currency, effective_refund_mint
             )
+            effective_refund_mint = token_mint_url(token, effective_refund_mint)
             result = {"token": token}
 
         if key.refund_currency == "sat":
@@ -421,13 +551,47 @@ async def refund_wallet_endpoint(
                 },
             )
 
+    except MeltOutcomeAmbiguousError as e:
+        # The melt was dispatched and may still settle. Restoring the balance
+        # here would let the same debit be paid out twice; keep the debit and
+        # leave the outcome to reconciliation.
+        logger.error(
+            "refund_wallet_endpoint: melt outcome ambiguous; balance withheld "
+            "pending reconciliation",
+            extra={
+                "error": str(e),
+                "hashed_key": key.hashed_key,
+                "remaining_balance": remaining_balance,
+                "refund_currency": key.refund_currency,
+                "refund_mint_url": key.refund_mint_url,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Refund was dispatched but its outcome is unconfirmed; the "
+                "balance is withheld until reconciliation completes"
+            ),
+        )
     except HTTPException:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         raise
     except Exception as e:
         # Minting failed — restore the debited balance
-        await _restore_balance(session, key.hashed_key, pre_debit_balance, pre_debit_reserved, key.refund_mint_url or "")
+        await _restore_balance(
+            session,
+            key.hashed_key,
+            pre_debit_balance,
+            pre_debit_reserved,
+            key.refund_mint_url or "",
+        )
         error_msg = str(e)
         logger.error(
             "refund_wallet_endpoint: mint/send failed",
@@ -454,7 +618,7 @@ async def refund_wallet_endpoint(
                 token=result["token"],
                 amount=remaining_balance,
                 unit=key.refund_currency or "sat",
-                mint_url=key.refund_mint_url,
+                mint_url=effective_refund_mint,
                 typ="out",
                 collected=False,
                 source="apikey",
@@ -646,7 +810,6 @@ async def reset_child_key_spent(
     await session.commit()
 
     return {"success": True, "message": "Child key balance reset successfully."}
-
 
 
 @router.api_route(

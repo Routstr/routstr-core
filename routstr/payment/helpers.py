@@ -18,7 +18,6 @@ from ..wallet import deserialize_token_from_string
 
 logger = get_logger(__name__)
 
-
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
     if x_cashu := headers.get("x-cashu", None):
         cashu_token = x_cashu
@@ -243,7 +242,7 @@ async def calculate_discounted_max_cost(
         },
     )
 
-    return max(0, adjusted)
+    return max(settings.min_request_msat, adjusted)
 
 
 def estimate_tokens(messages: list) -> int:

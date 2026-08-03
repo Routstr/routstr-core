@@ -13,13 +13,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import _row_to_model, list_models
 from ..proxy import refresh_model_maps, reinitialize_upstreams
-from ..wallet import (
-    fetch_all_balances,
-    get_proofs_per_mint_and_unit,
-    get_wallet,
-    send_token,
-    slow_filter_spend_proofs,
-)
+from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
 from .db import (
     ApiKey,
@@ -49,6 +43,13 @@ admin_sessions: dict[str, int] = {}
 ADMIN_SESSION_DURATION = 3600
 # Usage analytics remain queryable up to 12 months.
 MAX_USAGE_ANALYTICS_HOURS = 365 * 24
+
+
+async def _refresh_provider_model_paths(upstream_provider_id: int) -> None:
+    """Queue discovery sync without blocking the committed admin mutation."""
+    from ..upstream.model_paths import schedule_model_paths_refresh_for_provider
+
+    await schedule_model_paths_refresh_for_provider(upstream_provider_id)
 
 
 async def require_admin_api(request: Request) -> None:
@@ -435,37 +436,31 @@ class WithdrawRequest(BaseModel):
 async def withdraw(
     request: Request, withdraw_request: WithdrawRequest
 ) -> dict[str, str]:
-    # Get wallet and check balance
     from .settings import settings as global_settings
 
     effective_mint = withdraw_request.mint_url or global_settings.primary_mint
-    wallet = await get_wallet(effective_mint, withdraw_request.unit)
-    proofs = get_proofs_per_mint_and_unit(
-        wallet,
-        effective_mint,
-        withdraw_request.unit,
-        not_reserved=True,
-    )
-    proofs = await slow_filter_spend_proofs(proofs, wallet)
-    current_balance = sum(proof.amount for proof in proofs)
-
     if withdraw_request.amount <= 0:
         raise HTTPException(
             status_code=400, detail="Withdrawal amount must be positive"
         )
 
-    if withdraw_request.amount > current_balance:
-        raise HTTPException(status_code=400, detail="Insufficient wallet balance")
-
-    token = await send_token(
-        withdraw_request.amount, withdraw_request.unit, effective_mint
-    )
+    try:
+        token = await send_token(
+            withdraw_request.amount, withdraw_request.unit, effective_mint
+        )
+    except ValueError as error:
+        if not str(error).startswith("No trusted mint has "):
+            raise
+        raise HTTPException(
+            status_code=400, detail="Insufficient wallet balance"
+        ) from error
+    actual_mint = token_mint_url(token, effective_mint)
     try:
         await store_cashu_transaction(
             token=token,
             amount=withdraw_request.amount,
             unit=withdraw_request.unit,
-            mint_url=effective_mint,
+            mint_url=actual_mint,
             typ="out",
             collected=False,
             source="admin",
@@ -476,10 +471,10 @@ async def withdraw(
             extra={
                 "amount": withdraw_request.amount,
                 "unit": withdraw_request.unit,
-                "mint_url": effective_mint,
+                "mint_url": actual_mint,
             },
         )
-    return {"token": token}
+    return {"token": token, "mint_url": actual_mint}
 
 
 class ModelCreate(BaseModel):
@@ -579,6 +574,7 @@ async def upsert_provider_model(
             await session.refresh(row)
 
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return _row_to_model(
         row, apply_provider_fee=True, provider_fee=provider.provider_fee
     ).dict()  # type: ignore
@@ -633,6 +629,7 @@ async def delete_provider_model(provider_id: str, model_id: str) -> dict[str, ob
         await session.delete(row)
         await session.commit()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {"ok": True, "deleted_id": model_id}
 
 
@@ -652,6 +649,7 @@ async def delete_all_provider_models(provider_id: str) -> dict[str, object]:
             await session.delete(row)  # type: ignore
         await session.commit()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {"ok": True, "deleted": len(rows)}
 
 
@@ -743,6 +741,7 @@ async def batch_override_provider_models(
         await session.commit()
 
     await refresh_model_maps()
+    await _refresh_provider_model_paths(provider_pk)
     return {
         "ok": True,
         "count": overridden_count,
@@ -943,6 +942,7 @@ async def create_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -968,6 +968,7 @@ async def update_upstream_provider(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -1003,6 +1004,7 @@ async def update_upstream_provider_by_slug(
 
     await reinitialize_upstreams()
     await refresh_model_maps()
+    await _refresh_provider_model_paths(_provider_pk(provider))
     return _serialize_provider(provider)
 
 
@@ -1669,12 +1671,18 @@ async def get_transactions_api(
         )
         total = count_result.one()
 
-        stmt = base.order_by(col(CashuTransaction.created_at).desc()).offset(offset).limit(limit)
+        stmt = (
+            base.order_by(col(CashuTransaction.created_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
         results = await session.exec(stmt)
         transactions = results.all()
 
         return {
-            "transactions": [tx.dict() for tx in transactions],
+            "transactions": [
+                tx.dict(exclude={"sweep_started_at"}) for tx in transactions
+            ],
             "total": total,
         }
 

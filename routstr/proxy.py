@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 from typing import Any
 
@@ -25,7 +26,6 @@ from .core.db import (
 )
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
-from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -47,6 +47,13 @@ _provider_map: dict[
     str, list[tuple[Model, BaseUpstreamProvider]]
 ] = {}  # All aliases -> sorted [(candidate Model, its Provider)]
 _unique_models: dict[str, Model] = {}  # Unique model.id -> Model (no duplicates)
+
+
+async def _finish_read_transaction(session: AsyncSession) -> None:
+    """Release a read transaction without assuming a particular session mock."""
+    commit_result = session.commit()
+    if inspect.isawaitable(commit_result):
+        await commit_result
 
 
 async def initialize_upstreams() -> None:
@@ -183,6 +190,19 @@ async def refresh_model_maps() -> None:
         disabled_model_keys=disabled_model_keys,
     )
 
+    # Keep model-path discovery in sync with admin mutations: disabling or
+    # deleting a provider must stop advertising its paths immediately rather
+    # than after the next timed refresh.
+    from .upstream.model_paths import prune_model_paths_for_inactive_providers
+
+    try:
+        await prune_model_paths_for_inactive_providers()
+    except Exception as e:  # noqa: BLE001 - discovery sync must not break routing
+        logger.warning(
+            "Failed to prune model paths for inactive providers",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+
 
 async def refresh_model_maps_periodically() -> None:
     """Background task to refresh model maps every minute."""
@@ -220,6 +240,20 @@ _API_PATH_PREFIXES = (
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
     request: Request, path: str, session: AsyncSession = Depends(get_session)
+) -> Response | StreamingResponse:
+    """Run proxy setup in a short request session, never across response streaming."""
+    try:
+        return await _proxy(request, path, session)
+    finally:
+        # FastAPI yield dependencies normally close after the response body is
+        # sent. Close explicitly so a long stream cannot retain DB resources.
+        close_result = session.close()
+        if inspect.isawaitable(close_result):
+            await close_result
+
+
+async def _proxy(
+    request: Request, path: str, session: AsyncSession
 ) -> Response | StreamingResponse:
     # GET requests must hit a known API prefix; otherwise return a 404 (HTML
     # for browsers, JSON for API clients). POST requests are always forwarded
@@ -332,8 +366,6 @@ async def proxy(
     max_cost_for_model = await calculate_discounted_max_cost(
         _max_cost_for_model, request_body_dict, model_obj=model_obj
     )
-    # Ensure max_cost_for_model is at least the minimum allowed request cost
-    max_cost_for_model = max(max_cost_for_model, settings.min_request_msat)
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
 
@@ -450,6 +482,9 @@ async def proxy(
     if is_ehbp or request_body_dict:
         await pay_for_request(key, max_cost_for_model, session)
         reservation_snapshot = await get_reservation_snapshot(key, session)
+        # Snapshot validation performs SELECTs after pay_for_request commits.
+        # End that read transaction before waiting on upstream response headers.
+        await _finish_read_transaction(session)
 
     # Tracks request params already removed in response to upstream rejections,
     # shared across providers so a stripped param stays stripped on failover and
@@ -469,7 +504,6 @@ async def proxy(
             candidate_max = await calculate_discounted_max_cost(
                 candidate_max, request_body_dict, model_obj=model_obj
             )
-            candidate_max = max(candidate_max, settings.min_request_msat)
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
                     key, session, max_cost_for_model, reservation_snapshot
@@ -481,8 +515,10 @@ async def proxy(
                         raise
                     await pay_for_request(key, max_cost_for_model, session)
                     reservation_snapshot = await get_reservation_snapshot(key, session)
+                    await _finish_read_transaction(session)
                     continue
                 reservation_snapshot = await get_reservation_snapshot(key, session)
+                await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 
         headers = upstream.prepare_headers(dict(request.headers))
@@ -767,17 +803,29 @@ async def get_bearer_token_key(
             },
         )
         return key
-    except Exception as e:
-        key_preview = bearer_key[:20] + "..." if len(bearer_key) > 20 else bearer_key
-        logger.error(
-            f"Bearer token validation failed: {type(e).__name__}: {e} path={path} model={model_id!r} min_cost={min_cost} key={key_preview!r}",
+    except HTTPException as error:
+        detail: dict[str, Any] = error.detail if isinstance(error.detail, dict) else {}
+        raw_error = detail.get("error")
+        error_info = raw_error if isinstance(raw_error, dict) else {}
+        logger.warning(
+            "Bearer token rejected",
             extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
+                "status_code": error.status_code,
+                "error_code": error_info.get("code"),
                 "path": path,
                 "model_id": model_id,
-                "min_cost_msat": min_cost,
-                "bearer_key_preview": key_preview,
+                "required_msat": min_cost,
+            },
+        )
+        raise
+    except Exception as error:
+        logger.exception(
+            "Bearer token validation failed",
+            extra={
+                "error_type": type(error).__name__,
+                "path": path,
+                "model_id": model_id,
+                "required_msat": min_cost,
             },
         )
         raise

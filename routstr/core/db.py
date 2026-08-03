@@ -12,21 +12,80 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, or_
+from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio.engine import create_async_engine
 from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from .logging import get_logger
+from .settings import settings
 
 logger = get_logger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///keys.db")
 
 
-engine = create_async_engine(DATABASE_URL, echo=False)  # echo=True for debugging SQL
+def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
+    """Build and instrument an async engine from environment-only settings."""
+    url = make_url(database_url)
+    backend = url.get_backend_name()
+    is_sqlite = backend == "sqlite"
+    is_memory_sqlite = is_sqlite and url.database in {None, "", ":memory:"}
+    pool_pre_ping = settings.database_pool_pre_ping or not is_sqlite
+    options: dict[str, int | float | bool] = {"pool_pre_ping": pool_pre_ping}
+    if not is_memory_sqlite:
+        options.update(
+            pool_size=settings.database_pool_size,
+            max_overflow=settings.database_max_overflow,
+            pool_timeout=settings.database_pool_timeout,
+            pool_recycle=settings.database_pool_recycle,
+        )
+
+    logger.info(
+        "Database pool configured",
+        extra={
+            "database_url_backend": backend,
+            "in_memory_sqlite": is_memory_sqlite,
+            **options,
+        },
+    )
+    created_engine = create_async_engine(database_url, echo=False, **options)
+    hold_warn_seconds = settings.database_pool_hold_warn_seconds
+
+    def record_pool_checkout(
+        dbapi_connection: object, connection_record: object, proxy: object
+    ) -> None:
+        connection_record.info["routstr_checked_out_at"] = time.monotonic()  # type: ignore[attr-defined]
+
+    def record_pool_checkin(
+        dbapi_connection: object, connection_record: object
+    ) -> None:
+        checked_out_at = connection_record.info.pop(  # type: ignore[attr-defined]
+            "routstr_checked_out_at", None
+        )
+        if checked_out_at is None:
+            return
+        held_seconds = time.monotonic() - checked_out_at
+        if held_seconds >= hold_warn_seconds:
+            logger.warning(
+                "Database connection held longer than threshold",
+                extra={
+                    "held_seconds": round(held_seconds, 3),
+                    "threshold_seconds": hold_warn_seconds,
+                    "pool_status": created_engine.pool.status(),
+                },
+            )
+
+    event.listen(created_engine.sync_engine, "checkout", record_pool_checkout)
+    event.listen(created_engine.sync_engine, "checkin", record_pool_checkin)
+    return created_engine
+
+
+engine = create_db_engine()
 
 
 class ApiKey(SQLModel, table=True):  # type: ignore
@@ -222,7 +281,10 @@ async def release_stale_reservations(
     if released:
         logger.warning(
             "Released stale reservations",
-            extra={"released_reservations": released, "max_age_seconds": max_age_seconds},
+            extra={
+                "released_reservations": released,
+                "max_age_seconds": max_age_seconds,
+            },
         )
     return released
 
@@ -231,7 +293,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     """Delete dead parentless API keys; return the count removed.
 
     Dead = 0 balance/reservation/spend/requests, older than the grace period,
-    no parent, no children, no pending invoice. Cashu rows are unlinked (not
+    no parent, no children, no retryable invoice. Cashu rows are unlinked (not
     deleted) first to keep the audit trail.
     """
     cutoff = int(time.time()) - min_age_seconds
@@ -245,7 +307,9 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     pending_invoice = (
         select(LightningInvoice.id)
         .where(col(LightningInvoice.api_key_hash) == col(ApiKey.hashed_key))
-        .where(col(LightningInvoice.status) == "pending")
+        .where(
+            col(LightningInvoice.status).in_(("pending", "settlement_pending"))
+        )
     ).exists()
 
     eligible_hashes = (
@@ -255,9 +319,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.total_spent) == 0)
         .where(col(ApiKey.total_requests) == 0)
         .where(col(ApiKey.parent_key_hash).is_(None))
-        .where(
-            (col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff)
-        )
+        .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~pending_invoice)
         .where(~has_children)
     )
@@ -311,6 +373,60 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
+class ModelPathRow(SQLModel, table=True):  # type: ignore
+    """Upstream provider path a model is reachable through.
+
+    Discovery/visibility data only. ``model_id`` is intentionally NOT globally
+    unique: it is the client-visible ``/v1/models`` id (``forwarded_model_id or
+    id``) grouped across every provider that exposes the model. A single model
+    can therefore have several rows — one per direct provider path plus one per
+    OpenRouter sub-provider endpoint.
+    """
+
+    __tablename__ = "model_paths"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_id",
+            "path",
+            "upstream_provider_id",
+            name="uq_model_paths_model_path_provider",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    # No standalone index on model_id: the unique constraint's autoindex already
+    # leads on model_id, so a second index only adds write amplification.
+    model_id: str = Field(
+        description="Client-visible /v1/models id (forwarded_model_id or id)"
+    )
+    path: str = Field(
+        description=(
+            "Opaque selector containing upstream URL, provider ID, model ID, "
+            "and optional endpoint tag"
+        )
+    )
+    provider_slug: str = Field(
+        description="Public slug of the configured upstream provider"
+    )
+    provider_type: str = Field(description="Configured upstream provider type")
+    endpoint_tag: str | None = Field(
+        default=None,
+        description="Exact OpenRouter endpoint tag used for request-side selection",
+    )
+    endpoint_name: str | None = Field(
+        default=None, description="Human-readable endpoint display name"
+    )
+    upstream_provider_id: int = Field(
+        index=True,
+        foreign_key="upstream_providers.id",
+        ondelete="CASCADE",
+        description="upstream_providers.id this path was discovered from",
+    )
+    updated_at: int = Field(
+        default=0,
+        description="Unix timestamp of the refresh cycle that wrote this row",
+    )
+
+
 class LightningInvoice(SQLModel, table=True):  # type: ignore
     __tablename__ = "lightning_invoices"
 
@@ -320,12 +436,19 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     description: str = Field(description="Invoice description")
     payment_hash: str = Field(description="Payment hash for tracking", unique=True)
     status: str = Field(
-        default="pending", description="pending, paid, expired, cancelled"
+        default="pending",
+        description=(
+            "pending, settlement_pending, paid, expired, cancelled, "
+            "reconciliation_required"
+        ),
     )
     api_key_hash: str | None = Field(
         default=None, description="Associated API key hash for topup operations"
     )
     purpose: str = Field(description="create or topup")
+    mint_url: str | None = Field(
+        default=None, description="Mint URL where the quote was created (fallback tracking)"
+    )
     created_at: int = Field(
         default_factory=lambda: int(time.time()), description="Unix timestamp"
     )
@@ -365,6 +488,10 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
     )
     collected: bool = Field(default=False)
     swept: bool = Field(default=False)
+    sweep_started_at: int | None = Field(
+        default=None,
+        description="Unix timestamp for a recoverable refund-sweep claim",
+    )
     source: str = Field(
         default="x-cashu",
         description="Payment source: x-cashu or apikey",
@@ -596,9 +723,7 @@ class CliToken(SQLModel, table=True):  # type: ignore
     """Long-lived authorization token for CLI/agent use against admin endpoints."""
 
     __tablename__ = "cli_tokens"
-    id: str = Field(
-        primary_key=True, default_factory=lambda: uuid.uuid4().hex
-    )
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
     token: str = Field(unique=True, index=True, description="Bearer token value")
     name: str = Field(description="Human-readable label for this token")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -697,9 +822,7 @@ async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
     return result.rowcount == 1
 
 
-async def complete_routstr_fee_payout(
-    session: AsyncSession, paid_msats: int
-) -> bool:
+async def complete_routstr_fee_payout(session: AsyncSession, paid_msats: int) -> bool:
     """Mark a checkpointed payout complete after the external payment succeeds."""
     stmt = (
         update(RoutstrFee)
@@ -717,14 +840,49 @@ async def complete_routstr_fee_payout(
     return result.rowcount == 1
 
 
-async def balances_for_mint_and_unit(
+async def total_user_liability(db_session: AsyncSession) -> int:
+    """Return all outstanding API-key balances in millisatoshis."""
+    result = await db_session.exec(select(func.sum(ApiKey.balance)))
+    return int(result.one() or 0)
+
+
+async def balance_for_mint_and_unit(
     db_session: AsyncSession, mint_url: str, unit: str
 ) -> int:
-    query = select(func.sum(ApiKey.balance)).where(
-        ApiKey.refund_mint_url == mint_url, ApiKey.refund_currency == unit
+    """Return the user liability for one mint and unit in millisatoshis."""
+    result = await db_session.exec(
+        select(func.sum(ApiKey.balance)).where(
+            col(ApiKey.refund_mint_url) == mint_url,
+            col(ApiKey.refund_currency) == unit,
+        )
+    )
+    return int(result.one() or 0)
+
+
+async def balances_by_mint_and_unit(
+    db_session: AsyncSession, mint_urls: list[str], units: list[str]
+) -> dict[tuple[str, str], int]:
+    """Return requested user liabilities grouped by mint and unit."""
+    if not mint_urls or not units:
+        return {}
+    query = (
+        select(
+            col(ApiKey.refund_mint_url),
+            col(ApiKey.refund_currency),
+            func.sum(ApiKey.balance),
+        )
+        .where(
+            col(ApiKey.refund_mint_url).in_(mint_urls),
+            col(ApiKey.refund_currency).in_(units),
+        )
+        .group_by(col(ApiKey.refund_mint_url), col(ApiKey.refund_currency))
     )
     result = await db_session.exec(query)
-    return result.one() or 0
+    return {
+        (mint_url, unit): int(balance or 0)
+        for mint_url, unit, balance in result.all()
+        if mint_url is not None and unit is not None
+    }
 
 
 async def init_db() -> None:

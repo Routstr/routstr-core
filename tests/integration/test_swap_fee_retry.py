@@ -20,6 +20,7 @@ from collections.abc import Callable
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from cashu.core.base import MeltQuoteState
 from httpx import AsyncClient, Response
 
 from routstr.core.settings import settings
@@ -28,7 +29,9 @@ from routstr.core.settings import settings
 # with the testmint stub that bypasses swapping (see conftest.py).
 from routstr.wallet import recieve_token as _real_recieve_token
 
-PRIMARY_MINT = "http://primary:3338"
+# Match the authenticated fixture's persisted refund mint: existing-key topups
+# are intentionally constrained to that mint for collateral provenance.
+PRIMARY_MINT = "http://localhost:3338"
 
 
 def _make_swap_mocks(
@@ -81,7 +84,9 @@ def _make_swap_mocks(
             quote=f"melt_quote_{invoice}", amount=invoice, fee_reserve=_next_fee()
         )
     )
-    mock_token_wallet.melt = AsyncMock(return_value=Mock())
+    mock_token_wallet.melt = AsyncMock(
+        return_value=Mock(state=MeltQuoteState.paid)
+    )
 
     return mock_token, mock_token_wallet, mock_primary_wallet
 
@@ -89,7 +94,12 @@ def _make_swap_mocks(
 def _wallet_router(primary_wallet: Mock, token_wallet: Mock) -> Callable[..., Mock]:
     """Route get_wallet calls to the primary or foreign wallet mock by URL."""
 
-    def fake_get_wallet(mint_url: str, unit: str = "sat", load: bool = True) -> Mock:
+    def fake_get_wallet(
+        mint_url: str,
+        unit: str = "sat",
+        load: bool = True,
+        **kwargs: object,
+    ) -> Mock:
         return primary_wallet if mint_url == PRIMARY_MINT else token_wallet
 
     return fake_get_wallet
@@ -139,7 +149,7 @@ async def test_topup_retries_when_melt_demands_more_than_quoted(
             "Mint Error: not enough inputs provided for melt. "
             "Provided: 179, needed: 180 (Code: 11000)"
         ),
-        Mock(),
+        Mock(state=MeltQuoteState.paid),
     ]
 
     response = await _post_topup(
