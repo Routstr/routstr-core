@@ -32,6 +32,15 @@ class LNURLError(Exception):
     """LNURL related errors."""
 
 
+class MeltOutcomeAmbiguousError(LNURLError):
+    """A melt was dispatched but its final outcome could not be confirmed.
+
+    Callers must NOT treat this as a clean failure: the payment may still
+    settle, so debits backing it must be kept until reconciliation confirms
+    the true outcome.
+    """
+
+
 async def decode_lnurl(lnurl: str) -> str:
     """Decode LNURL to get the actual URL.
 
@@ -268,7 +277,7 @@ async def raw_send_to_lnurl(
             retry_timeouts=False,
         )
     except Exception as reconciliation_error:
-        raise LNURLError(
+        raise MeltOutcomeAmbiguousError(
             "Melt outcome is ambiguous; quote reconciliation failed and proofs "
             "must not be retried"
         ) from reconciliation_error
@@ -277,7 +286,7 @@ async def raw_send_to_lnurl(
         return final_amount
 
     state = getattr(getattr(quote, "state", None), "value", "unknown")
-    raise LNURLError(
+    raise MeltOutcomeAmbiguousError(
         "Melt outcome is ambiguous; proofs must not be retried "
         f"(quote_state={state})"
     ) from melt_error

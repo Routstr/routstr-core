@@ -1836,7 +1836,10 @@ async def fetch_all_balances(
 async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
     """Send only conservatively proven owner funds for one wallet."""
     try:
-        wallet = await get_wallet(mint_url, unit)
+        # Runs under wallet_operation_guard; a cached wallet may carry a proof
+        # snapshot up to 30s stale from another process's reservation, so the
+        # cross-process lock is only safe with a fresh reload.
+        wallet = await get_wallet(mint_url, unit, force_reload=True)
         proofs = get_proofs_per_mint_and_unit(
             wallet, mint_url, unit, not_reserved=True
         )

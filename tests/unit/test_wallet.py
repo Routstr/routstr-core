@@ -2667,3 +2667,16 @@ async def test_probe_recovery_resets_consecutive_rate_limits() -> None:
     assert guard._consecutive_rate_limits == 0
     assert guard._needs_probe is False
     assert guard.cooldown_remaining() == 0.0
+
+
+async def test_payout_reloads_wallet_snapshot_under_guard() -> None:
+    """Payout must not trust a cached proof snapshot from before the guard."""
+    from routstr.wallet import _payout_mint_and_unit
+
+    mock_get_wallet = AsyncMock(side_effect=RuntimeError("stop after get_wallet"))
+    with patch("routstr.wallet.get_wallet", mock_get_wallet):
+        await _payout_mint_and_unit("https://mint.example.com", "sat")
+
+    mock_get_wallet.assert_awaited_once_with(
+        "https://mint.example.com", "sat", force_reload=True
+    )

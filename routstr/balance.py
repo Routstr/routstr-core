@@ -23,6 +23,7 @@ from .core.db import (
 from .core.logging import get_logger
 from .core.settings import settings
 from .lightning import lightning_router
+from .payment.lnurl import MeltOutcomeAmbiguousError
 from .wallet import (
     classify_redemption_error,
     credit_balance,
@@ -550,6 +551,28 @@ async def refund_wallet_endpoint(
                 },
             )
 
+    except MeltOutcomeAmbiguousError as e:
+        # The melt was dispatched and may still settle. Restoring the balance
+        # here would let the same debit be paid out twice; keep the debit and
+        # leave the outcome to reconciliation.
+        logger.error(
+            "refund_wallet_endpoint: melt outcome ambiguous; balance withheld "
+            "pending reconciliation",
+            extra={
+                "error": str(e),
+                "hashed_key": key.hashed_key,
+                "remaining_balance": remaining_balance,
+                "refund_currency": key.refund_currency,
+                "refund_mint_url": key.refund_mint_url,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Refund was dispatched but its outcome is unconfirmed; the "
+                "balance is withheld until reconciliation completes"
+            ),
+        )
     except HTTPException:
         # Minting failed — restore the debited balance
         await _restore_balance(

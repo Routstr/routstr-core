@@ -170,11 +170,23 @@ async def _request_mint_with_fallback(
             f"generate_lightning_invoice: amount_sats must be > 0, got {amount_sats}."
         )
     tried: list[str] = []
-    candidates = (
-        list(dict.fromkeys(allowed_mints))
-        if allowed_mints
-        else _trusted_mint_candidates()
-    )
+    trusted = _trusted_mint_candidates()
+    if allowed_mints:
+        # Persisted mint preferences (e.g. an API key's refund_mint_url) must
+        # not outlive the operator's trusted-mint configuration.
+        candidates = [m for m in dict.fromkeys(allowed_mints) if m in trusted]
+        if not candidates:
+            logger.warning(
+                "Requested mints are no longer trusted; falling back to "
+                "configured mints",
+                extra={
+                    "requested_mints": list(dict.fromkeys(allowed_mints)),
+                    "op_name": "request_mint_invoice",
+                },
+            )
+            candidates = trusted
+    else:
+        candidates = trusted
     for mint_url in candidates:
         cooldown = mint_cooldown_remaining(mint_url)
         if cooldown > 0:

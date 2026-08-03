@@ -147,7 +147,9 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
     """A failing mint does not prevent payout for the other mints."""
     from routstr.core.settings import settings
 
-    async def _get_wallet(mint_url: str, unit: str) -> MagicMock:
+    async def _get_wallet(
+        mint_url: str, unit: str, force_reload: bool = False
+    ) -> MagicMock:
         if mint_url == "http://bad:3338":
             raise RuntimeError("mint unreachable")
         return MagicMock()

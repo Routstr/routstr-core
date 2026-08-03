@@ -10,7 +10,10 @@ from cashu.core.base import MeltQuoteState
 
 from routstr.core.settings import settings
 from routstr.mint import MintCooldownError, MintRateGuard
-from routstr.payment.lnurl import LNURLError, raw_send_to_lnurl
+from routstr.payment.lnurl import (
+    MeltOutcomeAmbiguousError,
+    raw_send_to_lnurl,
+)
 
 LNURL_DATA = {
     "callback_url": "https://ln.tld/cb",
@@ -58,7 +61,7 @@ async def test_raw_send_to_lnurl_timeout_keeps_unpaid_outcome_ambiguous() -> Non
         patch.object(settings, "mint_retry_max_attempts", 0),
         data_patch,
         invoice_patch,
-        pytest.raises(LNURLError, match="outcome is ambiguous"),
+        pytest.raises(MeltOutcomeAmbiguousError, match="outcome is ambiguous"),
     ):
         await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
 
@@ -106,7 +109,7 @@ async def test_raw_send_to_lnurl_pending_response_stays_ambiguous() -> None:
         patch.object(settings, "mint_operation_timeout_seconds", 5),
         data_patch,
         invoice_patch,
-        pytest.raises(LNURLError, match="outcome is ambiguous"),
+        pytest.raises(MeltOutcomeAmbiguousError, match="outcome is ambiguous"),
     ):
         await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
 

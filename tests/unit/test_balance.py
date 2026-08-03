@@ -781,3 +781,68 @@ async def test_topup_unexpected_non_valueerror_returns_500() -> None:
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Internal server error"
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_ambiguous_melt_does_not_restore_balance() -> None:
+    """An ambiguous LNURL melt may still settle: the debit must be kept."""
+    from fastapi import HTTPException
+
+    from routstr.payment.lnurl import MeltOutcomeAmbiguousError
+
+    key = _make_api_key(balance=5000, refund_address="user@ln.example.com")
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.exec = AsyncMock(return_value=MagicMock(rowcount=1))
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch(
+            "routstr.balance.send_to_lnurl",
+            AsyncMock(side_effect=MeltOutcomeAmbiguousError("outcome is ambiguous")),
+        ),
+        patch("routstr.balance._restore_balance", AsyncMock()) as mock_restore,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    assert exc_info.value.status_code == 502
+    mock_restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apikey_refund_clean_failure_still_restores_balance() -> None:
+    """A definitively failed melt must keep restoring the debited balance."""
+    from fastapi import HTTPException
+
+    key = _make_api_key(balance=5000, refund_address="user@ln.example.com")
+
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.exec = AsyncMock(return_value=MagicMock(rowcount=1))
+    session.commit = AsyncMock()
+
+    with (
+        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
+        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch(
+            "routstr.balance.send_to_lnurl",
+            AsyncMock(side_effect=RuntimeError("mint rejected melt")),
+        ),
+        patch("routstr.balance._restore_balance", AsyncMock()) as mock_restore,
+    ):
+        with pytest.raises(HTTPException):
+            await refund_wallet_endpoint(
+                authorization="Bearer sk-testhash",
+                x_cashu=None,
+                session=session,
+            )
+
+    mock_restore.assert_awaited_once()
