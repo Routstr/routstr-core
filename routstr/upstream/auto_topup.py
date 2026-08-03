@@ -57,7 +57,7 @@ PPQ_MAX_TOPUP_USD = 500
 # compromised and keeps reporting a below-threshold balance, this cap bounds
 # the damage instead of letting the worker drain the owner's mint funds one
 # per-transaction-capped payment at a time.
-PPQ_MAX_DAILY_TOPUP_USD = 1000
+PPQ_MAX_DAILY_TOPUP_USD = 300
 
 
 async def periodic_auto_topup() -> None:
