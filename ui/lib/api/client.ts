@@ -144,3 +144,18 @@ export class ApiError extends Error {
     this.data = data;
   }
 }
+
+/**
+ * HTTP status of a caught request error, whatever shape it arrived in.
+ * apiClient methods rethrow raw Axios errors, so callers must not rely on
+ * `instanceof ApiError` alone to read a status code.
+ */
+export function getErrorStatus(error: unknown): number | undefined {
+  if (error instanceof ApiError) {
+    return error.status;
+  }
+  if (axios.isAxiosError(error)) {
+    return error.response?.status;
+  }
+  return undefined;
+}

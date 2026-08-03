@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { PPQAutoTopupSettings } from '@/components/providers/PPQAutoTopupSettings';
 import { RoutstrNodeSettings } from '@/components/providers/RoutstrNodeSettings';
 import { RoutstrCreateKeySection } from '@/components/providers/RoutstrCreateKeySection';
 
@@ -78,6 +79,8 @@ export function ProviderFormFields({
               provider_type: value,
               base_url: getDefaultBaseUrl(value),
               provider_fee: value === 'openrouter' ? 1.06 : 1.01,
+              provider_settings:
+                value === prev.provider_type ? prev.provider_settings : {},
             }));
           }}
         >
@@ -114,6 +117,19 @@ export function ProviderFormFields({
             }))
           }
           availableMints={availableMints}
+          idPrefix={mode === 'edit' ? 'edit' : ''}
+        />
+      )}
+
+      {formData.provider_type === 'ppqai' && (
+        <PPQAutoTopupSettings
+          settings={formData.provider_settings || {}}
+          onSettingsChange={(settings) =>
+            setFormData((prev) => ({
+              ...prev,
+              provider_settings: settings,
+            }))
+          }
           idPrefix={mode === 'edit' ? 'edit' : ''}
         />
       )}

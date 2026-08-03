@@ -441,7 +441,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         """
         data = await self.check_balance()
         balance = data.get("balance")
-        if isinstance(balance, (int, float)):
+        if isinstance(balance, (int, float)) and not isinstance(balance, bool):
             return float(balance)
         return None
 

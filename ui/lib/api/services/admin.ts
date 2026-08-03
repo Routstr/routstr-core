@@ -1013,6 +1013,32 @@ export class AdminService {
     }>(`/admin/api/upstream-providers/${providerId}/balance`);
   }
 
+  static async getPPQAutoTopupState(
+    providerId: number
+  ): Promise<PPQAutoTopupState> {
+    return await apiClient.get<PPQAutoTopupState>(
+      `/admin/api/upstream-providers/${providerId}/ppq-auto-topup`
+    );
+  }
+
+  /**
+   * `stateToken` must be the `state_token` snapshotted when the admin opened
+   * the confirmation — not re-read at submit time. The server rejects a
+   * release whose claim changed in any way since that snapshot.
+   */
+  static async releasePPQAutoTopup(
+    providerId: number,
+    stateToken: string | null
+  ): Promise<{
+    ok: boolean;
+    released: boolean;
+  }> {
+    return await apiClient.post<{ ok: boolean; released: boolean }>(
+      `/admin/api/upstream-providers/${providerId}/ppq-auto-topup/release`,
+      { confirmed_safe_to_retry: true, state_token: stateToken }
+    );
+  }
+
   // ── CLI Tokens ──
 
   static async listCliTokens(): Promise<CliTokenListItem[]> {
@@ -1242,6 +1268,30 @@ export interface Transaction {
 export interface TransactionsResponse {
   transactions: Transaction[];
   total: number;
+}
+
+export interface PPQAutoTopupState {
+  ok: boolean;
+  active: boolean;
+  /**
+   * Opaque version of the claim as reviewed. Echo it back verbatim to
+   * release; the server rejects a release whose claim changed in any way
+   * (new attempt, phase change, renewed lease) since this was read.
+   */
+  state_token?: string | null;
+  /** Identifies the attempt currently holding the claim. Informational. */
+  operation_id?: string | null;
+  /** 'claimed' | 'in_flight' | 'reconcile'. Null when the claim is malformed. */
+  phase?: string | null;
+  /** False while a payment is in flight — the server rejects a release then. */
+  releasable?: boolean;
+  expires_at?: number | null;
+  invoice_id?: string | null;
+  created_at?: number;
+  amount?: number;
+  unit?: string;
+  mint_url?: string | null;
+  malformed?: boolean;
 }
 
 export interface LightningInvoice {
