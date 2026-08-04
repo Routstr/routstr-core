@@ -630,6 +630,7 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         UniqueConstraint(
             "base_url", "api_key", name="uq_upstream_providers_base_url_api_key"
         ),
+        {"sqlite_autoincrement": True},
     )
     id: int | None = Field(default=None, primary_key=True)
     slug: str | None = Field(
