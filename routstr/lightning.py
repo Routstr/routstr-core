@@ -456,11 +456,20 @@ async def check_invoice_payment(
 
             mint_url = settlement.mint_url or settings.primary_mint
             wallet = await get_wallet(mint_url, "sat")
-            mint_status = await run_mint_operation(
-                lambda: wallet.get_mint_quote(settlement.payment_hash),
-                op_name="get_mint_quote",
-                mint_url=mint_url,
-            )
+            try:
+                mint_status = await run_mint_operation(
+                    lambda: wallet.get_mint_quote(settlement.payment_hash),
+                    op_name="get_mint_quote",
+                    mint_url=mint_url,
+                )
+            except Exception as error:
+                if not _is_quote_not_found(error):
+                    raise
+                logger.info(
+                    "Invoice quote no longer exists at mint, marking expired",
+                    extra={"invoice_id": invoice.id, "error": str(error)},
+                )
+                return True
             if not mint_status.paid:
                 return getattr(mint_status, "state", None) == MintQuoteState.unpaid
             payment_confirmed = True
@@ -573,6 +582,15 @@ async def check_invoice_payment(
                 raise
             logger.error(f"Failed to check invoice payment: {error}")
             return False
+
+
+def _is_quote_not_found(error: BaseException) -> bool:
+    """Check if the error indicates the mint no longer has this quote."""
+    message = str(error)
+    return bool(
+        re.search(r"\bquote\s+not\s+found\b", message, re.IGNORECASE)
+        and re.search(r"\bcode\s*:?\s*0\b", message, re.IGNORECASE)
+    )
 
 
 def _is_outputs_already_signed(error: BaseException) -> bool:

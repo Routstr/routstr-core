@@ -150,6 +150,72 @@ async def test_invoice_mint_rejects_unrelated_concurrent_balance_growth() -> Non
 
 
 @pytest.mark.asyncio
+async def test_quote_not_found_is_definitively_unpaid() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            side_effect=Exception("Mint Error: quote not found (Code: 0)")
+        )
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Mint Error: quote not found (Code: 10000)",
+        "Mint Error: quote not found (Code: 01)",
+        "Mint Error: quote not found (Code: 0x10)",
+    ],
+)
+async def test_quote_not_found_without_exact_code_0_is_not_definitively_unpaid(
+    message: str,
+) -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(get_mint_quote=AsyncMock(side_effect=Exception(message)))
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_quote_not_found_case_insensitive() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            side_effect=Exception("MINT ERROR: Quote Not Found (code 0)")
+        )
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is True
+
+
+@pytest.mark.asyncio
 async def test_non_pending_invoice_is_not_minted() -> None:
     _invoice_settlement_locks.clear()
     invoice = _invoice(status="expired")
@@ -192,6 +258,36 @@ async def test_ambiguous_invoice_mint_timeout_remains_recoverable() -> None:
     session.rollback.assert_not_awaited()
     # One commit closes the initial read transaction before external I/O.
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_quote_not_found_after_payment_confirmation_is_not_unpaid() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice()
+    session = AsyncMock()
+    wallet = Mock(get_mint_quote=AsyncMock(return_value=Mock(paid=True)))
+    state_session = AsyncMock()
+    state_session.exec.return_value.rowcount = 1
+
+    @asynccontextmanager
+    async def owned_session() -> AsyncIterator[AsyncMock]:
+        yield state_session
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning.create_session", owned_session),
+        patch(
+            "routstr.lightning._mint_invoice_quote",
+            AsyncMock(
+                side_effect=Exception("Mint Error: quote not found (Code: 0)")
+            ),
+        ),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is False
+    assert invoice.status == "settlement_pending"
 
 
 @pytest.mark.asyncio
