@@ -150,6 +150,66 @@ async def test_invoice_mint_rejects_unrelated_concurrent_balance_growth() -> Non
 
 
 @pytest.mark.asyncio
+async def test_quote_not_found_is_definitively_unpaid() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            side_effect=Exception("Mint Error: quote not found (Code: 0)")
+        )
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_quote_not_found_without_code_0_is_not_definitively_unpaid() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            side_effect=Exception("Mint Error: quote not found (Code: 10000)")
+        )
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_quote_not_found_case_insensitive() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice(status="pending", expires_at=0)
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            side_effect=Exception("MINT ERROR: Quote Not Found (code 0)")
+        )
+    )
+
+    with (
+        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning._reload_invoice_view", AsyncMock()),
+    ):
+        result = await check_invoice_payment(invoice, session)  # type: ignore[arg-type]
+
+    assert result is True
+
+
+@pytest.mark.asyncio
 async def test_non_pending_invoice_is_not_minted() -> None:
     _invoice_settlement_locks.clear()
     invoice = _invoice(status="expired")

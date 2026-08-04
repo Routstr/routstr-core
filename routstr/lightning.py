@@ -571,8 +571,20 @@ async def check_invoice_payment(
                 pass
             if not isinstance(error, Exception):
                 raise
+            if _is_quote_not_found(error):
+                logger.info(
+                    f"Invoice quote no longer exists at mint, marking expired",
+                    extra={"invoice_id": invoice.id, "error": str(error)},
+                )
+                return True
             logger.error(f"Failed to check invoice payment: {error}")
             return False
+
+
+def _is_quote_not_found(error: BaseException) -> bool:
+    """Check if the error indicates the mint no longer has this quote."""
+    message = str(error).lower()
+    return "quote not found" in message and ("code: 0" in message or "code 0" in message)
 
 
 def _is_outputs_already_signed(error: BaseException) -> bool:
