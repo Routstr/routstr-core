@@ -4,7 +4,7 @@ Tests admin endpoints that are testable without full app setup:
 withdraw validation, password update, CLI token lifecycle.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException, Request
@@ -46,22 +46,19 @@ async def test_withdraw_rejects_insufficient_balance() -> None:
 
     request = Request(scope={"type": "http", "method": "POST"})
 
-    with patch("routstr.core.admin.get_wallet") as mock_wallet, \
-         patch("routstr.core.admin.get_proofs_per_mint_and_unit") as mock_proofs, \
-         patch("routstr.core.admin.slow_filter_spend_proofs") as mock_filter:
-
-        mock_w = Mock()
-        mock_w.keysets = {}
-        mock_w.proofs = []
-        mock_wallet.return_value = mock_w
-        mock_proofs.return_value = []
-        mock_filter.return_value = []
-
+    with patch(
+        "routstr.core.admin.send_token",
+        new=AsyncMock(
+            side_effect=ValueError(
+                "No trusted mint has 1000000 sat available; balances={}"
+            )
+        ),
+    ):
         with pytest.raises(HTTPException) as exc_info:
             await withdraw(request, WithdrawRequest(amount=1000000, unit="sat"))
 
-        assert exc_info.value.status_code == 400
-        assert "Insufficient" in str(exc_info.value.detail)
+    assert exc_info.value.status_code == 400
+    assert "Insufficient" in str(exc_info.value.detail)
 
 
 # ===========================================================================

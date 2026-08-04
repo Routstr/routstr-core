@@ -53,6 +53,18 @@ class Settings(BaseSettings):
     payout_interval_seconds: int = Field(
         default=900, gt=0, env="PAYOUT_INTERVAL_SECONDS"
     )
+    # Timeout (seconds) for individual mint API operations (melt, mint, swap,
+    # checkstate). When a mint is slow or rate-limiting, operations are
+    # cancelled after this delay instead of hanging indefinitely.
+    mint_operation_timeout_seconds: int = Field(
+        default=30, gt=0, env="MINT_OPERATION_TIMEOUT_SECONDS"
+    )
+    # Maximum concurrent API operations per mint. Actual mint quotas vary by
+    # endpoint, so 429 responses drive adaptive cooldown instead of fixed RPM
+    # pacing. 0 = unlimited concurrency.
+    mint_max_concurrency: int = Field(default=4, ge=0, env="MINT_MAX_CONCURRENCY")
+    # Max retries when a mint returns 429 or times out (exponential backoff).
+    mint_retry_max_attempts: int = Field(default=3, ge=0, env="MINT_RETRY_MAX_ATTEMPTS")
 
     # Pricing
     # Default behavior: derive pricing from MODELS
@@ -98,22 +110,30 @@ class Settings(BaseSettings):
     models_refresh_interval_seconds: int = Field(
         default=360, env="MODELS_REFRESH_INTERVAL_SECONDS"
     )
+    model_paths_refresh_interval_seconds: int = Field(
+        default=600, env="MODEL_PATHS_REFRESH_INTERVAL_SECONDS"
+    )
     enable_pricing_refresh: bool = Field(default=True, env="ENABLE_PRICING_REFRESH")
     enable_models_refresh: bool = Field(default=True, env="ENABLE_MODELS_REFRESH")
+    enable_model_paths_refresh: bool = Field(
+        default=True, env="ENABLE_MODEL_PATHS_REFRESH"
+    )
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
-    refund_sweep_ttl_seconds: int = Field(default=604800, env="REFUND_SWEEP_TTL_SECONDS")
+    refund_sweep_ttl_seconds: int = Field(
+        default=604800, env="REFUND_SWEEP_TTL_SECONDS"
+    )
     refund_sweep_claim_timeout_seconds: int = Field(
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
     )
 
-    # Database connection-pool controls (advanced). Capacity defaults match
-    # SQLAlchemy's established queue-pool behavior. Pre-ping is enabled by the
-    # engine factory for networked backends; SQLite can explicitly opt in.
-    # These fields are env-only below.
-    database_pool_size: int = Field(default=5, ge=1, env="DATABASE_POOL_SIZE")
-    database_max_overflow: int = Field(default=10, ge=0, env="DATABASE_MAX_OVERFLOW")
+    # Database connection-pool controls (advanced). Capacity defaults provide
+    # headroom for Routstr's concurrent request and background-payment workload.
+    # Pre-ping is enabled by the engine factory for networked backends; SQLite
+    # can explicitly opt in. These fields are env-only below.
+    database_pool_size: int = Field(default=10, ge=1, env="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=20, ge=0, env="DATABASE_MAX_OVERFLOW")
     database_pool_timeout: float = Field(
-        default=30.0, gt=0, env="DATABASE_POOL_TIMEOUT"
+        default=15.0, gt=0, env="DATABASE_POOL_TIMEOUT"
     )
     database_pool_recycle: int = Field(default=1800, ge=0, env="DATABASE_POOL_RECYCLE")
     database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
@@ -138,9 +158,8 @@ class Settings(BaseSettings):
 
     # Discovery
     relays: list[str] = Field(default_factory=list, env="RELAYS")
-    enable_analytics_sharing: bool = Field(
-        default=True, env="ENABLE_ANALYTICS_SHARING"
-    )
+    enable_analytics_sharing: bool = Field(default=True, env="ENABLE_ANALYTICS_SHARING")
+
 
 def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
     """Discard unknown keys from persisted settings."""

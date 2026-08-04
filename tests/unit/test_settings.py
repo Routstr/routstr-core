@@ -62,11 +62,11 @@ def test_payout_settings_have_sensible_defaults() -> None:
     assert s.payout_interval_seconds == 900
 
 
-def test_database_pool_defaults_match_sqlalchemy_capacity() -> None:
+def test_database_pool_defaults_provide_concurrency_headroom() -> None:
     s = Settings()
-    assert s.database_pool_size == 5
-    assert s.database_max_overflow == 10
-    assert s.database_pool_timeout == 30.0
+    assert s.database_pool_size == 10
+    assert s.database_max_overflow == 20
+    assert s.database_pool_timeout == 15.0
     assert s.database_pool_recycle == 1800
     assert s.database_pool_pre_ping is False
     assert s.database_pool_hold_warn_seconds == 10.0
@@ -139,7 +139,7 @@ async def test_update_does_not_apply_env_only_fields_to_live_settings(
     from the running pool.
     """
     monkeypatch.delenv("DATABASE_POOL_SIZE", raising=False)
-    monkeypatch.setattr(settings, "database_pool_size", 5)
+    monkeypatch.setattr(settings, "database_pool_size", 10)
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -151,7 +151,7 @@ async def test_update_does_not_apply_env_only_fields_to_live_settings(
         # A non-env-only field still updates normally...
         assert settings.name == "PoolTweaker"
         # ...but the env-only pool size stays at the boot value.
-        assert settings.database_pool_size == 5
+        assert settings.database_pool_size == 10
         # ...and it is never written to the settings blob.
         blob = await _read_settings_blob(session)
         assert "database_pool_size" not in blob

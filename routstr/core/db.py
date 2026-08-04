@@ -293,7 +293,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     """Delete dead parentless API keys; return the count removed.
 
     Dead = 0 balance/reservation/spend/requests, older than the grace period,
-    no parent, no children, no pending invoice. Cashu rows are unlinked (not
+    no parent, no children, no retryable invoice. Cashu rows are unlinked (not
     deleted) first to keep the audit trail.
     """
     cutoff = int(time.time()) - min_age_seconds
@@ -307,7 +307,9 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     pending_invoice = (
         select(LightningInvoice.id)
         .where(col(LightningInvoice.api_key_hash) == col(ApiKey.hashed_key))
-        .where(col(LightningInvoice.status) == "pending")
+        .where(
+            col(LightningInvoice.status).in_(("pending", "settlement_pending"))
+        )
     ).exists()
 
     eligible_hashes = (
@@ -317,9 +319,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.total_spent) == 0)
         .where(col(ApiKey.total_requests) == 0)
         .where(col(ApiKey.parent_key_hash).is_(None))
-        .where(
-            (col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff)
-        )
+        .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~pending_invoice)
         .where(~has_children)
     )
@@ -373,6 +373,60 @@ class ModelRow(SQLModel, table=True):  # type: ignore
     upstream_provider: "UpstreamProviderRow" = Relationship(back_populates="models")
 
 
+class ModelPathRow(SQLModel, table=True):  # type: ignore
+    """Upstream provider path a model is reachable through.
+
+    Discovery/visibility data only. ``model_id`` is intentionally NOT globally
+    unique: it is the client-visible ``/v1/models`` id (``forwarded_model_id or
+    id``) grouped across every provider that exposes the model. A single model
+    can therefore have several rows — one per direct provider path plus one per
+    OpenRouter sub-provider endpoint.
+    """
+
+    __tablename__ = "model_paths"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_id",
+            "path",
+            "upstream_provider_id",
+            name="uq_model_paths_model_path_provider",
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    # No standalone index on model_id: the unique constraint's autoindex already
+    # leads on model_id, so a second index only adds write amplification.
+    model_id: str = Field(
+        description="Client-visible /v1/models id (forwarded_model_id or id)"
+    )
+    path: str = Field(
+        description=(
+            "Opaque selector containing upstream URL, provider ID, model ID, "
+            "and optional endpoint tag"
+        )
+    )
+    provider_slug: str = Field(
+        description="Public slug of the configured upstream provider"
+    )
+    provider_type: str = Field(description="Configured upstream provider type")
+    endpoint_tag: str | None = Field(
+        default=None,
+        description="Exact OpenRouter endpoint tag used for request-side selection",
+    )
+    endpoint_name: str | None = Field(
+        default=None, description="Human-readable endpoint display name"
+    )
+    upstream_provider_id: int = Field(
+        index=True,
+        foreign_key="upstream_providers.id",
+        ondelete="CASCADE",
+        description="upstream_providers.id this path was discovered from",
+    )
+    updated_at: int = Field(
+        default=0,
+        description="Unix timestamp of the refresh cycle that wrote this row",
+    )
+
+
 class LightningInvoice(SQLModel, table=True):  # type: ignore
     __tablename__ = "lightning_invoices"
 
@@ -383,12 +437,18 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     payment_hash: str = Field(description="Payment hash for tracking", unique=True)
     status: str = Field(
         default="pending",
-        description="pending, paid, expired, cancelled, reconciliation_required",
+        description=(
+            "pending, settlement_pending, paid, expired, cancelled, "
+            "reconciliation_required"
+        ),
     )
     api_key_hash: str | None = Field(
         default=None, description="Associated API key hash for topup operations"
     )
     purpose: str = Field(description="create or topup")
+    mint_url: str | None = Field(
+        default=None, description="Mint URL where the quote was created (fallback tracking)"
+    )
     created_at: int = Field(
         default_factory=lambda: int(time.time()), description="Unix timestamp"
     )
@@ -663,9 +723,7 @@ class CliToken(SQLModel, table=True):  # type: ignore
     """Long-lived authorization token for CLI/agent use against admin endpoints."""
 
     __tablename__ = "cli_tokens"
-    id: str = Field(
-        primary_key=True, default_factory=lambda: uuid.uuid4().hex
-    )
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
     token: str = Field(unique=True, index=True, description="Bearer token value")
     name: str = Field(description="Human-readable label for this token")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -764,9 +822,7 @@ async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
     return result.rowcount == 1
 
 
-async def complete_routstr_fee_payout(
-    session: AsyncSession, paid_msats: int
-) -> bool:
+async def complete_routstr_fee_payout(session: AsyncSession, paid_msats: int) -> bool:
     """Mark a checkpointed payout complete after the external payment succeeds."""
     stmt = (
         update(RoutstrFee)

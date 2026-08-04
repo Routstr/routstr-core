@@ -48,6 +48,68 @@ Connect to your AI provider(s):
 | **Upstream URL** | API endpoint (e.g., `https://api.openai.com/v1`) |
 | **API Key**      | Your provider's API key                          |
 
+### PPQ Auto Top-up
+
+PPQ providers can automatically purchase more credits when their USD balance
+falls below a configured threshold. Configure this per provider in the Admin
+Dashboard by editing a **PPQ.AI** provider and opening **PPQ Auto Top-up**.
+There are no environment variables for this feature.
+
+#### Requirements
+
+Before enabling auto top-up, make sure that:
+
+- the PPQ provider has a valid API key;
+- at least one trusted Cashu mint is configured;
+- the node wallet has enough **node-owned** funds at one mint to pay the
+  Lightning invoice; client balances are never used; and
+- the node has a current BTC/USD price for validating the invoice amount.
+
+| Setting | Description |
+| ------- | ----------- |
+| **Enable Auto Top-up** | Enables automatic PPQ credit purchases for this provider. |
+| **When credits are below (USD)** | Starts a top-up when the reported PPQ balance is below this positive USD value. |
+| **Purchase this amount (USD)** | Amount of PPQ credit to buy per top-up. Must be a whole number from **1 to 500 USD**. |
+
+For example, a threshold of `5` and purchase amount of `20` buys 20 USD of
+credit when the PPQ balance drops below 5 USD.
+
+#### How it works
+
+The worker checks eligible providers approximately once per minute. When the
+balance is below the threshold, it:
+
+1. verifies the node has enough owner funds before creating an invoice;
+2. requests a USD-denominated Lightning top-up invoice from PPQ;
+3. rejects expired, mismatched, or unexpectedly expensive invoices (more than
+   10% above the local BTC/USD estimate);
+4. pays from the configured Cashu mint with sufficient owner funds; and
+5. waits for PPQ to confirm that the credit settled.
+
+Only one attempt can be active for a provider. An attempt that was active at
+the start of a cycle suppresses another top-up for that entire cycle, even if
+PPQ reports it settled immediately. This prevents a temporarily stale PPQ
+balance from causing a duplicate purchase.
+
+Completed PPQ payments appear in the dashboard transaction history with source
+`ppq_auto_topup`. The payment record is separate from the internal claim used
+to prevent concurrent attempts.
+
+#### Payment recovery
+
+If the Cashu mint paid the invoice but PPQ settlement cannot be confirmed, the
+provider card shows **Auto top-up needs review**. A payment still owned by a
+running worker is shown as **Paying invoice** and cannot be released.
+
+Before choosing **Release top-up**, manually verify both PPQ and the Cashu mint.
+Release the claim only when the previous Lightning payment is definitively
+unable to settle. Releasing an ambiguous payment allows the next cycle to try
+again and can therefore cause a duplicate top-up.
+
+Disabling auto top-up prevents new purchases, but the node continues to
+reconcile an already active payment until it reaches a safe terminal state or
+requires operator review.
+
 ### Node Identity
 
 How your node appears to clients:
@@ -136,12 +198,23 @@ Use environment variables for:
 | `NSEC`               | Legacy seed for the Nostr private key (otherwise set from the admin UI) | —                |
 | `ENABLE_ANALYTICS_SHARING` | Enable usage analytics sharing to Nostr | `true`                         |
 | `CASHU_MINTS`        | Comma-separated mint URLs         | `https://mint.minibits.cash/Bitcoin` |
+| `MINT_OPERATION_CONCURRENCY` | Concurrent mint/unit balance reads | `4` |
+| `MINT_OPERATION_TIMEOUT_SECONDS` | Per-attempt timeout for mint network calls | `30` |
+| `MINT_MAX_CONCURRENCY` | Concurrent operations allowed per mint (`0` disables the limit) | `4` |
+| `MINT_RETRY_MAX_ATTEMPTS` | Retries after a timeout or HTTP 429 (`0` disables retries) | `3` |
 | `RECEIVE_LN_ADDRESS` | Lightning address for withdrawals | —                                    |
 | `MIN_PAYOUT_SAT`     | Min payout balance in sats (applies to all mints) | `210`                |
 | `PAYOUT_INTERVAL_SECONDS` | Payout loop interval (seconds) | `900`                            |
 | `TOR_PROXY_URL`      | SOCKS5 proxy for Tor              | `socks5://127.0.0.1:9050`            |
 | `CORS_ORIGINS`       | Allowed CORS origins              | `*`                                  |
 | `RELAYS`             | Nostr relays (comma-separated)    | (default set)                        |
+| `MODEL_PATHS_REFRESH_INTERVAL_SECONDS` | How often to refresh `/v1/models/paths` discovery data; set `0` to pause the refresh (previously discovered paths keep being served) | `600` |
+| `ENABLE_MODEL_PATHS_REFRESH` | Kill switch for the background model-path refresh (OpenRouter endpoint fan-out) | `true` |
+
+Mint HTTP 429 responses create a per-mint cooldown. Operations that already hold
+Routstr's wallet mutation lock fail fast during that cooldown instead of waiting
+while blocking every other wallet mutation. Callers receive an error and may retry
+later; the current response does not include the cooldown duration.
 
 ### Priority
 
@@ -175,3 +248,8 @@ Manage which AI models you offer:
    - **Create aliases** — friendly names for models
 
 See [Pricing](pricing.md) for per-model pricing strategies.
+
+Model path discovery is refreshed in the background and exposed through
+`/v1/models/paths`. The response groups each client-visible model ID with the
+provider paths that may appear in chat-completion response metadata. Tune the
+refresh cadence with `MODEL_PATHS_REFRESH_INTERVAL_SECONDS`.

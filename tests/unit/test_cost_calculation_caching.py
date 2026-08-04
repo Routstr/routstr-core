@@ -15,6 +15,7 @@ os.environ.setdefault("LIGHTNING_ADDRESS", "test@stm.to")
 
 from routstr.core.settings import settings
 from routstr.payment.cost_calculation import CostData, MaxCostData, calculate_cost
+from routstr.payment.models import Architecture, Model, Pricing
 
 
 @pytest.fixture(autouse=True)
@@ -527,9 +528,134 @@ async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
     result = await calculate_cost(response, max_cost=100000)
 
     assert isinstance(result, CostData)
-    assert result.input_msats == 994
-    assert result.output_msats == 3477
+    assert result.input_msats == 995
+    assert result.output_msats == 3476
+    assert result.cache_read_msats == 758
+    assert result.cache_creation_msats == 0
     assert result.input_msats + result.output_msats == result.total_msats == 4471
+
+
+@pytest.mark.asyncio
+async def test_usd_cache_breakdown_matches_token_priced_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authoritative USD totals must retain model-specific cache-rate ratios."""
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    model = Model(
+        id="cache-priced-model",
+        name="cache-priced-model",
+        created=0,
+        description="",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="test",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.01, completion=0.02),
+        sats_pricing=Pricing(
+            prompt=0.01,
+            completion=0.02,
+            input_cache_read=0.001,
+            input_cache_write=0.01,
+        ),
+        per_request_limits=None,
+        top_provider=None,
+    )
+    usage = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+        "prompt_tokens_details": {"cached_tokens": 900},
+    }
+
+    token_result = await calculate_cost(
+        {"model": model.id, "usage": usage},
+        max_cost=100_000,
+        model_obj=model,
+    )
+    usd_result = await calculate_cost(
+        {
+            "model": model.id,
+            "usage": {
+                **usage,
+                "cost": 0.000195,
+                "cost_details": {
+                    "input_cost": 0.000095,
+                    "output_cost": 0.0001,
+                },
+            },
+        },
+        max_cost=100_000,
+        model_obj=model,
+        provider_fee=1.0,
+    )
+
+    assert isinstance(token_result, CostData)
+    assert isinstance(usd_result, CostData)
+    assert usd_result.total_msats == token_result.total_msats == 3900
+    assert usd_result.input_msats + usd_result.output_msats == usd_result.total_msats
+    assert usd_result.cache_read_msats == token_result.cache_read_msats == 900
+
+
+@pytest.mark.asyncio
+async def test_usd_cache_breakdown_does_not_absorb_total_rounding_remainder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sub-msat cache components truncate like the token-priced path."""
+    monkeypatch.setattr(settings, "fixed_pricing", False)
+    model = Model(
+        id="sub-msat-cache-model",
+        name="sub-msat-cache-model",
+        created=0,
+        description="",
+        context_length=8192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="test",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.001, completion=0.001),
+        sats_pricing=Pricing(
+            prompt=0.001,
+            completion=0.001,
+            input_cache_write=0.0006,
+        ),
+        per_request_limits=None,
+        top_provider=None,
+    )
+    usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 1,
+    }
+
+    token_result = await calculate_cost(
+        {"model": model.id, "usage": usage},
+        max_cost=100_000,
+        model_obj=model,
+    )
+    usd_result = await calculate_cost(
+        {
+            "model": model.id,
+            "usage": {
+                **usage,
+                "cost": 0.00000003,
+                "cost_details": {"input_cost": 0.00000003},
+            },
+        },
+        max_cost=100_000,
+        model_obj=model,
+        provider_fee=1.0,
+    )
+
+    assert isinstance(token_result, CostData)
+    assert isinstance(usd_result, CostData)
+    assert usd_result.total_msats == token_result.total_msats == 1
+    assert usd_result.cache_creation_msats == token_result.cache_creation_msats == 0
 
 
 # ============================================================================
@@ -568,12 +694,14 @@ async def test_ppq_byok_bills_upstream_inference_cost_plus_fee() -> None:
     # msats), not the fee alone (~0.0023 USD → ~45k msats).  ~20× correction.
     assert result.total_msats == 940274
     assert result.input_msats + result.output_msats == result.total_msats
-    assert result.input_msats == 926546
-    assert result.output_msats == 13728
+    assert result.input_msats == 926547
+    assert result.output_msats == 13727
     assert result.total_usd == pytest.approx(0.047013667305)
     # Token normalisation (OpenAI dialect: cached included in prompt_tokens)
     assert result.input_tokens == 5070  # 164371 - 159301
     assert result.cache_read_input_tokens == 159301
+    assert result.cache_read_msats == 897966
+    assert result.cache_creation_msats == 0
     assert result.output_tokens == 99
 
 

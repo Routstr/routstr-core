@@ -126,8 +126,11 @@ async def test_parent_and_child_keys_are_not_pruned(
 
 
 @pytest.mark.asyncio
-async def test_pending_invoice_protects_key(patched_db_engine: None) -> None:
-    """A key referenced by a pending topup invoice is never pruned mid-topup."""
+@pytest.mark.parametrize("status", ["pending", "settlement_pending"])
+async def test_retryable_invoice_protects_key(
+    patched_db_engine: None, status: str
+) -> None:
+    """A key referenced by a retryable topup invoice is never pruned mid-topup."""
     key = _dead_key(LONG_AGO)
     invoice = LightningInvoice(
         id=f"inv_{uuid.uuid4().hex}",
@@ -135,7 +138,7 @@ async def test_pending_invoice_protects_key(patched_db_engine: None) -> None:
         amount_sats=10,
         description="topup",
         payment_hash=uuid.uuid4().hex,
-        status="pending",
+        status=status,
         api_key_hash=key.hashed_key,
         purpose="topup",
         expires_at=NOW + 10_000,
