@@ -996,6 +996,7 @@ async def _request_mint_with_fallback(
                 lambda: wallet.request_mint(amount),
                 op_name=op_name,
                 mint_url=mint_url,
+                retry_timeouts=False,
                 retry_on_rate_limit=False,
             )
             logger.info(

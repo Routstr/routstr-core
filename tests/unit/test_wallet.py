@@ -2637,6 +2637,43 @@ async def test_wallet_fallback_on_429_no_in_place_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_wallet_fallback_on_timeout_no_in_place_retry() -> None:
+    """A timeout from one destination must immediately try the next mint."""
+    from routstr.core.settings import settings
+    from routstr.wallet import _request_mint_with_fallback
+
+    primary = "http://primary:3338"
+    secondary = "http://secondary:3338"
+    primary_wallet = Mock(
+        request_mint=AsyncMock(side_effect=httpx.TimeoutException("timed out"))
+    )
+    quote = Mock(quote="q_secondary", request="lnbc1secondary")
+    secondary_wallet = Mock(request_mint=AsyncMock(return_value=quote))
+    wallets = {primary: primary_wallet, secondary: secondary_wallet}
+
+    with (
+        patch.object(settings, "primary_mint", primary),
+        patch.object(settings, "cashu_mints", [primary, secondary]),
+        patch.object(settings, "mint_retry_max_attempts", 3),
+        patch.object(settings, "mint_max_concurrency", 0),
+        patch.object(settings, "mint_operation_timeout_seconds", 0),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
+        patch(
+            "routstr.wallet.get_wallet",
+            AsyncMock(side_effect=lambda mint, *args, **kwargs: wallets[mint]),
+        ),
+    ):
+        _, mint_url, _ = await _request_mint_with_fallback(
+            1000, op_name="test_timeout_fallback"
+        )
+
+    assert mint_url == secondary
+    primary_wallet.request_mint.assert_awaited_once_with(1000)
+    secondary_wallet.request_mint.assert_awaited_once_with(1000)
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_wallet_fallback_skips_mint_during_cooldown() -> None:
     from routstr.core.settings import settings
     from routstr.wallet import _MintRateGuard, _request_mint_with_fallback
