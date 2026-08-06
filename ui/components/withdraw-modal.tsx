@@ -116,7 +116,9 @@ export function WithdrawModal({
   if (withdrawnToken) {
     return (
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent className='sm:max-w-xl'>
+        {/* The X would route to handleOpenChange, which refuses until the token
+            is confirmed saved, so it would render as a dead control. */}
+        <DialogContent className='sm:max-w-xl' showCloseButton={false}>
           <DialogHeader>
             <DialogTitle>Withdrawal complete</DialogTitle>
             <DialogDescription>
@@ -163,8 +165,8 @@ export function WithdrawModal({
             </div>
 
             <p className='text-muted-foreground text-xs'>
-              A copy is also kept under Transactions, where you can copy it
-              again later.
+              A copy is also kept under Transactions in the Withdrawals tab,
+              where you can copy it again later.
             </p>
 
             <div className='flex items-center gap-2'>

@@ -1261,7 +1261,7 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
-  source: 'x-cashu' | 'apikey';
+  source: 'x-cashu' | 'apikey' | 'admin';
   api_key_hashed_key?: string;
 }
 
