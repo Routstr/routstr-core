@@ -187,7 +187,7 @@ export function AddProviderModelDialog({
             : '',
         canonical_slug: initialData.canonical_slug || '',
         alias_ids_raw: listToString(initialData.alias_ids),
-        forwarded_model_id: initialData.forwarded_model_id || initialData.id,
+        forwarded_model_id: initialData.forwarded_model_id || '',
         upstream_provider_id:
           typeof initialData.upstream_provider_id === 'string'
             ? initialData.upstream_provider_id
@@ -293,7 +293,7 @@ export function AddProviderModelDialog({
     );
     form.setValue('canonical_slug', model.canonical_slug || '');
     form.setValue('alias_ids_raw', listToString(model.alias_ids));
-    form.setValue('forwarded_model_id', model.forwarded_model_id || model.id);
+    form.setValue('forwarded_model_id', model.forwarded_model_id || '');
     form.setValue(
       'upstream_provider_id',
       typeof model.upstream_provider_id === 'string'
@@ -403,7 +403,7 @@ export function AddProviderModelDialog({
         canonical_slug: data.canonical_slug?.trim() || null,
         alias_ids: listFromString(data.alias_ids_raw || ''),
         enabled: data.enabled,
-        forwarded_model_id: data.forwarded_model_id?.trim() || data.id,
+        forwarded_model_id: data.forwarded_model_id?.trim() || null,
       };
 
       if (isEdit) {
@@ -578,7 +578,8 @@ export function AddProviderModelDialog({
                       </FormControl>
                       <FormDescription>
                         Alternate ID that clients can use to reference this
-                        model. Defaults to the model&apos;s own ID.
+                        model. Leave blank to use the model&apos;s own ID or
+                        reset an existing alias.
                       </FormDescription>
                       <FormMessage />
                     </FormItem>

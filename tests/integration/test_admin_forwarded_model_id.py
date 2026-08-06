@@ -111,6 +111,7 @@ async def test_admin_create_without_forwarded_model_id_preserves_null(
         )
 
     assert response.status_code == 200
+    assert response.json()["forwarded_model_id"] is None
     row = await integration_session.get(ModelRow, (MODEL_ID, provider.id))
     assert row is not None
     assert row.forwarded_model_id is None
@@ -118,14 +119,19 @@ async def test_admin_create_without_forwarded_model_id_preserves_null(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forwarded_model_id", [None, "", "   "], ids=["null", "empty", "blank"]
+)
 async def test_admin_update_can_clear_forwarded_model_id(
     integration_client: AsyncClient,
     integration_session: AsyncSession,
+    forwarded_model_id: str | None,
 ) -> None:
-    """An explicit JSON null must remove an existing upstream alias."""
+    """An explicit null or blank value must remove an existing upstream alias."""
     provider = await _create_provider(
         integration_session, base_url="https://issue-639-clear.example/v1"
     )
+    assert provider.id is not None
     row = _model_row(provider.id, forwarded_model_id="upstream-deepseek-chat")
     integration_session.add(row)
     await integration_session.commit()
@@ -135,9 +141,159 @@ async def test_admin_update_can_clear_forwarded_model_id(
         response = await integration_client.post(
             f"/admin/api/upstream-providers/{provider.id}/models",
             headers=_admin_headers(),
-            json=_model_payload(forwarded_model_id=None, include_alias=True),
+            json=_model_payload(
+                forwarded_model_id=forwarded_model_id, include_alias=True
+            ),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["forwarded_model_id"] is None
+    await integration_session.refresh(row)
+    assert row.forwarded_model_id is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_update_without_forwarded_model_id_preserves_alias(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """Omitting the alias must not overwrite an existing value."""
+    provider = await _create_provider(
+        integration_session, base_url="https://issue-639-preserve.example/v1"
+    )
+    assert provider.id is not None
+    row = _model_row(provider.id, forwarded_model_id="upstream-deepseek-chat")
+    integration_session.add(row)
+    await integration_session.commit()
+    await reinitialize_upstreams()
+
+    with patch("routstr.payment.models.sats_usd_price", return_value=1e-6):
+        response = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider.id}/models",
+            headers=_admin_headers(),
+            json=_model_payload(forwarded_model_id=None, include_alias=False),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["forwarded_model_id"] == "upstream-deepseek-chat"
+    await integration_session.refresh(row)
+    assert row.forwarded_model_id == "upstream-deepseek-chat"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_create_serializes_forwarded_model_id(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """A configured alias must remain visible in the admin response."""
+    provider = await _create_provider(
+        integration_session, base_url="https://issue-639-serialize.example/v1"
+    )
+    await reinitialize_upstreams()
+
+    with patch("routstr.payment.models.sats_usd_price", return_value=1e-6):
+        response = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider.id}/models",
+            headers=_admin_headers(),
+            json=_model_payload(
+                forwarded_model_id="upstream-deepseek-chat", include_alias=True
+            ),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["forwarded_model_id"] == "upstream-deepseek-chat"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_batch_create_preserves_forwarded_model_id(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """Batch creation must persist a distinct upstream alias."""
+    provider = await _create_provider(
+        integration_session, base_url="https://issue-639-batch-create.example/v1"
+    )
+    await reinitialize_upstreams()
+
+    response = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider.id}/batch-override",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                _model_payload(
+                    forwarded_model_id="upstream-deepseek-chat", include_alias=True
+                )
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    row = await integration_session.get(ModelRow, (MODEL_ID, provider.id))
+    assert row is not None
+    assert row.forwarded_model_id == "upstream-deepseek-chat"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_batch_update_can_clear_forwarded_model_id(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """Batch overrides must persist an explicit null alias too."""
+    provider = await _create_provider(
+        integration_session, base_url="https://issue-639-batch-clear.example/v1"
+    )
+    assert provider.id is not None
+    row = _model_row(provider.id, forwarded_model_id="upstream-deepseek-chat")
+    integration_session.add(row)
+    await integration_session.commit()
+    await reinitialize_upstreams()
+
+    with patch("routstr.payment.models.sats_usd_price", return_value=1e-6):
+        response = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider.id}/batch-override",
+            headers=_admin_headers(),
+            json={
+                "models": [
+                    _model_payload(forwarded_model_id=None, include_alias=True)
+                ]
+            },
         )
 
     assert response.status_code == 200
     await integration_session.refresh(row)
     assert row.forwarded_model_id is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_batch_update_without_forwarded_model_id_preserves_alias(
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """Batch updates must preserve aliases when the field is omitted."""
+    provider = await _create_provider(
+        integration_session, base_url="https://issue-639-batch-preserve.example/v1"
+    )
+    assert provider.id is not None
+    row = _model_row(provider.id, forwarded_model_id="upstream-deepseek-chat")
+    integration_session.add(row)
+    await integration_session.commit()
+    await reinitialize_upstreams()
+
+    response = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider.id}/batch-override",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                _model_payload(forwarded_model_id=None, include_alias=False)
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    await integration_session.refresh(row)
+    assert row.forwarded_model_id == "upstream-deepseek-chat"

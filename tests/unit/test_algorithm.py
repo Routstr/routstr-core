@@ -245,10 +245,16 @@ def test_create_model_mappings_does_not_split_self_alias_from_base_identity(
         "provider-b",
         "https://provider-b.example/v1",
         db_id=2,
-        models=[create_test_model(model_id)],
+        models=[
+            create_test_model(
+                model_id, prompt_price=0.0001, completion_price=0.0001
+            )
+        ],
     )
 
-    admin_saved_model = create_test_model(model_id)
+    admin_saved_model = create_test_model(
+        model_id, prompt_price=1.0, completion_price=1.0
+    )
     admin_saved_model.forwarded_model_id = model_id
     override_row = SimpleNamespace(id=model_id, upstream_provider_id=1, enabled=True)
 
@@ -257,7 +263,7 @@ def test_create_model_mappings_does_not_split_self_alias_from_base_identity(
 
     monkeypatch.setattr("routstr.payment.models._row_to_model", fake_row_to_model)
 
-    _, _, unique_models = create_model_mappings(
+    _, provider_map, unique_models = create_model_mappings(
         upstreams=[provider_a, provider_b],
         overrides_by_key={(model_id, 1): (override_row, 1.0)},
         disabled_model_keys=set(),
@@ -267,6 +273,40 @@ def test_create_model_mappings_does_not_split_self_alias_from_base_identity(
         model.forwarded_model_id or model.id for model in unique_models.values()
     )
     assert advertised_ids == ["deepseek-chat"]
+    assert provider_map[model_id][0][1] is provider_b
+
+
+def test_create_model_mappings_preserves_case_only_forwarded_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A case-only alias is distinct and must not be normalized as a self-alias."""
+    model_id = "deepseek/deepseek-chat"
+    case_only_alias = "DeepSeek/DeepSeek-Chat"
+    provider = create_test_provider(
+        "provider-a",
+        "https://provider-a.example/v1",
+        db_id=1,
+        models=[create_test_model(model_id)],
+    )
+
+    override_model = create_test_model(model_id)
+    override_model.forwarded_model_id = case_only_alias
+    override_row = SimpleNamespace(id=model_id, upstream_provider_id=1, enabled=True)
+
+    def fake_row_to_model(*args, **kwargs) -> Model:  # type: ignore[no-untyped-def]
+        return override_model
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", fake_row_to_model)
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={(model_id, 1): (override_row, 1.0)},
+        disabled_model_keys=set(),
+    )
+
+    assert list(unique_models) == [case_only_alias]
+    assert unique_models[case_only_alias].forwarded_model_id == case_only_alias
+    assert len(provider_map[case_only_alias.lower()]) == 1
 
 
 def test_create_model_mappings_disables_only_matching_provider() -> None:
