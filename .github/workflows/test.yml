@@ -2,9 +2,9 @@ name: Run Tests
 
 on:
   push:
-    branches: ["*"] # Run on all branches
+    branches: ["**"] # Run on all branches, including names with slashes
   pull_request:
-    branches: ["*"] # Run on PRs to all branches
+    branches: ["**"] # Run on PRs to all branches
 
 jobs:
   backend-test:
