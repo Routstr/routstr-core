@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -12,27 +11,35 @@ def test_backend_docker_context_excludes_generated_and_runtime_state() -> None:
     }
 
     required_patterns = {
-        "__pycache__",
-        "*.py[cod]",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".coverage",
-        "*.egg-info",
-        "build",
-        "dist",
+        "**/.env",
+        "**/.env.*",
+        "**/routstr_secret.key",
+        "**/.venv",
+        "**/__pycache__",
+        "**/*.py[cod]",
+        "**/.pytest_cache",
+        "**/.mypy_cache",
+        "**/.ruff_cache",
+        "**/.coverage",
+        "**/htmlcov",
+        "**/*.egg-info",
+        "**/build",
+        "**/dist",
         "logs",
         "logs.*",
-        ".wallet",
-        ".cashu",
-        "*.db",
-        "*.db-*",
-        "*.sqlite3",
-        "keys",
-        "proof_backups",
-        "relay-data",
-        "ui",
+        "**/*.log",
+        "**/.wallet*",
+        "**/.cashu",
+        "**/*.db",
+        "**/*.db-*",
+        "**/*.sqlite3",
+        "**/*.sqlite3-*",
+        "**/keys",
+        "**/proof_backups",
+        "**/relay-data",
         "ui_out",
+        "ui/.next",
+        "ui/out",
     }
 
     assert required_patterns <= patterns, (

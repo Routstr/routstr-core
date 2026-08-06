@@ -8,39 +8,41 @@
 .todo
 
 # Local configuration and secrets
-.env
-.env.*
-routstr_secret.key
+**/.env
+**/.env.*
+**/routstr_secret.key
 
 # Python environments, caches, and build artifacts
-.venv
-__pycache__
-*.py[cod]
-.pytest_cache
-.mypy_cache
-.ruff_cache
-.coverage
-htmlcov
-*.egg-info
-build
-dist
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+**/*.egg-info
+**/build
+**/dist
 
 # Runtime state must never be baked into the image
 logs
 logs.*
-*.log
-.wallet
-.cashu
-*.db
-*.db-*
-*.sqlite3
-keys
-proof_backups
-relay-data
+**/*.log
+**/.wallet*
+**/.cashu
+**/*.db
+**/*.db-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/keys
+**/proof_backups
+**/relay-data
 
-# The UI is built by its own service and mounted at runtime
-ui
+# The UI output is built by its own service and mounted at runtime
 ui_out
+ui/.next
+ui/out
 **/node_modules
 
 # Compose and local development files
