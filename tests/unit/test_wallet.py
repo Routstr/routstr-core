@@ -1510,11 +1510,8 @@ async def test_credit_balance_msat_unit_not_converted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_credit_balance_survives_audit_store_failure() -> None:
-    """A failure writing the CashuTransaction history record must not undo the
-    already-committed balance credit. (The silent swallow is a known
-    audit-trail gap slated for its own fix — this test pins the financial
-    invariant that the user keeps their credit, not the swallow itself.)"""
+async def test_credit_balance_propagates_audit_store_failure_after_credit() -> None:
+    """A final transaction-history failure propagates after committing credit."""
     mock_key = Mock()
     mock_key.balance = 0
     mock_key.hashed_key = "test_hash"
@@ -1531,9 +1528,9 @@ async def test_credit_balance_survives_audit_store_failure() -> None:
                 "routstr.wallet.store_cashu_transaction",
                 side_effect=Exception("history table locked"),
             ):
-                amount = await credit_balance("cashuAtest", mock_key, mock_session)
+                with pytest.raises(Exception, match="history table locked"):
+                    await credit_balance("cashuAtest", mock_key, mock_session)
 
-    assert amount == 1_000_000
     assert mock_session.commit.called
 
 

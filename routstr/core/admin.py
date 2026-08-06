@@ -455,25 +455,15 @@ async def withdraw(
             status_code=400, detail="Insufficient wallet balance"
         ) from error
     actual_mint = token_mint_url(token, effective_mint)
-    try:
-        await store_cashu_transaction(
-            token=token,
-            amount=withdraw_request.amount,
-            unit=withdraw_request.unit,
-            mint_url=actual_mint,
-            typ="out",
-            collected=False,
-            source="admin",
-        )
-    except Exception:
-        logger.critical(
-            "Admin withdrawal token issued without a persisted audit record",
-            extra={
-                "amount": withdraw_request.amount,
-                "unit": withdraw_request.unit,
-                "mint_url": actual_mint,
-            },
-        )
+    await store_cashu_transaction(
+        token=token,
+        amount=withdraw_request.amount,
+        unit=withdraw_request.unit,
+        mint_url=actual_mint,
+        typ="out",
+        collected=False,
+        source="admin",
+    )
     return {"token": token, "mint_url": actual_mint}
 
 

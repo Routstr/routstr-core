@@ -613,19 +613,16 @@ async def refund_wallet_endpoint(
     await _refund_cache_set(bearer_value, result)
 
     if "token" in result:
-        try:
-            await store_cashu_transaction(
-                token=result["token"],
-                amount=remaining_balance,
-                unit=key.refund_currency or "sat",
-                mint_url=effective_refund_mint,
-                typ="out",
-                collected=False,
-                source="apikey",
-                api_key_hashed_key=key.hashed_key,
-            )
-        except Exception:
-            pass  # store_cashu_transaction already logs
+        await store_cashu_transaction(
+            token=result["token"],
+            amount=remaining_balance,
+            unit=key.refund_currency or "sat",
+            mint_url=effective_refund_mint,
+            typ="out",
+            collected=False,
+            source="apikey",
+            api_key_hashed_key=key.hashed_key,
+        )
 
     logger.info(
         "refund_wallet_endpoint: refund successful",

@@ -3594,37 +3594,12 @@ class BaseUpstreamProvider:
 
         max_retries = 3
         last_exception = None
+        refund_token = None
 
         for attempt in range(max_retries):
             try:
                 refund_token = await send_token(amount, unit=unit, mint_url=mint)
-
-                logger.info(
-                    "Refund token created successfully",
-                    extra={
-                        "amount": amount,
-                        "unit": unit,
-                        "mint": mint,
-                        "attempt": attempt + 1,
-                        "token_preview": refund_token[:20] + "..."
-                        if len(refund_token) > 20
-                        else refund_token,
-                    },
-                )
-
-                try:
-                    await store_cashu_transaction(
-                        token=refund_token,
-                        amount=amount,
-                        unit=unit,
-                        mint_url=token_mint_url(refund_token, mint),
-                        typ="out",
-                        request_id=request_id,
-                    )
-                except Exception:
-                    pass  # store_cashu_transaction already logs
-
-                return refund_token
+                break
             except Exception as e:
                 last_exception = e
                 if attempt < max_retries - 1:
@@ -3654,16 +3629,39 @@ class BaseUpstreamProvider:
                         },
                     )
 
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "message": f"failed to create refund after {max_retries} attempts: {str(last_exception)}",
-                    "type": "invalid_request_error",
-                    "code": "send_token_failed",
-                }
+        if refund_token is None:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "message": f"failed to create refund after {max_retries} attempts: {str(last_exception)}",
+                        "type": "invalid_request_error",
+                        "code": "send_token_failed",
+                    }
+                },
+            )
+
+        logger.info(
+            "Refund token created successfully",
+            extra={
+                "amount": amount,
+                "unit": unit,
+                "mint": mint,
+                "attempt": attempt + 1,
+                "token_preview": refund_token[:20] + "..."
+                if len(refund_token) > 20
+                else refund_token,
             },
         )
+        await store_cashu_transaction(
+            token=refund_token,
+            amount=amount,
+            unit=unit,
+            mint_url=token_mint_url(refund_token, mint),
+            typ="out",
+            request_id=request_id,
+        )
+        return refund_token
 
     async def handle_x_cashu_streaming_response(
         self,
@@ -3979,17 +3977,14 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
-            try:
-                await store_cashu_transaction(
-                    token=refund_token,
-                    amount=emergency_refund,
-                    unit=unit,
-                    mint_url=token_mint_url(refund_token, mint),
-                    typ="out",
-                    request_id=request_id,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction(
+                token=refund_token,
+                amount=emergency_refund,
+                unit=unit,
+                mint_url=token_mint_url(refund_token, mint),
+                typ="out",
+                request_id=request_id,
+            )
 
             logger.warning(
                 "Emergency refund issued due to JSON parse error",
@@ -4345,18 +4340,15 @@ class BaseUpstreamProvider:
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
-            try:
-                await store_cashu_transaction(
-                    token=x_cashu_token,
-                    amount=amount,
-                    unit=unit,
-                    mint_url=mint,
-                    typ="in",
-                    request_id=request_id,
-                    collected=True,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction(
+                token=x_cashu_token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint,
+                typ="in",
+                request_id=request_id,
+                collected=True,
+            )
 
             logger.info(
                 "X-Cashu token redeemed for Responses API",
@@ -4960,17 +4952,14 @@ class BaseUpstreamProvider:
             emergency_refund = amount
             refund_token = await send_token(emergency_refund, unit=unit, mint_url=mint)
             response.headers["X-Cashu"] = refund_token
-            try:
-                await store_cashu_transaction(
-                    token=refund_token,
-                    amount=emergency_refund,
-                    unit=unit,
-                    mint_url=token_mint_url(refund_token, mint),
-                    typ="out",
-                    request_id=request_id,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction(
+                token=refund_token,
+                amount=emergency_refund,
+                unit=unit,
+                mint_url=token_mint_url(refund_token, mint),
+                typ="out",
+                request_id=request_id,
+            )
 
             logger.warning(
                 "Emergency refund issued for Responses API due to JSON parse error",
@@ -5034,18 +5023,15 @@ class BaseUpstreamProvider:
             headers = self.prepare_headers(dict(request.headers))
 
             request_id = getattr(request.state, "request_id", None)
-            try:
-                await store_cashu_transaction(
-                    token=x_cashu_token,
-                    amount=amount,
-                    unit=unit,
-                    mint_url=mint,
-                    typ="in",
-                    request_id=request_id,
-                    collected=True,
-                )
-            except Exception:
-                pass
+            await store_cashu_transaction(
+                token=x_cashu_token,
+                amount=amount,
+                unit=unit,
+                mint_url=mint,
+                typ="in",
+                request_id=request_id,
+                collected=True,
+            )
 
             logger.info(
                 "X-Cashu token redeemed successfully",

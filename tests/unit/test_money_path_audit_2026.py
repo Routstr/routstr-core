@@ -49,9 +49,7 @@ V-E9  Existing emergency-refund tests use a 500-char source window that
 from __future__ import annotations
 
 import inspect
-from unittest.mock import AsyncMock, patch
-
-import pytest
+import re
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,8 +63,8 @@ def _source_contains_except_pass(source: str, anchor: str, window: int = 1000) -
     if idx < 0:
         return False
     section = source[idx : idx + window]
-    has_except = "except Exception:" in section or "except:" in section
-    return has_except and "pass" in section
+    pattern = r"except(?:\s+Exception)?(?:\s+as\s+\w+)?\s*:\s*pass\b"
+    return re.search(pattern, section) is not None
 
 
 # ===========================================================================
@@ -335,28 +333,10 @@ def test_admin_withdraw_must_not_return_token_on_db_failure() -> None:
 # ===========================================================================
 
 
-def test_existing_emergency_refund_test_window_is_wide_enough() -> None:
-    """REGRESSION GUARD: The existing test_emergency_refund_no_try_except_pass
-    inspects a 500-character window after "emergency_refund = amount".
-    The except: pass block is ~530 chars after that anchor, so the 500-char
-    window misses it entirely — producing a false green.
+def test_except_pass_detector_window_is_wide_enough() -> None:
+    """The detector must catch an except/pass block beyond 500 characters."""
+    anchor = "emergency_refund = amount"
+    source = anchor + (" " * 520) + "except Exception:\n    pass"
 
-    This test verifies that a 1000-char window (which we use in V-E2/V-E3)
-    correctly catches the live bug.  If this test fails, someone shrank
-    the window back to 500 or removed the wider-window tests.
-    """
-    from routstr.upstream.base import BaseUpstreamProvider
-
-    src = inspect.getsource(
-        BaseUpstreamProvider.handle_x_cashu_non_streaming_response
-    )
-    emergency_start = src.find("emergency_refund = amount")
-    assert emergency_start > 0, "Emergency refund path must exist"
-
-    # The 1000-char window MUST see the except: pass (currently live bug)
-    wide_section = src[emergency_start : emergency_start + 1000]
-    assert "except Exception:" in wide_section and "pass" in wide_section, (
-        "The 1000-char window must catch the live except: pass bug. "
-        "If this fails, either the bug was fixed (good!) or the window "
-        "logic changed (bad — re-check V-E2)."
-    )
+    assert not _source_contains_except_pass(source, anchor, window=500)
+    assert _source_contains_except_pass(source, anchor, window=1000)
