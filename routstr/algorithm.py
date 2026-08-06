@@ -169,14 +169,27 @@ def create_model_mappings(
         base_url = str(getattr(upstream, "base_url", "") or "").lower()
         return f"{provider_type}|{base_url}"
 
+    def get_effective_forwarded_model_id(model: "Model") -> str | None:
+        """Ignore legacy self-aliases so they keep the model's base identity."""
+        forwarded_model_id = model.forwarded_model_id
+        if forwarded_model_id == model.id:
+            return None
+        return forwarded_model_id
+
     def _add_candidate(
         alias: str, model: "Model", provider: "BaseUpstreamProvider"
     ) -> None:
-        """Add candidate model/provider for an alias."""
+        """Add one candidate per model/provider identity for an alias."""
         alias_lower = alias.lower()
-        if alias_lower not in candidates:
-            candidates[alias_lower] = []
-        candidates[alias_lower].append((model, provider))
+        alias_candidates = candidates.setdefault(alias_lower, [])
+        provider_identity = get_provider_identity(provider)
+        if any(
+            existing_model.id.lower() == model.id.lower()
+            and get_provider_identity(existing_provider) == provider_identity
+            for existing_model, existing_provider in alias_candidates
+        ):
+            return
+        alias_candidates.append((model, provider))
 
     def process_provider_models(
         upstream: "BaseUpstreamProvider", is_openrouter: bool = False
@@ -208,12 +221,14 @@ def create_model_mappings(
 
             # Add to unique models
             base_id = get_base_model_id(model_to_use.id)
-            unique_key = model_to_use.forwarded_model_id or base_id
+            forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
+            unique_key = forwarded_model_id or base_id
             if not is_openrouter or unique_key not in unique_models:
                 unique_model = model_to_use.copy(
                     update={
                         "id": base_id,
                         "upstream_provider_id": upstream.provider_type,
+                        "forwarded_model_id": forwarded_model_id,
                     }
                 )
                 unique_models[unique_key] = unique_model
@@ -231,9 +246,9 @@ def create_model_mappings(
                 if prefixed_id not in aliases:
                     aliases.append(prefixed_id)
 
-            # Register forwarded_model_id as a routable alias
-            if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
-                aliases.append(model_to_use.forwarded_model_id)
+            # Register a distinct forwarded_model_id as a routable alias.
+            if forwarded_model_id and forwarded_model_id not in aliases:
+                aliases.append(forwarded_model_id)
 
             # Try to set each alias
             for alias in aliases:
@@ -283,7 +298,8 @@ def create_model_mappings(
             continue
 
         base_id = get_base_model_id(model_to_use.id)
-        unique_key = model_to_use.forwarded_model_id or base_id
+        forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
+        unique_key = forwarded_model_id or base_id
         is_openrouter = (
             getattr(upstream_for_override, "base_url", "")
             == "https://openrouter.ai/api/v1"
@@ -293,6 +309,7 @@ def create_model_mappings(
                 update={
                     "id": base_id,
                     "upstream_provider_id": upstream_for_override.provider_type,
+                    "forwarded_model_id": forwarded_model_id,
                 }
             )
             unique_models[unique_key] = unique_model
@@ -321,9 +338,9 @@ def create_model_mappings(
             if prefixed_id not in aliases:
                 aliases.append(prefixed_id)
 
-        # Register forwarded_model_id as a routable alias
-        if model_to_use.forwarded_model_id and model_to_use.forwarded_model_id not in aliases:
-            aliases.append(model_to_use.forwarded_model_id)
+        # Register a distinct forwarded_model_id as a routable alias.
+        if forwarded_model_id and forwarded_model_id not in aliases:
+            aliases.append(forwarded_model_id)
 
         for alias in aliases:
             _add_candidate(alias, model_to_use, upstream_for_override)
@@ -342,10 +359,8 @@ def create_model_mappings(
         forwarded_model_ids, the one whose forwarded_model_id equals the
         requested alias wins.
         """
-        if (
-            model.forwarded_model_id
-            and model.forwarded_model_id.lower() == alias
-        ):
+        forwarded_model_id = get_effective_forwarded_model_id(model)
+        if forwarded_model_id and forwarded_model_id.lower() == alias:
             return 5
 
         if (

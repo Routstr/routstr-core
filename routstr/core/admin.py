@@ -494,6 +494,12 @@ class ModelCreate(BaseModel):
     forwarded_model_id: str | None = None
 
 
+def _normalize_forwarded_model_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.strip() or None
+
+
 @admin_router.post(
     "/api/upstream-providers/{provider_id}/models",
     dependencies=[Depends(require_admin_api)],
@@ -534,7 +540,10 @@ async def upsert_provider_model(
                 json.dumps(payload.alias_ids) if payload.alias_ids else None
             )
             existing_row.enabled = payload.enabled
-            existing_row.forwarded_model_id = payload.forwarded_model_id or payload.id
+            if "forwarded_model_id" in payload.model_fields_set:
+                existing_row.forwarded_model_id = _normalize_forwarded_model_id(
+                    payload.forwarded_model_id
+                )
 
             session.add(existing_row)
             await session.commit()
@@ -567,7 +576,9 @@ async def upsert_provider_model(
                 ),
                 upstream_provider_id=provider_pk,
                 enabled=payload.enabled,
-                forwarded_model_id=payload.forwarded_model_id or payload.id,
+                forwarded_model_id=_normalize_forwarded_model_id(
+                    payload.forwarded_model_id
+                ),
             )
             session.add(row)
             await session.commit()
@@ -703,6 +714,10 @@ async def batch_override_provider_models(
                     json.dumps(model_data.alias_ids) if model_data.alias_ids else None
                 )
                 existing_row.enabled = model_data.enabled
+                if "forwarded_model_id" in model_data.model_fields_set:
+                    existing_row.forwarded_model_id = _normalize_forwarded_model_id(
+                        model_data.forwarded_model_id
+                    )
                 session.add(existing_row)
             else:
                 # Create new
@@ -733,6 +748,9 @@ async def batch_override_provider_models(
                     ),
                     upstream_provider_id=provider_pk,
                     enabled=model_data.enabled,
+                    forwarded_model_id=_normalize_forwarded_model_id(
+                        model_data.forwarded_model_id
+                    ),
                 )
                 session.add(row)
 

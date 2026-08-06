@@ -271,7 +271,7 @@ def _row_to_model(
         upstream_provider_id=row.upstream_provider_id,
         canonical_slug=getattr(row, "canonical_slug", None),
         alias_ids=json.loads(row.alias_ids) if row.alias_ids else None,
-        forwarded_model_id=getattr(row, "forwarded_model_id", None) or row.id,
+        forwarded_model_id=getattr(row, "forwarded_model_id", None),
     )
 
     if apply_provider_fee:
