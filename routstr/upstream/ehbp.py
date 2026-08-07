@@ -749,17 +749,14 @@ async def send_cashu_refund(
 ) -> str:
     """Create a Cashu refund token and record the outgoing transaction."""
     refund_token = await send_token(amount, unit=unit, mint_url=mint)
-    try:
-        await store_cashu_transaction(
-            token=refund_token,
-            amount=amount,
-            unit=unit,
-            mint_url=mint,
-            typ="out",
-            request_id=request_id,
-        )
-    except Exception:
-        pass
+    await store_cashu_transaction(
+        token=refund_token,
+        amount=amount,
+        unit=unit,
+        mint_url=mint,
+        typ="out",
+        request_id=request_id,
+    )
     return refund_token
 
 
@@ -1014,18 +1011,15 @@ async def forward_ehbp_x_cashu_request(
     try:
         amount, unit, mint = await recieve_token(x_cashu_token)
         redeemed = True
-        try:
-            await store_cashu_transaction(
-                token=x_cashu_token,
-                amount=amount,
-                unit=unit,
-                mint_url=mint,
-                typ="in",
-                request_id=request_id,
-                collected=True,
-            )
-        except Exception:
-            pass
+        await store_cashu_transaction(
+            token=x_cashu_token,
+            amount=amount,
+            unit=unit,
+            mint_url=mint,
+            typ="in",
+            request_id=request_id,
+            collected=True,
+        )
 
         headers = upstream.prepare_headers(dict(request.headers))  # type: ignore[attr-defined]
         target = upstream.get_ehbp_forwarding_target(path, model_obj)  # type: ignore[attr-defined]

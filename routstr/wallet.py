@@ -1703,23 +1703,19 @@ async def _credit_balance_locked(
             extra={"new_balance": key.balance},
         )
 
-        try:
-            await store_cashu_transaction(
-                token=cashu_token,
-                amount=original_amount,
-                unit=original_unit,
-                mint_url=mint_url,
-                typ="in",
-                source="apikey",
-                api_key_hashed_key=key.hashed_key,
-            )
-        except Exception:
-            pass
-        else:
-            logger.debug(
-                "Cashu token successfully redeemed and stored",
-                extra={"amount": amount, "unit": unit, "mint_url": mint_url},
-            )
+        await store_cashu_transaction(
+            token=cashu_token,
+            amount=original_amount,
+            unit=original_unit,
+            mint_url=mint_url,
+            typ="in",
+            source="apikey",
+            api_key_hashed_key=key.hashed_key,
+        )
+        logger.debug(
+            "Cashu token successfully redeemed and stored",
+            extra={"amount": amount, "unit": unit, "mint_url": mint_url},
+        )
         return amount
     except Exception as e:
         logger.error(
