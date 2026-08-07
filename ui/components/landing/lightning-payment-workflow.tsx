@@ -1,6 +1,7 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import Image from 'next/image';
 import { Copy, CheckCircle, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -204,6 +205,7 @@ export function LightningPaymentWorkflow({
   const [createdApiKey, setCreatedApiKey] = useState<string>('');
   const [topupApiKeyResult, setTopupApiKeyResult] = useState<string>('');
   const [recoveredApiKey, setRecoveredApiKey] = useState<string>('');
+  const { copy } = useCopyToClipboard();
   const [isWaitingPayment, setIsWaitingPayment] = useState(false);
   const [isWaitingTopupPayment, setIsWaitingTopupPayment] = useState(false);
 
@@ -218,22 +220,15 @@ export function LightningPaymentWorkflow({
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
   const [hasInteractedRecover, setHasInteractedRecover] = useState(false);
 
-  const handleCopy = useCallback(async (value: string): Promise<void> => {
-    if (!value) return;
-
-    if (typeof navigator === 'undefined' || !navigator.clipboard) {
-      toast.error('Clipboard API unavailable');
-      return;
-    }
-
-    try {
-      await navigator.clipboard.writeText(value);
-      toast.success('Copied to clipboard');
-    } catch (error) {
-      console.error(error);
-      toast.error('Unable to copy');
-    }
-  }, []);
+  const handleCopy = useCallback(
+    async (value: string): Promise<void> => {
+      if (!value) return;
+      if (await copy(value)) {
+        toast.success('Copied to clipboard');
+      }
+    },
+    [copy]
+  );
 
   const pollInvoiceStatus = useCallback(
     async (invoiceId: string, onPaid: (status: InvoiceStatus) => void) => {

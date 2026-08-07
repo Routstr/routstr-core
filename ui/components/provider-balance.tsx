@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { AdminService } from '@/lib/api/services/admin';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -33,6 +34,7 @@ export function ProviderBalance({
   isRoutstr = false,
   nodeUrl,
 }: ProviderBalanceProps) {
+  const { copy } = useCopyToClipboard();
   const [isTopupDialogOpen, setIsTopupDialogOpen] = useState(false);
   const [topupAmount, setTopupAmount] = useState('');
   const [topupError, setTopupError] = useState('');
@@ -257,11 +259,10 @@ export function ProviderBalance({
                   <Button
                     size='sm'
                     variant='outline'
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        invoiceData.payment_request
-                      );
-                      toast.success('Invoice copied to clipboard!');
+                    onClick={async () => {
+                      if (await copy(invoiceData.payment_request)) {
+                        toast.success('Invoice copied to clipboard!');
+                      }
                     }}
                     className='w-full sm:w-auto'
                   >

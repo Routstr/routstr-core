@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { AppPageShell } from '@/components/app-page-shell';
 import { PageHeader } from '@/components/page-header';
 import {
@@ -374,7 +375,7 @@ export default function TransactionsPage() {
   const [search, setSearch] = useState('');
   const [type, setType] = useState<string>('all');
   const [status, setStatus] = useState<string>('all');
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const { copiedKey: copiedId, copy } = useCopyToClipboard();
 
   // Load filters from localStorage on mount
   useEffect(() => {
@@ -401,6 +402,7 @@ export default function TransactionsPage() {
   const [activeTab, setActiveTab] = useState<string>('x-cashu');
   const [xcashuPage, setXcashuPage] = useState(0);
   const [apikeyPage, setApikeyPage] = useState(0);
+  const [withdrawalsPage, setWithdrawalsPage] = useState(0);
   const [lightningPage, setLightningPage] = useState(0);
 
   const typeParam = type === 'all' ? undefined : type;
@@ -449,6 +451,28 @@ export default function TransactionsPage() {
     placeholderData: keepPreviousData,
   });
 
+  // Withdrawals are stored with source "admin" and keep their one-time token.
+  const withdrawalsQuery = useQuery({
+    queryKey: [
+      'transactions',
+      'admin',
+      typeParam,
+      statusParam,
+      searchParam,
+      withdrawalsPage,
+    ],
+    queryFn: () =>
+      AdminService.getTransactions(
+        typeParam,
+        statusParam,
+        searchParam,
+        'admin',
+        PAGE_SIZE,
+        withdrawalsPage * PAGE_SIZE
+      ),
+    placeholderData: keepPreviousData,
+  });
+
   const LIGHTNING_STATUSES = ['pending', 'paid', 'expired', 'cancelled'];
   const lightningStatusParam = LIGHTNING_STATUSES.includes(status)
     ? status
@@ -479,17 +503,28 @@ export default function TransactionsPage() {
     setStatus('all');
     setXcashuPage(0);
     setApikeyPage(0);
+    setWithdrawalsPage(0);
     setLightningPage(0);
   };
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    toast.success('Copied to clipboard');
-    setTimeout(() => setCopiedId(null), 2000);
+  const copyToClipboard = async (text: string, id: string) => {
+    if (await copy(text, id)) {
+      toast.success('Copied to clipboard');
+    }
   };
 
   const getStatusBadge = (tx: Transaction) => {
+    // A withdrawal ends at "issued": the node hands over a bearer token and
+    // never learns whether it was redeemed, so it would read Pending forever.
+    if (tx.source === 'admin')
+      return (
+        <Badge
+          variant='outline'
+          className='border-gray-500/20 bg-gray-500/10 text-gray-500'
+        >
+          Issued
+        </Badge>
+      );
     if (tx.swept)
       return (
         <Badge
@@ -533,12 +568,14 @@ export default function TransactionsPage() {
   useEffect(() => {
     setXcashuPage(0);
     setApikeyPage(0);
+    setWithdrawalsPage(0);
     setLightningPage(0);
   }, [type, status, search]);
 
   const isRefetching =
     xcashuQuery.isRefetching ||
     apikeyQuery.isRefetching ||
+    withdrawalsQuery.isRefetching ||
     lightningQuery.isRefetching;
 
   const renderCardContent = (
@@ -617,6 +654,7 @@ export default function TransactionsPage() {
               onClick={() => {
                 xcashuQuery.refetch();
                 apikeyQuery.refetch();
+                withdrawalsQuery.refetch();
                 lightningQuery.refetch();
               }}
               variant='outline'
@@ -703,7 +741,7 @@ export default function TransactionsPage() {
           value={activeTab}
           onValueChange={setActiveTab}
         >
-          <TabsList className='mb-4'>
+          <TabsList className='mb-4 max-w-full justify-start overflow-x-auto'>
             <TabsTrigger value='x-cashu' className='flex items-center gap-2'>
               <Zap className='h-4 w-4' />
               X-Cashu
@@ -719,6 +757,18 @@ export default function TransactionsPage() {
               {apikeyQuery.data && (
                 <Badge variant='secondary' className='ml-1'>
                   {apikeyQuery.data.total}
+                </Badge>
+              )}
+            </TabsTrigger>
+            <TabsTrigger
+              value='withdrawals'
+              className='flex items-center gap-2'
+            >
+              <ArrowUpRight className='h-4 w-4' />
+              Withdrawals
+              {withdrawalsQuery.data && (
+                <Badge variant='secondary' className='ml-1'>
+                  {withdrawalsQuery.data.total}
                 </Badge>
               )}
             </TabsTrigger>
@@ -765,6 +815,28 @@ export default function TransactionsPage() {
               </CardHeader>
               <CardContent className='overflow-hidden'>
                 {renderCardContent(apikeyQuery, apikeyPage, setApikeyPage)}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value='withdrawals'>
+            <Card>
+              <CardHeader>
+                <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                  <CardTitle>Withdrawal History</CardTitle>
+                  {hasActiveFilters && (
+                    <CardDescription>
+                      Filtered by {activeFilterDescription}
+                    </CardDescription>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className='overflow-hidden'>
+                {renderCardContent(
+                  withdrawalsQuery,
+                  withdrawalsPage,
+                  setWithdrawalsPage
+                )}
               </CardContent>
             </Card>
           </TabsContent>

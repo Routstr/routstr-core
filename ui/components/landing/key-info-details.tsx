@@ -1,5 +1,6 @@
 'use client';
 
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { useWalletInfo } from '@/hooks/use-wallet-info';
 import type { RefundReceipt } from './cashu-payment-workflow';
 import { toast } from 'sonner';
@@ -58,6 +59,7 @@ export function KeyInfoDetails({
   onWalletInfoUpdated,
   onRefundComplete,
 }: KeyInfoDetailsProps): React.ReactNode {
+  const { copy } = useCopyToClipboard();
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
   const [isResetting, setIsResetting] = useState<string | null>(null);
   const [isRefunding, setIsRefunding] = useState(false);
@@ -92,9 +94,10 @@ export function KeyInfoDetails({
     }
   };
 
-  const handleCopy = (value: string) => {
-    navigator.clipboard.writeText(value);
-    toast.success('Copied to clipboard');
+  const handleCopy = async (value: string) => {
+    if (await copy(value)) {
+      toast.success('Copied to clipboard');
+    }
   };
 
   const handleResetSpent = async (childKey: string) => {

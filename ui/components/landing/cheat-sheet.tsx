@@ -2,6 +2,7 @@
 
 import { type JSX, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { Bolt, Copy, RefreshCcw, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -65,6 +66,7 @@ function normalizeBaseUrl(url: string): string {
 }
 
 export function CheatSheet(): JSX.Element {
+  const { copy } = useCopyToClipboard();
   const [baseUrl, setBaseUrl] = useState(() =>
     typeof window === 'undefined' ? '' : ConfigurationService.getLocalBaseUrl()
   );
@@ -98,22 +100,17 @@ export function CheatSheet(): JSX.Element {
     staleTime: 120_000,
   });
 
-  const handleCopy = useCallback(async (value: string): Promise<void> => {
-    if (!value) {
-      return;
-    }
-    if (typeof navigator === 'undefined' || !navigator.clipboard) {
-      toast.error('Clipboard API unavailable');
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(value);
-      toast.success('Copied to clipboard');
-    } catch (error) {
-      console.error(error);
-      toast.error('Unable to copy');
-    }
-  }, []);
+  const handleCopy = useCallback(
+    async (value: string): Promise<void> => {
+      if (!value) {
+        return;
+      }
+      if (await copy(value)) {
+        toast.success('Copied to clipboard');
+      }
+    },
+    [copy]
+  );
 
   const handleApiKeyCreated = useCallback(
     (apiKey: string, snapshot: WalletSnapshot) => {

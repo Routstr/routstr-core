@@ -13,6 +13,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { AdminService } from '@/lib/api/services/admin';
+import { getApiErrorMessage } from '@/lib/api/errors';
 import {
   Card,
   CardContent,
@@ -169,7 +170,8 @@ export function TemporaryBalances({
           <Alert variant='destructive'>
             <AlertCircle className='h-5 w-5' />
             <AlertDescription>
-              Error loading API keys: {(error as Error).message}
+              Error loading API keys:{' '}
+              {getApiErrorMessage(error, 'Request failed')}
             </AlertDescription>
           </Alert>
         ) : (

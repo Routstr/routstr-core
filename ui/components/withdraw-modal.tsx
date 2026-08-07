@@ -11,10 +11,11 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Select,
   SelectContent,
@@ -22,7 +23,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { AlertCircle, Copy, CheckCircle } from 'lucide-react';
+import { AlertCircle, Copy, CheckCircle, Download } from 'lucide-react';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
+import { getApiErrorMessage } from '@/lib/api/errors';
 
 interface WithdrawModalProps {
   open: boolean;
@@ -40,7 +43,8 @@ export function WithdrawModal({
   const [selectedMintUnit, setSelectedMintUnit] = useState('');
   const [amount, setAmount] = useState('');
   const [withdrawnToken, setWithdrawnToken] = useState('');
-  const [copiedToken, setCopiedToken] = useState(false);
+  const [confirmedSaved, setConfirmedSaved] = useState(false);
+  const { copied: copiedToken, copy } = useCopyToClipboard();
 
   const availableBalances = balances.filter(
     (b) => !b.error && b.wallet_balance > 0
@@ -82,14 +86,25 @@ export function WithdrawModal({
       setWithdrawnToken('');
       setAmount('');
       setSelectedMintUnit('');
-      setCopiedToken(false);
+      setConfirmedSaved(false);
     }
   }, [open]);
 
-  const handleCopyToken = () => {
-    navigator.clipboard.writeText(withdrawnToken);
-    setCopiedToken(true);
-    setTimeout(() => setCopiedToken(false), 2000);
+  // The token is a bearer instrument. Escape, backdrop, X and drag-dismiss all
+  // route through here; none of them may destroy it before the user confirms.
+  const handleOpenChange = (next: boolean) => {
+    if (!next && withdrawnToken && !confirmedSaved) return;
+    onOpenChange(next);
+  };
+
+  const handleDownloadToken = () => {
+    const blob = new Blob([withdrawnToken], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cashu-token-${Date.now()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const amountNum = parseInt(amount) || 0;
@@ -100,33 +115,30 @@ export function WithdrawModal({
 
   if (withdrawnToken) {
     return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className='sm:max-w-xl'>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        {/* The X would route to handleOpenChange, which refuses until the token
+            is confirmed saved, so it would render as a dead control. */}
+        <DialogContent className='sm:max-w-xl' showCloseButton={false}>
           <DialogHeader>
-            <DialogTitle>Withdrawal Successful</DialogTitle>
+            <DialogTitle>Withdrawal complete</DialogTitle>
             <DialogDescription>
-              Save this token! It represents your withdrawn balance.
+              This token is the money. Anyone holding it can redeem it, so save
+              it before closing.
             </DialogDescription>
           </DialogHeader>
 
           <div className='space-y-4'>
-            <Alert>
-              <CheckCircle className='h-5 w-5' />
-              <AlertTitle>Withdrawal Token</AlertTitle>
-              <AlertDescription>
-                Save this token now. It represents your withdrawn balance.
-              </AlertDescription>
-            </Alert>
             <Textarea
               readOnly
               value={withdrawnToken}
+              onFocus={(e) => e.target.select()}
               className='font-mono text-xs leading-relaxed'
               rows={6}
             />
 
             <div className='flex flex-col gap-2 sm:flex-row'>
               <Button
-                onClick={handleCopyToken}
+                onClick={() => copy(withdrawnToken)}
                 className='w-full flex-1'
                 variant={copiedToken ? 'outline' : 'default'}
               >
@@ -143,13 +155,41 @@ export function WithdrawModal({
                 )}
               </Button>
               <Button
-                onClick={() => onOpenChange(false)}
+                onClick={handleDownloadToken}
                 variant='outline'
-                className='w-full sm:w-auto'
+                className='w-full flex-1'
               >
-                Close
+                <Download className='mr-2 h-4 w-4' />
+                Download .txt
               </Button>
             </div>
+
+            <p className='text-muted-foreground text-xs'>
+              A copy is also kept under Transactions in the Withdrawals tab,
+              where you can copy it again later.
+            </p>
+
+            <div className='flex items-center gap-2'>
+              <Checkbox
+                id='token-saved'
+                checked={confirmedSaved}
+                onCheckedChange={(checked) =>
+                  setConfirmedSaved(checked === true)
+                }
+              />
+              <Label htmlFor='token-saved' className='text-sm font-normal'>
+                I have saved this token
+              </Label>
+            </div>
+
+            <Button
+              onClick={() => handleOpenChange(false)}
+              variant='outline'
+              disabled={!confirmedSaved}
+              className='w-full'
+            >
+              Close
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -233,8 +273,10 @@ export function WithdrawModal({
             <Alert variant='destructive'>
               <AlertCircle className='h-5 w-5' />
               <AlertDescription>
-                {(withdrawMutation.error as Error).message ||
-                  'Failed to withdraw'}
+                {getApiErrorMessage(
+                  withdrawMutation.error,
+                  'Failed to withdraw'
+                )}
               </AlertDescription>
             </Alert>
           )}
