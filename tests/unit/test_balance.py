@@ -548,6 +548,13 @@ async def test_refund_fresh_cashu_bearer_returns_401() -> None:
         )
 
     assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == {
+        "error": {
+            "message": "Key not found. Deposit first via /v1/wallet/create before requesting a refund.",
+            "type": "invalid_request_error",
+            "code": "key_not_found",
+        }
+    }
     session.get.assert_awaited_once()
     # No add/commit → no key was persisted
     session.add.assert_not_called()

@@ -439,7 +439,13 @@ async def refund_wallet_endpoint(
     if key is None:
         raise HTTPException(
             status_code=401,
-            detail="Key not found. Deposit first via /v1/wallet/create before requesting a refund.",
+            detail={
+                "error": {
+                    "message": "Key not found. Deposit first via /v1/wallet/create before requesting a refund.",
+                    "type": "invalid_request_error",
+                    "code": "key_not_found",
+                }
+            },
         )
 
     if key.total_balance <= 0:
