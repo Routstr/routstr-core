@@ -307,9 +307,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     pending_invoice = (
         select(LightningInvoice.id)
         .where(col(LightningInvoice.api_key_hash) == col(ApiKey.hashed_key))
-        .where(
-            col(LightningInvoice.status).in_(("pending", "settlement_pending"))
-        )
+        .where(col(LightningInvoice.status).in_(("pending", "settlement_pending")))
     ).exists()
 
     eligible_hashes = (
@@ -447,7 +445,8 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     )
     purpose: str = Field(description="create or topup")
     mint_url: str | None = Field(
-        default=None, description="Mint URL where the quote was created (fallback tracking)"
+        default=None,
+        description="Mint URL where the quote was created (fallback tracking)",
     )
     created_at: int = Field(
         default_factory=lambda: int(time.time()), description="Unix timestamp"
@@ -682,6 +681,9 @@ class RoutstrFee(SQLModel, table=True):  # type: ignore
     last_paid_at: int | None = Field(default=None)
     payout_in_progress_msats: int = Field(default=0)
     payout_started_at: int | None = Field(default=None)
+    payout_quote_id: str | None = Field(default=None)
+    payout_mint_url: str | None = Field(default=None)
+    payout_unit: str | None = Field(default=None)
 
 
 class NsecState(str, Enum):
@@ -805,8 +807,14 @@ async def set_nsec(session: AsyncSession, nsec: str) -> None:
     await session.commit()
 
 
-async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
-    """Checkpoint a fee payout before making the external payment."""
+async def reset_routstr_fee(
+    session: AsyncSession,
+    paid_msats: int,
+    quote_id: str,
+    mint_url: str,
+    unit: str,
+) -> bool:
+    """Checkpoint a fee payout and its reconciliation metadata before dispatch."""
     stmt = (
         update(RoutstrFee)
         .where(col(RoutstrFee.id) == 1)
@@ -816,6 +824,9 @@ async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
             accumulated_msats=RoutstrFee.accumulated_msats - paid_msats,
             payout_in_progress_msats=paid_msats,
             payout_started_at=int(time.time()),
+            payout_quote_id=quote_id,
+            payout_mint_url=mint_url,
+            payout_unit=unit,
         )
     )
     result = await session.exec(stmt)  # type: ignore[call-overload]
@@ -823,15 +834,56 @@ async def reset_routstr_fee(session: AsyncSession, paid_msats: int) -> bool:
     return result.rowcount == 1
 
 
-async def complete_routstr_fee_payout(session: AsyncSession, paid_msats: int) -> bool:
-    """Mark a checkpointed payout complete after the external payment succeeds."""
+async def restore_routstr_fee_payout(
+    session: AsyncSession,
+    paid_msats: int,
+    quote_id: str,
+    mint_url: str,
+    unit: str,
+) -> bool:
+    """Return the matching unresolved payout to the accumulated fee balance."""
     stmt = (
         update(RoutstrFee)
         .where(col(RoutstrFee.id) == 1)
         .where(col(RoutstrFee.payout_in_progress_msats) == paid_msats)
+        .where(col(RoutstrFee.payout_quote_id) == quote_id)
+        .where(col(RoutstrFee.payout_mint_url) == mint_url)
+        .where(col(RoutstrFee.payout_unit) == unit)
+        .values(
+            accumulated_msats=RoutstrFee.accumulated_msats + paid_msats,
+            payout_in_progress_msats=0,
+            payout_started_at=None,
+            payout_quote_id=None,
+            payout_mint_url=None,
+            payout_unit=None,
+        )
+    )
+    result = await session.exec(stmt)  # type: ignore[call-overload]
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def complete_routstr_fee_payout(
+    session: AsyncSession,
+    paid_msats: int,
+    quote_id: str,
+    mint_url: str,
+    unit: str,
+) -> bool:
+    """Mark the matching checkpoint complete after external payment succeeds."""
+    stmt = (
+        update(RoutstrFee)
+        .where(col(RoutstrFee.id) == 1)
+        .where(col(RoutstrFee.payout_in_progress_msats) == paid_msats)
+        .where(col(RoutstrFee.payout_quote_id) == quote_id)
+        .where(col(RoutstrFee.payout_mint_url) == mint_url)
+        .where(col(RoutstrFee.payout_unit) == unit)
         .values(
             payout_in_progress_msats=0,
             payout_started_at=None,
+            payout_quote_id=None,
+            payout_mint_url=None,
+            payout_unit=None,
             total_paid_msats=RoutstrFee.total_paid_msats + paid_msats,
             last_paid_at=int(time.time()),
         )

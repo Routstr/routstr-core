@@ -748,10 +748,17 @@ async def check_bolt11_payment_status(mint_url: str, unit: str, quote_id: str) -
     Runs under ``wallet_operation_guard`` because of that side effect: it
     mutates proof state and must not race other processes' wallet operations.
     """
+    async with wallet_operation_guard():
+        return await _check_bolt11_payment_status_locked(mint_url, unit, quote_id)
+
+
+async def _check_bolt11_payment_status_locked(
+    mint_url: str, unit: str, quote_id: str
+) -> str:
+    """Check a melt quote while the caller holds ``wallet_operation_guard``."""
     try:
-        async with wallet_operation_guard():
-            wallet = await get_wallet(mint_url, unit, force_reload=True)
-            quote = await wallet.get_melt_quote(quote_id)
+        wallet = await get_wallet(mint_url, unit, force_reload=True)
+        quote = await wallet.get_melt_quote(quote_id)
     except Exception as e:
         logger.warning(
             "Could not query the mint for a melt quote's status",
@@ -2346,6 +2353,10 @@ async def periodic_refund_sweep() -> None:
             )
 
 
+class _RoutstrFeePayoutAlreadyClaimed(Exception):
+    """Another worker claimed the fee balance before melt dispatch."""
+
+
 async def periodic_routstr_fee_payout() -> None:
     from .auth import (
         ROUTSTR_FEE_DEFAULT_PAYOUT,
@@ -2361,27 +2372,82 @@ async def periodic_routstr_fee_payout() -> None:
         try:
             async with db.create_session() as session:
                 fee = await db.get_routstr_fee(session)
-                if fee.payout_in_progress_msats:
-                    logger.critical(
-                        "Routstr fee payout requires manual reconciliation",
-                        extra={
-                            "payout_in_progress_msats": fee.payout_in_progress_msats,
-                            "payout_started_at": fee.payout_started_at,
-                        },
-                    )
-                    continue
-
+                payout_in_progress_msats = fee.payout_in_progress_msats
                 accumulated_sats = _msats_to_sats(fee.accumulated_msats)
-                if accumulated_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
-                    continue
-                paid_msats = _sats_to_msats(accumulated_sats)
 
-            # Serialize proof refresh, reservation, sending, and checkpoint
-            # finalization with every other wallet mutation across workers.
+            if payout_in_progress_msats:
+                # Dispatch holds the same guard from before checkpoint creation
+                # through melt completion. Re-read after taking it so a second
+                # worker cannot reconcile the quote between checkpoint and melt.
+                async with wallet_operation_guard():
+                    async with db.create_session() as session:
+                        fee = await db.get_routstr_fee(session)
+                        payout_in_progress_msats = fee.payout_in_progress_msats
+                        payout_started_at = fee.payout_started_at
+                        payout_quote_id = getattr(fee, "payout_quote_id", None)
+                        payout_mint_url = getattr(fee, "payout_mint_url", None)
+                        payout_unit = getattr(fee, "payout_unit", None)
+
+                    if not payout_in_progress_msats:
+                        continue
+                    if not (payout_quote_id and payout_mint_url and payout_unit):
+                        logger.critical(
+                            "Routstr fee payout lacks reconciliation metadata",
+                            extra={
+                                "payout_in_progress_msats": payout_in_progress_msats,
+                                "payout_started_at": payout_started_at,
+                            },
+                        )
+                        continue
+
+                    quote_state = await _check_bolt11_payment_status_locked(
+                        payout_mint_url, payout_unit, payout_quote_id
+                    )
+                    if quote_state == "paid":
+                        async with db.create_session() as session:
+                            completed = await db.complete_routstr_fee_payout(
+                                session,
+                                payout_in_progress_msats,
+                                payout_quote_id,
+                                payout_mint_url,
+                                payout_unit,
+                            )
+                        if completed:
+                            logger.info(
+                                "Routstr fee payout reconciled as paid",
+                                extra={"payout_quote_id": payout_quote_id},
+                            )
+                    elif quote_state == "unpaid":
+                        async with db.create_session() as session:
+                            restored = await db.restore_routstr_fee_payout(
+                                session,
+                                payout_in_progress_msats,
+                                payout_quote_id,
+                                payout_mint_url,
+                                payout_unit,
+                            )
+                        if restored:
+                            logger.warning(
+                                "Routstr fee payout reconciled as unpaid and restored for retry",
+                                extra={"payout_quote_id": payout_quote_id},
+                            )
+                    else:
+                        logger.warning(
+                            "Routstr fee payout is still awaiting reconciliation",
+                            extra={
+                                "payout_quote_id": payout_quote_id,
+                                "quote_state": quote_state,
+                            },
+                        )
+                continue
+
+            if accumulated_sats < ROUTSTR_FEE_DEFAULT_PAYOUT:
+                continue
+            paid_msats = _sats_to_msats(accumulated_sats)
+
+            # Serialize proof refresh, quote creation, checkpointing, sending,
+            # and finalization with every other wallet mutation across workers.
             async with wallet_operation_guard():
-                # Wallet/proof preparation cannot send funds, so do it before
-                # the durable checkpoint. Force a DB reload after taking the
-                # guard so another worker's reservations are visible.
                 wallet = await get_wallet(
                     settings.primary_mint, "sat", force_reload=True
                 )
@@ -2389,13 +2455,21 @@ async def periodic_routstr_fee_payout() -> None:
                     wallet, settings.primary_mint, "sat", not_reserved=True
                 )
 
-                async with db.create_session() as session:
-                    payout_checkpointed = await db.reset_routstr_fee(
-                        session, paid_msats
-                    )
-                if not payout_checkpointed:
-                    logger.warning("Routstr fee payout was already claimed")
-                    continue
+                attempt_quote_id: str | None = None
+
+                async def checkpoint_quote(quote_id: str) -> None:
+                    nonlocal attempt_quote_id
+                    async with db.create_session() as session:
+                        checkpointed = await db.reset_routstr_fee(
+                            session,
+                            paid_msats,
+                            quote_id,
+                            settings.primary_mint,
+                            "sat",
+                        )
+                    if not checkpointed:
+                        raise _RoutstrFeePayoutAlreadyClaimed
+                    attempt_quote_id = quote_id
 
                 try:
                     amount_received = await raw_send_to_lnurl(
@@ -2404,10 +2478,14 @@ async def periodic_routstr_fee_payout() -> None:
                         ROUTSTR_LN_ADDRESS,
                         "sat",
                         amount=accumulated_sats,
+                        on_melt_quote=checkpoint_quote,
                     )
+                except _RoutstrFeePayoutAlreadyClaimed:
+                    logger.warning("Routstr fee payout was already claimed")
+                    continue
                 except BaseException as e:
                     logger.critical(
-                        "Routstr fee payout outcome is unknown; manual reconciliation required",
+                        "Routstr fee payout outcome is unknown; awaiting quote reconciliation",
                         extra={"payout_in_progress_msats": paid_msats},
                         exc_info=isinstance(e, Exception),
                     )
@@ -2415,14 +2493,19 @@ async def periodic_routstr_fee_payout() -> None:
                         raise
                     continue
 
+                assert attempt_quote_id is not None
                 try:
                     async with db.create_session() as session:
                         payout_completed = await db.complete_routstr_fee_payout(
-                            session, paid_msats
+                            session,
+                            paid_msats,
+                            attempt_quote_id,
+                            settings.primary_mint,
+                            "sat",
                         )
                 except BaseException as e:
                     logger.critical(
-                        "Routstr fee payout sent but checkpoint was not completed",
+                        "Routstr fee payout sent but checkpoint was not completed; awaiting quote reconciliation",
                         extra={"payout_in_progress_msats": paid_msats},
                         exc_info=isinstance(e, Exception),
                     )
@@ -2431,7 +2514,7 @@ async def periodic_routstr_fee_payout() -> None:
                     continue
                 if not payout_completed:
                     logger.critical(
-                        "Routstr fee payout sent but checkpoint was not completed",
+                        "Routstr fee payout sent but checkpoint was not completed; awaiting quote reconciliation",
                         extra={"payout_in_progress_msats": paid_msats},
                     )
                     continue

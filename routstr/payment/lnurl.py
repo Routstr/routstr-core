@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Awaitable, Callable
 from typing import TypedDict
 
 import httpx
@@ -175,6 +176,8 @@ async def raw_send_to_lnurl(
     lnurl: str,
     unit: str,
     amount: int | None = None,
+    *,
+    on_melt_quote: Callable[[str], Awaitable[None]] | None = None,
 ) -> int:
     """Send funds to an LNURL address.
 
@@ -237,6 +240,9 @@ async def raw_send_to_lnurl(
         mint_url=str(wallet.url),
     )
 
+    if on_melt_quote is not None:
+        await on_melt_quote(melt_quote_resp.quote)
+
     if amount:
         proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
@@ -287,6 +293,5 @@ async def raw_send_to_lnurl(
 
     state = getattr(getattr(quote, "state", None), "value", "unknown")
     raise MeltOutcomeAmbiguousError(
-        "Melt outcome is ambiguous; proofs must not be retried "
-        f"(quote_state={state})"
+        f"Melt outcome is ambiguous; proofs must not be retried (quote_state={state})"
     ) from melt_error
