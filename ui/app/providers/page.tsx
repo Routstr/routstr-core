@@ -3,6 +3,7 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { getApiErrorMessage } from '@/lib/api/errors';
 import {
   AdminService,
   ProviderModels,
@@ -139,7 +140,7 @@ export default function ProvidersPage() {
       resetForm();
     },
     onError: (error: Error) => {
-      toast.error(`Failed to create provider: ${error.message}`);
+      toast.error(getApiErrorMessage(error, 'Failed to create provider'));
     },
   });
 
@@ -153,7 +154,7 @@ export default function ProvidersPage() {
       toast.success('Provider updated successfully');
     },
     onError: (error: Error) => {
-      toast.error(`Failed to update provider: ${error.message}`);
+      toast.error(getApiErrorMessage(error, 'Failed to update provider'));
     },
   });
 
@@ -164,7 +165,7 @@ export default function ProvidersPage() {
       toast.success('Provider deleted successfully');
     },
     onError: (error: Error) => {
-      toast.error(`Failed to delete provider: ${error.message}`);
+      toast.error(getApiErrorMessage(error, 'Failed to delete provider'));
     },
   });
 
@@ -183,7 +184,7 @@ export default function ProvidersPage() {
       toast.success('Model deleted successfully');
     },
     onError: (error: Error) => {
-      toast.error(`Failed to delete model: ${error.message}`);
+      toast.error(getApiErrorMessage(error, 'Failed to delete model'));
     },
   });
 
@@ -205,9 +206,7 @@ export default function ProvidersPage() {
         toast.success('Account created, but no API key returned.');
       }
     } catch (error: unknown) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error';
-      toast.error(`Failed to create account: ${errorMessage}`);
+      toast.error(getApiErrorMessage(error, 'Failed to create account'));
     } finally {
       setIsCreatingAccount(false);
     }

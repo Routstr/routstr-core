@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { RefreshCw, AlertCircle, Wallet, User, Coins } from 'lucide-react';
 import { WalletService, BalanceDetail } from '@/lib/api/services/wallet';
+import { getApiErrorMessage } from '@/lib/api/errors';
 import {
   Card,
   CardContent,
@@ -191,7 +192,8 @@ export function DetailedWalletBalance({
             <Alert variant='destructive'>
               <AlertCircle className='h-5 w-5' />
               <AlertDescription>
-                Error loading balance: {(error as Error).message}
+                Error loading balance:{' '}
+                {getApiErrorMessage(error, 'Request failed')}
               </AlertDescription>
             </Alert>
           ) : (
