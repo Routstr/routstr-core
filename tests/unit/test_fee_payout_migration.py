@@ -37,7 +37,8 @@ def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
         }
         fee = connection.execute(
             "SELECT id, accumulated_msats, total_paid_msats, last_paid_at, "
-            "payout_in_progress_msats, payout_started_at FROM routstr_fees"
+            "payout_in_progress_msats, payout_started_at, payout_quote_id, "
+            "payout_mint_url, payout_unit FROM routstr_fees"
         ).fetchone()
 
     migration_config = Config(str(root / "alembic.ini"))
@@ -51,8 +52,11 @@ def test_fresh_node_migrates_fee_payout_schema_to_head(tmp_path: Path) -> None:
         "last_paid_at",
         "payout_in_progress_msats",
         "payout_started_at",
+        "payout_quote_id",
+        "payout_mint_url",
+        "payout_unit",
     } <= columns
-    assert fee == (1, 0, 0, None, 0, None)
+    assert fee == (1, 0, 0, None, 0, None, None, None, None)
 
 
 def test_fee_payout_checkpoint_migration_preserves_existing_row(
@@ -76,11 +80,11 @@ def test_fee_payout_checkpoint_migration_preserves_existing_row(
     with sqlite3.connect(database_path) as connection:
         row = connection.execute(
             "SELECT accumulated_msats, total_paid_msats, last_paid_at, "
-            "payout_in_progress_msats, payout_started_at "
-            "FROM routstr_fees WHERE id = 1"
+            "payout_in_progress_msats, payout_started_at, payout_quote_id, "
+            "payout_mint_url, payout_unit FROM routstr_fees WHERE id = 1"
         ).fetchone()
 
-    assert row == (5000, 1000, 123, 0, None)
+    assert row == (5000, 1000, 123, 0, None, None, None, None)
 
 
 def test_fee_payout_checkpoint_repair_restores_columns_missing_at_old_head(

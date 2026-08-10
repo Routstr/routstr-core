@@ -38,20 +38,120 @@ async def test_fee_payout_checkpoint_is_atomic_and_durable() -> None:
         session.add(db.RoutstrFee(id=1, accumulated_msats=5_000))
         await session.commit()
 
-        assert await db.reset_routstr_fee(session, 5_000) is True
-        assert await db.reset_routstr_fee(session, 5_000) is False
+        assert (
+            await db.reset_routstr_fee(
+                session, 5_000, "quote-1", "https://mint.test", "sat"
+            )
+            is True
+        )
+        assert (
+            await db.reset_routstr_fee(
+                session, 5_000, "quote-2", "https://mint.test", "sat"
+            )
+            is False
+        )
 
         fee = await db.get_routstr_fee(session)
         await session.refresh(fee)
         assert fee.accumulated_msats == 0
         assert fee.payout_in_progress_msats == 5_000
+        assert fee.payout_quote_id == "quote-1"
+        assert fee.payout_mint_url == "https://mint.test"
+        assert fee.payout_unit == "sat"
         assert fee.total_paid_msats == 0
 
-        assert await db.complete_routstr_fee_payout(session, 5_000) is True
+        assert (
+            await db.complete_routstr_fee_payout(
+                session, 5_000, "quote-1", "https://mint.test", "sat"
+            )
+            is True
+        )
         await session.refresh(fee)
         assert fee.payout_in_progress_msats == 0
+        assert fee.payout_quote_id is None
+        assert fee.payout_mint_url is None
+        assert fee.payout_unit is None
         assert fee.total_paid_msats == 5_000
         assert fee.last_paid_at is not None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_checkpoint_can_be_restored_for_retry() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    async with AsyncSession(engine) as session:
+        session.add(db.RoutstrFee(id=1, accumulated_msats=7_000))
+        await session.commit()
+
+        assert (
+            await db.reset_routstr_fee(
+                session, 5_000, "quote-1", "https://mint.test", "sat"
+            )
+            is True
+        )
+        assert (
+            await db.restore_routstr_fee_payout(
+                session, 5_000, "quote-1", "https://mint.test", "sat"
+            )
+            is True
+        )
+        assert (
+            await db.restore_routstr_fee_payout(
+                session, 5_000, "quote-1", "https://mint.test", "sat"
+            )
+            is False
+        )
+
+        fee = await db.get_routstr_fee(session)
+        await session.refresh(fee)
+        assert fee.accumulated_msats == 7_000
+        assert fee.payout_in_progress_msats == 0
+        assert fee.payout_started_at is None
+        assert fee.payout_quote_id is None
+        assert fee.payout_mint_url is None
+        assert fee.payout_unit is None
+        assert fee.total_paid_msats == 0
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_reconciliation_cannot_mutate_replacement_quote() -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        await connection.run_sync(SQLModel.metadata.create_all)
+
+    async with AsyncSession(engine) as session:
+        session.add(db.RoutstrFee(id=1, accumulated_msats=10_000))
+        await session.commit()
+
+        assert await db.reset_routstr_fee(
+            session, 5_000, "quote-1", "https://mint.test", "sat"
+        )
+        assert await db.restore_routstr_fee_payout(
+            session, 5_000, "quote-1", "https://mint.test", "sat"
+        )
+        assert await db.reset_routstr_fee(
+            session, 5_000, "quote-2", "https://mint.test", "sat"
+        )
+
+        assert not await db.restore_routstr_fee_payout(
+            session, 5_000, "quote-1", "https://mint.test", "sat"
+        )
+        assert not await db.complete_routstr_fee_payout(
+            session, 5_000, "quote-1", "https://mint.test", "sat"
+        )
+
+        fee = await db.get_routstr_fee(session)
+        await session.refresh(fee)
+        assert fee.accumulated_msats == 5_000
+        assert fee.payout_in_progress_msats == 5_000
+        assert fee.payout_quote_id == "quote-2"
+        assert fee.total_paid_msats == 0
 
     await engine.dispose()
 
@@ -75,7 +175,9 @@ async def test_fee_payout_prepares_wallet_then_checkpoints_before_sending() -> N
         events.append("checkpoint")
         return True
 
-    async def send(*_args: object, **_kwargs: object) -> int:
+    async def send(*_args: object, **kwargs: object) -> int:
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1")  # type: ignore[operator]
         events.append("send")
         return 5
 
@@ -149,7 +251,13 @@ async def test_fee_payout_lost_checkpoint_race_does_not_send() -> None:
         payout_in_progress_msats=0,
         payout_started_at=None,
     )
-    send = AsyncMock()
+    dispatched = AsyncMock()
+
+    async def send(*_args: object, **kwargs: object) -> int:
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        await dispatched()
+        return 5
 
     with (
         patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
@@ -169,24 +277,30 @@ async def test_fee_payout_lost_checkpoint_race_does_not_send() -> None:
         ),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
-        patch("routstr.wallet.raw_send_to_lnurl", send),
+        patch("routstr.wallet.raw_send_to_lnurl", side_effect=send),
         patch("routstr.wallet.logger.warning") as warning,
     ):
         with pytest.raises(asyncio.CancelledError):
             await wallet.periodic_routstr_fee_payout()
 
-    send.assert_not_awaited()
+    dispatched.assert_not_awaited()
     warning.assert_called_once_with("Routstr fee payout was already claimed")
 
 
 @pytest.mark.asyncio
-async def test_fee_payout_does_not_retry_an_unresolved_checkpoint() -> None:
+async def test_fee_payout_finalizes_a_paid_unresolved_quote_without_resending() -> None:
     session = Mock()
     fee = SimpleNamespace(
         accumulated_msats=10_000,
         payout_in_progress_msats=5_000,
         payout_started_at=123,
+        payout_quote_id="quote-1",
+        payout_mint_url="https://mint.test",
+        payout_unit="sat",
     )
+    complete = AsyncMock(return_value=True)
+    restore = AsyncMock()
+    send = AsyncMock()
 
     with (
         patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
@@ -199,17 +313,215 @@ async def test_fee_payout_does_not_retry_an_unresolved_checkpoint() -> None:
             "routstr.wallet.db.create_session", return_value=_session_context(session)
         ),
         patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
-        patch("routstr.wallet.db.reset_routstr_fee", AsyncMock()) as checkpoint,
-        patch("routstr.wallet.get_wallet", AsyncMock()) as get_wallet,
-        patch("routstr.wallet.raw_send_to_lnurl", AsyncMock()) as send,
+        patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
+        patch("routstr.wallet.db.restore_routstr_fee_payout", restore),
+        patch(
+            "routstr.wallet._check_bolt11_payment_status_locked",
+            AsyncMock(return_value="paid"),
+        ) as status,
+        patch("routstr.wallet.raw_send_to_lnurl", send),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    status.assert_awaited_once_with("https://mint.test", "sat", "quote-1")
+    complete.assert_awaited_once_with(
+        session, 5_000, "quote-1", "https://mint.test", "sat"
+    )
+    restore.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_restores_only_an_unpaid_quote_and_retries() -> None:
+    session = Mock()
+    unresolved_fee = SimpleNamespace(
+        accumulated_msats=10_000,
+        payout_in_progress_msats=5_000,
+        payout_started_at=123,
+        payout_quote_id="quote-1",
+        payout_mint_url="https://mint.test",
+        payout_unit="sat",
+    )
+    restored_fee = SimpleNamespace(
+        accumulated_msats=15_000,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+
+    async def send(*_args: object, **kwargs: object) -> int:
+        await kwargs["on_melt_quote"]("quote-2")  # type: ignore[index,operator]
+        return 15
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch(
+            "routstr.wallet.db.get_routstr_fee",
+            AsyncMock(side_effect=[unresolved_fee, unresolved_fee, restored_fee]),
+        ),
+        patch(
+            "routstr.wallet._check_bolt11_payment_status_locked",
+            AsyncMock(return_value="unpaid"),
+        ),
+        patch(
+            "routstr.wallet.db.restore_routstr_fee_payout",
+            AsyncMock(return_value=True),
+        ) as restore,
+        patch(
+            "routstr.wallet.db.reset_routstr_fee", AsyncMock(return_value=True)
+        ) as reset,
+        patch(
+            "routstr.wallet.db.complete_routstr_fee_payout",
+            AsyncMock(return_value=True),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch("routstr.wallet.raw_send_to_lnurl", side_effect=send) as raw_send,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    restore.assert_awaited_once_with(
+        session, 5_000, "quote-1", "https://mint.test", "sat"
+    )
+    reset.assert_awaited_once_with(
+        session, 15_000, "quote-2", wallet.settings.primary_mint, "sat"
+    )
+    raw_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quote_state", ["pending", "unknown"])
+async def test_fee_payout_keeps_nonfinal_quote_locked(quote_state: str) -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=10_000,
+        payout_in_progress_msats=5_000,
+        payout_started_at=123,
+        payout_quote_id="quote-1",
+        payout_mint_url="https://mint.test",
+        payout_unit="sat",
+    )
+    complete = AsyncMock()
+    restore = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
+        patch("routstr.wallet.db.restore_routstr_fee_payout", restore),
+        patch(
+            "routstr.wallet._check_bolt11_payment_status_locked",
+            AsyncMock(return_value=quote_state),
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    complete.assert_not_awaited()
+    restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_reconciliation_rechecks_state_under_wallet_guard() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=10_000,
+        payout_in_progress_msats=5_000,
+        payout_started_at=123,
+        payout_quote_id="quote-1",
+        payout_mint_url="https://mint.test",
+        payout_unit="sat",
+    )
+    guard_held = False
+
+    @asynccontextmanager
+    async def guard() -> AsyncGenerator[None, None]:
+        nonlocal guard_held
+        assert not guard_held
+        guard_held = True
+        try:
+            yield
+        finally:
+            guard_held = False
+
+    async def status(*_args: object) -> str:
+        assert guard_held
+        return "pending"
+
+    get_fee = AsyncMock(return_value=fee)
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", get_fee),
+        patch("routstr.wallet.wallet_operation_guard", guard),
+        patch(
+            "routstr.wallet._check_bolt11_payment_status_locked",
+            side_effect=status,
+        ),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    assert get_fee.await_count == 2
+    assert not guard_held
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_keeps_legacy_checkpoint_without_quote_locked() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=10_000,
+        payout_in_progress_msats=5_000,
+        payout_started_at=123,
+        payout_quote_id=None,
+        payout_mint_url=None,
+        payout_unit=None,
+    )
+    restore = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.restore_routstr_fee_payout", restore),
         patch("routstr.wallet.logger.critical") as critical,
     ):
         with pytest.raises(asyncio.CancelledError):
             await wallet.periodic_routstr_fee_payout()
 
-    checkpoint.assert_not_awaited()
-    get_wallet.assert_not_awaited()
-    send.assert_not_awaited()
+    restore.assert_not_awaited()
     critical.assert_called_once()
 
 
@@ -222,6 +534,11 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
         payout_started_at=None,
     )
     complete = AsyncMock()
+
+    async def send(*_args: object, **kwargs: object) -> int:
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        raise TimeoutError("unknown outcome")
 
     with (
         patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
@@ -239,10 +556,7 @@ async def test_fee_payout_keeps_checkpoint_when_send_outcome_is_unknown() -> Non
         patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
-        patch(
-            "routstr.wallet.raw_send_to_lnurl",
-            AsyncMock(side_effect=TimeoutError("unknown outcome")),
-        ),
+        patch("routstr.wallet.raw_send_to_lnurl", side_effect=send),
         patch("routstr.wallet.logger.critical") as critical,
     ):
         with pytest.raises(asyncio.CancelledError):
@@ -262,6 +576,11 @@ async def test_fee_payout_cancellation_during_send_alerts_and_propagates() -> No
     )
     complete = AsyncMock()
 
+    async def cancel_send(*_args: object, **kwargs: object) -> int:
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        raise asyncio.CancelledError
+
     with (
         patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
         patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
@@ -275,10 +594,7 @@ async def test_fee_payout_cancellation_during_send_alerts_and_propagates() -> No
         patch("routstr.wallet.db.complete_routstr_fee_payout", complete),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
-        patch(
-            "routstr.wallet.raw_send_to_lnurl",
-            AsyncMock(side_effect=asyncio.CancelledError()),
-        ),
+        patch("routstr.wallet.raw_send_to_lnurl", side_effect=cancel_send),
         patch("routstr.wallet.logger.critical") as critical,
     ):
         with pytest.raises(asyncio.CancelledError):
@@ -287,7 +603,7 @@ async def test_fee_payout_cancellation_during_send_alerts_and_propagates() -> No
     complete.assert_not_awaited()
     critical.assert_called_once()
     assert critical.call_args.args[0] == (
-        "Routstr fee payout outcome is unknown; manual reconciliation required"
+        "Routstr fee payout outcome is unknown; awaiting quote reconciliation"
     )
 
 
@@ -315,6 +631,11 @@ async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
         create_session = Mock(return_value=_session_context(session))
         completion.side_effect = RuntimeError("checkpoint unavailable")
 
+    async def send(*_args: object, **kwargs: object) -> int:
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1")  # type: ignore[operator]
+        return 5
+
     with (
         patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
         patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
@@ -329,7 +650,7 @@ async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
         patch("routstr.wallet.db.complete_routstr_fee_payout", completion),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
         patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
-        patch("routstr.wallet.raw_send_to_lnurl", AsyncMock(return_value=5)),
+        patch("routstr.wallet.raw_send_to_lnurl", side_effect=send),
         patch("routstr.wallet.logger.critical") as critical,
     ):
         with pytest.raises(asyncio.CancelledError):
@@ -337,7 +658,8 @@ async def test_fee_payout_completion_failures_use_sent_checkpoint_alert(
 
     critical.assert_called_once()
     assert critical.call_args.args[0] == (
-        "Routstr fee payout sent but checkpoint was not completed"
+        "Routstr fee payout sent but checkpoint was not completed; "
+        "awaiting quote reconciliation"
     )
 
 
@@ -359,7 +681,10 @@ async def test_fee_payout_releases_db_connection_during_send(tmp_path: object) -
         async with AsyncSession(engine, expire_on_commit=False) as session:
             yield session
 
-    async def send(*_args: object, **_kwargs: object) -> int:
+    async def send(*_args: object, **kwargs: object) -> int:
+        assert engine.pool.checkedout() == 0  # type: ignore[attr-defined]
+        checkpoint_quote = kwargs["on_melt_quote"]
+        await checkpoint_quote("quote-1")  # type: ignore[operator]
         assert engine.pool.checkedout() == 0  # type: ignore[attr-defined]
         return 5
 

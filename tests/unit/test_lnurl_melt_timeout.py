@@ -77,9 +77,7 @@ async def test_raw_send_to_lnurl_timeout_reconciled_paid_is_success() -> None:
         await asyncio.sleep(5)
 
     wallet.melt = AsyncMock(side_effect=_hang)
-    wallet.get_melt_quote = AsyncMock(
-        return_value=MagicMock(state=MeltQuoteState.paid)
-    )
+    wallet.get_melt_quote = AsyncMock(return_value=MagicMock(state=MeltQuoteState.paid))
     data_patch, invoice_patch = _lnurl_patches()
 
     with (
@@ -146,14 +144,10 @@ async def test_raw_send_to_lnurl_rate_rejection_unreserves_proofs(
         ),
         pytest.raises((MintCooldownError, httpx.HTTPStatusError)),
     ):
-        await raw_send_to_lnurl(
-            wallet, proofs, "owner@ln.tld", "sat", amount=1000
-        )
+        await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
 
     wallet.melt.assert_not_awaited()
-    wallet.set_reserved_for_send.assert_awaited_once_with(
-        proofs, reserved=False
-    )
+    wallet.set_reserved_for_send.assert_awaited_once_with(proofs, reserved=False)
 
 
 @pytest.mark.asyncio
@@ -175,15 +169,40 @@ async def test_real_mint_wrapper_http_429_unreserves_proofs() -> None:
         invoice_patch,
         pytest.raises(httpx.HTTPStatusError),
     ):
-        await raw_send_to_lnurl(
-            wallet, proofs, "owner@ln.tld", "sat", amount=1000
-        )
+        await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
 
     wallet.melt.assert_awaited_once()
-    wallet.set_reserved_for_send.assert_awaited_once_with(
-        proofs, reserved=False
-    )
+    wallet.set_reserved_for_send.assert_awaited_once_with(proofs, reserved=False)
     MintRateGuard._guards.pop(str(wallet.url), None)
+
+
+@pytest.mark.asyncio
+async def test_raw_send_to_lnurl_checkpoints_quote_before_melt_dispatch() -> None:
+    wallet, proofs = _wallet()
+    events: list[str] = []
+
+    async def checkpoint(quote_id: str) -> None:
+        assert quote_id == "q"
+        events.append("checkpoint")
+
+    async def melt(**_kwargs: object) -> MagicMock:
+        events.append("melt")
+        return MagicMock(state=MeltQuoteState.paid)
+
+    wallet.melt = AsyncMock(side_effect=melt)
+    data_patch, invoice_patch = _lnurl_patches()
+
+    with data_patch, invoice_patch:
+        await raw_send_to_lnurl(
+            wallet,
+            proofs,
+            "owner@ln.tld",
+            "sat",
+            amount=1000,
+            on_melt_quote=checkpoint,
+        )
+
+    assert events == ["checkpoint", "melt"]
 
 
 @pytest.mark.asyncio
