@@ -24,3 +24,11 @@ export function getApiErrorMessage(
   }
   return fallback;
 }
+
+export function isNodeUnreachable(error: unknown): boolean {
+  return isAxiosError(error) && !error.response;
+}
+
+export function isUnauthorized(error: unknown): boolean {
+  return isAxiosError(error) && error.response?.status === 401;
+}
