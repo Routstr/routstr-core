@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Copy, Check } from 'lucide-react';
-import { useState } from 'react';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { getLogLevelBadgeVariant } from '@/lib/utils/log-level';
 import type { LogEntry } from './types';
 
@@ -24,16 +24,12 @@ export function LogDetailsDialog({
   isOpen,
   onClose,
 }: LogDetailsDialogProps) {
-  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const { copiedKey: copiedField, copy } = useCopyToClipboard();
 
   if (!log) return null;
 
-  const copyToClipboard = (text: string, fieldName?: string) => {
-    navigator.clipboard.writeText(text);
-    if (fieldName) {
-      setCopiedField(fieldName);
-      setTimeout(() => setCopiedField(null), 2000);
-    }
+  const copyToClipboard = (text: string, fieldName: string) => {
+    void copy(text, fieldName);
   };
 
   const allFields = Object.keys(log).filter((key) => key !== 'key');

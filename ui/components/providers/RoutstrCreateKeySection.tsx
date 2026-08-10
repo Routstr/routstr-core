@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { Copy, Loader2, Zap, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import QRCode from 'qrcode';
@@ -35,6 +36,7 @@ export function RoutstrCreateKeySection({
   onApiKeyCreated,
 }: RoutstrCreateKeySectionProps) {
   // Lightning state
+  const { copy } = useCopyToClipboard();
   const [lnAmount, setLnAmount] = useState('');
   const [lnInvoice, setLnInvoice] = useState<{
     bolt11: string;
@@ -61,11 +63,8 @@ export function RoutstrCreateKeySection({
   const cleanUrl = baseUrl.replace(/\/+$/, '');
 
   const handleCopy = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copy(text)) {
       toast.success('Copied to clipboard');
-    } catch {
-      toast.error('Failed to copy');
     }
   };
 

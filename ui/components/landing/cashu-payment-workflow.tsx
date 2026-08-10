@@ -1,6 +1,7 @@
 'use client';
 
 import { type JSX, useCallback, useState } from 'react';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { Copy, RefreshCcw } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { toast } from 'sonner';
@@ -45,6 +46,7 @@ export function CashuPaymentWorkflow({
   onApiKeyCreated,
   onWalletInfoUpdated,
 }: CashuPaymentWorkflowProps): JSX.Element {
+  const { copy } = useCopyToClipboard();
   const [initialToken, setInitialToken] = useState('');
   const [topupToken, setTopupToken] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
@@ -65,22 +67,17 @@ export function CashuPaymentWorkflow({
   } = useWalletInfo(baseUrl, activeApiKey);
   const walletInfo = propWalletInfo ?? queryWalletInfo ?? null;
 
-  const handleCopy = useCallback(async (value: string): Promise<void> => {
-    if (!value) {
-      return;
-    }
-    if (typeof navigator === 'undefined' || !navigator.clipboard) {
-      toast.error('Clipboard API unavailable');
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(value);
-      toast.success('Copied to clipboard');
-    } catch (error) {
-      console.error(error);
-      toast.error('Unable to copy');
-    }
-  }, []);
+  const handleCopy = useCallback(
+    async (value: string): Promise<void> => {
+      if (!value) {
+        return;
+      }
+      if (await copy(value)) {
+        toast.success('Copied to clipboard');
+      }
+    },
+    [copy]
+  );
 
   const handleCreateKey = useCallback(async (): Promise<void> => {
     if (!initialToken.trim()) {
