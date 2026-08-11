@@ -106,14 +106,8 @@ async def dual_provider_maps(
         yield cheap, expensive
 
 
-def _upstream_response(request: httpx.Request) -> httpx.Response:
-    """502 from the cheap (winning) provider; a served completion elsewhere."""
-    if request.url.host == "cheap.example.com":
-        return httpx.Response(
-            502,
-            content=json.dumps({"error": {"message": "bad gateway"}}).encode(),
-            headers={"content-type": "application/json"},
-        )
+def _successful_upstream_response() -> httpx.Response:
+    """Return a successful completion with deterministic token usage."""
     body = {
         "id": "chatcmpl-served",
         "object": "chat.completion",
@@ -137,6 +131,17 @@ def _upstream_response(request: httpx.Request) -> httpx.Response:
         content=json.dumps(body).encode(),
         headers={"content-type": "application/json"},
     )
+
+
+def _upstream_response(request: httpx.Request) -> httpx.Response:
+    """502 from the cheap (winning) provider; a served completion elsewhere."""
+    if request.url.host == "cheap.example.com":
+        return httpx.Response(
+            502,
+            content=json.dumps({"error": {"message": "bad gateway"}}).encode(),
+            headers={"content-type": "application/json"},
+        )
+    return _successful_upstream_response()
 
 
 @pytest.mark.integration
@@ -233,6 +238,44 @@ async def same_id_provider_maps(
     )
     async for _ in _install_providers([cheap, expensive]):
         yield
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_same_id_cheapest_provider_serves_and_bills_its_own_price(
+    authenticated_client: AsyncClient,
+    same_id_provider_maps: None,
+) -> None:
+    """Exact same-ID candidates route cheapest and bill that provider's model."""
+    sent_requests: list[httpx.Request] = []
+
+    async def fake_transport(
+        request: httpx.Request, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        sent_requests.append(request)
+        return _successful_upstream_response()
+
+    with (
+        patch(
+            "httpx.AsyncHTTPTransport.handle_async_request",
+            side_effect=fake_transport,
+        ),
+        patch(
+            "routstr.payment.cost_calculation.sats_usd_price",
+            return_value=0.0005,
+        ),
+    ):
+        response = await authenticated_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "dual-model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [request.url.host for request in sent_requests] == ["cheap.example.com"]
+    assert response.json()["cost"]["total_msats"] == 2_000
 
 
 @pytest.mark.integration
