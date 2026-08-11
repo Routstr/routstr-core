@@ -123,35 +123,26 @@ def create_model_mappings(
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
+    unique_model_keys: dict[str, str] = {}
     seen_model_provider: set[tuple[str, str]] = set()
 
+    # Providers sharing a URL may use different credentials and expose different
+    # deployments. Keep them all; candidates for the same model are ranked by
+    # their fee-adjusted pricing below.
     providers_by_db_id: dict[int, "BaseUpstreamProvider"] = {}
     for upstream in upstreams:
         db_id = getattr(upstream, "db_id", None)
         if isinstance(db_id, int):
             providers_by_db_id[db_id] = upstream
 
-    # Group upstreams by URL and keep only the one with the lowest fee for each URL
-    upstreams_by_url: dict[str, list["BaseUpstreamProvider"]] = {}
-    for upstream in upstreams:
-        url = getattr(upstream, "base_url", "")
-        if url not in upstreams_by_url:
-            upstreams_by_url[url] = []
-        upstreams_by_url[url].append(upstream)
-
-    filtered_upstreams: list["BaseUpstreamProvider"] = []
-    for providers in upstreams_by_url.values():
-        best_provider = min(providers, key=lambda p: p.provider_fee)
-        filtered_upstreams.append(best_provider)
-
     # Separate OpenRouter from other providers
-    openrouter: "BaseUpstreamProvider" | None = None
+    openrouter_upstreams: list["BaseUpstreamProvider"] = []
     other_upstreams: list["BaseUpstreamProvider"] = []
 
-    for upstream in filtered_upstreams:
+    for upstream in upstreams:
         base_url = getattr(upstream, "base_url", "")
         if base_url == "https://openrouter.ai/api/v1":
-            openrouter = upstream
+            openrouter_upstreams.append(upstream)
         else:
             other_upstreams.append(upstream)
 
@@ -191,9 +182,13 @@ def create_model_mappings(
             return
         alias_candidates.append((model, provider))
 
-    def process_provider_models(
-        upstream: "BaseUpstreamProvider", is_openrouter: bool = False
-    ) -> None:
+    def record_unique_model_key(model: "Model") -> None:
+        """Record one case-insensitive public ID and its display spelling."""
+        base_id = get_base_model_id(model.id)
+        public_id = get_effective_forwarded_model_id(model) or base_id
+        unique_model_keys.setdefault(public_id.lower(), public_id)
+
+    def process_provider_models(upstream: "BaseUpstreamProvider") -> None:
         """Process all models from a given provider."""
         upstream_prefix = getattr(upstream, "upstream_name", None)
         provider_key = get_provider_identity(upstream)
@@ -219,19 +214,7 @@ def create_model_mappings(
             else:
                 model_to_use = model
 
-            # Add to unique models
-            base_id = get_base_model_id(model_to_use.id)
             forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
-            unique_key = forwarded_model_id or base_id
-            if not is_openrouter or unique_key not in unique_models:
-                unique_model = model_to_use.copy(
-                    update={
-                        "id": base_id,
-                        "upstream_provider_id": upstream.provider_type,
-                        "forwarded_model_id": forwarded_model_id,
-                    }
-                )
-                unique_models[unique_key] = unique_model
 
             # Get all aliases for this model
             aliases = resolve_model_alias(
@@ -253,15 +236,16 @@ def create_model_mappings(
             # Try to set each alias
             for alias in aliases:
                 _add_candidate(alias, model_to_use, upstream)
+            record_unique_model_key(model_to_use)
             seen_model_provider.add((model_to_use.id.lower(), provider_key))
 
     # Process non-OpenRouter providers first
     for upstream in other_upstreams:
-        process_provider_models(upstream, is_openrouter=False)
+        process_provider_models(upstream)
 
     # Process OpenRouter last
-    if openrouter:
-        process_provider_models(openrouter, is_openrouter=True)
+    for upstream in openrouter_upstreams:
+        process_provider_models(upstream)
 
     # Include enabled DB overrides even when provider discovery misses models.
     # This is important for deployment-based providers like Azure.
@@ -297,22 +281,7 @@ def create_model_mappings(
         if not model_to_use.enabled:
             continue
 
-        base_id = get_base_model_id(model_to_use.id)
         forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
-        unique_key = forwarded_model_id or base_id
-        is_openrouter = (
-            getattr(upstream_for_override, "base_url", "")
-            == "https://openrouter.ai/api/v1"
-        )
-        if not is_openrouter or unique_key not in unique_models:
-            unique_model = model_to_use.copy(
-                update={
-                    "id": base_id,
-                    "upstream_provider_id": upstream_for_override.provider_type,
-                    "forwarded_model_id": forwarded_model_id,
-                }
-            )
-            unique_models[unique_key] = unique_model
 
         try:
             aliases = resolve_model_alias(
@@ -344,6 +313,7 @@ def create_model_mappings(
 
         for alias in aliases:
             _add_candidate(alias, model_to_use, upstream_for_override)
+        record_unique_model_key(model_to_use)
         seen_model_provider.add(dedupe_key)
 
     # Sort candidates and build final maps
@@ -353,20 +323,16 @@ def create_model_mappings(
     def alias_priority(model: "Model", alias: str) -> int:
         """Rank how strong the mapping of alias->model is.
 
-        forwarded_model_id is the most specific identifier (set per-provider
-        instance), so a match there should beat a model_id match. This way,
-        when multiple providers have the same model_id but different
-        forwarded_model_ids, the one whose forwarded_model_id equals the
-        requested alias wins.
+        An exact model ID is authoritative and must be cost-ranked against the
+        other exact matches before considering forwarded aliases. This keeps a
+        provider-specific forwarded ID from shadowing a directly available,
+        cheaper model with the requested ID.
         """
-        forwarded_model_id = get_effective_forwarded_model_id(model)
-        if forwarded_model_id and forwarded_model_id.lower() == alias:
+        if model.id and model.id.lower() == alias:
             return 5
 
-        if (
-            model.id
-            and model.id.lower() == alias
-        ):
+        forwarded_model_id = get_effective_forwarded_model_id(model)
+        if forwarded_model_id and forwarded_model_id.lower() == alias:
             return 4
 
         model_base = get_base_model_id(model.id)
@@ -394,6 +360,22 @@ def create_model_mappings(
         best_model, best_provider = items[0]
         model_instances[alias] = best_model
         provider_map[alias] = list(items)
+
+    # The catalog must advertise the same provider-specific model that routing
+    # selects for the public ID. Normally this is the cheapest candidate; alias
+    # priority intentionally wins forwarded-ID collisions.
+    for unique_key, advertised_id in unique_model_keys.items():
+        ranked_candidates = provider_map.get(unique_key)
+        if not ranked_candidates:
+            continue
+        best_model, best_provider = ranked_candidates[0]
+        unique_models[unique_key] = best_model.copy(
+            update={
+                "id": advertised_id,
+                "upstream_provider_id": best_provider.provider_type,
+                "forwarded_model_id": get_effective_forwarded_model_id(best_model),
+            }
+        )
 
     # Log provider distribution (using top provider for stats)
     provider_counts: dict[str, int] = {}

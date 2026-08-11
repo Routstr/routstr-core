@@ -618,10 +618,8 @@ async def model_paths_for_model(model_id: str) -> dict:
 
     result = await get_paths_for_model(model_id)
     if not result["data"]:
-        advertised_ids = {
-            model.forwarded_model_id or model.id for model in get_unique_models()
-        }
-        if model_id not in advertised_ids:
+        advertised_ids = {model.id.lower() for model in get_unique_models()}
+        if model_id.lower() not in advertised_ids:
             raise HTTPException(status_code=404, detail="Model not found")
     return result
 
@@ -637,8 +635,5 @@ async def models(session: AsyncSession = Depends(get_session)) -> dict:
     items = get_unique_models()
     data = []
     for model in items:
-        m = model.dict()
-        if model.forwarded_model_id:
-            m["id"] = model.forwarded_model_id
-        data.append(m)
+        data.append(model.dict())
     return {"data": data}
