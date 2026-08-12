@@ -191,7 +191,10 @@ async def test_topup_with_spent_token(  # type: ignore[no-untyped-def]
     )
 
     assert response.status_code == 400
-    assert "spent" in response.json()["detail"].lower()
+    detail = response.json()["detail"]
+    # Structured error envelope: detail is now a dict with an "error" key
+    message = detail["error"]["message"] if isinstance(detail, dict) else detail
+    assert "spent" in message.lower()
 
     # Verify no additional balance changes
     diff = await db_snapshot.diff()
@@ -390,7 +393,10 @@ async def test_network_failure_during_token_verification(  # type: ignore[no-unt
         # Should return 500 error for network issues
         assert response.status_code == 500
         assert "detail" in response.json()
-        assert response.json()["detail"] == "Internal server error"
+        detail = response.json()["detail"]
+        # Structured error envelope: detail is now a dict with an "error" key
+        message = detail["error"]["message"] if isinstance(detail, dict) else detail
+        assert message == "Internal server error"
 
 
 @pytest.mark.integration

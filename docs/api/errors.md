@@ -123,10 +123,9 @@ They apply to every endpoint that accepts a token:
 - **Minting an API key** from a token sent in `Authorization: Bearer <cashu-token>`.
 
 All three share one classifier, so the same failure yields the same HTTP status
-and sanitized message everywhere. Structured error envelopes (`X-Cashu` and
-`Authorization: Bearer <cashu-token>`) also expose the same `type` and `code` —
-branch on `type` (or `code` for finer granularity). `POST /v1/wallet/topup`
-keeps its existing plain-string `detail` envelope, so branch on status there.
+and sanitized message everywhere. All three paths also expose the same
+structured `type` and `code` — branch on `type` (or `code` for finer
+granularity) on any of them.
 
 | `type` | Status | `code` | Retryable | Meaning |
 |--------|--------|--------|-----------|---------|
@@ -208,13 +207,11 @@ depends on how you paid:
   { "detail": { "error": { "type": "mint_unreachable", "message": "Cashu mint is unreachable", "code": "cashu_mint_unreachable" } } }
   ```
 
-- **`POST /v1/wallet/topup`** returns a plain string message under `detail` —
-  it carries the shared HTTP **status** and **message** (e.g. `503` for an
-  unreachable mint) but not the structured `type`/`code`, so branch on the
-  status code here:
+- **`POST /v1/wallet/topup`** returns the same structured envelope wrapped in
+  FastAPI's `detail` field, identical to the bearer path:
 
   ```json
-  { "detail": "Cashu mint is unreachable" }
+  { "detail": { "error": { "type": "mint_unreachable", "message": "Cashu mint is unreachable", "code": "cashu_mint_unreachable" } } }
   ```
 
 ### Validation Errors

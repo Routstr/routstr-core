@@ -494,9 +494,7 @@ Authorization: Bearer sk-...
 
 ```json
 {
-  "balance": 18500,
-  "amount_added": 10000,
-  "currency": "sat"
+  "msats": 10000000
 }
 ```
 

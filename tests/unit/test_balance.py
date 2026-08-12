@@ -581,6 +581,19 @@ async def test_refund_unknown_sk_bearer_returns_401() -> None:
 
 
 # --- Topup redemption error taxonomy (POST /v1/wallet/topup) ------------------
+#
+# The topup endpoint returns the same structured error envelope as the bearer
+# and X-Cashu paths: ``{"error": {"message": ..., "type": ..., "code": ...}}``
+# under FastAPI's ``detail`` field.  Tests assert the full envelope, not just
+# the message string, so a regression that drops ``type``/``code`` is caught.
+
+
+def _envelope(exc) -> dict:
+    """Extract the structured error dict from an HTTPException raised by topup."""
+    detail = exc.detail
+    assert isinstance(detail, dict), f"detail is not a dict: {detail!r}"
+    assert "error" in detail, f"missing 'error' key in detail: {detail!r}"
+    return detail["error"]
 
 
 @pytest.mark.asyncio
@@ -610,7 +623,10 @@ async def test_topup_mint_unreachable_returns_503(error: Exception) -> None:
             )
 
     assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Cashu mint is unreachable"
+    err = _envelope(exc_info.value)
+    assert err["type"] == "mint_unreachable"
+    assert err["code"] == "cashu_mint_unreachable"
+    assert err["message"] == "Cashu mint is unreachable"
 
 
 @pytest.mark.asyncio
@@ -633,7 +649,10 @@ async def test_topup_unreachable_source_mint_explains_why_fallback_is_impossible
             )
 
     assert exc_info.value.status_code == 503
-    assert "cannot be redeemed at another mint" in exc_info.value.detail
+    err = _envelope(exc_info.value)
+    assert err["type"] == "mint_unreachable"
+    assert err["code"] == "cashu_source_mint_unreachable"
+    assert "cannot be redeemed at another mint" in err["message"]
 
 
 @pytest.mark.asyncio
@@ -658,7 +677,10 @@ async def test_topup_already_spent_still_returns_400() -> None:
             )
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Cashu token already spent"
+    err = _envelope(exc_info.value)
+    assert err["type"] == "token_already_spent"
+    assert err["code"] == "cashu_token_already_spent"
+    assert err["message"] == "Cashu token already spent"
 
 
 @pytest.mark.asyncio
@@ -685,7 +707,10 @@ async def test_topup_zero_value_returns_400_zero_value_message() -> None:
             )
 
     assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Failed to redeem Cashu token: token yielded no value"
+    err = _envelope(exc_info.value)
+    assert err["type"] == "cashu_error"
+    assert err["code"] == "cashu_token_zero_value"
+    assert err["message"] == "Failed to redeem Cashu token: token yielded no value"
 
 
 @pytest.mark.asyncio
@@ -712,20 +737,25 @@ async def test_topup_token_consumed_returns_500() -> None:
             )
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == (
+    err = _envelope(exc_info.value)
+    assert err["type"] == "token_consumed"
+    assert err["code"] == "cashu_token_consumed"
+    assert err["message"] == (
         "Token was redeemed but could not be credited; do not retry"
     )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error", "expected_status", "expected_detail"),
+    ("error", "expected_status", "expected_type", "expected_code", "expected_message"),
     [
         (
             ValueError(
                 "Failed to estimate fees: Fees (7 sat) exceed token amount (5 sat)"
             ),
             422,
+            "mint_error",
+            "cashu_token_swap_fees_exceed_amount",
             "Token value is too small to cover swap fees",
         ),
         (
@@ -733,17 +763,25 @@ async def test_topup_token_consumed_returns_500() -> None:
                 "Token amount (5 sat) is insufficient to cover melt fees."
             ),
             422,
+            "mint_error",
+            "cashu_token_swap_fees_exceed_amount",
             "Token value is too small to cover swap fees",
         ),
         (
             ValueError("Failed to melt token from foreign mint http://m: boom"),
             422,
+            "mint_error",
+            "cashu_foreign_mint_swap_failed",
             "Failed to swap token from foreign mint",
         ),
     ],
 )
 async def test_topup_fee_and_swap_failures_return_422(
-    error: Exception, expected_status: int, expected_detail: str
+    error: Exception,
+    expected_status: int,
+    expected_type: str,
+    expected_code: str,
+    expected_message: str,
 ) -> None:
     """Fee/swap failures map to 422 (shared taxonomy), matching the bearer and
     X-Cashu paths — previously top-up flattened these to 400."""
@@ -762,7 +800,10 @@ async def test_topup_fee_and_swap_failures_return_422(
             )
 
     assert exc_info.value.status_code == expected_status
-    assert exc_info.value.detail == expected_detail
+    err = _envelope(exc_info.value)
+    assert err["type"] == expected_type
+    assert err["code"] == expected_code
+    assert err["message"] == expected_message
 
 
 @pytest.mark.asyncio
@@ -787,7 +828,10 @@ async def test_topup_unexpected_non_valueerror_returns_500() -> None:
             )
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == "Internal server error"
+    err = _envelope(exc_info.value)
+    assert err["type"] == "api_error"
+    assert err["code"] == "internal_error"
+    assert err["message"] == "Internal server error"
 
 
 @pytest.mark.asyncio

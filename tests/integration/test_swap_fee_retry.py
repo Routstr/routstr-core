@@ -199,6 +199,9 @@ async def test_topup_returns_422_when_retries_exhausted(
     )
 
     assert response.status_code == 422
-    assert "too small to cover swap fees" in response.json()["detail"]
+    # Structured error envelope: detail is now a dict with an "error" key
+    raw_detail = response.json()["detail"]
+    message = raw_detail["error"]["message"] if isinstance(raw_detail, dict) else raw_detail
+    assert "too small to cover swap fees" in message
     assert token_wallet.melt_quote.call_count == 4  # estimation + 3 attempts
     token_wallet.melt.assert_not_called()
