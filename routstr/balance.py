@@ -9,7 +9,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlmodel import col, select, update
 
-from .auth import get_billing_key, validate_bearer_key
+from .auth import (
+    get_billing_key,
+    redemption_error_to_http_exception,
+    validate_bearer_key,
+)
 from .core.db import (
     ApiKey,
     AsyncSession,
@@ -243,7 +247,7 @@ async def topup_wallet_endpoint(
                     "error_chain": _error_chain(e),
                 },
             )
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise redemption_error_to_http_exception(e)
         error_type, status_code, message, error_code = classified
         logger.warning(
             "Cashu wallet top-up failed",
@@ -258,7 +262,7 @@ async def topup_wallet_endpoint(
                 "error_chain": _error_chain(e),
             },
         )
-        raise HTTPException(status_code=status_code, detail=message)
+        raise redemption_error_to_http_exception(e)
 
     logger.info(
         "Cashu wallet top-up completed",

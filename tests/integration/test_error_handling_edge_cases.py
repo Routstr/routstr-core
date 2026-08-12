@@ -181,7 +181,12 @@ class TestInvalidInputHandling:
             # All should fail with 400
             assert response.status_code == 400, f"Token {repr(token)} should fail"
             # Accept various error messages that indicate token validation failure
-            error_detail = response.json()["detail"].lower()
+            raw_detail = response.json()["detail"]
+            error_detail = (
+                raw_detail["error"]["message"].lower()
+                if isinstance(raw_detail, dict)
+                else raw_detail.lower()
+            )
             assert any(
                 keyword in error_detail
                 for keyword in ["invalid", "failed to redeem", "failed to decode"]
