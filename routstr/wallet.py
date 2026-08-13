@@ -133,6 +133,16 @@ class Wallet(_CashuWallet):
             )
         _CashuWallet.raise_on_error_request(resp)
 
+    async def load_mint(
+        self, keyset_id: str = "", force_old_keysets: bool = False
+    ) -> None:
+        """Upstream load_mint minus its blanket ``except Exception: pass`` —
+        the swallow hides 429/transport failures and leaves the wallet
+        keyset-less, so redemption later dies with "No active keyset"."""
+        await self.load_mint_keysets(force_old_keysets)
+        await self.activate_keyset(keyset_id)
+        await self.load_mint_info(reload=True)
+
 
 class MintConnectionError(Exception):
     """The mint could not be reached (network transport failure).
@@ -311,11 +321,8 @@ async def _redeem_same_mint(
     that, not the face value, or routstr over-credits the user and its wallet
     drifts insolvent.
     """
-    # A short NUT-02 v2 keyset id (e.g. minibits tokens) can't be activated:
-    # mint keysets are keyed by full ids, activate_keyset silently fails inside
-    # load_mint, and split() later dies with "No active keyset". Let load_mint
-    # pick an active keyset for the wallet's unit instead; the proofs' short
-    # ids are expanded via normalize_token_proofs below.
+    # A short v2 id can't be activated (keysets are keyed by full ids); let
+    # load_mint pick an active keyset and expand the proofs' ids below.
     load_keyset_id = token_obj.keysets[0]
     if is_short_v2_keyset_id(load_keyset_id):
         load_keyset_id = ""

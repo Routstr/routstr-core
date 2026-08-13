@@ -2927,3 +2927,40 @@ async def test_payout_reloads_wallet_snapshot_under_guard() -> None:
     mock_get_wallet.assert_awaited_once_with(
         "https://mint.example.com", "sat", force_reload=True
     )
+
+
+@pytest.mark.asyncio
+async def test_load_mint_propagates_rate_limit() -> None:
+    """Unlike upstream, our load_mint must not swallow a 429 — that leaves the
+    wallet keyset-less and split() dies with "No active keyset"."""
+    from routstr.mint import MintRateLimitedError
+    from routstr.wallet import Wallet
+
+    wallet = Wallet.__new__(Wallet)
+    error = MintRateLimitedError(
+        "Cashu mint rate limited",
+        request=httpx.Request("GET", "https://mint.example/v1/keysets"),
+        response=httpx.Response(429),
+    )
+    with (
+        patch.object(wallet, "load_mint_keysets", new=AsyncMock(side_effect=error)),
+        pytest.raises(MintRateLimitedError),
+    ):
+        await wallet.load_mint()
+
+
+@pytest.mark.asyncio
+async def test_load_mint_runs_keysets_activation_and_info() -> None:
+    from routstr.wallet import Wallet
+
+    wallet = Wallet.__new__(Wallet)
+    with (
+        patch.object(wallet, "load_mint_keysets", new=AsyncMock()) as load_keysets,
+        patch.object(wallet, "activate_keyset", new=AsyncMock()) as activate,
+        patch.object(wallet, "load_mint_info", new=AsyncMock()) as load_info,
+    ):
+        await wallet.load_mint(keyset_id="abc")
+
+    load_keysets.assert_awaited_once_with(False)
+    activate.assert_awaited_once_with("abc")
+    load_info.assert_awaited_once_with(reload=True)

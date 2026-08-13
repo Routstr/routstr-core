@@ -1,12 +1,7 @@
-"""Compatibility shims for incoming Cashu token proofs.
+"""Compatibility shims applied to incoming token proofs before redemption.
 
-Ecosystem migrations (NUT spec revisions, wallet-specific quirks) periodically
-change the shape of tokens we receive. Each such fix is a
-:class:`ProofCompatShim`; :func:`normalize_token_proofs` is the single entry
-point the redeem/swap paths call before touching a token's proofs.
-
-To add a new shim: subclass :class:`ProofCompatShim` and append an instance to
-:data:`PROOF_SHIMS`.
+Add a shim by subclassing ProofCompatShim and appending an instance to
+PROOF_SHIMS.
 """
 
 from abc import ABC, abstractmethod
@@ -21,11 +16,8 @@ if TYPE_CHECKING:
 
 
 def is_short_v2_keyset_id(keyset_id: object) -> bool:
-    """True for a 16-char NUT-02 v2 short keyset id (version byte ``01``).
-
-    Short ids exist only inside tokens; mint keysets are keyed by the full
-    66-char id, so a short id can never be activated or looked up directly.
-    """
+    """16-char NUT-02 v2 short id (version byte ``01``). Mint keysets are
+    keyed by the full 66-char id, so short ids can't be looked up directly."""
     return (
         isinstance(keyset_id, str)
         and keyset_id.startswith("01")
@@ -34,20 +26,17 @@ def is_short_v2_keyset_id(keyset_id: object) -> bool:
 
 
 class ProofCompatShim(ABC):
-    """One token-format compatibility fix applied to proofs in place."""
-
     @abstractmethod
-    def applies(self, proofs: list[Proof]) -> bool:
-        """Cheap check whether this shim is needed for these proofs."""
+    def applies(self, proofs: list[Proof]) -> bool: ...
 
     @abstractmethod
     async def apply(self, wallet: "_CashuWallet", proofs: list[Proof]) -> None:
-        """Mutate ``proofs`` in place; may talk to the mint via ``wallet``."""
+        """Fix ``proofs`` in place; may talk to the mint via ``wallet``."""
 
 
 class ShortKeysetIdExpansion(ProofCompatShim):
-    """Expand short NUT-02 v2 keyset ids (e.g. minibits tokens) to full
-    66-char ids in place; the mint won't accept a short id on melt/swap."""
+    """Expand short NUT-02 v2 keyset ids (e.g. minibits tokens) to the full
+    66-char id; the mint rejects short ids on melt/swap."""
 
     def applies(self, proofs: list[Proof]) -> bool:
         return any(
@@ -89,11 +78,10 @@ PROOF_SHIMS: tuple[ProofCompatShim, ...] = (ShortKeysetIdExpansion(),)
 async def normalize_token_proofs(
     wallet: "_CashuWallet", token_obj: Token
 ) -> list[Proof]:
-    """Capture a token's proofs once and run every applicable compat shim.
+    """Run every applicable shim and return the proof list to use from here on.
 
-    ``token_obj.proofs`` rebuilds fresh Proof objects on every access, so
-    callers must use the returned list — re-reading ``token_obj.proofs`` after
-    this call silently discards the shims' in-place mutations.
+    token_obj.proofs rebuilds fresh Proof objects on every access — callers
+    must use the returned list or the in-place fixes are lost.
     """
     proofs = token_obj.proofs
     for shim in PROOF_SHIMS:

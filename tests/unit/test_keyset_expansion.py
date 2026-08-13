@@ -24,7 +24,7 @@ from routstr.token_compat import ShortKeysetIdExpansion
 
 
 async def _expand_short_keysets(wallet, proofs) -> None:  # type: ignore[no-untyped-def]
-    """Run the shim the way normalize_token_proofs does: applies() then apply()."""
+    # Run the shim the way normalize_token_proofs does.
     shim = ShortKeysetIdExpansion()
     if shim.applies(proofs):
         await shim.apply(wallet, proofs)
@@ -254,10 +254,7 @@ async def test_redeem_same_mint_expands_keysets_before_split() -> None:
     split_proofs = wallet.split.call_args.kwargs["proofs"]
     assert split_proofs[0].id == FULL_V2_ID
     assert token.proofs_access_count == 1
-    # A short id can't be activated (mint keysets are keyed by full ids and
-    # load_mint swallows the KeysetNotFoundError, leaving keyset_id unset →
-    # split dies with "No active keyset"). load_mint must be asked for an
-    # active keyset of the wallet's unit instead.
+    # Short ids can't be activated; load_mint must pick an active keyset.
     assert wallet.load_mint.call_args.kwargs["keyset_id"] == ""
 
 
