@@ -56,11 +56,11 @@ class _ExpandingWallet:
         self.keysets = keysets  # {full_id: obj-with-.id}
         self.url = url
         self.keysets_after_load = keysets_after_load
-        self.load_mint_called = False
+        self.load_keysets_called = False
         self.expand_called = False
 
-    async def load_mint(self, keyset_id: str = "") -> None:
-        self.load_mint_called = True
+    async def load_mint_keysets(self) -> None:
+        self.load_keysets_called = True
         if self.keysets_after_load is not None:
             self.keysets = self.keysets_after_load
 
@@ -85,7 +85,7 @@ async def test_expand_short_keysets_noop_for_v1_legacy_ids() -> None:
     proofs = [_proof(V1_LEGACY_ID)]
     await _expand_short_keysets(wallet, proofs)
     assert proofs[0].id == V1_LEGACY_ID
-    assert wallet.load_mint_called is False
+    assert wallet.load_keysets_called is False
     assert wallet.expand_called is False
 
 
@@ -98,7 +98,7 @@ async def test_expand_short_keysets_noop_for_full_v2_ids() -> None:
     proofs = [_proof(FULL_V2_ID)]
     await _expand_short_keysets(wallet, proofs)
     assert proofs[0].id == FULL_V2_ID
-    assert wallet.load_mint_called is False
+    assert wallet.load_keysets_called is False
 
 
 @pytest.mark.asyncio
@@ -130,8 +130,26 @@ async def test_expand_short_keysets_loads_keysets_when_empty() -> None:
     )
     proofs = [_proof(SHORT_V2_ID)]
     await _expand_short_keysets(wallet, proofs)
-    assert wallet.load_mint_called is True
+    assert wallet.load_keysets_called is True
     assert proofs[0].id == FULL_V2_ID
+
+
+@pytest.mark.asyncio
+async def test_expand_short_keysets_propagates_keyset_load_failure() -> None:
+    """Loading failures retain their original error instead of blaming the token."""
+    from routstr.wallet import _expand_short_keysets
+
+    wallet = _ExpandingWallet({})
+    load_error = RuntimeError("mint unavailable")
+    with (
+        patch.object(
+            wallet,
+            "load_mint_keysets",
+            new=AsyncMock(side_effect=load_error),
+        ),
+        pytest.raises(RuntimeError, match="mint unavailable"),
+    ):
+        await _expand_short_keysets(wallet, [_proof(SHORT_V2_ID)])
 
 
 @pytest.mark.asyncio
@@ -146,7 +164,7 @@ async def test_expand_short_keysets_refreshes_stale_keysets() -> None:
     )
     proofs = [_proof(SHORT_V2_ID)]
     await _expand_short_keysets(wallet, proofs)
-    assert wallet.load_mint_called is True
+    assert wallet.load_keysets_called is True
     assert proofs[0].id == FULL_V2_ID
 
 

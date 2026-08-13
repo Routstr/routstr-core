@@ -310,7 +310,7 @@ async def _expand_short_keysets(wallet: "_CashuWallet", proofs: list[Proof]) -> 
 
     async def load_keysets() -> None:
         await run_mint_operation(
-            lambda: wallet.load_mint(),
+            lambda: wallet.load_mint_keysets(),
             op_name="load_mint_for_keyset_expansion",
             mint_url=wallet.url,
             retry_timeouts=False,
