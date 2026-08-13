@@ -33,6 +33,7 @@ from .mint import (
     run_mint_operation,
 )
 from .payment.lnurl import raw_send_to_lnurl
+from .token_compat import is_short_v2_keyset_id, normalize_token_proofs
 
 # Backwards-compatible aliases for callers/tests that imported the former
 # wallet-local policy. Production modules use the public routstr.mint API.
@@ -299,46 +300,6 @@ async def get_balance(unit: str) -> int:
     return wallet.available_balance.amount
 
 
-async def _expand_short_keysets(wallet: "_CashuWallet", proofs: list[Proof]) -> None:
-    """Expand short NUT-02 v2 keyset ids (e.g. minibits tokens) to full 66-char
-    ids in place; the mint won't accept a short id on melt/swap."""
-    has_short_v2_id = any(
-        isinstance(proof_id := getattr(proof, "id", None), str)
-        and proof_id.startswith("01")
-        and len(proof_id) == 16
-        for proof in proofs
-    )
-    if not has_short_v2_id:
-        return
-
-    had_keysets = bool(wallet.keysets)
-
-    async def load_keysets() -> None:
-        await run_mint_operation(
-            lambda: wallet.load_mint_keysets(),
-            op_name="load_mint_for_keyset_expansion",
-            mint_url=wallet.url,
-            retry_timeouts=False,
-        )
-
-    if not had_keysets:
-        await load_keysets()
-    try:
-        try:
-            await wallet._expand_short_keyset_ids(proofs)
-        except KeyError:
-            if not had_keysets:
-                raise
-            # Cached keysets may predate the token's issuing keyset.
-            await load_keysets()
-            await wallet._expand_short_keyset_ids(proofs)
-    except KeyError as e:
-        raise ValueError(
-            "Token carries a short keyset id that cannot be mapped to a "
-            f"mint keyset (NUT-02 v2 migration): {e}"
-        ) from e
-
-
 async def _redeem_same_mint(
     wallet: Wallet, token_obj: Token
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
@@ -350,9 +311,17 @@ async def _redeem_same_mint(
     that, not the face value, or routstr over-credits the user and its wallet
     drifts insolvent.
     """
+    # A short NUT-02 v2 keyset id (e.g. minibits tokens) can't be activated:
+    # mint keysets are keyed by full ids, activate_keyset silently fails inside
+    # load_mint, and split() later dies with "No active keyset". Let load_mint
+    # pick an active keyset for the wallet's unit instead; the proofs' short
+    # ids are expanded via normalize_token_proofs below.
+    load_keyset_id = token_obj.keysets[0]
+    if is_short_v2_keyset_id(load_keyset_id):
+        load_keyset_id = ""
     try:
         await run_mint_operation(
-            lambda: wallet.load_mint(keyset_id=token_obj.keysets[0]),
+            lambda: wallet.load_mint(keyset_id=load_keyset_id),
             op_name="redeem_load_mint",
             mint_url=token_obj.mint,
         )
@@ -376,11 +345,7 @@ async def _redeem_same_mint(
             ) from error
         raise
 
-    # token_obj.proofs rebuilds fresh Proof objects on every access, so
-    # capture it once and reuse below — otherwise _expand_short_keysets'
-    # in-place id mutation gets silently discarded.
-    proofs = token_obj.proofs
-    await _expand_short_keysets(wallet, proofs)
+    proofs = await normalize_token_proofs(wallet, token_obj)
 
     wallet.verify_proofs_dleq(proofs)
     input_fees = wallet.get_fees_for_proofs(proofs)
@@ -1331,11 +1296,7 @@ async def swap_to_trusted_mint(
         )
         return await _redeem_same_mint(token_wallet, token_obj)
 
-    # token_obj.proofs rebuilds fresh Proof objects on every access, so
-    # capture it once and reuse below — otherwise _expand_short_keysets'
-    # in-place id mutation gets silently discarded.
-    proofs = token_obj.proofs
-    await _expand_short_keysets(token_wallet, proofs)
+    proofs = await normalize_token_proofs(token_wallet, token_obj)
 
     primary_wallet: Wallet | None = None
 

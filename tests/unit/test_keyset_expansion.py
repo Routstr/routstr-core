@@ -7,8 +7,10 @@ the full id before any melt/swap, otherwise redemption fails with
 ``A short keyset ID v2 was encountered, but got no keysets to map it to``
 (500 "Internal error during token redemption").
 
-These tests pin the behavior of :func:`routstr.wallet._expand_short_keysets`
-and verify both redeem paths (same-mint split and cross-mint melt) invoke it.
+These tests pin the behavior of
+:class:`routstr.token_compat.ShortKeysetIdExpansion` and verify both redeem
+paths (same-mint split and cross-mint melt) invoke it via
+:func:`routstr.token_compat.normalize_token_proofs`.
 """
 
 from types import SimpleNamespace
@@ -17,6 +19,16 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from cashu.core.base import Proof
 from cashu.wallet.keyset_manager import KeysetManager
+
+from routstr.token_compat import ShortKeysetIdExpansion
+
+
+async def _expand_short_keysets(wallet, proofs) -> None:  # type: ignore[no-untyped-def]
+    """Run the shim the way normalize_token_proofs does: applies() then apply()."""
+    shim = ShortKeysetIdExpansion()
+    if shim.applies(proofs):
+        await shim.apply(wallet, proofs)
+
 
 # Matches the live minibits mint: active v2 keyset and its 16-char short id.
 FULL_V2_ID = "01fc0ec0e59cd6fa01b7a88f8cd77fce81fd1e64bca67d752e984992b7a3c3a821"
@@ -79,8 +91,6 @@ class _ExpandingWallet:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_noop_for_v1_legacy_ids() -> None:
     """v1 (``00``) short ids are the full id — no expansion, no keyset load."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet({}, url="https://mint.example")
     proofs = [_proof(V1_LEGACY_ID)]
     await _expand_short_keysets(wallet, proofs)
@@ -92,8 +102,6 @@ async def test_expand_short_keysets_noop_for_v1_legacy_ids() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_noop_for_incomplete_test_proofs() -> None:
     """Proof-like test doubles without string ids are safely ignored."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet({})
     await _expand_short_keysets(wallet, [Mock(), {"amount": 1}])  # type: ignore[list-item]
     assert wallet.load_keysets_called is False
@@ -103,8 +111,6 @@ async def test_expand_short_keysets_noop_for_incomplete_test_proofs() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_noop_for_full_v2_ids() -> None:
     """Already-full 66-char v2 ids are left untouched."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet({FULL_V2_ID: _keyset(FULL_V2_ID)})
     proofs = [_proof(FULL_V2_ID)]
     await _expand_short_keysets(wallet, proofs)
@@ -115,8 +121,6 @@ async def test_expand_short_keysets_noop_for_full_v2_ids() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_expands_v2_short_to_full() -> None:
     """16-char ``01`` short id is expanded to the full 66-char id."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet(
         {
             FULL_V2_ID: _keyset(FULL_V2_ID),
@@ -132,8 +136,6 @@ async def test_expand_short_keysets_expands_v2_short_to_full() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_loads_keysets_when_empty() -> None:
     """When the wallet has no keysets loaded, load them before expansion."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet(
         {},
         url="https://mint.example",
@@ -148,8 +150,6 @@ async def test_expand_short_keysets_loads_keysets_when_empty() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_propagates_keyset_load_failure() -> None:
     """Loading failures retain their original error instead of blaming the token."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet({})
     load_error = RuntimeError("mint unavailable")
     with (
@@ -166,8 +166,6 @@ async def test_expand_short_keysets_propagates_keyset_load_failure() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_refreshes_stale_keysets() -> None:
     """Retry with refreshed keysets when a populated cache cannot map the id."""
-    from routstr.wallet import _expand_short_keysets
-
     stale_id = "01" + "11" * 32
     wallet = _ExpandingWallet(
         {stale_id: _keyset(stale_id)},
@@ -182,8 +180,6 @@ async def test_expand_short_keysets_refreshes_stale_keysets() -> None:
 @pytest.mark.asyncio
 async def test_expand_short_keysets_wraps_unresolvable_short_id() -> None:
     """A short id that can't be mapped surfaces as a clear ValueError."""
-    from routstr.wallet import _expand_short_keysets
-
     wallet = _ExpandingWallet({FULL_V2_ID: _keyset(FULL_V2_ID)})
     stray = "0111111111111111"  # 16-char short id with no matching keyset
     with pytest.raises(ValueError, match="cannot be mapped"):
@@ -258,6 +254,21 @@ async def test_redeem_same_mint_expands_keysets_before_split() -> None:
     split_proofs = wallet.split.call_args.kwargs["proofs"]
     assert split_proofs[0].id == FULL_V2_ID
     assert token.proofs_access_count == 1
+    # A short id can't be activated (mint keysets are keyed by full ids and
+    # load_mint swallows the KeysetNotFoundError, leaving keyset_id unset →
+    # split dies with "No active keyset"). load_mint must be asked for an
+    # active keyset of the wallet's unit instead.
+    assert wallet.load_mint.call_args.kwargs["keyset_id"] == ""
+
+
+def test_is_short_v2_keyset_id() -> None:
+    from routstr.token_compat import is_short_v2_keyset_id
+
+    assert is_short_v2_keyset_id(SHORT_V2_ID) is True
+    assert is_short_v2_keyset_id(FULL_V2_ID) is False  # full v2 id
+    assert is_short_v2_keyset_id(V1_LEGACY_ID) is False  # v1 short == full id
+    assert is_short_v2_keyset_id(None) is False
+    assert is_short_v2_keyset_id(16) is False
 
 
 @pytest.mark.asyncio
