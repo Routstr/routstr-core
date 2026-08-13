@@ -11,6 +11,7 @@ These tests pin the behavior of :func:`routstr.wallet._expand_short_keysets`
 and verify both redeem paths (same-mint split and cross-mint melt) invoke it.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -25,9 +26,9 @@ SHORT_V2_ID = "01fc0ec0e59cd6fa"
 V1_LEGACY_ID = "00107937db0cc865"
 
 
-def _keyset(full_id: str):
+def _keyset(full_id: str) -> SimpleNamespace:
     """Construct a fake keyset object carrying the given full id."""
-    return type("KS", (object,), {"id": full_id})()
+    return SimpleNamespace(id=full_id)
 
 
 def _proof(keyset_id: str, amount: int = 1) -> Proof:
@@ -46,15 +47,25 @@ class _ExpandingWallet:
     exercises the actual short->full mapping, not a mock.
     """
 
-    def __init__(self, keysets, url: str = "https://mint.example"):
+    def __init__(
+        self,
+        keysets: dict[str, SimpleNamespace],
+        url: str = "https://mint.example",
+        keysets_after_load: dict[str, SimpleNamespace] | None = None,
+    ) -> None:
         self.keysets = keysets  # {full_id: obj-with-.id}
         self.url = url
+        self.keysets_after_load = keysets_after_load
         self.load_mint_called = False
+        self.expand_called = False
 
-    async def load_mint(self, keyset_id: str = ""):
+    async def load_mint(self, keyset_id: str = "") -> None:
         self.load_mint_called = True
+        if self.keysets_after_load is not None:
+            self.keysets = self.keysets_after_load
 
-    async def _expand_short_keyset_ids(self, proofs):
+    async def _expand_short_keyset_ids(self, proofs: list[Proof]) -> None:
+        self.expand_called = True
         manager = KeysetManager()
         keysets_dict = {k.id: k for k in self.keysets.values()}
         for p in proofs:
@@ -66,21 +77,20 @@ class _ExpandingWallet:
 
 
 @pytest.mark.asyncio
-async def test_expand_short_keysets_noop_for_v1_legacy_ids():
+async def test_expand_short_keysets_noop_for_v1_legacy_ids() -> None:
     """v1 (``00``) short ids are the full id — no expansion, no keyset load."""
     from routstr.wallet import _expand_short_keysets
 
-    wallet = _ExpandingWallet(
-        {V1_LEGACY_ID: _keyset(V1_LEGACY_ID)}, url="https://mint.example"
-    )
+    wallet = _ExpandingWallet({}, url="https://mint.example")
     proofs = [_proof(V1_LEGACY_ID)]
     await _expand_short_keysets(wallet, proofs)
     assert proofs[0].id == V1_LEGACY_ID
     assert wallet.load_mint_called is False
+    assert wallet.expand_called is False
 
 
 @pytest.mark.asyncio
-async def test_expand_short_keysets_noop_for_full_v2_ids():
+async def test_expand_short_keysets_noop_for_full_v2_ids() -> None:
     """Already-full 66-char v2 ids are left untouched."""
     from routstr.wallet import _expand_short_keysets
 
@@ -92,7 +102,7 @@ async def test_expand_short_keysets_noop_for_full_v2_ids():
 
 
 @pytest.mark.asyncio
-async def test_expand_short_keysets_expands_v2_short_to_full():
+async def test_expand_short_keysets_expands_v2_short_to_full() -> None:
     """16-char ``01`` short id is expanded to the full 66-char id."""
     from routstr.wallet import _expand_short_keysets
 
@@ -109,20 +119,39 @@ async def test_expand_short_keysets_expands_v2_short_to_full():
 
 
 @pytest.mark.asyncio
-async def test_expand_short_keysets_loads_keysets_when_empty():
-    """When the wallet has no keysets loaded, load_mint is called first."""
+async def test_expand_short_keysets_loads_keysets_when_empty() -> None:
+    """When the wallet has no keysets loaded, load them before expansion."""
     from routstr.wallet import _expand_short_keysets
 
-    wallet = _ExpandingWallet({}, url="https://mint.example")
-    # NOTE: real load would populate keysets; here we assert the calls we make.
-    # After load_mint the (empty) keysets can't resolve the short id -> error.
-    with pytest.raises(ValueError):
-        await _expand_short_keysets(wallet, [_proof(SHORT_V2_ID)])
+    wallet = _ExpandingWallet(
+        {},
+        url="https://mint.example",
+        keysets_after_load={FULL_V2_ID: _keyset(FULL_V2_ID)},
+    )
+    proofs = [_proof(SHORT_V2_ID)]
+    await _expand_short_keysets(wallet, proofs)
     assert wallet.load_mint_called is True
+    assert proofs[0].id == FULL_V2_ID
 
 
 @pytest.mark.asyncio
-async def test_expand_short_keysets_wraps_unresolvable_short_id():
+async def test_expand_short_keysets_refreshes_stale_keysets() -> None:
+    """Retry with refreshed keysets when a populated cache cannot map the id."""
+    from routstr.wallet import _expand_short_keysets
+
+    stale_id = "01" + "11" * 32
+    wallet = _ExpandingWallet(
+        {stale_id: _keyset(stale_id)},
+        keysets_after_load={FULL_V2_ID: _keyset(FULL_V2_ID)},
+    )
+    proofs = [_proof(SHORT_V2_ID)]
+    await _expand_short_keysets(wallet, proofs)
+    assert wallet.load_mint_called is True
+    assert proofs[0].id == FULL_V2_ID
+
+
+@pytest.mark.asyncio
+async def test_expand_short_keysets_wraps_unresolvable_short_id() -> None:
     """A short id that can't be mapped surfaces as a clear ValueError."""
     from routstr.wallet import _expand_short_keysets
 
@@ -141,7 +170,15 @@ class _PropertyToken:
     visible to whoever captured that particular list. A caller that re-reads
     ``.proofs`` after expansion would silently get the short id back."""
 
-    def __init__(self, mint, unit, amount, keysets, keyset_id, proof_amount):
+    def __init__(
+        self,
+        mint: str,
+        unit: str,
+        amount: int,
+        keysets: list[str],
+        keyset_id: str,
+        proof_amount: int,
+    ) -> None:
         self.mint = mint
         self.unit = unit
         self.amount = amount
@@ -151,19 +188,19 @@ class _PropertyToken:
         self.proofs_access_count = 0
 
     @property
-    def proofs(self):
+    def proofs(self) -> list[Proof]:
         self.proofs_access_count += 1
         return [_proof(self._keyset_id, amount=self._proof_amount)]
 
 
-def _mutate_short_to_full(proofs):
+def _mutate_short_to_full(proofs: list[Proof]) -> None:
     for p in proofs:
         if p.id == SHORT_V2_ID:
             p.id = FULL_V2_ID
 
 
 @pytest.mark.asyncio
-async def test_redeem_same_mint_expands_keysets_before_split():
+async def test_redeem_same_mint_expands_keysets_before_split() -> None:
     """Same-mint redemption expands short ids and split() sees the full id
     even though token.proofs is a property re-generated on every access."""
     from routstr.wallet import _redeem_same_mint
@@ -195,7 +232,7 @@ async def test_redeem_same_mint_expands_keysets_before_split():
 
 
 @pytest.mark.asyncio
-async def test_swap_to_trusted_mint_expands_keysets_before_melt():
+async def test_swap_to_trusted_mint_expands_keysets_before_melt() -> None:
     """Cross-mint swap expands short ids and melt() sees the full id even
     though token.proofs is a property re-generated on every access."""
     import routstr.wallet as wallet_mod

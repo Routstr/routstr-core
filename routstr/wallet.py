@@ -302,22 +302,33 @@ async def get_balance(unit: str) -> int:
 async def _expand_short_keysets(wallet: "_CashuWallet", proofs: list[Proof]) -> None:
     """Expand short NUT-02 v2 keyset ids (e.g. minibits tokens) to full 66-char
     ids in place; the mint won't accept a short id on melt/swap."""
-    short_ids = {
-        p.id
-        for p in proofs
-        if isinstance(getattr(p, "id", None), str) and 0 < len(p.id) < 66
-    }
-    if not short_ids:
+    has_short_v2_id = any(
+        p.id.startswith("01") and len(p.id) == 16 for p in proofs
+    )
+    if not has_short_v2_id:
         return
-    if not wallet.keysets:
+
+    had_keysets = bool(wallet.keysets)
+
+    async def load_keysets() -> None:
         await run_mint_operation(
             lambda: wallet.load_mint(),
             op_name="load_mint_for_keyset_expansion",
             mint_url=wallet.url,
             retry_timeouts=False,
         )
+
+    if not had_keysets:
+        await load_keysets()
     try:
-        await wallet._expand_short_keyset_ids(proofs)
+        try:
+            await wallet._expand_short_keyset_ids(proofs)
+        except KeyError:
+            if not had_keysets:
+                raise
+            # Cached keysets may predate the token's issuing keyset.
+            await load_keysets()
+            await wallet._expand_short_keyset_ids(proofs)
     except KeyError as e:
         raise ValueError(
             "Token carries a short keyset id that cannot be mapped to a "
