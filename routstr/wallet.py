@@ -299,6 +299,32 @@ async def get_balance(unit: str) -> int:
     return wallet.available_balance.amount
 
 
+async def _expand_short_keysets(wallet: "_CashuWallet", proofs: list[Proof]) -> None:
+    """Expand short NUT-02 v2 keyset ids (e.g. minibits tokens) to full 66-char
+    ids in place; the mint won't accept a short id on melt/swap."""
+    short_ids = {
+        p.id
+        for p in proofs
+        if isinstance(getattr(p, "id", None), str) and 0 < len(p.id) < 66
+    }
+    if not short_ids:
+        return
+    if not wallet.keysets:
+        await run_mint_operation(
+            lambda: wallet.load_mint(),
+            op_name="load_mint_for_keyset_expansion",
+            mint_url=wallet.url,
+            retry_timeouts=False,
+        )
+    try:
+        await wallet._expand_short_keyset_ids(proofs)
+    except KeyError as e:
+        raise ValueError(
+            "Token carries a short keyset id that cannot be mapped to a "
+            f"mint keyset (NUT-02 v2 migration): {e}"
+        ) from e
+
+
 async def _redeem_same_mint(
     wallet: Wallet, token_obj: Token
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
@@ -336,11 +362,17 @@ async def _redeem_same_mint(
             ) from error
         raise
 
-    wallet.verify_proofs_dleq(token_obj.proofs)
-    input_fees = wallet.get_fees_for_proofs(token_obj.proofs)
+    # token_obj.proofs rebuilds fresh Proof objects on every access, so
+    # capture it once and reuse below — otherwise _expand_short_keysets'
+    # in-place id mutation gets silently discarded.
+    proofs = token_obj.proofs
+    await _expand_short_keysets(wallet, proofs)
+
+    wallet.verify_proofs_dleq(proofs)
+    input_fees = wallet.get_fees_for_proofs(proofs)
     try:
         await run_mint_operation(
-            lambda: wallet.split(proofs=token_obj.proofs, amount=0, include_fees=True),
+            lambda: wallet.split(proofs=proofs, amount=0, include_fees=True),
             op_name="redeem_split",
             mint_url=token_obj.mint,
             retry_timeouts=False,
@@ -1285,6 +1317,12 @@ async def swap_to_trusted_mint(
         )
         return await _redeem_same_mint(token_wallet, token_obj)
 
+    # token_obj.proofs rebuilds fresh Proof objects on every access, so
+    # capture it once and reuse below — otherwise _expand_short_keysets'
+    # in-place id mutation gets silently discarded.
+    proofs = token_obj.proofs
+    await _expand_short_keysets(token_wallet, proofs)
+
     primary_wallet: Wallet | None = None
 
     minted_amount = await _calculate_swap_amount(
@@ -1293,7 +1331,7 @@ async def swap_to_trusted_mint(
         token_obj.mint,
         token_wallet,
         primary_wallet,
-        token_obj.proofs,
+        proofs,
         destination_candidates,
     )
 
@@ -1372,7 +1410,7 @@ async def swap_to_trusted_mint(
                     "Issuing Cashu mint is unreachable"
                 ) from error
             raise
-        input_fees = token_wallet.get_fees_for_proofs(token_obj.proofs)
+        input_fees = token_wallet.get_fees_for_proofs(proofs)
         total_needed = melt_quote.amount + melt_quote.fee_reserve + input_fees
         logger.info(
             "swap_to_trusted_mint: melt quote received",
@@ -1426,7 +1464,7 @@ async def swap_to_trusted_mint(
         try:
             melt_response = await run_mint_operation(
                 lambda: token_wallet.melt(
-                    proofs=token_obj.proofs,
+                    proofs=proofs,
                     invoice=mint_quote.request,
                     fee_reserve_sat=melt_quote.fee_reserve,
                     quote_id=melt_quote.quote,
@@ -1436,7 +1474,7 @@ async def swap_to_trusted_mint(
                 retry_timeouts=False,
             )
             await _confirm_melt_paid(
-                token_wallet, melt_quote.quote, token_obj.proofs, melt_response
+                token_wallet, melt_quote.quote, proofs, melt_response
             )
         except Exception as e:
             shortfall = _melt_insufficient_shortfall(e)
@@ -1449,7 +1487,7 @@ async def swap_to_trusted_mint(
                     ) from e
                 if is_mint_connection_error(e):
                     await _reconcile_ambiguous_melt(
-                        token_wallet, melt_quote.quote, token_obj.proofs
+                        token_wallet, melt_quote.quote, proofs
                     )
                     logger.info(
                         "Source melt reconciled as paid; minting on destination",
