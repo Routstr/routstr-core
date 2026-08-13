@@ -90,6 +90,17 @@ async def test_expand_short_keysets_noop_for_v1_legacy_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_expand_short_keysets_noop_for_incomplete_test_proofs() -> None:
+    """Proof-like test doubles without string ids are safely ignored."""
+    from routstr.wallet import _expand_short_keysets
+
+    wallet = _ExpandingWallet({})
+    await _expand_short_keysets(wallet, [Mock(), {"amount": 1}])  # type: ignore[list-item]
+    assert wallet.load_keysets_called is False
+    assert wallet.expand_called is False
+
+
+@pytest.mark.asyncio
 async def test_expand_short_keysets_noop_for_full_v2_ids() -> None:
     """Already-full 66-char v2 ids are left untouched."""
     from routstr.wallet import _expand_short_keysets

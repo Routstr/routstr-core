@@ -302,7 +302,12 @@ async def get_balance(unit: str) -> int:
 async def _expand_short_keysets(wallet: "_CashuWallet", proofs: list[Proof]) -> None:
     """Expand short NUT-02 v2 keyset ids (e.g. minibits tokens) to full 66-char
     ids in place; the mint won't accept a short id on melt/swap."""
-    has_short_v2_id = any(p.id.startswith("01") and len(p.id) == 16 for p in proofs)
+    has_short_v2_id = any(
+        isinstance(proof_id := getattr(proof, "id", None), str)
+        and proof_id.startswith("01")
+        and len(proof_id) == 16
+        for proof in proofs
+    )
     if not has_short_v2_id:
         return
 
