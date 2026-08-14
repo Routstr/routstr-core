@@ -36,14 +36,18 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
     is_sqlite = backend == "sqlite"
     is_memory_sqlite = is_sqlite and url.database in {None, "", ":memory:"}
     pool_pre_ping = settings.database_pool_pre_ping or not is_sqlite
-    options: dict[str, int | float | bool] = {"pool_pre_ping": pool_pre_ping}
+    options: dict[str, object] = {"pool_pre_ping": pool_pre_ping}
     if not is_memory_sqlite:
         options.update(
-            pool_size=settings.database_pool_size,
-            max_overflow=settings.database_max_overflow,
+            pool_size=1 if is_sqlite else settings.database_pool_size,
+            max_overflow=0 if is_sqlite else settings.database_max_overflow,
             pool_timeout=settings.database_pool_timeout,
             pool_recycle=settings.database_pool_recycle,
         )
+    if is_sqlite:
+        options["connect_args"] = {
+            "timeout": settings.database_sqlite_busy_timeout,
+        }
 
     logger.info(
         "Database pool configured",
@@ -80,8 +84,20 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
                 },
             )
 
+    def configure_sqlite_connection(
+        dbapi_connection: object, connection_record: object
+    ) -> None:
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        try:
+            timeout_ms = round(settings.database_sqlite_busy_timeout * 1000)
+            cursor.execute(f"PRAGMA busy_timeout={timeout_ms}")
+        finally:
+            cursor.close()
+
     event.listen(created_engine.sync_engine, "checkout", record_pool_checkout)
     event.listen(created_engine.sync_engine, "checkin", record_pool_checkin)
+    if is_sqlite:
+        event.listen(created_engine.sync_engine, "connect", configure_sqlite_connection)
     return created_engine
 
 

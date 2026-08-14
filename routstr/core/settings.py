@@ -127,9 +127,9 @@ class Settings(BaseSettings):
     )
 
     # Database connection-pool controls (advanced). Capacity defaults provide
-    # headroom for Routstr's concurrent request and background-payment workload.
-    # Pre-ping is enabled by the engine factory for networked backends; SQLite
-    # can explicitly opt in. These fields are env-only below.
+    # headroom for networked backends. File-backed SQLite is forced to one
+    # connection because it permits only one writer. Pre-ping is automatic for
+    # networked backends; SQLite can explicitly opt in. These fields are env-only.
     database_pool_size: int = Field(default=10, ge=1, env="DATABASE_POOL_SIZE")
     database_max_overflow: int = Field(default=20, ge=0, env="DATABASE_MAX_OVERFLOW")
     database_pool_timeout: float = Field(
@@ -139,6 +139,9 @@ class Settings(BaseSettings):
     database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
     database_pool_hold_warn_seconds: float = Field(
         default=10.0, gt=0, env="DATABASE_POOL_HOLD_WARN_SECONDS"
+    )
+    database_sqlite_busy_timeout: float = Field(
+        default=30.0, gt=0, env="DATABASE_SQLITE_BUSY_TIMEOUT"
     )
 
     # Logging
@@ -196,6 +199,7 @@ ENV_ONLY_FIELDS = frozenset(
         "database_pool_recycle",
         "database_pool_pre_ping",
         "database_pool_hold_warn_seconds",
+        "database_sqlite_busy_timeout",
     }
 )
 
