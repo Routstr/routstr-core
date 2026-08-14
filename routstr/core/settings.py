@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=10, ge=1, env="DATABASE_POOL_SIZE")
     database_max_overflow: int = Field(default=20, ge=0, env="DATABASE_MAX_OVERFLOW")
     database_pool_timeout: float = Field(
-        default=15.0, gt=0, env="DATABASE_POOL_TIMEOUT"
+        default=30.0, gt=0, env="DATABASE_POOL_TIMEOUT"
     )
     database_pool_recycle: int = Field(default=1800, ge=0, env="DATABASE_POOL_RECYCLE")
     database_pool_pre_ping: bool = Field(default=False, env="DATABASE_POOL_PRE_PING")
