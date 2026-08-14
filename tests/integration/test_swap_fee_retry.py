@@ -56,7 +56,9 @@ def _make_swap_mocks(
     mock_token.proofs = [Mock(amount=token_amount)]
 
     mock_token_wallet = Mock()
-    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_mint_keysets = AsyncMock()
+    mock_token_wallet.activate_keyset = AsyncMock()
+    mock_token_wallet._expand_short_keyset_ids = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
     mock_token_wallet.get_fees_for_proofs = Mock(return_value=input_fees)
 
