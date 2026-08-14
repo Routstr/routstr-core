@@ -66,7 +66,7 @@ def test_database_pool_defaults_provide_concurrency_headroom() -> None:
     s = Settings()
     assert s.database_pool_size == 10
     assert s.database_max_overflow == 20
-    assert s.database_pool_timeout == 15.0
+    assert s.database_pool_timeout == 30.0
     assert s.database_pool_recycle == 1800
     assert s.database_pool_pre_ping is False
     assert s.database_pool_hold_warn_seconds == 10.0
