@@ -166,13 +166,19 @@ async def test_cached_keysets_do_not_mask_a_refresh_failure(
 
 
 @pytest.mark.asyncio
-async def test_cross_mint_swap_reuses_resolved_proofs_end_to_end() -> None:
-    token = _token()
+async def test_cross_mint_swap_uses_resolved_proofs_and_active_output_keyset() -> None:
+    token = _token(amounts=(7,))
     source_wallet = _wallet_with_keysets(FULL_V2_ID)
     source_wallet.melt_quote = AsyncMock(
-        return_value=Mock(quote="melt-quote", amount=5, fee_reserve=0)
+        return_value=Mock(quote="melt-quote", amount=5, fee_reserve=2)
     )
-    source_wallet.melt = AsyncMock(return_value=Mock(state=MeltQuoteState.paid))
+
+    async def assert_melt_boundary(**kwargs: object) -> Mock:
+        assert kwargs["fee_reserve_sat"] == 2
+        assert source_wallet.keyset_id == FULL_V2_ID
+        return Mock(state=MeltQuoteState.paid)
+
+    source_wallet.melt = AsyncMock(side_effect=assert_melt_boundary)
 
     destination_url = "https://trusted-mint.example"
     destination_wallet = Mock(
