@@ -1,5 +1,6 @@
 import asyncio
 import fcntl
+import json
 import os
 import re
 import time
@@ -24,6 +25,7 @@ from .core.settings import settings
 from .mint import (
     MINT_TRANSPORT_COOLDOWN_SECONDS,
     MINT_TRANSPORT_EXCEPTIONS,
+    MintError,
     MintRateGuard,
     MintRateLimitedError,
     fail_fast_mint_operations,
@@ -130,7 +132,20 @@ class Wallet(_CashuWallet):
                 request=resp.request,
                 response=resp,
             )
+        try:
+            response_data = resp.json()
+        except json.JSONDecodeError:
+            response_data = None
+        if isinstance(response_data, dict) and "detail" in response_data:
+            raise MintError(response_data["detail"], response_data.get("code"))
         _CashuWallet.raise_on_error_request(resp)
+
+    async def load_mint(
+        self, keyset_id: str = "", force_old_keysets: bool = False
+    ) -> None:
+        await self.load_mint_keysets(force_old_keysets)
+        await self.activate_keyset(keyset_id)
+        await self.load_mint_info(reload=True)
 
 
 class MintConnectionError(Exception):
@@ -307,7 +322,6 @@ async def _load_and_resolve_token_proofs(
     ``TokenV4.proofs`` rebuilds its list on each access, so callers must reuse
     this list after Cashu expands short keyset IDs in place.
     """
-    # Cashu's load_mint() suppresses failures, which can leave cached keysets stale.
     try:
         await run_mint_operation(
             lambda: wallet.load_mint_keysets(),

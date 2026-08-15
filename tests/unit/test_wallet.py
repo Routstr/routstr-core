@@ -2500,6 +2500,24 @@ async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
     assert "cashu_swap_completed" in events
 
 
+def test_raise_on_error_request_identifies_cashu_mint_error() -> None:
+    from routstr.mint import MintError
+    from routstr.wallet import Wallet
+
+    response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "https://mint.example/v1/swap"),
+        json={"detail": "Token already spent.", "code": 11001},
+    )
+
+    with pytest.raises(MintError) as captured:
+        Wallet.raise_on_error_request(response)
+
+    assert captured.value.detail == "Token already spent."
+    assert captured.value.code == 11001
+    assert str(captured.value) == "Mint Error: Token already spent. (Code: 11001)"
+
+
 @pytest.mark.asyncio
 async def test_lightning_mint_fallback_on_cashu_json_429() -> None:
     """The real Cashu JSON-error adapter preserves 429 for fallback."""
@@ -2948,8 +2966,6 @@ async def test_payout_reloads_wallet_snapshot_under_guard() -> None:
 
 @pytest.mark.asyncio
 async def test_load_mint_propagates_rate_limit() -> None:
-    """Unlike upstream, our load_mint must not swallow a 429 — that leaves the
-    wallet keyset-less and split() dies with "No active keyset"."""
     from routstr.mint import MintRateLimitedError
     from routstr.wallet import Wallet
 
@@ -2964,6 +2980,21 @@ async def test_load_mint_propagates_rate_limit() -> None:
         pytest.raises(MintRateLimitedError),
     ):
         await wallet.load_mint()
+
+
+@pytest.mark.asyncio
+async def test_load_mint_propagates_connection_error() -> None:
+    from routstr.wallet import Wallet
+
+    wallet = Wallet.__new__(Wallet)
+    error = httpx.ConnectError("mint unavailable")
+    with (
+        patch.object(wallet, "load_mint_keysets", new=AsyncMock(side_effect=error)),
+        pytest.raises(httpx.ConnectError) as captured,
+    ):
+        await wallet.load_mint()
+
+    assert captured.value is error
 
 
 @pytest.mark.asyncio
