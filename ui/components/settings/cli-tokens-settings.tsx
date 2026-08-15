@@ -21,6 +21,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Copy, Trash2, Check } from 'lucide-react';
 import { toast } from 'sonner';
+import { getApiErrorMessage } from '@/lib/api/errors';
 
 function formatTs(ts: number | null): string {
   if (!ts) return '—';
@@ -44,9 +45,7 @@ export function CliTokensSettings(): React.ReactElement {
       const data = await AdminService.listCliTokens();
       setTokens(data);
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to load tokens';
-      setError(message);
+      setError(getApiErrorMessage(err, 'Failed to load tokens'));
     } finally {
       setLoading(false);
     }
@@ -79,9 +78,7 @@ export function CliTokensSettings(): React.ReactElement {
       await loadTokens();
       toast.success('Token created. Copy it now — it will not be shown again.');
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to create token';
-      toast.error(message);
+      toast.error(getApiErrorMessage(err, 'Failed to create token'));
     } finally {
       setCreating(false);
     }
@@ -98,9 +95,7 @@ export function CliTokensSettings(): React.ReactElement {
       await loadTokens();
       toast.success('Token revoked');
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to revoke token';
-      toast.error(message);
+      toast.error(getApiErrorMessage(err, 'Failed to revoke token'));
     }
   }
 
