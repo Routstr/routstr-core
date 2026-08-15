@@ -33,7 +33,6 @@ from .mint import (
     run_mint_operation,
 )
 from .payment.lnurl import raw_send_to_lnurl
-from .token_compat import is_short_v2_keyset_id, normalize_token_proofs
 
 # Backwards-compatible aliases for callers/tests that imported the former
 # wallet-local policy. Production modules use the public routstr.mint API.
@@ -132,16 +131,6 @@ class Wallet(_CashuWallet):
                 response=resp,
             )
         _CashuWallet.raise_on_error_request(resp)
-
-    async def load_mint(
-        self, keyset_id: str = "", force_old_keysets: bool = False
-    ) -> None:
-        """Upstream load_mint minus its blanket ``except Exception: pass`` —
-        the swallow hides 429/transport failures and leaves the wallet
-        keyset-less, so redemption later dies with "No active keyset"."""
-        await self.load_mint_keysets(force_old_keysets)
-        await self.activate_keyset(keyset_id)
-        await self.load_mint_info(reload=True)
 
 
 class MintConnectionError(Exception):
@@ -310,6 +299,43 @@ async def get_balance(unit: str) -> int:
     return wallet.available_balance.amount
 
 
+async def _load_and_resolve_token_proofs(
+    wallet: Wallet, token_obj: Token, *, op_name: str
+) -> list[Proof]:
+    """Load mint keysets and return the proof list used for redemption.
+
+    ``TokenV4.proofs`` rebuilds its list on each access, so callers must reuse
+    this list after Cashu expands short keyset IDs in place.
+    """
+    # Cashu's load_mint() suppresses failures, which can leave cached keysets stale.
+    try:
+        await run_mint_operation(
+            lambda: wallet.load_mint_keysets(),
+            op_name=op_name,
+            mint_url=token_obj.mint,
+        )
+    except Exception as error:
+        if is_mint_connection_error(error) or is_mint_rate_limited(error):
+            raise
+        raise MintConnectionError("Cashu mint keysets are unavailable") from error
+    try:
+        await wallet.activate_keyset()
+    except Exception as error:
+        # Cashu raises plain Exception when no active keyset exists.
+        raise MintConnectionError("Cashu mint has no active keyset") from error
+
+    proofs = token_obj.proofs
+    try:
+        # Cashu's TokenV4 receive helper uses this resolver after load_mint().
+        await wallet._expand_short_keyset_ids(proofs)
+    except (KeyError, ValueError) as error:
+        raise ValueError(
+            "Cashu token references an unknown or ambiguous keyset"
+        ) from error
+
+    return proofs
+
+
 async def _redeem_same_mint(
     wallet: Wallet, token_obj: Token
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
@@ -321,16 +347,11 @@ async def _redeem_same_mint(
     that, not the face value, or routstr over-credits the user and its wallet
     drifts insolvent.
     """
-    # A short v2 id can't be activated (keysets are keyed by full ids); let
-    # load_mint pick an active keyset and expand the proofs' ids below.
-    load_keyset_id = token_obj.keysets[0]
-    if is_short_v2_keyset_id(load_keyset_id):
-        load_keyset_id = ""
     try:
-        await run_mint_operation(
-            lambda: wallet.load_mint(keyset_id=load_keyset_id),
+        proofs = await _load_and_resolve_token_proofs(
+            wallet,
+            token_obj,
             op_name="redeem_load_mint",
-            mint_url=token_obj.mint,
         )
     except Exception as error:
         if is_mint_connection_error(error):
@@ -351,8 +372,6 @@ async def _redeem_same_mint(
                 "Issuing Cashu mint is unreachable"
             ) from error
         raise
-
-    proofs = await normalize_token_proofs(wallet, token_obj)
 
     wallet.verify_proofs_dleq(proofs)
     input_fees = wallet.get_fees_for_proofs(proofs)
@@ -423,7 +442,6 @@ async def _recieve_token_locked(
         )
 
     wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
-    wallet.keyset_id = token_obj.keysets[0]
     if token_obj.mint not in destinations:
         logger.info(
             "Cashu cross-mint swap required",
@@ -1303,7 +1321,18 @@ async def swap_to_trusted_mint(
         )
         return await _redeem_same_mint(token_wallet, token_obj)
 
-    proofs = await normalize_token_proofs(token_wallet, token_obj)
+    try:
+        proofs = await _load_and_resolve_token_proofs(
+            token_wallet,
+            token_obj,
+            op_name="swap_load_source_mint",
+        )
+    except Exception as error:
+        if is_mint_connection_error(error):
+            raise SourceMintConnectionError(
+                "Issuing Cashu mint is unreachable"
+            ) from error
+        raise
 
     primary_wallet: Wallet | None = None
 

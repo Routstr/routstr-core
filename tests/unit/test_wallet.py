@@ -143,7 +143,9 @@ async def test_recieve_token_valid() -> None:
             mock_token.proofs = [{"amount": 1000}]
             mock_deserialize.return_value = mock_token
 
-            mock_wallet.load_mint = AsyncMock()
+            mock_wallet.load_mint_keysets = AsyncMock()
+            mock_wallet.activate_keyset = AsyncMock()
+            mock_wallet._expand_short_keyset_ids = AsyncMock()
             mock_wallet.load_proofs = AsyncMock()
             with patch("routstr.wallet.Wallet.with_db", return_value=mock_wallet):
                 amount, unit, mint = await recieve_token(token_str)
@@ -194,7 +196,9 @@ async def test_recieve_token_trusted_mint_deducts_input_fee() -> None:
             mock_token.proofs = [{"amount": 1000}]
             mock_deserialize.return_value = mock_token
 
-            mock_wallet.load_mint = AsyncMock()
+            mock_wallet.load_mint_keysets = AsyncMock()
+            mock_wallet.activate_keyset = AsyncMock()
+            mock_wallet._expand_short_keyset_ids = AsyncMock()
             mock_wallet.load_proofs = AsyncMock()
             # Patch get_wallet directly so the module-level `_wallets` cache
             # (keyed by mint URL) can't hand back a wallet from another test.
@@ -300,7 +304,8 @@ async def test_primary_mint_failure_does_not_try_another_mint() -> None:
         proofs=[Mock(amount=100)],
     )
     source_wallet = Mock(
-        load_mint=AsyncMock(side_effect=httpx.ConnectError("mint unavailable"))
+        load_mint_keysets=AsyncMock(side_effect=httpx.ConnectError("mint unavailable")),
+        activate_keyset=AsyncMock(),
     )
     get_wallet = AsyncMock(return_value=source_wallet)
 
@@ -337,7 +342,9 @@ async def test_same_mint_split_timeout_is_non_retryable() -> None:
         proofs=[Mock(amount=1000)],
     )
     wallet = Mock(
-        load_mint=AsyncMock(),
+        load_mint_keysets=AsyncMock(),
+        activate_keyset=AsyncMock(),
+        _expand_short_keyset_ids=AsyncMock(),
         split=AsyncMock(side_effect=httpx.ReadTimeout("response lost")),
         get_fees_for_proofs=Mock(return_value=0),
     )
@@ -364,7 +371,9 @@ async def test_same_mint_split_connect_error_remains_retryable() -> None:
         proofs=[Mock(amount=1000)],
     )
     wallet = Mock(
-        load_mint=AsyncMock(),
+        load_mint_keysets=AsyncMock(),
+        activate_keyset=AsyncMock(),
+        _expand_short_keyset_ids=AsyncMock(),
         split=AsyncMock(side_effect=httpx.ConnectError("connect failed")),
         get_fees_for_proofs=Mock(return_value=0),
     )
@@ -731,7 +740,9 @@ async def test_swap_to_primary_mint_insufficient_for_fees() -> None:
     mock_token.proofs = [{"amount": 404}]
 
     mock_token_wallet = Mock()
-    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_mint_keysets = AsyncMock()
+    mock_token_wallet.activate_keyset = AsyncMock()
+    mock_token_wallet._expand_short_keyset_ids = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
     mock_token_wallet.get_fees_for_proofs = Mock(return_value=0)
 
@@ -807,7 +818,9 @@ async def test_swap_to_primary_mint_already_on_primary() -> None:
     mock_token.proofs = [{"amount": 1000}]
 
     mock_token_wallet = Mock()
-    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_mint_keysets = AsyncMock()
+    mock_token_wallet.activate_keyset = AsyncMock()
+    mock_token_wallet._expand_short_keyset_ids = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
     mock_token_wallet.verify_proofs_dleq = Mock()
     # Mock a 3-sat input fee from the Cashu wallet API.
@@ -862,7 +875,9 @@ def _make_swap_mocks(
     mock_token.proofs = [Mock(amount=token_amount)]
 
     mock_token_wallet = Mock()
-    mock_token_wallet.load_mint = AsyncMock()
+    mock_token_wallet.load_mint_keysets = AsyncMock()
+    mock_token_wallet.activate_keyset = AsyncMock()
+    mock_token_wallet._expand_short_keyset_ids = AsyncMock()
     mock_token_wallet.load_proofs = AsyncMock()
     mock_token_wallet.get_fees_for_proofs = Mock(return_value=input_fees)
 
@@ -2430,7 +2445,9 @@ async def test_swap_falls_back_when_primary_wallet_cannot_load() -> None:
         proofs=[Mock(amount=1000)],
     )
     source_wallet = Mock(
-        load_mint=AsyncMock(),
+        load_mint_keysets=AsyncMock(),
+        activate_keyset=AsyncMock(),
+        _expand_short_keyset_ids=AsyncMock(),
         load_proofs=AsyncMock(),
         get_fees_for_proofs=Mock(return_value=0),
         melt_quote=AsyncMock(
