@@ -22,6 +22,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Copy, Trash2, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { getApiErrorMessage } from '@/lib/api/errors';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 
 function formatTs(ts: number | null): string {
   if (!ts) return '—';
@@ -36,7 +37,7 @@ export function CliTokensSettings(): React.ReactElement {
   const [expiresInDays, setExpiresInDays] = useState<string>('');
   const [creating, setCreating] = useState(false);
   const [newToken, setNewToken] = useState<CliTokenCreated | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyToClipboard();
 
   const loadTokens = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -101,9 +102,7 @@ export function CliTokensSettings(): React.ReactElement {
 
   async function handleCopy(): Promise<void> {
     if (!newToken) return;
-    await navigator.clipboard.writeText(newToken.token);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    await copy(newToken.token);
   }
 
   return (

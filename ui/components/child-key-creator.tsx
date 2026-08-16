@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard';
 import { useWalletInfo } from '@/hooks/use-wallet-info';
 import { WalletService } from '@/lib/api/services/wallet';
 import { ApiKeyInput } from './api-key-input';
@@ -75,7 +76,7 @@ export function ChildKeyCreator({
     cost_msats: number;
     parent_balance: number;
   } | null>(null);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const { copiedKey, copy } = useCopyToClipboard();
 
   const addConfig = () => {
     setConfigs([
@@ -163,16 +164,16 @@ export function ChildKeyCreator({
     }
   };
 
-  const copyToClipboard = (key: string) => {
-    navigator.clipboard.writeText(key);
-    setCopiedKey(key);
-    toast.success('API key copied to clipboard');
-    setTimeout(() => setCopiedKey(null), 2000);
+  const copyToClipboard = async (key: string) => {
+    if (await copy(key, key)) {
+      toast.success('API key copied to clipboard');
+    }
   };
 
-  const copyAllToClipboard = () => {
-    navigator.clipboard.writeText(newKeys.join('\n'));
-    toast.success('All API keys copied to clipboard');
+  const copyAllToClipboard = async () => {
+    if (await copy(newKeys.join('\n'), 'all')) {
+      toast.success('All API keys copied to clipboard');
+    }
   };
 
   return (
@@ -215,10 +216,15 @@ export function ChildKeyCreator({
                   <Button
                     variant='outline'
                     size='icon'
-                    onClick={() => navigator.clipboard.writeText(activeApiKey)}
+                    aria-label='Copy parent API key'
+                    onClick={() => copyToClipboard(activeApiKey)}
                     disabled={!activeApiKey}
                   >
-                    <Copy className='h-4 w-4' />
+                    {copiedKey === activeApiKey ? (
+                      <Check className='h-4 w-4' />
+                    ) : (
+                      <Copy className='h-4 w-4' />
+                    )}
                   </Button>
                 </div>
                 {walletInfo && (
