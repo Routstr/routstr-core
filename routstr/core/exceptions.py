@@ -52,7 +52,7 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
             },
         )
 
-    if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
+    if isinstance(detail, dict) and "error" in detail:
         content = {"detail": detail, **detail}
     else:
         content = {"detail": detail}

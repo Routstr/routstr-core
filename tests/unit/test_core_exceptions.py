@@ -48,6 +48,21 @@ async def test_structured_http_error_uses_standard_error_envelope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_string_error_uses_standard_error_envelope() -> None:
+    error = "max_tokens must be an integer"
+    response = await http_exception_handler(
+        _request(),
+        HTTPException(status_code=400, detail={"error": error}),
+    )
+
+    assert json.loads(response.body) == {
+        "detail": {"error": error},
+        "error": error,
+        "request_id": "req-123",
+    }
+
+
+@pytest.mark.asyncio
 async def test_plain_http_error_keeps_detail_envelope() -> None:
     response = await http_exception_handler(
         _request(),
