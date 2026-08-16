@@ -31,6 +31,15 @@ from routstr.payment.models import (
     backfill_cache_pricing,
 )
 from routstr.upstream import GenericUpstreamProvider
+from routstr.upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
+
+
+@pytest.fixture(autouse=True)
+def _deepseek_v4_pricing() -> None:
+    # litellm's bundled cost map lacks the DeepSeek V4 entries (they only
+    # appear when its remote map is reachable); production injects them at
+    # startup via this same shim.
+    register_deepseek_v4_pricing()
 
 
 def _make_model(model_id: str, pricing: Pricing) -> Model:
