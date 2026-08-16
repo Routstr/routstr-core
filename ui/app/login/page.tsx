@@ -5,7 +5,13 @@ import type { ChangeEvent, FormEvent, ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { adminLogin } from '@/lib/api/services/auth';
+import {
+  getApiErrorMessage,
+  isNodeUnreachable,
+  isUnauthorized,
+} from '@/lib/api/errors';
 import { ConfigurationService } from '@/lib/api/services/configuration';
 import { toast } from 'sonner';
 import { AuthPageShell } from '@/components/auth-page-shell';
@@ -16,6 +22,7 @@ export default function AdminLoginPage(): ReactElement {
   const [password, setPassword] = useState<string>('');
   const [baseUrl, setBaseUrl] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [loginError, setLoginError] = useState<string>('');
 
   useEffect(() => {
     if (ConfigurationService.isTokenValid()) {
@@ -43,18 +50,22 @@ export default function AdminLoginPage(): ReactElement {
     event: FormEvent<HTMLFormElement>
   ): Promise<void> => {
     event.preventDefault();
+    setLoginError('');
 
+    // The login request itself must target the entered URL, so it is written
+    // before the attempt and rolled back if the node was unreachable.
+    const previousBaseUrl = ConfigurationService.getManualBaseUrl();
     if (allowCustomBaseUrl) {
       const normalizedBaseUrl = baseUrl.trim();
       if (!normalizedBaseUrl) {
-        toast.error('Please enter the API URL');
+        setLoginError('Please enter the API URL');
         return;
       }
       ConfigurationService.setManualBaseUrl(normalizedBaseUrl);
     }
 
     if (!password) {
-      toast.error('Please enter your password');
+      setLoginError('Please enter your password');
       return;
     }
 
@@ -65,7 +76,18 @@ export default function AdminLoginPage(): ReactElement {
       router.push('/');
     } catch (error) {
       console.error('Login error:', error);
-      toast.error('Invalid password. Please try again.');
+      if (isNodeUnreachable(error)) {
+        setLoginError(
+          `Can't reach your node at ${ConfigurationService.getLocalBaseUrl()}. Is it running?`
+        );
+        if (allowCustomBaseUrl) {
+          ConfigurationService.setManualBaseUrl(previousBaseUrl);
+        }
+      } else if (isUnauthorized(error)) {
+        setLoginError('Incorrect password. Please try again.');
+      } else {
+        setLoginError(getApiErrorMessage(error, 'Login failed'));
+      }
     } finally {
       setIsLoading(false);
     }
@@ -79,9 +101,13 @@ export default function AdminLoginPage(): ReactElement {
       <form onSubmit={handleSubmit} className='space-y-4'>
         {allowCustomBaseUrl && (
           <div className='space-y-2'>
+            <Label htmlFor='api-url'>API URL</Label>
             <Input
+              id='api-url'
+              name='url'
               type='text'
-              placeholder='API URL (https://api.example.com)'
+              autoComplete='url'
+              placeholder='https://api.example.com'
               value={baseUrl}
               onChange={(event: ChangeEvent<HTMLInputElement>) =>
                 setBaseUrl(event.target.value)
@@ -92,9 +118,13 @@ export default function AdminLoginPage(): ReactElement {
           </div>
         )}
         <div className='space-y-2'>
+          <Label htmlFor='admin-password'>Admin password</Label>
           <Input
+            id='admin-password'
+            name='password'
             type='password'
-            placeholder='Admin Password'
+            autoComplete='current-password'
+            placeholder='Enter your admin password'
             value={password}
             onChange={(event: ChangeEvent<HTMLInputElement>) =>
               setPassword(event.target.value)
@@ -104,6 +134,11 @@ export default function AdminLoginPage(): ReactElement {
             required
           />
         </div>
+        {loginError && (
+          <p role='alert' className='text-destructive text-sm'>
+            {loginError}
+          </p>
+        )}
         <Button type='submit' className='w-full' disabled={isLoading}>
           {isLoading ? 'Logging in...' : 'Login'}
         </Button>
