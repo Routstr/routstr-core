@@ -79,22 +79,30 @@ def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
 
     The header format is::
 
-        prompt=<n>,completion=<n>,total=<n>[,model=<name>]
+        prompt=<n>,completion=<n>,total=<n>[,cached_prompt_tokens=<n>,
+        uncached_prompt_tokens=<n>][,model=<name>][,cost_usd=<usd>]
+
+    ``prompt`` is the inclusive prompt total and ``cached_prompt_tokens`` is
+    the cache-read portion included within it. Routstr maps these to
+    ``prompt_tokens`` and ``cache_read_input_tokens`` so ``normalize_usage``
+    can subtract the cached read from the prompt total (OpenAI-family
+    semantics). ``cost_usd`` is parsed as a float and kept for logging/
+    cross-checking only — billing uses the token path.
 
     The ``model`` field (added in tinfoilsh/confidential-model-router PR #385)
-    is extracted as a string and included in the returned dict under the
-    ``"model"`` key so callers can compare the served model against the
-    requested one and adjust pricing.
+    is extracted as a string so callers can compare the served model against
+    the requested one and adjust pricing.
 
-    Returns a dict like ``{"prompt_tokens": n, "completion_tokens": n,
-    "model": "<name>"}`` suitable for :func:`calculate_cost` (which ignores
-    the extra ``model`` key in the usage sub-dict), or ``None`` when the
+    Returns a dict suitable for :func:`calculate_cost`, or ``None`` when the
     header is absent or malformed.
     """
     if not header_value:
         return None
-    parts: dict[str, int] = {}
+
+    int_parts: dict[str, int] = {}
     model: str | None = None
+    cost_usd: float | None = None
+
     for item in header_value.split(","):
         key, sep, value = item.partition("=")
         if not sep:
@@ -104,30 +112,44 @@ def parse_tinfoil_usage_metrics(header_value: str | None) -> dict | None:
         if key == "model":
             model = value
             continue
+        if key == "cost_usd":
+            try:
+                cost_usd = float(value)
+            except (ValueError, TypeError):
+                cost_usd = None
+            continue
         try:
-            parts[key] = int(value)
+            int_parts[key] = int(value)
         except (ValueError, TypeError):
             continue
-    prompt = parts.get("prompt")
-    completion = parts.get("completion")
-    if prompt is not None and completion is not None:
-        result: dict[str, int | str] = {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-        }
-        if "total" in parts:
-            result["total_tokens"] = parts["total"]
-        if model:
-            result["model"] = model
-        return result
-    logger.warning(
-        "Failed to parse X-Tinfoil-Usage-Metrics header",
-        extra={
-            "header_value": header_value,
-            "parsed_parts": parts,
-        },
-    )
-    return None
+
+    prompt = int_parts.get("prompt")
+    completion = int_parts.get("completion")
+    if prompt is None or completion is None:
+        logger.warning(
+            "Failed to parse X-Tinfoil-Usage-Metrics header",
+            extra={
+                "header_value": header_value,
+                "parsed_parts": int_parts,
+            },
+        )
+        return None
+
+    result: dict[str, int | float | str] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+    }
+    if "total" in int_parts:
+        result["total_tokens"] = int_parts["total"]
+    if "cached_prompt_tokens" in int_parts:
+        result["cache_read_input_tokens"] = int_parts["cached_prompt_tokens"]
+    if "uncached_prompt_tokens" in int_parts:
+        result["uncached_prompt_tokens"] = int_parts["uncached_prompt_tokens"]
+    if cost_usd is not None:
+        result["cost_usd"] = cost_usd
+    if model:
+        result["model"] = model
+    return result
 
 
 def _get_header_case_insensitive(
@@ -274,6 +296,11 @@ def _build_cost_info(
     output_tokens: int = 0,
     input_msats: int = 0,
     output_msats: int = 0,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_read_msats: int = 0,
+    cache_creation_msats: int = 0,
+    total_usd: float = 0.0,
     actual_model: str | None = None,
 ) -> dict:
     """Build a cost-info dict with token counts and per-token-type costs.
@@ -282,13 +309,18 @@ def _build_cost_info(
     one), it is included in the returned dict so callers can use it for billing
     finalization and logging.
     """
-    result: dict[str, int | str | None] = {
+    result: dict[str, int | float | str | None] = {
         "total_msats": total_msats,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
         "input_msats": input_msats,
         "output_msats": output_msats,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_msats": cache_read_msats,
+        "cache_creation_msats": cache_creation_msats,
+        "total_usd": total_usd,
     }
     if actual_model:
         result["actual_model"] = actual_model
@@ -307,6 +339,12 @@ def _inject_cost_response_headers(
     headers["X-Routstr-Cost-Msats"] = str(cost_info["total_msats"])
     headers["X-Routstr-Input-Cost-Msats"] = str(cost_info["input_msats"])
     headers["X-Routstr-Output-Cost-Msats"] = str(cost_info["output_msats"])
+    headers["X-Routstr-Cache-Read-Msats"] = str(
+        cost_info.get("cache_read_msats", 0)
+    )
+    headers["X-Routstr-Cache-Creation-Msats"] = str(
+        cost_info.get("cache_creation_msats", 0)
+    )
 
 
 async def _compute_ehbp_actual_cost(
@@ -445,6 +483,11 @@ async def _compute_ehbp_actual_cost(
             output_tokens=cost.output_tokens,
             input_msats=cost.input_msats,
             output_msats=cost.output_msats,
+            cache_read_input_tokens=cost.cache_read_input_tokens,
+            cache_creation_input_tokens=cost.cache_creation_input_tokens,
+            cache_read_msats=cost.cache_read_msats,
+            cache_creation_msats=cost.cache_creation_msats,
+            total_usd=cost.total_usd,
             actual_model=actual_model,
         )
     # CostDataError
@@ -904,7 +947,7 @@ async def forward_ehbp_request(
                 cost_info,
                 reservation_snapshot,
             )
-            cost_data = {**cost_info, "total_usd": 0.0}
+            cost_data = {**cost_info}
         else:
             logger.warning(
                 "EHBP usage metrics not found in headers or trailers, "
@@ -939,6 +982,12 @@ async def forward_ehbp_request(
             + cost_data.get("output_tokens", 0),
             "input_msats": cost_data.get("input_msats", 0),
             "output_msats": cost_data.get("output_msats", 0),
+            "cache_read_input_tokens": cost_data.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_data.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_msats": cost_data.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_data.get("cache_creation_msats", 0),
         }
         cost_usd = cost_data.get("total_usd", 0.0)
 

@@ -102,7 +102,25 @@ class TestParseTinfoilUsageMetrics:
         assert result["prompt_tokens"] == 69
         assert result["completion_tokens"] == 20
         assert result["total_tokens"] == 89
+        assert result["cache_read_input_tokens"] == 64
+        assert result["uncached_prompt_tokens"] == 5
         assert result["model"] == "kimi-k2-6"
+        assert "cost_usd" not in result
+
+    def test_with_cached_and_cost_usd(self) -> None:
+        result = parse_tinfoil_usage_metrics(
+            "prompt=69,completion=20,total=89,"
+            "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+            "model=glm-5-2,cost_usd=0.000123456"
+        )
+        assert result is not None
+        assert result["prompt_tokens"] == 69
+        assert result["completion_tokens"] == 20
+        assert result["total_tokens"] == 89
+        assert result["cache_read_input_tokens"] == 64
+        assert result["uncached_prompt_tokens"] == 5
+        assert result["cost_usd"] == 0.000123456
+        assert result["model"] == "glm-5-2"
 
     def test_old_format_still_works(self) -> None:
         """Headers without the model field (pre-PR #385) still parse."""
@@ -283,6 +301,46 @@ class TestComputeEhbpActualCost:
             assert result["total_tokens"] == 109
             assert result["input_msats"] == 10
             assert result["output_msats"] == 20
+
+    @pytest.mark.asyncio
+    async def test_cache_fields_propagated(self) -> None:
+        model_obj = MagicMock()
+        model_obj.id = "tinfoil-glm-5-2"
+        model_obj.forwarded_model_id = "glm-5-2"
+        with patch(
+            "routstr.upstream.ehbp.calculate_cost",
+            new_callable=AsyncMock,
+        ) as mock_calc:
+            from routstr.payment.cost_calculation import CostData
+
+            mock_calc.return_value = CostData(
+                base_msats=0,
+                input_msats=5,
+                output_msats=20,
+                total_msats=25,
+                total_usd=0.0003,
+                input_tokens=5,
+                output_tokens=20,
+                cache_read_input_tokens=64,
+                cache_creation_input_tokens=0,
+                cache_read_msats=12,
+                cache_creation_msats=0,
+            )
+            result = await _compute_ehbp_actual_cost(
+                "prompt=69,completion=20,total=89,"
+                "cached_prompt_tokens=64,uncached_prompt_tokens=5,"
+                "model=glm-5-2",
+                model_obj,
+                100_000,
+            )
+            assert result["total_msats"] == 25
+            assert result["input_tokens"] == 5
+            assert result["output_tokens"] == 20
+            assert result["cache_read_input_tokens"] == 64
+            assert result["cache_creation_input_tokens"] == 0
+            assert result["cache_read_msats"] == 12
+            assert result["cache_creation_msats"] == 0
+            assert result["total_usd"] == 0.0003
 
     @pytest.mark.asyncio
     async def test_max_cost_data_falls_back(self) -> None:
@@ -694,6 +752,20 @@ class TestTinfoilUpstreamProvider:
         assert tf.id == "llama3-3-70b"
         assert tf.pricing.inputTokenPricePer1M == 1.75
         assert tf.pricing.outputTokenPricePer1M == 2.75
+        assert tf.pricing.cachedInputTokenPricePer1M is None
+
+    def test_tinfoil_model_pricing_parses_cached_rate(self) -> None:
+        data = {
+            "id": "glm-5-2",
+            "pricing": {
+                "inputTokenPricePer1M": 1.5,
+                "outputTokenPricePer1M": 5.25,
+                "cachedInputTokenPricePer1M": 0.375,
+                "requestPrice": 0,
+            },
+        }
+        tf = TinfoilModel.parse_obj(data)
+        assert tf.pricing.cachedInputTokenPricePer1M == 0.375
 
     @pytest.mark.asyncio
     async def test_fetch_models_parses_response(self) -> None:
@@ -732,7 +804,51 @@ class TestTinfoilUpstreamProvider:
         assert models[0].id == "llama3-3-70b"
         assert models[0].pricing.prompt == 1.75 / 1_000_000
         assert models[0].pricing.completion == 2.75 / 1_000_000
+        # No cachedInputTokenPricePer1M means cache reads are billed at the
+        # full input rate (and cache writes too — no separate write price).
+        assert models[0].pricing.input_cache_read == 1.75 / 1_000_000
+        assert models[0].pricing.input_cache_write == 1.75 / 1_000_000
         assert models[0].context_length == 128000
+
+    @pytest.mark.asyncio
+    async def test_fetch_models_maps_cached_pricing(self) -> None:
+        provider = TinfoilUpstreamProvider(api_key="test")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "glm-5-2",
+                    "context_window": 393216,
+                    "created": 1775088000,
+                    "multimodal": False,
+                    "pricing": {
+                        "inputTokenPricePer1M": 1.5,
+                        "outputTokenPricePer1M": 5.25,
+                        "cachedInputTokenPricePer1M": 0.375,
+                        "requestPrice": 0,
+                    },
+                    "endpoints": ["/v1/chat/completions", "/v1/responses"],
+                    "type": "chat",
+                }
+            ]
+        }
+
+        with patch("routstr.upstream.tinfoil.httpx.AsyncClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client_cls.return_value = mock_client
+
+            models = await provider.fetch_models()
+
+        assert len(models) == 1
+        assert models[0].pricing.prompt == 1.5 / 1_000_000
+        assert models[0].pricing.completion == 5.25 / 1_000_000
+        assert models[0].pricing.input_cache_read == 0.375 / 1_000_000
+        assert models[0].pricing.input_cache_write == 1.5 / 1_000_000
 
     @pytest.mark.asyncio
     async def test_fetch_models_handles_error(self) -> None:
