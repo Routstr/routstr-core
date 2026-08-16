@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from routstr.wallet import periodic_payout
+from routstr.wallet import _payout_units, periodic_payout
 
 # Sentinel interval used to break the otherwise-infinite payout loop after
 # exactly one full cycle.
@@ -67,6 +67,10 @@ async def test_periodic_payout_includes_primary_mint_not_in_cashu_mints() -> Non
         patch.object(settings, "min_payout_sat", 10),
         patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
         patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat"]),
+        ),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch(
             "routstr.wallet.get_proofs_per_mint_and_unit",
@@ -121,6 +125,10 @@ async def test_periodic_payout_releases_session_before_slow_mint_send() -> None:
         patch.object(settings, "min_payout_sat", 10),
         patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
         patch("routstr.wallet.db.create_session", tracked_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat"]),
+        ),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
         patch(
             "routstr.wallet.get_proofs_per_mint_and_unit",
@@ -139,7 +147,7 @@ async def test_periodic_payout_releases_session_before_slow_mint_send() -> None:
         with pytest.raises(_LoopBreak):
             await periodic_payout()
 
-    assert sends_completed == 2
+    assert sends_completed == 1
 
 
 @pytest.mark.asyncio
@@ -165,6 +173,10 @@ async def test_periodic_payout_isolates_failing_mint() -> None:
         patch.object(settings, "min_payout_sat", 10),
         patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
         patch("routstr.wallet.db.create_session", _fake_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat", "msat"]),
+        ),
         patch("routstr.wallet.get_wallet", get_wallet),
         patch(
             "routstr.wallet.get_proofs_per_mint_and_unit",
@@ -207,6 +219,10 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
         patch.object(settings, "payout_interval_seconds", _INTERVAL),
         patch("routstr.wallet.asyncio.sleep", _one_cycle_sleep()),
         patch("routstr.wallet.db.create_session", create_session),
+        patch(
+            "routstr.wallet._get_supported_mint_units",
+            AsyncMock(return_value=["sat", "msat"]),
+        ),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=MagicMock())),
         patch(
             "routstr.wallet.get_proofs_per_mint_and_unit",
@@ -230,3 +246,12 @@ async def test_periodic_payout_handles_session_creation_failure() -> None:
     extra = logger.error.call_args.kwargs["extra"]
     assert message == "Error in periodic payout cycle: RuntimeError"
     assert extra["error"] == "db unavailable"
+
+
+@pytest.mark.asyncio
+async def test_payout_units_excludes_units_the_sender_cannot_pay() -> None:
+    with patch(
+        "routstr.wallet._get_supported_mint_units",
+        AsyncMock(return_value=["usd", "sat", "eur", "msat"]),
+    ):
+        assert await _payout_units("http://mint:3338") == ["sat", "msat"]

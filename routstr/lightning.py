@@ -783,17 +783,60 @@ async def _credit_topup_record(
 # quote, so polling faster just burns the global request budget for nothing.
 INVOICE_WATCH_INTERVAL_SECONDS = 10
 INVOICE_WATCH_BATCH_LIMIT = 100
+INVOICE_WATCH_CANDIDATE_LIMIT = 500
+INVOICE_POLL_MAX_INTERVAL_SECONDS = 600
+SETTLEMENT_POLL_MAX_INTERVAL_SECONDS = 60
 
 
-async def _process_invoice_watch_batch(session: AsyncSession) -> None:
-    result = await session.exec(
+def _invoice_poll_interval(age_seconds: int) -> int:
+    """Older quotes rarely settle, and the mint request budget is per IP."""
+    if age_seconds < 60:
+        return 10
+    if age_seconds < 300:
+        return 30
+    if age_seconds < 1800:
+        return 120
+    return INVOICE_POLL_MAX_INTERVAL_SECONDS
+
+
+def _invoice_poll_due(
+    invoice: LightningInvoice, now: int, prev_now: int, max_interval: int
+) -> bool:
+    """Whether the invoice's backoff interval elapsed between the two cycles."""
+    if invoice.created_at > prev_now:
+        return True
+    age = now - invoice.created_at
+    prev_age = prev_now - invoice.created_at
+    interval = min(_invoice_poll_interval(age), max_interval)
+    return age // interval != prev_age // interval
+
+
+async def _process_invoice_watch_batch(session: AsyncSession, prev_now: int) -> int:
+    now = int(time.time())
+    # Already-paid rows still owe a credit, so they poll far more eagerly.
+    settling = await session.exec(
         select(LightningInvoice)
-        .where(
-            col(LightningInvoice.status).in_(_RETRYABLE_INVOICE_STATUSES)
-        )
-        .limit(INVOICE_WATCH_BATCH_LIMIT)
+        .where(col(LightningInvoice.status) == "settlement_pending")
+        .order_by(col(LightningInvoice.created_at))
+        .limit(INVOICE_WATCH_BATCH_LIMIT // 2)
     )
-    for invoice in result.all():
+    unpaid = await session.exec(
+        select(LightningInvoice)
+        .where(col(LightningInvoice.status) == "pending")
+        .order_by(col(LightningInvoice.created_at).desc())
+        .limit(INVOICE_WATCH_CANDIDATE_LIMIT)
+    )
+    due = [
+        inv
+        for inv in settling.all()
+        if _invoice_poll_due(inv, now, prev_now, SETTLEMENT_POLL_MAX_INTERVAL_SECONDS)
+    ]
+    due += [
+        inv
+        for inv in unpaid.all()
+        if _invoice_poll_due(inv, now, prev_now, INVOICE_POLL_MAX_INTERVAL_SECONDS)
+    ]
+    for invoice in due[:INVOICE_WATCH_BATCH_LIMIT]:
         try:
             definitively_unpaid = await check_invoice_payment(invoice, session)
             await _expire_invoice_if_authoritatively_unpaid(
@@ -804,14 +847,16 @@ async def _process_invoice_watch_batch(session: AsyncSession) -> None:
                 "Invoice watcher failed for invoice",
                 extra={"invoice_id": invoice.id, "error": str(e)},
             )
+    return now
 
 
 async def periodic_invoice_watcher() -> None:
     """Background task: detect paid Lightning invoices and credit balances."""
+    prev_now = int(time.time()) - INVOICE_WATCH_INTERVAL_SECONDS
     while True:
         try:
             async with create_session() as session:
-                await _process_invoice_watch_batch(session)
+                prev_now = await _process_invoice_watch_batch(session, prev_now)
         except asyncio.CancelledError:
             raise
         except Exception as e:
