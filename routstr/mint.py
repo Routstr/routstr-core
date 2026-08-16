@@ -31,6 +31,18 @@ _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 7 * 60 * 60
 _fail_fast_depth: ContextVar[int] = ContextVar("mint_fail_fast_depth", default=0)
 
 
+class MintError(Exception):
+    """Structured error response returned by a Cashu mint."""
+
+    def __init__(self, detail: Any, code: Any | None = None):
+        self.detail = detail
+        self.code = code
+        message = f"Mint Error: {detail}"
+        if code is not None:
+            message += f" (Code: {code})"
+        super().__init__(message)
+
+
 class MintRateLimitedError(httpx.HTTPStatusError):
     """Typed boundary error preserving a Cashu mint's HTTP 429 response."""
 

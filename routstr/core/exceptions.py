@@ -52,13 +52,13 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
             },
         )
 
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "detail": detail,
-            "request_id": request_id,
-        },
-    )
+    if isinstance(detail, dict) and "error" in detail:
+        content = {"detail": detail, **detail}
+    else:
+        content = {"detail": detail}
+    content["request_id"] = request_id
+
+    return JSONResponse(status_code=status_code, content=content)
 
 
 async def general_exception_handler(request: Request, exc: Exception) -> JSONResponse:
