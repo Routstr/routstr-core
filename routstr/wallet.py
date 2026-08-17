@@ -350,6 +350,66 @@ async def _load_and_resolve_token_proofs(
     return proofs
 
 
+# Message fragment of the AssertionError Cashu's ``verify_proofs_dleq`` raises
+# when a proof's keyset is missing from the wallet's local keyset cache.
+_UNKNOWN_KEYSET_DLEQ_MARKER = "can not verify DLEQ"
+
+
+async def _verify_proofs_dleq_with_refresh(
+    wallet: Wallet, token_obj: Token, proofs: list[Proof]
+) -> None:
+    """Verify DLEQ proofs, refreshing the local keyset cache once on a miss.
+
+    Cashu's ``verify_proofs_dleq`` asserts every proof's keyset is present in
+    ``wallet.keysets``, which is hydrated from the wallet's local keyset
+    database. When the mint has rotated keysets since the cache was populated,
+    the assertion fires even though the token is perfectly valid — previously
+    surfacing as an unclassified AssertionError and an HTTP 500 on every
+    redemption attempt until the cache was rebuilt by hand.
+
+    On that specific assertion, refetch the mint's keysets (including inactive
+    ones, which older tokens reference) and retry the verification once. A
+    keyset that is still unknown after a fresh fetch means the mint does not
+    serve it at all, so the token cannot be verified here — raise the same
+    ValueError taxonomy as the short-keyset-ID resolver above (400, not 500).
+    """
+    try:
+        wallet.verify_proofs_dleq(proofs)
+        return
+    except AssertionError as error:
+        if _UNKNOWN_KEYSET_DLEQ_MARKER not in str(error):
+            raise
+        logger.warning(
+            "DLEQ verification hit unknown keyset; refreshing keyset cache",
+            extra={
+                "event": "cashu_dleq_unknown_keyset_refresh",
+                "source_mint": token_obj.mint,
+                "source_unit": token_obj.unit,
+                "error": str(error),
+            },
+        )
+
+    try:
+        await run_mint_operation(
+            lambda: wallet.load_mint_keysets(force_old_keysets=True),
+            op_name="redeem_refresh_keysets",
+            mint_url=token_obj.mint,
+        )
+    except Exception as error:
+        if is_mint_connection_error(error) or is_mint_rate_limited(error):
+            raise
+        raise MintConnectionError("Cashu mint keysets are unavailable") from error
+
+    try:
+        wallet.verify_proofs_dleq(proofs)
+    except AssertionError as error:
+        if _UNKNOWN_KEYSET_DLEQ_MARKER not in str(error):
+            raise
+        raise ValueError(
+            "Cashu token references an unknown or ambiguous keyset"
+        ) from error
+
+
 async def _redeem_same_mint(
     wallet: Wallet, token_obj: Token
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
@@ -367,6 +427,7 @@ async def _redeem_same_mint(
             token_obj,
             op_name="redeem_load_mint",
         )
+        await _verify_proofs_dleq_with_refresh(wallet, token_obj, proofs)
     except Exception as error:
         if is_mint_connection_error(error):
             logger.warning(
@@ -387,7 +448,6 @@ async def _redeem_same_mint(
             ) from error
         raise
 
-    wallet.verify_proofs_dleq(proofs)
     input_fees = wallet.get_fees_for_proofs(proofs)
     try:
         await run_mint_operation(
