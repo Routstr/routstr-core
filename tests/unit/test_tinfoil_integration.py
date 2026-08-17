@@ -126,6 +126,7 @@ class TestStripProxyHeaders:
     def test_strips_all_proxy_only(self) -> None:
         headers = {
             "x-routstr-model": "tinfoil-llama3-3-70b",
+            "x-routstr-max-tokens": "1024",
             "X-Tinfoil-Enclave-Url": "https://inference.tinfoil.sh",
             "X-Tinfoil-Request-Usage-Metrics": "true",
             "Authorization": "Bearer secret",
@@ -133,6 +134,7 @@ class TestStripProxyHeaders:
         }
         clean = _strip_proxy_headers(headers)
         assert "x-routstr-model" not in clean
+        assert "x-routstr-max-tokens" not in clean
         assert "X-Tinfoil-Enclave-Url" not in clean
         assert "X-Tinfoil-Request-Usage-Metrics" not in clean
         assert clean["Authorization"] == "Bearer secret"
@@ -141,6 +143,7 @@ class TestStripProxyHeaders:
     def test_all_proxy_only_headers_covered(self) -> None:
         assert _PROXY_ONLY_HEADERS == {
             "x-routstr-model",
+            "x-routstr-max-tokens",
             "x-tinfoil-enclave-url",
             "x-tinfoil-request-usage-metrics",
         }

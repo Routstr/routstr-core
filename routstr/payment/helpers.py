@@ -155,8 +155,15 @@ async def calculate_discounted_max_cost(
     max_cost_for_model: int,
     body: dict,
     model_obj: Any | None = None,
+    max_tokens: int | None = None,
 ) -> int:
-    """Calculate the discounted max cost for a request using model pricing when available."""
+    """Calculate the discounted max cost for a request using model pricing when available.
+
+    ``max_tokens`` is an explicit override used for opaque-body requests (e.g.
+    EHBP/encrypted tinfoil calls) where the proxy cannot read ``max_tokens``
+    from the request body. When ``None`` it falls back to the body's
+    ``max_tokens`` (then ``max_completion_tokens``).
+    """
     if settings.fixed_pricing:
         return max_cost_for_model
 
@@ -216,7 +223,12 @@ async def calculate_discounted_max_cost(
         if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
 
-    max_tokens_raw = body.get("max_tokens", None)
+    if max_tokens is not None:
+        max_tokens_raw = max_tokens
+    else:
+        max_tokens_raw = body.get("max_tokens", None)
+        if max_tokens_raw is None:
+            max_tokens_raw = body.get("max_completion_tokens", None)
     if max_tokens_raw is not None:
         try:
             max_tokens_int = int(max_tokens_raw)

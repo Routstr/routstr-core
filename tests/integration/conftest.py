@@ -531,6 +531,7 @@ async def integration_app(
             max_cost_for_model: int,
             body: dict,
             model_obj: Any = None,
+            max_tokens: int | None = None,
         ) -> int:
             return max_cost_for_model
 
