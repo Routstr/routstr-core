@@ -29,6 +29,11 @@ from .payment.cost_calculation import (
     MaxCostData,
     calculate_cost,
 )
+from .redemption_cache import (
+    TERMINAL_REDEMPTION_CODES,
+    CachedRedemptionFailure,
+    redemption_negative_cache,
+)
 from .wallet import (
     classify_redemption_error,
     credit_balance,
@@ -163,6 +168,50 @@ def redemption_error_to_http_exception(error: Exception) -> HTTPException:
                 "code": error_code,
             }
         },
+    )
+
+
+def _cached_failure_to_http_exception(
+    failure: CachedRedemptionFailure,
+) -> HTTPException:
+    """Rebuild the exact error envelope the original mint-backed failure produced."""
+    return HTTPException(
+        status_code=failure.status_code,
+        detail={
+            "error": {
+                "message": failure.message,
+                "type": failure.error_type,
+                "code": failure.code,
+            }
+        },
+    )
+
+
+def _maybe_cache_terminal_redemption_failure(hashed_key: str, error: Exception) -> None:
+    """Record a redemption failure in the negative cache if it can never succeed.
+
+    Transient classifications (mint unreachable, rate-limited) are never
+    cached — only codes in TERMINAL_REDEMPTION_CODES, which are permanent
+    properties of the token itself.
+    """
+    classified = classify_redemption_error(error)
+    if classified is None:
+        return
+    error_type, status_code, message, code = classified
+    if code not in TERMINAL_REDEMPTION_CODES:
+        return
+    redemption_negative_cache.put(
+        hashed_key,
+        CachedRedemptionFailure(
+            status_code=status_code,
+            error_type=error_type,
+            message=message,
+            code=code,
+        ),
+    )
+    logger.info(
+        "Cached terminal redemption failure; further attempts rejected locally",
+        extra={"key_hash": hashed_key[:8] + "...", "code": code},
     )
 
 
@@ -379,6 +428,16 @@ async def _validate_bearer_key_locked(
 
                 return existing_key
 
+            if cached_failure := redemption_negative_cache.get(hashed_key):
+                logger.info(
+                    "Rejecting known-dead Cashu token from negative cache",
+                    extra={
+                        "key_hash": hashed_key[:8] + "...",
+                        "code": cached_failure.code,
+                    },
+                )
+                raise _cached_failure_to_http_exception(cached_failure)
+
             logger.info(
                 "Creating new Cashu token entry",
                 extra={
@@ -458,6 +517,7 @@ async def _validate_bearer_key_locked(
                     },
                 )
                 await session.rollback()
+                _maybe_cache_terminal_redemption_failure(hashed_key, credit_error)
                 raise redemption_error_to_http_exception(credit_error) from credit_error
 
             if msats <= 0:
