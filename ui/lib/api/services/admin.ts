@@ -1261,6 +1261,7 @@ export interface Transaction {
   created_at: number;
   collected: boolean;
   swept: boolean;
+  status: 'issued' | 'collected' | 'swept' | 'pending';
   source: 'x-cashu' | 'apikey' | 'admin';
   api_key_hashed_key?: string;
 }

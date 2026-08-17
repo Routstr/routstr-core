@@ -66,6 +66,28 @@ import { toast } from 'sonner';
 
 const STORAGE_KEY = 'routstr-transaction-filters';
 
+const STATUS_BADGES: Record<
+  Transaction['status'],
+  { label: string; className: string }
+> = {
+  issued: {
+    label: 'Issued',
+    className: 'border-gray-500/20 bg-gray-500/10 text-gray-500',
+  },
+  collected: {
+    label: 'Collected',
+    className: 'border-green-500/20 bg-green-500/10 text-green-500',
+  },
+  swept: {
+    label: 'Swept',
+    className: 'border-orange-500/20 bg-orange-500/10 text-orange-500',
+  },
+  pending: {
+    label: 'Pending',
+    className: 'border-blue-500/20 bg-blue-500/10 text-blue-500',
+  },
+};
+
 function TransactionTable({
   transactions,
   copiedId,
@@ -197,10 +219,9 @@ function TransactionTable({
                         <Copy className='h-4 w-4' />
                       )}
                     </Button>
-                    {/* The sweeper marks a withdrawal collected or swept once
-                        it can no longer be redeemed, and the token is never
-                        rendered anywhere. */}
-                    {tx.source === 'admin' && !tx.swept && !tx.collected && (
+                    {/* The token is never rendered in the table, so the
+                        clipboard must not be the only way to get it out. */}
+                    {tx.status === 'issued' && (
                       <Button
                         variant='ghost'
                         size='icon'
@@ -534,42 +555,10 @@ export default function TransactionsPage() {
   };
 
   const getStatusBadge = (tx: Transaction) => {
-    if (tx.swept)
-      return (
-        <Badge
-          variant='outline'
-          className='border-orange-500/20 bg-orange-500/10 text-orange-500'
-        >
-          Swept
-        </Badge>
-      );
-    if (tx.collected)
-      return (
-        <Badge
-          variant='outline'
-          className='border-green-500/20 bg-green-500/10 text-green-500'
-        >
-          Collected
-        </Badge>
-      );
-    // An outstanding withdrawal ends at "issued": the node hands over a
-    // bearer token and never learns whether it was redeemed, so it would
-    // otherwise read Pending forever.
-    if (tx.source === 'admin')
-      return (
-        <Badge
-          variant='outline'
-          className='border-gray-500/20 bg-gray-500/10 text-gray-500'
-        >
-          Issued
-        </Badge>
-      );
+    const { label, className } = STATUS_BADGES[tx.status];
     return (
-      <Badge
-        variant='outline'
-        className='border-blue-500/20 bg-blue-500/10 text-blue-500'
-      >
-        Pending
+      <Badge variant='outline' className={className}>
+        {label}
       </Badge>
     );
   };
@@ -734,6 +723,7 @@ export default function TransactionsPage() {
                   <SelectContent>
                     <SelectItem value='all'>All Statuses</SelectItem>
                     <SelectItem value='pending'>Pending</SelectItem>
+                    <SelectItem value='issued'>Issued</SelectItem>
                     <SelectItem value='collected'>Collected</SelectItem>
                     <SelectItem value='swept'>Swept</SelectItem>
                     <SelectItem value='paid'>Paid (Lightning)</SelectItem>
