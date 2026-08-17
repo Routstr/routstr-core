@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 from cashu.core.base import MintQuoteState, Proof
 
 from routstr.lightning import (
+    INVOICE_EXPIRY_GRACE_SECONDS,
     InvoiceRecoverRequest,
     _invoice_settlement_locks,
     _is_outputs_already_signed,
@@ -216,9 +218,9 @@ async def test_quote_not_found_case_insensitive() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_pending_invoice_is_not_minted() -> None:
+async def test_credited_invoice_is_not_minted() -> None:
     _invoice_settlement_locks.clear()
-    invoice = _invoice(status="expired")
+    invoice = _invoice(status="paid")
     session = AsyncMock()
 
     with patch("routstr.lightning.get_wallet", AsyncMock()) as get_wallet:
@@ -464,3 +466,56 @@ async def test_concurrent_invoice_checks_finalize_once_in_process() -> None:
     assert invoice.status == "paid"
     finalize.assert_awaited_once()
     assert _invoice_settlement_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_expired_invoice_inside_grace_still_reaches_the_mint() -> None:
+    now = int(time.time())
+    invoice = _invoice(status="expired", expires_at=now - 3600)
+    session = AsyncMock()
+    session.get.return_value = invoice
+    check = AsyncMock(return_value=False)
+
+    with patch("routstr.lightning.check_invoice_payment", check):
+        response = await get_invoice_status(invoice.id, session)  # type: ignore[arg-type]
+
+    check.assert_awaited_once()
+    assert response.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_expired_invoice_past_grace_answers_without_mint_io() -> None:
+    now = int(time.time())
+    invoice = _invoice(
+        status="expired", expires_at=now - INVOICE_EXPIRY_GRACE_SECONDS - 1
+    )
+    session = AsyncMock()
+    session.get.return_value = invoice
+    check = AsyncMock(return_value=False)
+
+    with patch("routstr.lightning.check_invoice_payment", check):
+        status_response = await get_invoice_status(invoice.id, session)  # type: ignore[arg-type]
+
+    check.assert_not_awaited()
+    assert status_response.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_recovery_reaches_the_mint_for_an_invoice_past_grace() -> None:
+    now = int(time.time())
+    invoice = _invoice(
+        status="expired", expires_at=now - INVOICE_EXPIRY_GRACE_SECONDS - 1
+    )
+    session = AsyncMock()
+    result = Mock()
+    result.first.return_value = invoice
+    session.exec.return_value = result
+    check = AsyncMock(return_value=False)
+
+    with patch("routstr.lightning.check_invoice_payment", check):
+        response = await recover_invoice(
+            InvoiceRecoverRequest(bolt11="lnbc-test"), session  # type: ignore[arg-type]
+        )
+
+    check.assert_awaited_once()
+    assert response.status == "expired"

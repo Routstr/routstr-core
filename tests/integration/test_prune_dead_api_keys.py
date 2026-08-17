@@ -14,6 +14,7 @@ from sqlalchemy.sql.dml import Update
 from sqlmodel import col, update
 
 from routstr.core.db import (
+    INVOICE_EXPIRY_GRACE_SECONDS,
     ApiKey,
     CashuTransaction,
     LightningInvoice,
@@ -126,11 +127,18 @@ async def test_parent_and_child_keys_are_not_pruned(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["pending", "settlement_pending"])
-async def test_retryable_invoice_protects_key(
-    patched_db_engine: None, status: str
+@pytest.mark.parametrize(
+    ("status", "expires_at"),
+    [
+        ("pending", NOW + 10_000),
+        ("settlement_pending", NOW + 10_000),
+        ("expired", NOW - INVOICE_EXPIRY_GRACE_SECONDS + 1_000),
+    ],
+)
+async def test_settleable_invoice_protects_key(
+    patched_db_engine: None, status: str, expires_at: int
 ) -> None:
-    """A key referenced by a retryable topup invoice is never pruned mid-topup."""
+    """A key referenced by a still-settleable topup invoice is never pruned."""
     key = _dead_key(LONG_AGO)
     invoice = LightningInvoice(
         id=f"inv_{uuid.uuid4().hex}",
@@ -141,7 +149,7 @@ async def test_retryable_invoice_protects_key(
         status=status,
         api_key_hash=key.hashed_key,
         purpose="topup",
-        expires_at=NOW + 10_000,
+        expires_at=expires_at,
     )
     async with create_session() as session:
         session.add(key)
@@ -153,6 +161,35 @@ async def test_retryable_invoice_protects_key(
 
     assert pruned == 0
     assert await _exists(key.hashed_key)
+
+
+@pytest.mark.asyncio
+async def test_expired_invoice_past_grace_does_not_protect_key(
+    patched_db_engine: None,
+) -> None:
+    """Once the grace window closes the invoice can no longer credit the key."""
+    key = _dead_key(LONG_AGO)
+    invoice = LightningInvoice(
+        id=f"inv_{uuid.uuid4().hex}",
+        bolt11=f"lnbc_{uuid.uuid4().hex}",
+        amount_sats=10,
+        description="topup",
+        payment_hash=uuid.uuid4().hex,
+        status="expired",
+        api_key_hash=key.hashed_key,
+        purpose="topup",
+        expires_at=NOW - INVOICE_EXPIRY_GRACE_SECONDS - 1_000,
+    )
+    async with create_session() as session:
+        session.add(key)
+        session.add(invoice)
+        await session.commit()
+
+    async with create_session() as session:
+        pruned = await prune_dead_api_keys(session, OLD)
+
+    assert pruned == 1
+    assert not await _exists(key.hashed_key)
 
 
 @pytest.mark.asyncio

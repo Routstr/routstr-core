@@ -293,10 +293,11 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
     """Delete dead parentless API keys; return the count removed.
 
     Dead = 0 balance/reservation/spend/requests, older than the grace period,
-    no parent, no children, no retryable invoice. Cashu rows are unlinked (not
-    deleted) first to keep the audit trail.
+    no parent, no children, no invoice that could still settle. Cashu rows are
+    unlinked (not deleted) first to keep the audit trail.
     """
-    cutoff = int(time.time()) - min_age_seconds
+    now = int(time.time())
+    cutoff = now - min_age_seconds
 
     child = aliased(ApiKey)
     has_children = (
@@ -304,10 +305,21 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
             col(child.parent_key_hash) == col(ApiKey.hashed_key)
         )
     ).exists()
-    pending_invoice = (
+    # An expired invoice stays creditable for the grace window, and crediting it
+    # after its target key is gone strands the payment at the mint.
+    settleable_invoice = (
         select(LightningInvoice.id)
         .where(col(LightningInvoice.api_key_hash) == col(ApiKey.hashed_key))
-        .where(col(LightningInvoice.status).in_(("pending", "settlement_pending")))
+        .where(
+            col(LightningInvoice.status).in_(("pending", "settlement_pending"))
+            | (
+                (col(LightningInvoice.status) == "expired")
+                & (
+                    col(LightningInvoice.expires_at)
+                    > now - INVOICE_EXPIRY_GRACE_SECONDS
+                )
+            )
+        )
     ).exists()
 
     eligible_hashes = (
@@ -318,7 +330,7 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.total_requests) == 0)
         .where(col(ApiKey.parent_key_hash).is_(None))
         .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
-        .where(~pending_invoice)
+        .where(~settleable_invoice)
         .where(~has_children)
     )
 
@@ -423,6 +435,11 @@ class ModelPathRow(SQLModel, table=True):  # type: ignore
         default=0,
         description="Unix timestamp of the refresh cycle that wrote this row",
     )
+
+
+# expires_at is our own clock, not the mint's quote expiry, so an expired row
+# may still be paid at the mint and must stay creditable for this long after.
+INVOICE_EXPIRY_GRACE_SECONDS = 86_400
 
 
 class LightningInvoice(SQLModel, table=True):  # type: ignore
