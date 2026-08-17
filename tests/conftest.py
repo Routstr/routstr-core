@@ -7,6 +7,7 @@ absent one) override this per-test via ``monkeypatch``.
 """
 
 import os
+from typing import Iterator
 
 import pytest
 
@@ -18,7 +19,7 @@ os.environ.setdefault("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY)
 
 
 @pytest.fixture(autouse=True)
-def _isolate_redemption_negative_cache():
+def _isolate_redemption_negative_cache() -> Iterator[None]:
     """Clear the process-wide negative cache between tests.
 
     The cache deliberately persists terminal redemption failures across

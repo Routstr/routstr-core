@@ -1,5 +1,7 @@
 """Unit tests for the terminal-redemption negative cache."""
 
+from typing import Iterator
+
 import pytest
 from fastapi import HTTPException
 
@@ -31,7 +33,7 @@ class FakeClock:
 
 
 @pytest.fixture(autouse=True)
-def _clean_singleton():
+def _clean_singleton() -> Iterator[None]:
     redemption_negative_cache.clear()
     yield
     redemption_negative_cache.clear()
