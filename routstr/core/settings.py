@@ -90,9 +90,10 @@ class Settings(BaseSettings):
         default=300, env="STALE_RESERVATION_TIMEOUT_SECONDS"
     )
     # Background prune of dead (zero balance, never used) API keys.
-    # Interval 0 disables it; min-age is a grace period (default 1 week).
+    # Disabled by default (0); set DEAD_KEY_PRUNE_INTERVAL_SECONDS > 0 to
+    # enable. Min-age is a grace period (default 1 week).
     dead_key_prune_interval_seconds: int = Field(
-        default=3600, env="DEAD_KEY_PRUNE_INTERVAL_SECONDS"
+        default=0, env="DEAD_KEY_PRUNE_INTERVAL_SECONDS"
     )
     dead_key_min_age_seconds: int = Field(
         default=604_800, env="DEAD_KEY_MIN_AGE_SECONDS"
@@ -119,9 +120,10 @@ class Settings(BaseSettings):
         default=True, env="ENABLE_MODEL_PATHS_REFRESH"
     )
     refund_cache_ttl_seconds: int = Field(default=3600, env="REFUND_CACHE_TTL_SECONDS")
-    refund_sweep_ttl_seconds: int = Field(
-        default=604800, env="REFUND_SWEEP_TTL_SECONDS"
-    )
+    # Uncollected refund tokens are swept after ~6 months (180 days).
+    # Fixed for now: not configurable via env or the settings DB/admin API
+    # (empty env list disables env binding; see FIXED_FIELDS).
+    refund_sweep_ttl_seconds: int = Field(default=15_552_000, env=[])
     refund_sweep_claim_timeout_seconds: int = Field(
         default=900, gt=0, env="REFUND_SWEEP_CLAIM_TIMEOUT_SECONDS"
     )
@@ -199,7 +201,11 @@ ENV_ONLY_FIELDS = frozenset(
     }
 )
 
-_NON_PERSISTED_FIELDS = SECRET_FIELDS | ENV_ONLY_FIELDS
+# Deliberately hardcoded values: not configurable from env, the persisted
+# settings blob, or the admin update API. Their in-code defaults always win.
+FIXED_FIELDS = frozenset({"refund_sweep_ttl_seconds"})
+
+_NON_PERSISTED_FIELDS = SECRET_FIELDS | ENV_ONLY_FIELDS | FIXED_FIELDS
 
 
 def _strip_secret_fields(data: dict[str, Any]) -> dict[str, Any]:
@@ -395,6 +401,7 @@ class SettingsService:
                     if v not in (None, "", [], {})
                     and k in valid_fields
                     and k not in ENV_ONLY_FIELDS
+                    and k not in FIXED_FIELDS
                 }
             )
             merged_dict = Settings(**merged_dict).dict()
@@ -445,7 +452,12 @@ class SettingsService:
     ) -> Settings:
         async with cls._lock:
             current = cls.get()
-            candidate_dict = {**current.dict(), **_normalize_settings_data(partial)}
+            sanitized_partial = {
+                k: v
+                for k, v in _normalize_settings_data(partial).items()
+                if k not in FIXED_FIELDS
+            }
+            candidate_dict = {**current.dict(), **sanitized_partial}
             candidate = Settings(**candidate_dict)
             from sqlmodel import text
 
@@ -487,7 +499,7 @@ class SettingsService:
             valid_fields = set(settings.dict().keys())
             # Update in-place
             for k, v in data.items():
-                if k in valid_fields:
+                if k in valid_fields and k not in FIXED_FIELDS:
                     setattr(settings, k, v)
             cls._current = settings
             return settings
