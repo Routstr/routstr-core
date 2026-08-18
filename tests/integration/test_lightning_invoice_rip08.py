@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey
+from routstr.wallet import MintConnectionError
 
 RIP08_PATH = "/lightning/invoice"
 LEGACY_PATH = "/v1/balance/lightning/invoice"
@@ -141,6 +142,9 @@ async def test_topup_missing_auth_returns_401(
         json={"amount_sats": 100, "purpose": "topup"},
     )
     assert resp.status_code == 401
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "topup_authorization_required"
 
 
 @pytest.mark.integration
@@ -157,6 +161,9 @@ async def test_topup_unknown_api_key_returns_404(
         headers={"Authorization": "Bearer sk-deadbeef"},
     )
     assert resp.status_code == 404
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "topup_api_key_not_found"
 
 
 @pytest.mark.integration
@@ -169,6 +176,9 @@ async def test_invoice_status_404_for_unknown_id(
     base = path.rsplit("/invoice", 1)[0] + "/invoice"
     resp = await integration_client.get(f"{base}/does-not-exist/status")
     assert resp.status_code == 404
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invoice_not_found"
 
 
 @pytest.mark.integration
@@ -204,3 +214,28 @@ async def test_authorization_header_overrides_body_api_key(
         headers={"Authorization": f"Bearer {seeded_topup_key}"},
     )
     assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,status,code",
+    [
+        (MintConnectionError("all mints failed"), 503, "lightning_mint_unreachable"),
+        (RuntimeError("boom"), 500, "invoice_creation_failed"),
+    ],
+)
+async def test_create_invoice_maps_mint_failures(
+    integration_client: AsyncClient,
+    error: Exception,
+    status: int,
+    code: str,
+) -> None:
+    with patch(
+        "routstr.lightning.generate_lightning_invoice",
+        side_effect=error,
+    ):
+        resp = await integration_client.post(RIP08_PATH, json={"amount_sats": 100})
+
+    assert resp.status_code == status
+    assert resp.json()["detail"]["error"]["code"] == code

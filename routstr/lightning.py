@@ -255,6 +255,47 @@ def generate_invoice_id() -> str:
     return secrets.token_urlsafe(16)
 
 
+def _invoice_error(
+    status_code: int, message: str, error_type: str, code: str
+) -> HTTPException:
+    """Build a client-facing error using the same envelope as the proxy paths."""
+    return HTTPException(
+        status_code=status_code,
+        detail={"error": {"message": message, "type": error_type, "code": code}},
+    )
+
+
+def _invoice_creation_error(error: Exception) -> HTTPException:
+    """Map an invoice-creation failure to its specific client-facing error."""
+    if is_mint_rate_limited(error):
+        return _invoice_error(
+            503,
+            "Cashu mint rate-limited; retry after cooldown",
+            "mint_rate_limited",
+            "lightning_mint_rate_limited",
+        )
+    if is_mint_connection_error(error):
+        return _invoice_error(
+            503,
+            "Cashu mint is unreachable; no Lightning quote could be requested",
+            "mint_unreachable",
+            "lightning_mint_unreachable",
+        )
+    if isinstance(error, ValueError):
+        return _invoice_error(
+            400,
+            "Invalid invoice amount",
+            "invalid_request_error",
+            "invalid_invoice_amount",
+        )
+    return _invoice_error(
+        500,
+        "Failed to create Lightning invoice",
+        "api_error",
+        "invoice_creation_failed",
+    )
+
+
 @lightning_router.post("/invoice", response_model=InvoiceCreateResponse)
 async def create_invoice(
     request: InvoiceCreateRequest,
@@ -266,16 +307,28 @@ async def create_invoice(
 
     if request.purpose == "topup":
         if not api_key_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Authorization bearer api key is required for topup",
+            raise _invoice_error(
+                401,
+                "Authorization bearer api key is required for topup",
+                "invalid_request_error",
+                "topup_authorization_required",
             )
         if not api_key_token.startswith("sk-"):
-            raise HTTPException(status_code=400, detail="Invalid API key format")
+            raise _invoice_error(
+                400,
+                "Invalid API key format. Expected an 'sk-...' API key.",
+                "invalid_request_error",
+                "topup_invalid_api_key_format",
+            )
 
         topup_api_key = await session.get(ApiKey, api_key_token[3:])
         if not topup_api_key:
-            raise HTTPException(status_code=404, detail="API key not found")
+            raise _invoice_error(
+                404,
+                "API key not found",
+                "invalid_request_error",
+                "topup_api_key_not_found",
+            )
 
     try:
         description = f"Routstr {request.purpose} {request.amount_sats} sats"
@@ -334,9 +387,7 @@ async def create_invoice(
 
     except Exception as e:
         logger.error(f"Failed to create Lightning invoice: {e}")
-        raise HTTPException(
-            status_code=500, detail="Failed to create Lightning invoice"
-        )
+        raise _invoice_creation_error(e)
 
 
 @lightning_router.get(
@@ -348,7 +399,12 @@ async def get_invoice_status(
 ) -> InvoiceStatusResponse:
     invoice = await session.get(LightningInvoice, invoice_id)
     if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise _invoice_error(
+            404,
+            "Invoice not found",
+            "invalid_request_error",
+            "invoice_not_found",
+        )
 
     definitively_unpaid = False
     if _within_settlement_window(invoice, int(time.time())):
@@ -387,7 +443,12 @@ async def recover_invoice(
     invoice = result.first()
 
     if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise _invoice_error(
+            404,
+            "Invoice not found",
+            "invalid_request_error",
+            "invoice_not_found",
+        )
 
     # Recovery is the last remedy for a payment we never observed, so it ignores
     # the grace window. Holding the bolt11 already proves the caller owns it.
