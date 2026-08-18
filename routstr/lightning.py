@@ -601,8 +601,20 @@ async def check_invoice_payment(
 
 
 def _is_quote_not_found(error: BaseException) -> bool:
-    """Check if the error indicates the mint no longer has this quote."""
+    """Check if the error indicates the mint no longer has this quote.
+
+    Recognised variants:
+    - ``Mint Error: quote not found (Code: 0)`` (legacy wording) — treated as
+      definitive only with the exact ``0`` code, because some mints reuse the
+      ``quote not found`` wording for ambiguous states.
+    - ``Mint Error: Unknown quote (Code: 50000)`` — reported by some mint
+      implementations when the quote id was never issued or was dropped. The
+      wording itself is definitive (the mint has no record of the quote), and
+      the numeric code varies (seen as ``50000``), so no code check is applied.
+    """
     message = str(error)
+    if re.search(r"\bunknown\s+quote\b", message, re.IGNORECASE):
+        return True
     return bool(
         re.search(r"\bquote\s+not\s+found\b", message, re.IGNORECASE)
         and re.search(r"\bcode\s*:?\s*0\b", message, re.IGNORECASE)
