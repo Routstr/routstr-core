@@ -601,8 +601,15 @@ async def check_invoice_payment(
 
 
 def _is_quote_not_found(error: BaseException) -> bool:
-    """Check if the error indicates the mint no longer has this quote."""
+    """Check if the error indicates the mint no longer has this quote.
+
+    ``Unknown quote`` is definitive on wording alone and its numeric code varies
+    between mints. ``quote not found`` needs ``Code: 0`` because some mints reuse
+    that wording for ambiguous states.
+    """
     message = str(error)
+    if re.search(r"\bunknown\s+quote\b", message, re.IGNORECASE):
+        return True
     return bool(
         re.search(r"\bquote\s+not\s+found\b", message, re.IGNORECASE)
         and re.search(r"\bcode\s*:?\s*0\b", message, re.IGNORECASE)
