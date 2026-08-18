@@ -14,6 +14,7 @@ from routstr.lightning import (
     InvoiceRecoverRequest,
     _invoice_settlement_locks,
     _is_outputs_already_signed,
+    _is_quote_not_found,
     _mint_invoice_quote,
     check_invoice_payment,
     get_invoice_status,
@@ -219,7 +220,6 @@ async def test_quote_not_found_case_insensitive() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_quote_is_definitively_unpaid() -> None:
-    """Some mints report a dropped quote as 'Unknown quote (Code: 50000)'."""
     _invoice_settlement_locks.clear()
     invoice = _invoice(status="pending", expires_at=0)
     session = AsyncMock()
@@ -241,17 +241,14 @@ async def test_unknown_quote_is_definitively_unpaid() -> None:
 @pytest.mark.parametrize(
     "message",
     [
-        # legacy wording must still require the exact code 0
+        # legacy wording still requires the exact code 0
         "Mint Error: quote not found (Code: 10000)",
         "Mint Error: quote not found (Code: 50000)",
-        # not actually referring to a mint quote id
         "Mint Error: unknown request",
         "connection error: quote endpoint unreachable",
     ],
 )
 def test_unknown_quote_only_matches_real_quote_missing_errors(message: str) -> None:
-    from routstr.lightning import _is_quote_not_found
-
     assert not _is_quote_not_found(Exception(message))
 
 
@@ -264,8 +261,6 @@ def test_unknown_quote_only_matches_real_quote_missing_errors(message: str) -> N
     ],
 )
 def test_unknown_quote_wording_is_recognized(message: str) -> None:
-    from routstr.lightning import _is_quote_not_found
-
     assert _is_quote_not_found(Exception(message))
 
 
