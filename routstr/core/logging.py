@@ -183,26 +183,15 @@ class RequestIdFilter(logging.Filter):
 
 
 class ClientAppFilter(logging.Filter):
-    """Filter to add the requesting client app to all log records.
-
-    The middleware resolves it from the OpenRouter-convention identity headers
-    (X-Title, then Referer, then User-Agent) into a context variable, so even
-    errors raised deep in the wallet/mint code carry it.
-    """
+    """Filter to add the requesting client app to all log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Add the client app to the log record unless set explicitly."""
-        if hasattr(record, "client_app"):
-            return True
-        try:
-            # Import here to avoid circular imports
-            from .middleware import UNKNOWN_CLIENT_APP, client_app_context
+        """Add the client app to the log record if available."""
+        # Import here to avoid circular imports
+        from .middleware import UNKNOWN_CLIENT_APP, client_app_context
 
-            client_app = client_app_context.get(None)
-            record.client_app = client_app if client_app else UNKNOWN_CLIENT_APP
-        except ImportError:
-            # If middleware isn't available yet, just use default
-            record.client_app = "unknown"
+        client_app = client_app_context.get(None)
+        record.client_app = client_app if client_app else UNKNOWN_CLIENT_APP
         return True
 
 

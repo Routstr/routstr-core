@@ -14,26 +14,26 @@ logger = get_logger(__name__)
 # Context variable to store request ID across async context
 request_id_context: ContextVar[str | None] = ContextVar("request_id")
 
-# Context variable holding the client app behind the current request, so log
-# lines emitted while handling it (wallet/mint errors included) can say who
-# triggered it.
+# Context variable to store the client app across async context
 client_app_context: ContextVar[str | None] = ContextVar("client_app")
 
 UNKNOWN_CLIENT_APP = "unknown"
 
-# OpenRouter-convention identity headers, in priority order: X-Title carries
-# the app name, HTTP-Referer its URL; User-Agent covers SDKs and scripts that
-# set neither.
-_CLIENT_APP_HEADERS: tuple[str, ...] = ("x-title", "referer", "user-agent")
+# Identity headers in priority order. X-Title and HTTP-Referer are the
+# OpenRouter convention; User-Agent covers SDKs and scripts that set neither.
+_CLIENT_APP_HEADERS: tuple[str, ...] = (
+    "x-title",
+    "http-referer",
+    "referer",
+    "user-agent",
+)
 
-# Headers are attacker-controlled free text: cap the length so one request
-# can't bloat every log line, strip control characters so a crafted value
-# can't forge log records.
+# Header values are attacker-controlled: cap the length so one request can't
+# bloat every log line.
 _CLIENT_APP_MAX_LENGTH = 120
 
 
 def client_app_from_headers(headers: Headers) -> str:
-    """Resolve the requesting app from identity headers, or "unknown"."""
     for header in _CLIENT_APP_HEADERS:
         raw = headers.get(header)
         if raw is None:
@@ -101,9 +101,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # Set request ID in context for logging
         token = request_id_context.set(request_id)
 
-        client_app = client_app_from_headers(request.headers)
-        request.state.client_app = client_app
-        client_app_token = client_app_context.set(client_app)
+        client_app_token = client_app_context.set(
+            client_app_from_headers(request.headers)
+        )
 
         path = request.url.path
         should_log = _should_log(request.method, path)
@@ -118,7 +118,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "method": request.method,
                     "path": path,
-                    "client_app": client_app,
                     "query_params": dict(request.query_params),
                 },
             )
@@ -135,7 +134,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                         "request_id": request_id,
                         "method": request.method,
                         "path": path,
-                        "client_app": client_app,
                         "status_code": response.status_code,
                         "duration_ms": round(duration * 1000, 2),
                     },
@@ -154,7 +152,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "method": request.method,
                     "path": path,
-                    "client_app": client_app,
                     "duration_ms": round(duration * 1000, 2),
                     "error": str(e),
                     "error_type": type(e).__name__,
@@ -172,6 +169,5 @@ __all__ = [
     "LoggingMiddleware",
     "UNKNOWN_CLIENT_APP",
     "client_app_context",
-    "client_app_from_headers",
     "request_id_context",
 ]
