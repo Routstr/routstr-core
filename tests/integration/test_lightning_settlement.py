@@ -11,9 +11,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey, LightningInvoice
 from routstr.lightning import (
+    INVOICE_EXPIRY_GRACE_SECONDS,
+    INVOICE_WATCH_BATCH_LIMIT,
     _expire_invoice_if_authoritatively_unpaid,
+    _expire_overdue_invoices,
     _finalize_invoice_settlement,
     _InvoiceSettlement,
+    _process_invoice_watch_batch,
     check_invoice_payment,
 )
 
@@ -313,7 +317,7 @@ async def test_expiry_cas_cannot_overwrite_concurrent_paid_invoice(
 
 
 @pytest.mark.asyncio
-async def test_paid_quote_worker_does_not_mint_after_expiry_claim_wins(
+async def test_paid_quote_still_credits_after_expiry_claim_wins(
     integration_engine: AsyncEngine,
     patched_db_engine: None,
 ) -> None:
@@ -339,7 +343,10 @@ async def test_paid_quote_worker_does_not_mint_after_expiry_claim_wins(
         observed_pending = await worker.get(LightningInvoice, invoice.id)
         assert observed_pending is not None
 
-        with patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)):
+        with (
+            patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+            patch("routstr.lightning._mint_invoice_quote", AsyncMock()),
+        ):
             settlement_task = asyncio.create_task(
                 check_invoice_payment(observed_pending, worker)
             )
@@ -358,8 +365,256 @@ async def test_paid_quote_worker_does_not_mint_after_expiry_claim_wins(
             release_quote.set()
             assert await settlement_task is False
 
-    wallet.mint.assert_not_awaited()
     async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
         stored = await verify.get(LightningInvoice, invoice.id)
         assert stored is not None
+        assert stored.status == "paid"
+        assert stored.paid_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_expires_only_overdue_pending_invoices(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    now = int(time.time())
+    overdue = _lightning_invoice(expires_at=now - 1)
+    fresh = _lightning_invoice(expires_at=now + 3600)
+    settling = _lightning_invoice(expires_at=now - 1, status="settlement_pending")
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add_all([overdue, fresh, settling])
+        await seed.commit()
+
+    await _expire_overdue_invoices(now)
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        for invoice, expected in (
+            (overdue, "expired"),
+            (fresh, "pending"),
+            (settling, "settlement_pending"),
+        ):
+            stored = await verify.get(LightningInvoice, invoice.id)
+            assert stored is not None
+            assert stored.status == expected
+
+
+@pytest.mark.asyncio
+async def test_watch_batch_expires_overdue_invoices_and_keeps_settling_rows(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    now = int(time.time())
+    overdue = _lightning_invoice(expires_at=now - 1, created_at=now)
+    fresh = _lightning_invoice(expires_at=now + 3600, created_at=now)
+    settling = _lightning_invoice(
+        expires_at=now - 86_400, created_at=now - 86_400, status="settlement_pending"
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add_all([overdue, fresh, settling])
+        await seed.commit()
+
+    polled: list[str] = []
+
+    async def record(invoice: LightningInvoice, _session: AsyncSession) -> bool:
+        polled.append(invoice.id)
+        return False
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as watcher:
+        with patch("routstr.lightning.check_invoice_payment", record):
+            await _process_invoice_watch_batch(watcher, now - 10)
+
+    assert fresh.id in polled
+    assert settling.id in polled
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, overdue.id)
+        assert stored is not None
         assert stored.status == "expired"
+
+
+@pytest.mark.asyncio
+async def test_sweep_cannot_expire_a_row_a_worker_already_claimed(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    now = int(time.time())
+    invoice = _lightning_invoice(expires_at=now - 1)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add(invoice)
+        await seed.commit()
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as claimer:
+        claimed = await claimer.exec(  # type: ignore[call-overload]
+            update(LightningInvoice)
+            .where(col(LightningInvoice.id) == invoice.id)
+            .values(status="settlement_pending")
+        )
+        assert claimed.rowcount == 1
+        await claimer.commit()
+
+    assert await _expire_overdue_invoices(now) == 0
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "settlement_pending"
+
+
+@pytest.mark.asyncio
+async def test_expired_invoice_is_credited_exactly_once(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    key_hash = uuid.uuid4().hex
+    invoice = _lightning_invoice(
+        status="expired", purpose="topup", api_key_hash=key_hash, amount_sats=100
+    )
+    key = ApiKey(
+        hashed_key=key_hash,
+        balance=0,
+        refund_currency="sat",
+        refund_mint_url="http://mint:3338",
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add(invoice)
+        seed.add(key)
+        await seed.commit()
+
+    settlement = _InvoiceSettlement.from_invoice(invoice)
+    async with AsyncSession(integration_engine, expire_on_commit=False) as first:
+        settled, _ = await _finalize_invoice_settlement(settlement, first, 123)
+    assert settled is True
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as second:
+        replayed, _ = await _finalize_invoice_settlement(settlement, second, 456)
+    assert replayed is False
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "paid"
+        assert stored.paid_at == 123
+        credited = await verify.get(ApiKey, key_hash)
+        assert credited is not None
+        assert credited.balance == 100_000
+
+
+@pytest.mark.asyncio
+async def test_expired_invoice_is_polled_only_inside_the_grace_window(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    now = int(time.time())
+    recoverable = _lightning_invoice(
+        status="expired", expires_at=now - 3600, created_at=now - 7200
+    )
+    abandoned = _lightning_invoice(
+        status="expired",
+        expires_at=now - INVOICE_EXPIRY_GRACE_SECONDS - 1,
+        created_at=now - INVOICE_EXPIRY_GRACE_SECONDS - 3600,
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add_all([recoverable, abandoned])
+        await seed.commit()
+
+    polled: list[str] = []
+
+    async def record(invoice: LightningInvoice, _session: AsyncSession) -> bool:
+        polled.append(invoice.id)
+        return False
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as watcher:
+        with patch("routstr.lightning.check_invoice_payment", record):
+            await _process_invoice_watch_batch(watcher, now - 601)
+
+    assert recoverable.id in polled
+    assert abandoned.id not in polled
+
+
+@pytest.mark.asyncio
+async def test_watcher_credits_a_late_paid_expired_invoice(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    now = int(time.time())
+    key_hash = uuid.uuid4().hex
+    invoice = _lightning_invoice(
+        status="expired",
+        purpose="topup",
+        api_key_hash=key_hash,
+        amount_sats=100,
+        expires_at=now - 3600,
+        created_at=now - 7200,
+    )
+    key = ApiKey(
+        hashed_key=key_hash,
+        balance=0,
+        refund_currency="sat",
+        refund_mint_url="http://mint:3338",
+    )
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add_all([invoice, key])
+        await seed.commit()
+
+    async def settle(polled: LightningInvoice, _session: AsyncSession) -> bool:
+        settlement = _InvoiceSettlement.from_invoice(polled)
+        async with AsyncSession(integration_engine, expire_on_commit=False) as owned:
+            await _finalize_invoice_settlement(settlement, owned, now)
+        return False
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as watcher:
+        with patch("routstr.lightning.check_invoice_payment", settle):
+            await _process_invoice_watch_batch(watcher, now - 601)
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as verify:
+        stored = await verify.get(LightningInvoice, invoice.id)
+        assert stored is not None
+        assert stored.status == "paid"
+        credited = await verify.get(ApiKey, key_hash)
+        assert credited is not None
+        assert credited.balance == 100_000
+
+
+@pytest.mark.asyncio
+async def test_recovery_tail_cannot_starve_owed_or_live_invoices(
+    integration_engine: AsyncEngine,
+    patched_db_engine: None,
+) -> None:
+    now = int(time.time())
+    settling = [
+        _lightning_invoice(
+            status="settlement_pending",
+            expires_at=now - 86_400,
+            created_at=now - 86_400 - offset,
+        )
+        for offset in range(50)
+    ]
+    fresh = [
+        _lightning_invoice(expires_at=now + 3600, created_at=now - offset)
+        for offset in range(50)
+    ]
+    tail = [
+        _lightning_invoice(
+            status="expired",
+            expires_at=now - 3600,
+            created_at=now - 7200 - offset,
+        )
+        for offset in range(200)
+    ]
+    async with AsyncSession(integration_engine, expire_on_commit=False) as seed:
+        seed.add_all(settling + fresh + tail)
+        await seed.commit()
+
+    polled: list[str] = []
+
+    async def record(invoice: LightningInvoice, _session: AsyncSession) -> bool:
+        polled.append(invoice.id)
+        return False
+
+    async with AsyncSession(integration_engine, expire_on_commit=False) as watcher:
+        with patch("routstr.lightning.check_invoice_payment", record):
+            await _process_invoice_watch_batch(watcher, now - 601)
+
+    assert len(polled) == INVOICE_WATCH_BATCH_LIMIT
+    assert {inv.id for inv in settling} <= set(polled)
+    assert {inv.id for inv in fresh} <= set(polled)

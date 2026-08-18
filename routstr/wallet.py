@@ -2119,7 +2119,7 @@ async def fetch_all_balances(
             _balance_fetch_failures.pop(key, None)
             user_balance = user_balances.get((mint_url, unit), 0)
             if unit == "sat":
-                user_balance = _msats_to_sats(user_balance)
+                user_balance = _msats_to_sats_ceil(user_balance)
             proofs_balance = sum(proof.amount for proof in proofs)
             return {
                 "mint_url": mint_url,
@@ -2151,7 +2151,7 @@ async def fetch_all_balances(
             total_user_balance_sats += (
                 detail["user_balance"]
                 if unit == "sat"
-                else _msats_to_sats(detail["user_balance"])
+                else _msats_to_sats_ceil(detail["user_balance"])
             )
 
     if liabilities_error is None:
@@ -2179,6 +2179,10 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         # cross-process lock is only safe with a fresh reload.
         wallet = await get_wallet(mint_url, unit, force_reload=True)
         proofs = get_proofs_per_mint_and_unit(wallet, mint_url, unit, not_reserved=True)
+        if not proofs:
+            # Nothing to pay out, so skip the settle delay rather than hold the
+            # cross-process guard (and block credits) for a wallet with no funds.
+            return
         proofs = await slow_filter_spend_proofs(proofs, wallet)
         await asyncio.sleep(5)
     except Exception as e:
@@ -2206,7 +2210,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
 
     try:
         if unit == "sat":
-            user_balance = _msats_to_sats(user_balance)
+            user_balance = _msats_to_sats_ceil(user_balance)
         proofs_balance = sum(proof.amount for proof in proofs)
         available_balance = proofs_balance - user_balance
         min_amount = (
@@ -2238,6 +2242,23 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
         )
 
 
+async def _payout_units(mint_url: str) -> list[str]:
+    """Only sat and msat are payable: raw_send_to_lnurl rejects other units."""
+    try:
+        units = await _get_supported_mint_units(mint_url)
+    except Exception as e:
+        logger.warning(
+            "Unable to discover payout units, falling back to primary unit",
+            extra={
+                "mint_url": mint_url,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+        )
+        units = [settings.primary_mint_unit]
+    return [unit for unit in units if unit in ("sat", "msat")]
+
+
 async def periodic_payout() -> None:
     while True:
         await asyncio.sleep(settings.payout_interval_seconds)
@@ -2246,7 +2267,7 @@ async def periodic_payout() -> None:
                 continue
 
             for mint_url in _mints_to_inspect():
-                for unit in ["sat", "msat"]:
+                for unit in await _payout_units(mint_url):
                     # Proof mutation, liability observation, and sending are one
                     # cross-process critical section. Credits take the same lock.
                     async with wallet_operation_guard():
