@@ -185,11 +185,9 @@ class RequestIdFilter(logging.Filter):
 class ClientAppFilter(logging.Filter):
     """Filter to add the requesting client app to all log records.
 
-    The client app (the app or agent that made the request) is resolved by the
-    logging middleware from the OpenRouter-convention identity headers
-    (``X-Title``/``HTTP-Referer``, falling back to ``User-Agent``) and stored
-    in a context variable, so every log line emitted while handling a request
-    carries it — including error messages raised deep in the wallet/mint code.
+    The middleware resolves it from the OpenRouter-convention identity headers
+    (X-Title, then Referer, then User-Agent) into a context variable, so even
+    errors raised deep in the wallet/mint code carry it.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:

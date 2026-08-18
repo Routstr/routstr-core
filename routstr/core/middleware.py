@@ -14,30 +14,26 @@ logger = get_logger(__name__)
 # Context variable to store request ID across async context
 request_id_context: ContextVar[str | None] = ContextVar("request_id")
 
-# Context variable holding the client app that made the current request, so
-# every log line emitted while handling it (including deep wallet/mint errors)
-# can say who triggered it. "unknown" when the client sent no identity headers.
+# Context variable holding the client app behind the current request, so log
+# lines emitted while handling it (wallet/mint errors included) can say who
+# triggered it.
 client_app_context: ContextVar[str | None] = ContextVar("client_app")
 
 UNKNOWN_CLIENT_APP = "unknown"
 
-# Client identity headers, in priority order. Follows the OpenRouter
-# convention: apps identify themselves with ``X-Title`` (human-readable app
-# name) and/or ``HTTP-Referer`` (app URL); ``User-Agent`` is the fallback for
-# SDKs and scripts that set neither.
+# OpenRouter-convention identity headers, in priority order: X-Title carries
+# the app name, HTTP-Referer its URL; User-Agent covers SDKs and scripts that
+# set neither.
 _CLIENT_APP_HEADERS: tuple[str, ...] = ("x-title", "referer", "user-agent")
 
-# Header values are attacker-controlled free text; cap the length so a single
-# request can't bloat every log line, and strip control characters so a crafted
-# header can't inject fake log records.
+# Headers are attacker-controlled free text: cap the length so one request
+# can't bloat every log line, strip control characters so a crafted value
+# can't forge log records.
 _CLIENT_APP_MAX_LENGTH = 120
 
 
 def client_app_from_headers(headers: Headers) -> str:
-    """Resolve the client app identity from request headers.
-
-    Priority: ``X-Title`` > ``HTTP-Referer`` > ``User-Agent`` > "unknown".
-    """
+    """Resolve the requesting app from identity headers, or "unknown"."""
     for header in _CLIENT_APP_HEADERS:
         raw = headers.get(header)
         if raw is None:
