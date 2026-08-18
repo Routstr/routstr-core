@@ -64,12 +64,6 @@ _WALLET_OPERATION_LOCK = Path(".wallet") / ".routstr-operation.lock"
 _wallet_operation_depth: ContextVar[int] = ContextVar(
     "wallet_operation_depth", default=0
 )
-# (key_hashed_key, serialized_token) of the credit_balance call currently on
-# the stack, so swap_to_trusted_mint can checkpoint who to credit if the swap
-# is interrupted between melt dispatch and the balance update.
-_swap_credit_context: ContextVar[tuple[str, str] | None] = ContextVar(
-    "swap_credit_context", default=None
-)
 
 
 @asynccontextmanager
@@ -1298,86 +1292,6 @@ async def _confirm_melt_paid(
     return await _reconcile_ambiguous_melt(wallet, quote_id, proofs)
 
 
-async def _persist_pending_swap(
-    *,
-    source_mint: str,
-    source_unit: str,
-    melt_quote_id: str,
-    dest_mint: str,
-    dest_unit: str,
-    mint_quote_id: str,
-    minted_amount: int,
-) -> str | None:
-    """Checkpoint an about-to-be-dispatched melt. Best-effort: a persistence
-    failure must not block the swap, it only loses the automatic-recovery net."""
-    credit_ctx = _swap_credit_context.get()
-    try:
-        row = db.PendingSwap(
-            source_mint=source_mint,
-            source_unit=source_unit,
-            melt_quote_id=melt_quote_id,
-            dest_mint=dest_mint,
-            dest_unit=dest_unit,
-            mint_quote_id=mint_quote_id,
-            minted_amount=minted_amount,
-            key_hashed_key=credit_ctx[0] if credit_ctx else None,
-            token=credit_ctx[1] if credit_ctx else None,
-        )
-        async with db.create_session() as session:
-            session.add(row)
-            await session.commit()
-        return row.id
-    except Exception as e:
-        logger.warning(
-            "pending_swap: failed to persist checkpoint before melt dispatch",
-            extra={"error": str(e), "melt_quote_id": melt_quote_id},
-        )
-        return None
-
-
-async def _mark_pending_swap(
-    swap_id: str | None, *, state: str, error: str | None = None
-) -> None:
-    if swap_id is None:
-        return
-    try:
-        async with db.create_session() as session:
-            values: dict[str, object] = {
-                "state": state,
-                "updated_at": int(time.time()),
-            }
-            if error is not None:
-                values["last_error"] = error[:500]
-            stmt = (
-                update(db.PendingSwap)
-                .where(col(db.PendingSwap.id) == swap_id)
-                .values(**values)
-            )
-            await session.exec(stmt)  # type: ignore[call-overload]
-            await session.commit()
-    except Exception as e:
-        logger.warning(
-            "pending_swap: failed to update checkpoint state",
-            extra={"error": str(e), "swap_id": swap_id, "state": state},
-        )
-
-
-async def _delete_pending_swap(swap_id: str | None) -> None:
-    if swap_id is None:
-        return
-    try:
-        async with db.create_session() as session:
-            row = await session.get(db.PendingSwap, swap_id)
-            if row is not None:
-                await session.delete(row)
-                await session.commit()
-    except Exception as e:
-        logger.warning(
-            "pending_swap: failed to delete checkpoint",
-            extra={"error": str(e), "swap_id": swap_id},
-        )
-
-
 async def swap_to_trusted_mint(
     token_obj: Token,
     token_wallet: Wallet,
@@ -1451,7 +1365,6 @@ async def swap_to_trusted_mint(
     # amount recomputed from the fees the mint actually demands.
     observed_extra_fee = 0
     attempt = 0
-    pending_swap_id: str | None = None
     dest_wallet = primary_wallet
     dest_mint_url = settings.primary_mint
     while True:
@@ -1573,18 +1486,6 @@ async def swap_to_trusted_mint(
             minted_amount = recomputed
             continue
 
-        # Durable checkpoint: from the moment the melt hits the wire, a crash
-        # or ambiguous failure leaves real money in flight. The reconciler
-        # completes or discards this row if we never get to delete it in-line.
-        pending_swap_id = await _persist_pending_swap(
-            source_mint=token_obj.mint,
-            source_unit=token_obj.unit,
-            melt_quote_id=melt_quote.quote,
-            dest_mint=dest_mint_url,
-            dest_unit=settings.primary_mint_unit,
-            mint_quote_id=mint_quote.quote,
-            minted_amount=int(minted_amount),
-        )
         try:
             melt_response = await run_mint_operation(
                 lambda: token_wallet.melt(
@@ -1606,7 +1507,6 @@ async def swap_to_trusted_mint(
                 if isinstance(e, TokenConsumedError):
                     raise
                 if _melt_definitively_failed(e):
-                    await _delete_pending_swap(pending_swap_id)
                     raise ValueError(
                         f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
                     ) from e
@@ -1647,11 +1547,9 @@ async def swap_to_trusted_mint(
                         "attempts": attempt,
                     },
                 )
-                await _delete_pending_swap(pending_swap_id)
                 raise ValueError(
                     f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
                 ) from e
-            await _delete_pending_swap(pending_swap_id)
             logger.warning(
                 "swap_to_trusted_mint: mint demanded more than quoted at melt, retrying",
                 extra={
@@ -1665,7 +1563,6 @@ async def swap_to_trusted_mint(
 
         break
 
-    await _mark_pending_swap(pending_swap_id, state="melt_confirmed")
     logger.info(
         "Source melt succeeded; minting on destination",
         extra={
@@ -1718,11 +1615,6 @@ async def swap_to_trusted_mint(
                     # Recovery scan ran but did NOT restore the orphaned proofs
                     # (mint reports them as spent — they're stuck). Refuse to
                     # credit the API key balance for proofs we don't actually hold.
-                    await _mark_pending_swap(
-                        pending_swap_id,
-                        state="stale",
-                        error="outputs signed but proofs unrecoverable",
-                    )
                     raise TokenConsumedError(
                         f"Swap recovery failed: mint signed outputs but proofs are "
                         f"unrecoverable (mint reports them spent). "
@@ -1767,8 +1659,6 @@ async def swap_to_trusted_mint(
         },
     )
 
-    await _delete_pending_swap(pending_swap_id)
-
     return int(minted_amount), settings.primary_mint_unit, dest_mint_url
 
 
@@ -1783,11 +1673,7 @@ async def credit_balance(
     cashu_token: str, key: db.ApiKey, session: db.AsyncSession
 ) -> int:
     async with wallet_operation_guard():
-        ctx_token = _swap_credit_context.set((key.hashed_key, cashu_token))
-        try:
-            return await _credit_balance_locked(cashu_token, key, session)
-        finally:
-            _swap_credit_context.reset(ctx_token)
+        return await _credit_balance_locked(cashu_token, key, session)
 
 
 async def _credit_balance_locked(
@@ -2516,232 +2402,6 @@ async def refund_sweep_once() -> None:
     """Sweep eligible uncollected refund tokens once."""
     cutoff = int(time.time()) - settings.refund_sweep_ttl_seconds
     await _refund_sweep_once(cutoff)
-
-
-_SWAP_RECONCILE_INTERVAL_SECONDS = 5 * 60
-_SWAP_RECONCILE_MIN_AGE_SECONDS = 120
-_SWAP_RECONCILE_MAX_ATTEMPTS = 96
-_SWAP_UNPAID_GIVEUP_AGE_SECONDS = 60 * 60
-
-
-async def _bump_pending_swap(row: "db.PendingSwap", *, error: str | None) -> None:
-    """Record one more unresolved reconciliation attempt; park as stale at cap."""
-    if row.attempts + 1 >= _SWAP_RECONCILE_MAX_ATTEMPTS:
-        logger.critical(
-            "swap_reconciliation: giving up on checkpoint; manual reconciliation required",
-            extra={
-                "swap_id": row.id,
-                "source_mint": row.source_mint,
-                "melt_quote_id": row.melt_quote_id,
-                "dest_mint": row.dest_mint,
-                "mint_quote_id": row.mint_quote_id,
-                "minted_amount": row.minted_amount,
-                "last_error": error,
-            },
-        )
-    try:
-        async with db.create_session() as session:
-            values: dict[str, object] = {
-                "attempts": db.PendingSwap.attempts + 1,
-                "updated_at": int(time.time()),
-            }
-            if error is not None:
-                values["last_error"] = error[:500]
-            if row.attempts + 1 >= _SWAP_RECONCILE_MAX_ATTEMPTS:
-                values["state"] = "stale"
-            stmt = (
-                update(db.PendingSwap)
-                .where(col(db.PendingSwap.id) == row.id)
-                .values(**values)
-            )
-            await session.exec(stmt)  # type: ignore[call-overload]
-            await session.commit()
-    except Exception as e:
-        logger.warning(
-            "swap_reconciliation: failed to bump checkpoint attempts",
-            extra={"error": str(e), "swap_id": row.id},
-        )
-
-
-async def _credit_reconciled_swap(row: "db.PendingSwap") -> None:
-    amount_msat = (
-        _sats_to_msats(row.minted_amount)
-        if row.dest_unit == "sat"
-        else row.minted_amount
-    )
-    credited_key = row.key_hashed_key
-    if credited_key:
-        async with db.create_session() as session:
-            stmt = (
-                update(db.ApiKey)
-                .where(col(db.ApiKey.hashed_key) == credited_key)
-                .values(balance=db.ApiKey.balance + amount_msat)
-            )
-            result = await session.exec(stmt)  # type: ignore[call-overload]
-            if (getattr(result, "rowcount", 0) or 0) == 0:
-                # The failed request rolled back the freshly-created key row.
-                # Recreate it: auth hashes the same bearer token back to this
-                # hashed_key, so the user reaches this balance by re-presenting
-                # the token they already paid with.
-                session.add(
-                    db.ApiKey(
-                        hashed_key=credited_key,
-                        balance=amount_msat,
-                        refund_mint_url=row.dest_mint,
-                        refund_currency=row.dest_unit,
-                    )
-                )
-            await session.commit()
-        if row.token:
-            await store_cashu_transaction(
-                token=row.token,
-                amount=row.minted_amount,
-                unit=row.dest_unit,
-                mint_url=row.dest_mint,
-                typ="in",
-                source="apikey",
-                api_key_hashed_key=credited_key,
-            )
-    else:
-        logger.warning(
-            "swap_reconciliation: recovered swap has no API key to credit; "
-            "minted funds remain in the node wallet",
-            extra={"swap_id": row.id, "minted_amount": row.minted_amount},
-        )
-    await _delete_pending_swap(row.id)
-    logger.info(
-        "swap_reconciliation: recovered interrupted swap",
-        extra={
-            "event": "cashu_swap_reconciled",
-            "swap_id": row.id,
-            "credited_key": (credited_key or "")[:8],
-            "amount_msat": amount_msat,
-            "dest_mint": row.dest_mint,
-        },
-    )
-
-
-async def _reconcile_pending_swap(row: "db.PendingSwap") -> None:
-    async with wallet_operation_guard():
-        state = row.state
-        if state == "pending":
-            source_wallet = await get_wallet(
-                row.source_mint, unit=row.source_unit, load=False
-            )
-            try:
-                quote = await run_mint_operation(
-                    lambda: source_wallet.get_melt_quote(row.melt_quote_id),
-                    op_name="reconcile_pending_swap_melt_quote",
-                    mint_url=row.source_mint,
-                    retry_timeouts=False,
-                )
-            except Exception as e:
-                await _bump_pending_swap(row, error=str(e))
-                return
-            quote_state = getattr(quote, "state", None)
-            if quote is not None and quote_state == MeltQuoteState.paid:
-                await _mark_pending_swap(row.id, state="melt_confirmed")
-                state = "melt_confirmed"
-            elif quote is None or quote_state == MeltQuoteState.unpaid:
-                # Still UNPAID long after dispatch: the Lightning payment never
-                # happened, the source proofs were not consumed, and the user
-                # can safely re-present the token. Drop the checkpoint.
-                if int(time.time()) - row.created_at >= _SWAP_UNPAID_GIVEUP_AGE_SECONDS:
-                    logger.info(
-                        "swap_reconciliation: melt never settled; dropping checkpoint",
-                        extra={
-                            "swap_id": row.id,
-                            "source_mint": row.source_mint,
-                            "melt_quote_id": row.melt_quote_id,
-                        },
-                    )
-                    await _delete_pending_swap(row.id)
-                else:
-                    await _bump_pending_swap(row, error="melt quote still unpaid")
-                return
-            else:
-                await _bump_pending_swap(
-                    row,
-                    error=f"melt quote state: {getattr(quote_state, 'value', 'unknown')}",
-                )
-                return
-
-        if state == "melt_confirmed":
-            dest_wallet = await get_wallet(row.dest_mint, unit=row.dest_unit)
-            try:
-                await run_mint_operation(
-                    lambda: dest_wallet.mint(
-                        row.minted_amount, quote_id=row.mint_quote_id
-                    ),
-                    op_name="reconcile_pending_swap_mint",
-                    mint_url=row.dest_mint,
-                    retry_timeouts=False,
-                )
-            except Exception as e:
-                msg = str(e)
-                lowered = msg.lower()
-                if (
-                    "11003" in msg
-                    or "outputs already signed" in lowered
-                    or "already issued" in lowered
-                ):
-                    # The quote was (partially) used by the crashed in-line
-                    # attempt; blind re-minting risks double counting. Park for
-                    # manual reconciliation.
-                    logger.critical(
-                        "swap_reconciliation: destination quote already used; "
-                        "manual reconciliation required",
-                        extra={
-                            "swap_id": row.id,
-                            "dest_mint": row.dest_mint,
-                            "mint_quote_id": row.mint_quote_id,
-                            "error": msg,
-                        },
-                    )
-                    await _mark_pending_swap(row.id, state="stale", error=msg)
-                else:
-                    await _bump_pending_swap(row, error=msg)
-                return
-            await _credit_reconciled_swap(row)
-
-
-async def reconcile_pending_swaps_once() -> None:
-    now = int(time.time())
-    async with db.create_session() as session:
-        result = await session.exec(
-            select(db.PendingSwap).where(
-                col(db.PendingSwap.state).in_(["pending", "melt_confirmed"])
-            )
-        )
-        rows = list(result.all())
-    for row in rows:
-        # Give the in-line swap time to finish (and delete its row) before
-        # a second worker starts poking the mints about it.
-        if now - row.created_at < _SWAP_RECONCILE_MIN_AGE_SECONDS:
-            continue
-        try:
-            await _reconcile_pending_swap(row)
-        except Exception as e:
-            logger.error(
-                "swap_reconciliation: error processing checkpoint",
-                extra={
-                    "swap_id": row.id,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                },
-            )
-
-
-async def periodic_swap_reconciliation() -> None:
-    while True:
-        await asyncio.sleep(_SWAP_RECONCILE_INTERVAL_SECONDS)
-        try:
-            await reconcile_pending_swaps_once()
-        except Exception as e:
-            logger.error(
-                "Error in periodic swap reconciliation",
-                extra={"error": str(e), "error_type": type(e).__name__},
-            )
 
 
 async def periodic_refund_sweep() -> None:
