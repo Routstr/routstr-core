@@ -156,7 +156,12 @@ async def calculate_discounted_max_cost(
     body: dict,
     model_obj: Any | None = None,
 ) -> int:
-    """Calculate the discounted max cost for a request using model pricing when available."""
+    """Calculate the discounted max cost for a request using model pricing when available.
+
+    Prompt discounts are trimmed from ``messages`` (chat/completions) or
+    ``input`` (responses) when either is present. Completion discounts are
+    trimmed from ``max_tokens`` or ``max_output_tokens`` (responses).
+    """
     if settings.fixed_pricing:
         return max_cost_for_model
 
@@ -196,10 +201,19 @@ async def calculate_discounted_max_cost(
 
     adjusted = max_cost_for_model
 
+    prompt_tokens = 0
+    image_tokens = 0
+    has_prompt = False
     if messages := body.get("messages"):
+        has_prompt = True
         prompt_tokens = estimate_tokens(messages)
-
         image_tokens = await estimate_image_tokens_in_messages(messages)
+    elif input_data := body.get("input"):
+        has_prompt = True
+        prompt_tokens = estimate_tokens_from_input(input_data)
+        image_tokens = await estimate_image_tokens_from_input(input_data)
+
+    if has_prompt:
         if image_tokens > 0:
             logger.debug(
                 "Found images in request",
@@ -208,7 +222,7 @@ async def calculate_discounted_max_cost(
                     "image_tokens": image_tokens,
                 },
             )
-            prompt_tokens += image_tokens
+        prompt_tokens += image_tokens
 
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
@@ -217,6 +231,8 @@ async def calculate_discounted_max_cost(
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
 
     max_tokens_raw = body.get("max_tokens", None)
+    if max_tokens_raw is None:
+        max_tokens_raw = body.get("max_output_tokens", None)
     if max_tokens_raw is not None:
         try:
             max_tokens_int = int(max_tokens_raw)
@@ -259,6 +275,45 @@ def estimate_tokens(messages: list) -> int:
                     for item in content
                     if isinstance(item, dict) and item.get("type") == "text"
                 )
+    return total // 3
+
+
+def estimate_tokens_from_input(input_data: Any) -> int:
+    """Estimate text tokens from a Responses API ``input`` field.
+
+    ``input`` may be a plain string or a list of input items. Text is counted
+    from ``content`` strings, ``input_text``/``text`` content parts, and
+    top-level ``input_text`` items.
+    """
+    if isinstance(input_data, str):
+        return len(input_data) // 3
+
+    if not isinstance(input_data, list):
+        return 0
+
+    total = 0
+    for item in input_data:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") == "input_text":
+            text = item.get("text", "")
+            if isinstance(text, str):
+                total += len(text)
+            continue
+
+        content = item.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in (
+                    "text",
+                    "input_text",
+                ):
+                    text = part.get("text", "")
+                    if isinstance(text, str):
+                        total += len(text)
     return total // 3
 
 
@@ -324,6 +379,65 @@ def _calculate_image_tokens(width: int, height: int, detail: str = "auto") -> in
     return 85 + (170 * num_tiles)
 
 
+async def _estimate_image_tokens(image_url_data: Any) -> int:
+    """Estimate tokens for a single ``image_url`` payload.
+
+    ``image_url_data`` may be a URL string or a dict with ``url``/``detail``
+    keys. Returns 0 when it is missing or malformed.
+    """
+    if isinstance(image_url_data, str):
+        url = image_url_data
+        detail = "auto"
+    elif isinstance(image_url_data, dict):
+        url = image_url_data.get("url", "")
+        detail = image_url_data.get("detail", "auto")
+    else:
+        return 0
+
+    if not url:
+        return 0
+
+    if url.startswith("data:image/"):
+        try:
+            header, base64_data = url.split(",", 1)
+            image_bytes = base64.b64decode(base64_data)
+            width, height = _get_image_dimensions(image_bytes)
+            tokens = _calculate_image_tokens(width, height, detail)
+            logger.debug(
+                "Calculated tokens for base64 image",
+                extra={
+                    "width": width,
+                    "height": height,
+                    "detail": detail,
+                    "tokens": tokens,
+                },
+            )
+            return tokens
+        except Exception as e:
+            logger.warning(
+                "Failed to process base64 image",
+                extra={"error": str(e)},
+            )
+            return 85
+    else:
+        image_bytes_or_none = await _fetch_image_from_url(url)
+        if image_bytes_or_none:
+            width, height = _get_image_dimensions(image_bytes_or_none)
+            tokens = _calculate_image_tokens(width, height, detail)
+            logger.debug(
+                "Calculated tokens for URL image",
+                extra={
+                    "url": url[:100],
+                    "width": width,
+                    "height": height,
+                    "detail": detail,
+                    "tokens": tokens,
+                },
+            )
+            return tokens
+        return 85
+
+
 async def estimate_image_tokens_in_messages(messages: list) -> int:
     """Estimate total tokens for all images in messages.
 
@@ -336,12 +450,6 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
             continue
 
         content = message.get("content")
-        if not content:
-            continue
-
-        if isinstance(content, str):
-            continue
-
         if not isinstance(content, list):
             continue
 
@@ -353,62 +461,42 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
             if content_type not in ("image_url", "input_image"):
                 continue
 
-            image_url_data = content_item.get("image_url")
-            if not image_url_data:
-                continue
+            total_image_tokens += await _estimate_image_tokens(
+                content_item.get("image_url")
+            )
 
-            if isinstance(image_url_data, str):
-                url = image_url_data
-                detail = "auto"
-            elif isinstance(image_url_data, dict):
-                url = image_url_data.get("url", "")
-                detail = image_url_data.get("detail", "auto")
-            else:
-                continue
+    return total_image_tokens
 
-            if not url:
-                continue
 
-            if url.startswith("data:image/"):
-                try:
-                    header, base64_data = url.split(",", 1)
-                    image_bytes = base64.b64decode(base64_data)
-                    width, height = _get_image_dimensions(image_bytes)
-                    tokens = _calculate_image_tokens(width, height, detail)
-                    total_image_tokens += tokens
-                    logger.debug(
-                        "Calculated tokens for base64 image",
-                        extra={
-                            "width": width,
-                            "height": height,
-                            "detail": detail,
-                            "tokens": tokens,
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to process base64 image",
-                        extra={"error": str(e)},
-                    )
-                    total_image_tokens += 85
-            else:
-                image_bytes_or_none = await _fetch_image_from_url(url)
-                if image_bytes_or_none:
-                    width, height = _get_image_dimensions(image_bytes_or_none)
-                    tokens = _calculate_image_tokens(width, height, detail)
-                    total_image_tokens += tokens
-                    logger.debug(
-                        "Calculated tokens for URL image",
-                        extra={
-                            "url": url[:100],
-                            "width": width,
-                            "height": height,
-                            "detail": detail,
-                            "tokens": tokens,
-                        },
-                    )
-                else:
-                    total_image_tokens += 85
+async def estimate_image_tokens_from_input(input_data: Any) -> int:
+    """Estimate total tokens for images embedded in a Responses API ``input``.
+
+    Recognizes ``input_image`` items at the top level of the input list and
+    inside ``message`` content parts.
+    """
+    if not isinstance(input_data, list):
+        return 0
+
+    total_image_tokens = 0
+    for item in input_data:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") == "input_image":
+            total_image_tokens += await _estimate_image_tokens(
+                item.get("image_url")
+            )
+            continue
+
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "input_image":
+                total_image_tokens += await _estimate_image_tokens(
+                    part.get("image_url")
+                )
 
     return total_image_tokens
 
