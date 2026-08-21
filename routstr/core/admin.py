@@ -1811,6 +1811,21 @@ async def release_ppq_auto_topup_api(
     return {"ok": True, "released": True}
 
 
+def _transaction_status(tx: CashuTransaction) -> str:
+    """An outgoing admin withdrawal ends at "issued": the node hands the bearer
+    token over and never learns whether it was redeemed, so its flags stay false
+    and it would otherwise read pending forever. Incoming admin rows are redeemed
+    by the node itself and keep the normal collected/swept lifecycle.
+    """
+    if tx.swept:
+        return "swept"
+    if tx.collected:
+        return "collected"
+    if tx.source == "admin" and tx.type == "out":
+        return "issued"
+    return "pending"
+
+
 @admin_router.get("/api/transactions", dependencies=[Depends(require_admin_api)])
 async def get_transactions_api(
     type: str | None = None,
@@ -1840,13 +1855,25 @@ async def get_transactions_api(
                 base = base.where(CashuTransaction.source == source)
         if status:
             if status == "collected":
-                base = base.where(CashuTransaction.collected == True)  # noqa: E712
+                base = base.where(
+                    CashuTransaction.collected == True,  # noqa: E712
+                    CashuTransaction.swept == False,  # noqa: E712
+                )
             elif status == "swept":
                 base = base.where(CashuTransaction.swept == True)  # noqa: E712
+            elif status == "issued":
+                base = base.where(
+                    CashuTransaction.source == "admin",
+                    CashuTransaction.type == "out",
+                    CashuTransaction.collected == False,  # noqa: E712
+                    CashuTransaction.swept == False,  # noqa: E712
+                )
             elif status == "pending":
                 base = base.where(
                     CashuTransaction.collected == False,  # noqa: E712
                     CashuTransaction.swept == False,  # noqa: E712
+                    (CashuTransaction.source != "admin")
+                    | (CashuTransaction.type != "out"),
                 )
 
         if search:
@@ -1873,7 +1900,11 @@ async def get_transactions_api(
 
         return {
             "transactions": [
-                tx.dict(exclude={"sweep_started_at"}) for tx in transactions
+                {
+                    **tx.dict(exclude={"sweep_started_at"}),
+                    "status": _transaction_status(tx),
+                }
+                for tx in transactions
             ],
             "total": total,
         }
