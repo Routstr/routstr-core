@@ -17,7 +17,11 @@ from ..auth import (
     periodic_stale_reservation_sweep,
 )
 from ..balance import balance_router, deprecated_wallet_router
-from ..lightning import lightning_router, periodic_invoice_watcher
+from ..lightning import (
+    lightning_router,
+    periodic_invoice_watcher,
+    v2_lightning_router,
+)
 from ..nostr import (
     announce_provider,
     providers_cache_refresher,
@@ -422,6 +426,7 @@ app.include_router(models_router)
 app.include_router(admin_router)
 app.include_router(balance_router)
 app.include_router(lightning_router)
+app.include_router(v2_lightning_router)
 app.include_router(deprecated_wallet_router)
 app.include_router(providers_router)
 app.include_router(proxy_router)

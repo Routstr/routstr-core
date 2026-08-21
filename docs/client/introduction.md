@@ -75,11 +75,12 @@ Visit the node's root page (e.g., [api.routstr.com](https://api.routstr.com)) or
 Generate an invoice and pay it with any Lightning wallet.
 
 ```bash
-curl -X POST https://api.routstr.com/lightning/invoice \
+curl -X POST https://api.routstr.com/v2/lightning/invoice \
+  -H 'Content-Type: application/json' \
   -d '{"amount_sats": 1000, "purpose": "create"}'
 ```
 
-*Returns an invoice (`bolt11`) and an ID. Once paid, the status endpoint returns your `api_key`.*
+*Returns an invoice (`bolt11`) and an ID. Once paid, `GET /v2/lightning/invoice/{invoice_id}/status` returns your `api_key`.*
 
 **Option B: Cashu Token (Best for privacy & devs)**
 If you have a Cashu wallet, you can copy a token string (`cashuA...`) and use it directly.

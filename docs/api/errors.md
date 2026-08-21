@@ -4,7 +4,7 @@ This guide covers error responses, codes, and handling strategies for the Routst
 
 ## Error Response Format
 
-All errors follow a consistent JSON structure:
+Versioned endpoints use a structured JSON error object:
 
 ```json
 {
@@ -18,6 +18,28 @@ All errors follow a consistent JSON structure:
   }
 }
 ```
+
+### Lightning invoice errors
+
+The `/v2/lightning/*` endpoints use the structured error object above. In the
+HTTP response, `error` is available at the top level and mirrored under
+`detail.error`. Clients should branch on `error.code`.
+
+| Endpoint case | Status | `type` | `code` |
+|---------------|--------|--------|--------|
+| Top-up without a credential | 401 | `invalid_request_error` | `topup_authorization_required` |
+| Top-up with a non-`sk-` credential | 400 | `invalid_request_error` | `topup_invalid_api_key_format` |
+| Top-up target key not found | 404 | `invalid_request_error` | `topup_api_key_not_found` |
+| Invoice not found during status or recovery | 404 | `invalid_request_error` | `invoice_not_found` |
+| Cashu mint rate-limited | 503 | `mint_rate_limited` | `lightning_mint_rate_limited` |
+| Cashu mint unreachable | 503 | `mint_unreachable` | `lightning_mint_unreachable` |
+| Unexpected invoice creation failure | 500 | `api_error` | `invoice_creation_failed` |
+
+Request validation failures, including non-positive or excessive amounts, use
+FastAPI's standard 422 validation response. Only the 503 mint failures are retryable. Use backoff and honor any mint
+cooldown. The compatibility endpoints `/lightning/*` and
+`/v1/balance/lightning/*` retain their original string `detail` errors and
+legacy status behavior.
 
 ## HTTP Status Codes
 
