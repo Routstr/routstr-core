@@ -1,9 +1,4 @@
-"""RIP-08 lightning invoice endpoint tests.
-
-Verifies both the spec-compliant path (`POST /lightning/invoice` with
-`Authorization: Bearer sk-...`) and the legacy path
-(`POST /v1/balance/lightning/invoice` with `api_key` in body).
-"""
+"""Lightning invoice endpoint compatibility and v2 contract tests."""
 
 from __future__ import annotations
 
@@ -16,9 +11,13 @@ from httpx import AsyncClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey
+from routstr.wallet import MintConnectionError
 
 RIP08_PATH = "/lightning/invoice"
 LEGACY_PATH = "/v1/balance/lightning/invoice"
+V2_PATH = "/v2/lightning/invoice"
+COMPATIBILITY_PATHS = [RIP08_PATH, LEGACY_PATH]
+ALL_PATHS = [*COMPATIBILITY_PATHS, V2_PATH]
 
 
 @pytest_asyncio.fixture
@@ -63,13 +62,13 @@ async def seeded_topup_key(integration_session: AsyncSession) -> str:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [RIP08_PATH, LEGACY_PATH])
+@pytest.mark.parametrize("path", ALL_PATHS)
 async def test_create_invoice_purpose_create(
     integration_client: AsyncClient,
     patch_invoice_generation: Any,
     path: str,
 ) -> None:
-    """`purpose=create` works on both paths and requires no auth."""
+    """`purpose=create` works on every path and requires no auth."""
     resp = await integration_client.post(
         path,
         json={"amount_sats": 1000, "purpose": "create"},
@@ -84,7 +83,7 @@ async def test_create_invoice_purpose_create(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [RIP08_PATH, LEGACY_PATH])
+@pytest.mark.parametrize("path", ALL_PATHS)
 async def test_topup_with_authorization_header(
     integration_client: AsyncClient,
     patch_invoice_generation: Any,
@@ -107,14 +106,14 @@ async def test_topup_with_authorization_header(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [RIP08_PATH, LEGACY_PATH])
+@pytest.mark.parametrize("path", ALL_PATHS)
 async def test_topup_with_legacy_api_key_in_body(
     integration_client: AsyncClient,
     patch_invoice_generation: Any,
     seeded_topup_key: str,
     path: str,
 ) -> None:
-    """Legacy: topup with `api_key` in body still accepted on both paths."""
+    """The deprecated body `api_key` remains accepted on every path."""
     resp = await integration_client.post(
         path,
         json={
@@ -129,24 +128,81 @@ async def test_topup_with_legacy_api_key_in_body(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [RIP08_PATH, LEGACY_PATH])
-async def test_topup_missing_auth_returns_401(
+@pytest.mark.parametrize("path", COMPATIBILITY_PATHS)
+async def test_compatibility_topup_missing_auth_keeps_string_error(
     integration_client: AsyncClient,
     patch_invoice_generation: Any,
     path: str,
 ) -> None:
-    """Topup without any credential is rejected on both paths."""
     resp = await integration_client.post(
         path,
         json={"amount_sats": 100, "purpose": "topup"},
     )
     assert resp.status_code == 401
+    assert resp.json()["detail"] == (
+        "Authorization bearer api key is required for topup"
+    )
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [RIP08_PATH, LEGACY_PATH])
-async def test_topup_unknown_api_key_returns_404(
+async def test_v2_topup_missing_auth_returns_typed_error(
+    integration_client: AsyncClient,
+    patch_invoice_generation: Any,
+) -> None:
+    resp = await integration_client.post(
+        V2_PATH,
+        json={"amount_sats": 100, "purpose": "topup"},
+    )
+    assert resp.status_code == 401
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "topup_authorization_required"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,expected_detail",
+    [
+        (RIP08_PATH, "Invalid API key format"),
+        (LEGACY_PATH, "Invalid API key format"),
+    ],
+)
+async def test_compatibility_invalid_api_key_format_keeps_original_message(
+    integration_client: AsyncClient,
+    path: str,
+    expected_detail: str,
+) -> None:
+    resp = await integration_client.post(
+        path,
+        json={"amount_sats": 100, "purpose": "topup"},
+        headers={"Authorization": "Bearer invalid"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == expected_detail
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_v2_invalid_api_key_format_returns_typed_error(
+    integration_client: AsyncClient,
+) -> None:
+    resp = await integration_client.post(
+        V2_PATH,
+        json={"amount_sats": 100, "purpose": "topup"},
+        headers={"Authorization": "Bearer invalid"},
+    )
+    assert resp.status_code == 400
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "topup_invalid_api_key_format"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", COMPATIBILITY_PATHS)
+async def test_compatibility_unknown_api_key_keeps_string_error(
     integration_client: AsyncClient,
     patch_invoice_generation: Any,
     path: str,
@@ -157,18 +213,48 @@ async def test_topup_unknown_api_key_returns_404(
         headers={"Authorization": "Bearer sk-deadbeef"},
     )
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "API key not found"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", [RIP08_PATH, LEGACY_PATH])
-async def test_invoice_status_404_for_unknown_id(
+async def test_v2_unknown_api_key_returns_typed_error(
+    integration_client: AsyncClient,
+    patch_invoice_generation: Any,
+) -> None:
+    resp = await integration_client.post(
+        V2_PATH,
+        json={"amount_sats": 100, "purpose": "topup"},
+        headers={"Authorization": "Bearer sk-deadbeef"},
+    )
+    assert resp.status_code == 404
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "topup_api_key_not_found"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", COMPATIBILITY_PATHS)
+async def test_compatibility_status_404_keeps_string_error(
     integration_client: AsyncClient,
     path: str,
 ) -> None:
-    base = path.rsplit("/invoice", 1)[0] + "/invoice"
-    resp = await integration_client.get(f"{base}/does-not-exist/status")
+    resp = await integration_client.get(f"{path}/does-not-exist/status")
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "Invoice not found"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_v2_status_404_returns_typed_error(
+    integration_client: AsyncClient,
+) -> None:
+    resp = await integration_client.get(f"{V2_PATH}/does-not-exist/status")
+    assert resp.status_code == 404
+    error = resp.json()["detail"]["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invoice_not_found"
 
 
 @pytest.mark.integration
@@ -204,3 +290,74 @@ async def test_authorization_header_overrides_body_api_key(
         headers={"Authorization": f"Bearer {seeded_topup_key}"},
     )
     assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,status,code",
+    [
+        (MintConnectionError("all mints failed"), 503, "lightning_mint_unreachable"),
+        (RuntimeError("boom"), 500, "invoice_creation_failed"),
+    ],
+)
+async def test_create_invoice_maps_mint_failures(
+    integration_client: AsyncClient,
+    error: Exception,
+    status: int,
+    code: str,
+) -> None:
+    with patch(
+        "routstr.lightning.generate_lightning_invoice",
+        side_effect=error,
+    ):
+        resp = await integration_client.post(V2_PATH, json={"amount_sats": 100})
+
+    assert resp.status_code == status
+    assert resp.json()["detail"]["error"]["code"] == code
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_compatibility_create_failure_keeps_generic_error(
+    integration_client: AsyncClient,
+) -> None:
+    with patch(
+        "routstr.lightning.generate_lightning_invoice",
+        side_effect=MintConnectionError("all mints failed"),
+    ):
+        resp = await integration_client.post(RIP08_PATH, json={"amount_sats": 100})
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Failed to create Lightning invoice"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,expected_detail",
+    [
+        ("/lightning/recover", "Invoice not found"),
+        ("/v1/balance/lightning/recover", "Invoice not found"),
+    ],
+)
+async def test_compatibility_recover_404_keeps_string_error(
+    integration_client: AsyncClient,
+    path: str,
+    expected_detail: str,
+) -> None:
+    resp = await integration_client.post(path, json={"bolt11": "unknown"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == expected_detail
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_v2_recover_404_returns_typed_error(
+    integration_client: AsyncClient,
+) -> None:
+    resp = await integration_client.post(
+        "/v2/lightning/recover", json={"bolt11": "unknown"}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["error"]["code"] == "invoice_not_found"

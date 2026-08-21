@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 from cashu.core.base import MintQuoteState
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlmodel import col, select, update
@@ -24,6 +24,7 @@ from .core.db import (
 from .core.logging import get_logger
 from .core.settings import settings
 from .mint import (
+    MintCooldownError,
     is_mint_rate_limited,
     mint_cooldown_remaining,
     run_mint_operation,
@@ -38,6 +39,8 @@ from .wallet import (
 logger = get_logger(__name__)
 
 lightning_router = APIRouter(prefix="/lightning")
+v2_lightning_router = APIRouter(prefix="/v2/lightning")
+
 
 # Avoid duplicate work within one process. Cross-process settlement is fenced
 # by claiming a paid quote before minting and by the final conditional update.
@@ -201,6 +204,7 @@ async def _request_mint_with_fallback(
             candidates = trusted
     else:
         candidates = trusted
+    all_rate_limited = bool(candidates)
     for mint_url in candidates:
         cooldown = mint_cooldown_remaining(mint_url)
         if cooldown > 0:
@@ -225,8 +229,11 @@ async def _request_mint_with_fallback(
             return quote.request, quote.quote, mint_url
         except Exception as e:
             tried.append(f"{mint_url}: {type(e).__name__}")
-            if not is_mint_connection_error(e) and not is_mint_rate_limited(e):
+            rate_limited = is_mint_rate_limited(e)
+            if not is_mint_connection_error(e) and not rate_limited:
                 raise
+            if not rate_limited:
+                all_rate_limited = False
             logger.warning(
                 "request_mint failed, trying fallback mint",
                 extra={
@@ -236,6 +243,11 @@ async def _request_mint_with_fallback(
                 },
             )
             continue
+    if all_rate_limited:
+        retry_after = max(
+            (mint_cooldown_remaining(mint) for mint in candidates), default=0.0
+        )
+        raise MintCooldownError("all configured mints", retry_after)
     raise MintConnectionError(f"All mints failed for request_mint: {tried}")
 
 
@@ -255,27 +267,99 @@ def generate_invoice_id() -> str:
     return secrets.token_urlsafe(16)
 
 
+def _uses_v2_errors(request: Request) -> bool:
+    return request.scope["path"].startswith("/v2/lightning/")
+
+
+def _invoice_error(
+    status_code: int,
+    message: str,
+    error_type: str,
+    code: str,
+    *,
+    structured: bool,
+    legacy_message: str | None = None,
+) -> HTTPException:
+    """Build either the legacy string detail or the v2 typed envelope."""
+    detail: str | dict[str, dict[str, str]]
+    if structured:
+        detail = {"error": {"message": message, "type": error_type, "code": code}}
+    else:
+        detail = legacy_message or message
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _invoice_creation_error(error: Exception, *, structured: bool) -> HTTPException:
+    """Map an invoice-creation failure without changing legacy endpoint behavior."""
+    if not structured:
+        return HTTPException(
+            status_code=500, detail="Failed to create Lightning invoice"
+        )
+    if is_mint_rate_limited(error):
+        return _invoice_error(
+            503,
+            "Cashu mint rate-limited; retry after cooldown",
+            "mint_rate_limited",
+            "lightning_mint_rate_limited",
+            structured=True,
+        )
+    if is_mint_connection_error(error):
+        return _invoice_error(
+            503,
+            "Cashu mint is unreachable; no Lightning quote could be requested",
+            "mint_unreachable",
+            "lightning_mint_unreachable",
+            structured=True,
+        )
+    return _invoice_error(
+        500,
+        "Failed to create Lightning invoice",
+        "api_error",
+        "invoice_creation_failed",
+        structured=True,
+    )
+
+
+@v2_lightning_router.post("/invoice", response_model=InvoiceCreateResponse)
 @lightning_router.post("/invoice", response_model=InvoiceCreateResponse)
 async def create_invoice(
     request: InvoiceCreateRequest,
     authorization: str | None = Header(default=None),
     session: AsyncSession = Depends(get_session),
+    structured_errors: bool = Depends(_uses_v2_errors),
 ) -> InvoiceCreateResponse:
+    structured_errors = structured_errors is True
     api_key_token = _extract_bearer_api_key(authorization) or request.api_key
     topup_api_key: ApiKey | None = None
 
     if request.purpose == "topup":
         if not api_key_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Authorization bearer api key is required for topup",
+            raise _invoice_error(
+                401,
+                "Authorization bearer api key is required for topup",
+                "invalid_request_error",
+                "topup_authorization_required",
+                structured=structured_errors,
             )
         if not api_key_token.startswith("sk-"):
-            raise HTTPException(status_code=400, detail="Invalid API key format")
+            raise _invoice_error(
+                400,
+                "Invalid API key format. Expected an 'sk-...' API key.",
+                "invalid_request_error",
+                "topup_invalid_api_key_format",
+                structured=structured_errors,
+                legacy_message="Invalid API key format",
+            )
 
         topup_api_key = await session.get(ApiKey, api_key_token[3:])
         if not topup_api_key:
-            raise HTTPException(status_code=404, detail="API key not found")
+            raise _invoice_error(
+                404,
+                "API key not found",
+                "invalid_request_error",
+                "topup_api_key_not_found",
+                structured=structured_errors,
+            )
 
     try:
         description = f"Routstr {request.purpose} {request.amount_sats} sats"
@@ -285,9 +369,7 @@ async def create_invoice(
             # A key's liabilities are attributed to a single refund mint. Keep
             # top-up collateral on that same mint so balances and payouts cannot
             # misclassify funds held by another mint as owner profit.
-            allowed_mints = [
-                topup_api_key.refund_mint_url or settings.primary_mint
-            ]
+            allowed_mints = [topup_api_key.refund_mint_url or settings.primary_mint]
         bolt11, payment_hash, mint_url = await generate_lightning_invoice(
             request.amount_sats, description, allowed_mints=allowed_mints
         )
@@ -334,21 +416,29 @@ async def create_invoice(
 
     except Exception as e:
         logger.error(f"Failed to create Lightning invoice: {e}")
-        raise HTTPException(
-            status_code=500, detail="Failed to create Lightning invoice"
-        )
+        raise _invoice_creation_error(e, structured=structured_errors)
 
 
+@v2_lightning_router.get(
+    "/invoice/{invoice_id}/status", response_model=InvoiceStatusResponse
+)
 @lightning_router.get(
     "/invoice/{invoice_id}/status", response_model=InvoiceStatusResponse
 )
 async def get_invoice_status(
     invoice_id: str,
     session: AsyncSession = Depends(get_session),
+    structured_errors: bool = Depends(_uses_v2_errors),
 ) -> InvoiceStatusResponse:
     invoice = await session.get(LightningInvoice, invoice_id)
     if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise _invoice_error(
+            404,
+            "Invoice not found",
+            "invalid_request_error",
+            "invoice_not_found",
+            structured=structured_errors is True,
+        )
 
     definitively_unpaid = False
     if _within_settlement_window(invoice, int(time.time())):
@@ -376,10 +466,12 @@ async def get_invoice_status(
     )
 
 
+@v2_lightning_router.post("/recover", response_model=InvoiceStatusResponse)
 @lightning_router.post("/recover", response_model=InvoiceStatusResponse)
 async def recover_invoice(
     request: InvoiceRecoverRequest,
     session: AsyncSession = Depends(get_session),
+    structured_errors: bool = Depends(_uses_v2_errors),
 ) -> InvoiceStatusResponse:
     result = await session.exec(
         select(LightningInvoice).where(LightningInvoice.bolt11 == request.bolt11)
@@ -387,7 +479,13 @@ async def recover_invoice(
     invoice = result.first()
 
     if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
+        raise _invoice_error(
+            404,
+            "Invoice not found",
+            "invalid_request_error",
+            "invoice_not_found",
+            structured=structured_errors is True,
+        )
 
     # Recovery is the last remedy for a payment we never observed, so it ignores
     # the grace window. Holding the bolt11 already proves the caller owns it.
@@ -553,9 +651,7 @@ async def check_invoice_payment(
                     "invoice_id": settlement.id,
                     "amount_sats": settlement.amount_sats,
                     "purpose": settlement.purpose,
-                    "api_key_hash": api_key_hash[:8] + "..."
-                    if api_key_hash
-                    else None,
+                    "api_key_hash": api_key_hash[:8] + "..." if api_key_hash else None,
                 },
             )
             return False
@@ -577,9 +673,7 @@ async def check_invoice_payment(
                         )
                         await state_session.commit()
                     if pending.rowcount == 1:
-                        _publish_invoice_value(
-                            invoice, "status", "settlement_pending"
-                        )
+                        _publish_invoice_value(invoice, "status", "settlement_pending")
                 except Exception as state_error:
                     logger.critical(
                         "Paid invoice reconciliation state could not be persisted",
