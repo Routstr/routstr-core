@@ -182,6 +182,19 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class ClientAppFilter(logging.Filter):
+    """Filter to add the requesting client app to all log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Add the client app to the log record if available."""
+        # Import here to avoid circular imports
+        from .middleware import UNKNOWN_CLIENT_APP, client_app_context
+
+        client_app = client_app_context.get(None)
+        record.client_app = client_app if client_app else UNKNOWN_CLIENT_APP
+        return True
+
+
 # Standard ``LogRecord`` attributes that are never user-supplied ``extra``
 # fields; skipped when redacting structured extras (``msg``/``message`` are
 # handled separately above).
@@ -323,7 +336,7 @@ def setup_logging() -> None:
             "rich_tracebacks": True,
             "markup": True,
             "console": _console,
-            "filters": ["request_id_filter", "security_filter"],
+            "filters": ["request_id_filter", "client_app_filter", "security_filter"],
         }
     else:
         console_handler = {
@@ -331,7 +344,7 @@ def setup_logging() -> None:
             "level": log_level,
             "formatter": "plain",
             "stream": "ext://sys.stdout",
-            "filters": ["request_id_filter", "security_filter"],
+            "filters": ["request_id_filter", "client_app_filter", "security_filter"],
         }
 
     LOGGING_CONFIG = {
@@ -340,7 +353,7 @@ def setup_logging() -> None:
         "formatters": {
             "json": {
                 "()": jsonlogger.JsonFormatter,
-                "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s %(request_id)s",
+                "format": "%(asctime)s %(name)s %(levelname)s %(message)s %(pathname)s %(lineno)d %(version)s %(request_id)s %(client_app)s",
                 "datefmt": "%Y-%m-%d %H:%M:%S",
             },
             "plain": {
@@ -351,6 +364,7 @@ def setup_logging() -> None:
         "filters": {
             "version_filter": {"()": VersionFilter},
             "request_id_filter": {"()": RequestIdFilter},
+            "client_app_filter": {"()": ClientAppFilter},
             "security_filter": {"()": SecurityFilter},
         },
         "handlers": {
@@ -364,7 +378,12 @@ def setup_logging() -> None:
                 "interval": 1,  # Every 1 day
                 "backupCount": 30,  # Keep 30 days of logs
                 "atTime": None,  # Rotate at midnight (00:00)
-                "filters": ["version_filter", "request_id_filter", "security_filter"],
+                "filters": [
+                    "version_filter",
+                    "request_id_filter",
+                    "client_app_filter",
+                    "security_filter",
+                ],
             },
         },
         "loggers": {
