@@ -273,9 +273,22 @@ async def _proxy(
     # raw encrypted body to the upstream's /private/ endpoint and stream the
     # encrypted response back untouched — the SDK's SecureClient decrypts it.
     is_ehbp = "ehbp-encapsulated-key" in headers
+    ehbp_max_tokens: int | None = None
     if is_ehbp:
+        # The body is HPKE-sealed/opaque, so the SDK also surfaces the client's
+        # completion cap ("max_tokens") via X-Routstr-Max-Tokens. This lets the
+        # proxy size the required balance down without decrypting the body.
+        # A present header below the enclave's floor is rejected outright.
         request_body_dict = {}
         model_id = headers.get("x-routstr-model", "")
+        try:
+            ehbp_max_tokens = _validated_ehbp_max_tokens(
+                headers.get("x-routstr-max-tokens", "")
+            )
+        except ValueError as exc:
+            return create_error_response(
+                "invalid_request", str(exc), 400, request=request
+            )
         if not model_id:
             return create_error_response(
                 "invalid_request",
@@ -364,7 +377,10 @@ async def _proxy(
         model=model_id, session=session, model_obj=model_obj
     )
     max_cost_for_model = await calculate_discounted_max_cost(
-        _max_cost_for_model, request_body_dict, model_obj=model_obj
+        _max_cost_for_model,
+        request_body_dict,
+        model_obj=model_obj,
+        max_tokens=ehbp_max_tokens,
     )
 
     check_token_balance(headers, request_body_dict, max_cost_for_model)
@@ -502,7 +518,10 @@ async def _proxy(
                 model=model_id, session=session, model_obj=model_obj
             )
             candidate_max = await calculate_discounted_max_cost(
-                candidate_max, request_body_dict, model_obj=model_obj
+                candidate_max,
+                request_body_dict,
+                model_obj=model_obj,
+                max_tokens=ehbp_max_tokens,
             )
             if candidate_max > max_cost_for_model:
                 await revert_pay_for_request(
@@ -829,6 +848,50 @@ async def get_bearer_token_key(
             },
         )
         raise
+
+
+def _parse_ehbp_max_tokens(raw: str) -> int | None:
+    """Parse the ``X-Routstr-Max-Tokens`` header into an integer (or ``None``).
+
+    ``None`` is returned for missing, non-integer, and non-positive values.
+    Range validation (e.g. a Tinfoil minimum completion cap) is the caller's
+    responsibility via :func:`_validated_ehbp_max_tokens`.
+    """
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+# Tinfoil enclaves reject completion caps below this floor, so a client that
+# sends a lower ``X-Routstr-Max-Tokens`` is rejected rather than silently
+# priced off the (unreachable) smaller cap.
+_EHBP_MIN_MAX_TOKENS = 64_000
+
+
+def _validated_ehbp_max_tokens(
+    raw: str, min_tokens: int = _EHBP_MIN_MAX_TOKENS
+) -> int | None:
+    """Parse and range-check an ``X-Routstr-Max-Tokens`` header value.
+
+    Returns ``None`` when the header is absent (no constraint), or the parsed
+    integer when it is present and at least ``min_tokens``. Raises
+    ``ValueError`` when the header is present but invalid or below
+    ``min_tokens`` — callers should turn that into a 400.
+    """
+    if not raw:
+        return None
+    value = _parse_ehbp_max_tokens(raw)
+    if value is None or value < min_tokens:
+        raise ValueError(
+            f"X-Routstr-Max-Tokens must be an integer of at least {min_tokens}"
+        )
+    return value
 
 
 def extract_model_from_responses_request(request_body_dict: dict[str, Any]) -> str:
