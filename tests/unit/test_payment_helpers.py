@@ -155,3 +155,82 @@ async def test_discounted_max_cost_floors_at_min_request_msat() -> None:
         cost = await calculate_discounted_max_cost(150_000, body, model_obj)
 
     assert cost == 1000
+
+
+async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
+    """Body ``max_output_tokens`` (Responses API) is honored as a completion cap."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {"max_output_tokens": 80_000}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    assert cost == 80_000
+
+
+async def test_discounted_max_cost_responses_input_prompt_discount() -> None:
+    """Responses-style ``input`` drives the prompt discount like ``messages``."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 1.0
+    pricing.max_completion_cost = 0.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {
+        "model": "test-model",
+        "input": [{"role": "user", "content": "a" * 600}],
+    }
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    # 600 chars -> 200 estimated tokens -> 0.2 sats of prompt used.
+    # 1.0 - 0.2 = 0.8 sats discount => 800 msats off the 100000 msats ceiling.
+    assert cost == 99_200
+
+
+def test_estimate_tokens_from_input() -> None:
+    from routstr.payment.helpers import estimate_tokens_from_input
+
+    assert estimate_tokens_from_input("hello world") == 11 // 3
+    assert (
+        estimate_tokens_from_input(
+            [
+                {"role": "user", "content": "abc"},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "defgh"}],
+                },
+                {"type": "input_text", "text": "ij"},
+            ]
+        )
+        == 3  # (3 + 5 + 2) // 3
+    )
