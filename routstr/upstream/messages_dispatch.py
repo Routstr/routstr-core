@@ -40,6 +40,10 @@ logger = get_logger(__name__)
 # unsupported params; these newer/extension fields get passed through
 # verbatim and the upstream rejects them with a 400. Pop them here so the
 # request reaches the upstream cleanly.
+#
+# Note: ``dispatch_anthropic_messages`` additionally enforces
+# ``ALLOWED_MESSAGES_REQUEST_FIELDS``, which already excludes all of these.
+# This tuple remains for ``gemini_messages``, which pops them explicitly.
 ANTHROPIC_ONLY_FIELDS: tuple[str, ...] = (
     "thinking",
     "cache_control",
@@ -49,6 +53,25 @@ ANTHROPIC_ONLY_FIELDS: tuple[str, ...] = (
     "service_tier",
     "anthropic_version",
     "anthropic_beta",
+)
+
+# Anthropic Messages API request fields forwarded from the client body
+# into the upstream call. Only these are passed on; anything else is
+# dropped so the forwarded request is deterministic and limited to the
+# documented Messages surface.
+ALLOWED_MESSAGES_REQUEST_FIELDS: frozenset[str] = frozenset(
+    {
+        "messages",
+        "max_tokens",
+        "system",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stop_sequences",
+        "tools",
+        "tool_choice",
+        "metadata",
+    }
 )
 
 
@@ -466,15 +489,18 @@ async def dispatch_anthropic_messages(
     client_stream = bool(body.pop("stream", False))
     upstream_stream = True
 
-    dropped: dict[str, Any] = {}
-    for field in ANTHROPIC_ONLY_FIELDS:
-        if field in body:
-            dropped[field] = body.pop(field)
+    # Forward only allowlisted Anthropic Messages request fields. Any
+    # other client-supplied key is dropped so it cannot leak into the
+    # upstream request. See ALLOWED_MESSAGES_REQUEST_FIELDS.
+    dropped = sorted(set(body) - ALLOWED_MESSAGES_REQUEST_FIELDS)
     if dropped:
         logger.debug(
-            "Dropped anthropic-only fields before litellm dispatch",
-            extra={"dropped_keys": sorted(dropped.keys())},
+            "Dropped non-forwardable fields before litellm dispatch",
+            extra={"dropped_keys": dropped},
         )
+    body = {
+        k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS
+    }
 
     # Convention: `model.id` is the canonical upstream model name;
     # `forwarded_model_id` is the public alias the internal API exposes

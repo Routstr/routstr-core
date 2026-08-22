@@ -305,6 +305,10 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
             "service_tier": "auto",
             "anthropic_beta": "abc",
             "anthropic_version": "2023-06-01",
+            "api_base": "https://attacker.invalid",
+            "api_key": "client-controlled-key",
+            "custom_llm_provider": "client-controlled-provider",
+            "unexpected_field": "must-not-leak",
         }
     ).encode()
 
@@ -342,6 +346,8 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
         "service_tier",
         "anthropic_beta",
         "anthropic_version",
+        "custom_llm_provider",
+        "unexpected_field",
     ):
         assert stripped not in forwarded, (
             f"Anthropic-only field {stripped!r} leaked through to litellm"
@@ -349,6 +355,64 @@ async def test_dispatch_strips_anthropic_only_fields_before_litellm() -> None:
     # Core fields preserved
     assert forwarded["max_tokens"] == 64
     assert forwarded["messages"] == [{"role": "user", "content": "hi"}]
+    # Dispatch-controlled values cannot be overridden by the client body.
+    assert forwarded["model"] == "openai/openai/gpt-4o-mini"
+    assert forwarded["api_base"] == "http://test"
+    assert forwarded["api_key"] == "upstream-key"
+    assert forwarded["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_forwards_all_allowlisted_messages_fields() -> None:
+    provider = _make_provider()
+    key = _make_key()
+    model = _make_model()
+    session = _make_session()
+    allowed = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 64,
+        "system": "Be concise",
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "top_k": 20,
+        "stop_sequences": ["STOP"],
+        "tools": [
+            {
+                "name": "lookup",
+                "description": "Look something up",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        "tool_choice": {"type": "tool", "name": "lookup"},
+        "metadata": {"user_id": "test-user"},
+    }
+    body = json.dumps({"model": model.id, **allowed}).encode()
+    captured: dict[str, Any] = {}
+
+    async def fake_acreate(**kwargs: Any) -> dict:
+        captured["kwargs"] = kwargs
+        return _anthropic_non_stream_response()
+
+    with (
+        patch(
+            "litellm.anthropic.messages.acreate",
+            new=AsyncMock(side_effect=fake_acreate),
+        ),
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            new=AsyncMock(return_value={"total_msats": 0, "total_usd": 0.0}),
+        ),
+    ):
+        await provider._forward_messages_via_litellm(
+            request_body=body,
+            key=key,
+            session=session,
+            max_cost_for_model=10_000,
+            model_obj=model,
+        )
+
+    forwarded = captured["kwargs"]
+    assert {field: forwarded[field] for field in allowed} == allowed
 
 
 @pytest.mark.asyncio
