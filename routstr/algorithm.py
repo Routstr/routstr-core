@@ -59,6 +59,23 @@ def calculate_model_cost_score(model: "Model") -> float:
     return total_cost
 
 
+def calculate_model_reservation_score(model: "Model") -> float:
+    """Context-based reservation ceiling for ranking same-model candidates.
+
+    The balance gate reserves on ``sats_pricing.max_cost``, which scales with
+    ``context_length``. Ranking on the same ceiling keeps the advertised,
+    routed, and reserved candidate consistent. Lower is better.
+    """
+    from .payment.models import _calculate_usd_max_costs
+
+    try:
+        _, _, max_cost = _calculate_usd_max_costs(model)
+        return float(max_cost)
+    except Exception:
+        # Pricing shape missing/invalid; per-token score keeps order deterministic
+        return calculate_model_cost_score(model)
+
+
 def get_provider_penalty(provider: "BaseUpstreamProvider") -> float:
     """Calculate a penalty multiplier for certain providers.
 
@@ -345,15 +362,19 @@ def create_model_mappings(
         return 1
 
     for alias, items in candidates.items():
-        # Sort key: (priority DESC, cost ASC)
-        # Using negative cost for DESC sort overall to keep high priority first
-        def sort_key(item: tuple["Model", "BaseUpstreamProvider"]) -> tuple[int, float]:
+        # Sort key: (priority DESC, reservation ASC, cost ASC)
+        # Using negative costs for DESC sort overall to keep high priority first
+        def sort_key(
+            item: tuple["Model", "BaseUpstreamProvider"],
+        ) -> tuple[int, float, float]:
             model, provider = item
             priority = alias_priority(model, alias)
-            cost = calculate_model_cost_score(model)
             penalty = get_provider_penalty(provider)
-            adjusted_cost = cost * penalty
-            return (priority, -adjusted_cost)
+            # Rank on the reservation ceiling the balance gate enforces, with
+            # per-token typical-usage cost as tiebreaker
+            adjusted_reservation = calculate_model_reservation_score(model) * penalty
+            adjusted_cost = calculate_model_cost_score(model) * penalty
+            return (priority, -adjusted_reservation, -adjusted_cost)
 
         items.sort(key=sort_key, reverse=True)
 
