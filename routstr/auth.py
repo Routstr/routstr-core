@@ -4,6 +4,7 @@ import math
 import random
 import time
 import uuid
+from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
@@ -867,6 +868,10 @@ async def pay_for_request(
             _clear_current_reservation(reservation)
         raise
 
+    # The reservation is durable; keep its lease fresh for the whole request
+    # lifetime (upstream header waits, non-streaming and streaming alike).
+    _start_reservation_heartbeat(reservation)
+
     try:
         await session.refresh(billing_key)
         if billing_key.hashed_key != key.hashed_key:
@@ -957,6 +962,84 @@ async def _validate_reservation_snapshot(
         raise RuntimeError("Billing reservation record does not match the request")
 
 
+async def renew_reservation(
+    snapshot: ReservationSnapshot, session: AsyncSession
+) -> bool:
+    """Push an active reservation's lease forward so the sweeper skips it.
+
+    ``ReservationRelease.created_at`` doubles as the lease timestamp: the
+    stale-reservation sweeper releases reservations whose ``created_at`` is
+    older than the timeout, so a long-lived stream must renew it periodically
+    or lose its reservation mid-flight (and finish uncharged, since release is
+    terminal). Returns False once the reservation reached a terminal state.
+    """
+    result = await session.exec(  # type: ignore[call-overload]
+        update(ReservationRelease)
+        .where(col(ReservationRelease.id) == snapshot.release_id)
+        .where(col(ReservationRelease.status) == "active")
+        .values(created_at=int(time.time()))
+    )
+    await session.commit()
+    return bool(result.rowcount == 1)
+
+
+# One heartbeat task per in-flight reservation, keyed by release id. Started
+# when the reservation is created and stopped when it reaches a terminal
+# state, so every request path — header waits, non-streaming, streaming — is
+# covered for its whole lifetime.
+_reservation_heartbeats: dict[str, "asyncio.Task[None]"] = {}
+
+
+def _start_reservation_heartbeat(snapshot: ReservationSnapshot) -> None:
+    """Keep an in-flight reservation's lease fresh until it is finalized.
+
+    Spawns a background task that renews the lease every third of the stale
+    timeout using its own session, so requests longer than
+    ``STALE_RESERVATION_TIMEOUT_SECONDS`` are not swept and finish charged.
+    The task stops on its own once the reservation reaches a terminal state
+    or its owning request task finishes; terminal transitions also stop it
+    explicitly. Binding renewal to the owner's lifetime guarantees the sweeper
+    can always recover a reservation whose request died without finalizing —
+    a detached heartbeat would otherwise renew it forever and lock the funds.
+    """
+    interval = max(1, settings.stale_reservation_timeout_seconds // 3)
+    owner = asyncio.current_task()
+
+    async def beat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                if owner is None or owner.done():
+                    # Request control is gone; let the lease expire so the
+                    # sweeper can release the reservation if no terminal
+                    # transition ever ran.
+                    return
+                try:
+                    async with create_session() as session:
+                        if not await renew_reservation(snapshot, session):
+                            return
+                except Exception:
+                    logger.exception(
+                        "Failed to renew billing reservation lease",
+                        extra={"release_id": snapshot.release_id},
+                    )
+        finally:
+            _reservation_heartbeats.pop(snapshot.release_id, None)
+
+    _reservation_heartbeats[snapshot.release_id] = asyncio.create_task(beat())
+
+
+async def _stop_reservation_heartbeat(release_id: str) -> None:
+    """Cancel and await a reservation's heartbeat so no renewal overlaps
+    finalization."""
+    task = _reservation_heartbeats.pop(release_id, None)
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 async def get_reservation_snapshot(
     key: ApiKey, session: AsyncSession
 ) -> ReservationSnapshot:
@@ -966,6 +1049,60 @@ async def get_reservation_snapshot(
         raise RuntimeError("No billing reservation is associated with this request")
     await _validate_reservation_snapshot(key, snapshot, session)
     return snapshot
+
+
+async def _repair_corrupt_reservation(
+    snapshot: ReservationSnapshot,
+    session: AsyncSession,
+    *,
+    decrement_requests: bool,
+) -> bool:
+    """Terminalize a reservation without subtracting uncertain aggregates."""
+    transition = (
+        update(ReservationRelease)
+        .where(col(ReservationRelease.id) == snapshot.release_id)
+        .where(col(ReservationRelease.status) == "active")
+        .where(col(ReservationRelease.key_hash) == snapshot.key_hash)
+        .where(col(ReservationRelease.billing_key_hash) == snapshot.billing_key_hash)
+        .where(col(ReservationRelease.reserved_msats) == snapshot.reserved_msats)
+        .values(status="released")
+    )
+    result = await session.exec(transition)  # type: ignore[call-overload]
+    if result.rowcount != 1:
+        await session.rollback()
+        return False
+
+    if decrement_requests:
+        for key_hash in {snapshot.billing_key_hash, snapshot.key_hash}:
+            request_result = await session.exec(  # type: ignore[call-overload]
+                update(ApiKey)
+                .where(col(ApiKey.hashed_key) == key_hash)
+                .values(
+                    total_requests=case(
+                        (
+                            col(ApiKey.total_requests) > 0,
+                            col(ApiKey.total_requests) - 1,
+                        ),
+                        else_=0,
+                    )
+                )
+            )
+            if request_result.rowcount != 1:
+                await session.rollback()
+                return False
+
+    await session.commit()
+    logger.error(
+        "Released corrupt reservation without aggregate subtraction",
+        extra={
+            "reservation_id": snapshot.release_id,
+            "billing_key_hash": snapshot.billing_key_hash[:8] + "...",
+            "reserved_msats": snapshot.reserved_msats,
+        },
+    )
+    await _stop_reservation_heartbeat(snapshot.release_id)
+    _clear_current_reservation(snapshot)
+    return True
 
 
 async def _transition_reservation_to_released(
@@ -988,7 +1125,7 @@ async def _transition_reservation_to_released(
     if transition_result.rowcount != 1:
         await session.rollback()
         existing = await session.get(ReservationRelease, snapshot.release_id)
-        return bool(
+        already_released = bool(
             idempotent_success
             and existing is not None
             and existing.status == "released"
@@ -996,6 +1133,9 @@ async def _transition_reservation_to_released(
             and existing.billing_key_hash == snapshot.billing_key_hash
             and existing.reserved_msats == snapshot.reserved_msats
         )
+        if already_released:
+            await _stop_reservation_heartbeat(snapshot.release_id)
+        return already_released
 
     values: dict[str, object] = {
         "reserved_balance": col(ApiKey.reserved_balance) - snapshot.reserved_msats,
@@ -1019,7 +1159,9 @@ async def _transition_reservation_to_released(
     result = await session.exec(release_stmt)  # type: ignore[call-overload]
     if result.rowcount != 1:
         await session.rollback()
-        return False
+        return await _repair_corrupt_reservation(
+            snapshot, session, decrement_requests=decrement_requests
+        )
 
     if snapshot.billing_key_hash != snapshot.key_hash:
         child_release_stmt = (
@@ -1033,9 +1175,12 @@ async def _transition_reservation_to_released(
         )
         if child_result.rowcount != 1:
             await session.rollback()
-            return False
+            return await _repair_corrupt_reservation(
+                snapshot, session, decrement_requests=decrement_requests
+            )
 
     await session.commit()
+    await _stop_reservation_heartbeat(snapshot.release_id)
     _clear_current_reservation(snapshot)
     return True
 
@@ -1071,11 +1216,78 @@ async def _claim_reservation_for_charge(
     )
     result = await session.exec(statement)  # type: ignore[call-overload]
     if result.rowcount == 1:
+        # The claim is not committed yet — the heartbeat must keep running
+        # until the surrounding charge transaction commits, or a rollback
+        # would restore an active reservation with no lease renewal.
         _clear_current_reservation(snapshot)
         return True
 
     await session.rollback()
     return False
+
+
+async def _charge_reservation_rows(
+    session: AsyncSession,
+    *,
+    billing_key_hash: str,
+    key_hash: str,
+    reserved_msats: int,
+    charge_msats: int,
+    extra_billing_guards: tuple = (),
+) -> bool:
+    """Release the reserved amount and record the charge on the billing row
+    (and the child row when different) inside the caller's transaction.
+
+    Guarded subtraction replaces defensive clamping: every row must still hold
+    the full reserved amount, otherwise the whole transaction rolls back and
+    nothing is charged. A violated invariant must never silently erase the
+    aggregate reservations of sibling requests. Returns False after rollback.
+    """
+    billing_stmt = (
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == billing_key_hash)
+        .where(col(ApiKey.reserved_balance) >= reserved_msats)
+        .values(
+            reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
+            reserved_at=case(
+                (
+                    col(ApiKey.reserved_balance) - reserved_msats > 0,
+                    col(ApiKey.reserved_at),
+                ),
+                else_=None,
+            ),
+            balance=col(ApiKey.balance) - charge_msats,
+            total_spent=col(ApiKey.total_spent) + charge_msats,
+        )
+    )
+    for guard in extra_billing_guards:
+        billing_stmt = billing_stmt.where(guard)
+    result = await session.exec(billing_stmt)  # type: ignore[call-overload]
+    if result.rowcount != 1:
+        await session.rollback()
+        return False
+
+    if key_hash != billing_key_hash:
+        child_result = await session.exec(  # type: ignore[call-overload]
+            update(ApiKey)
+            .where(col(ApiKey.hashed_key) == key_hash)
+            .where(col(ApiKey.reserved_balance) >= reserved_msats)
+            .values(
+                reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
+                reserved_at=case(
+                    (
+                        col(ApiKey.reserved_balance) - reserved_msats > 0,
+                        col(ApiKey.reserved_at),
+                    ),
+                    else_=None,
+                ),
+                total_spent=col(ApiKey.total_spent) + charge_msats,
+            )
+        )
+        if child_result.rowcount != 1:
+            await session.rollback()
+            return False
+    return True
 
 
 async def adjust_payment_for_tokens(
@@ -1108,6 +1320,10 @@ async def adjust_payment_for_tokens(
     # changed the caller's original estimate.
     deducted_max_cost = reservation.reserved_msats
     model = response_data.get("model", "unknown")
+    # Failure paths log after a rollback has expired the ORM instances, so
+    # capture the identifiers as plain strings up front.
+    key_log_hash = key.hashed_key[:8] + "..."
+    billing_log_hash = billing_key.hashed_key[:8] + "..."
 
     logger.debug(
         "Starting payment adjustment for tokens",
@@ -1132,8 +1348,8 @@ async def adjust_payment_for_tokens(
                 if released
                 else "Reservation was already finalized; fallback skipped",
                 extra={
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                    "key_hash": key_log_hash,
+                    "billing_key_hash": billing_log_hash,
                     "deducted_max_cost": deducted_max_cost,
                 },
             )
@@ -1142,8 +1358,8 @@ async def adjust_payment_for_tokens(
                 "Failed to release reservation in fallback",
                 extra={
                     "error": str(e),
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                    "key_hash": key_log_hash,
+                    "billing_key_hash": billing_log_hash,
                 },
             )
 
@@ -1166,6 +1382,7 @@ async def adjust_payment_for_tokens(
             # A prior charge or release already owns this reservation. Returning
             # the calculated metadata is safe; the aggregate balances must not
             # be modified a second time.
+            calculated_cost.charged_msats = 0
             return calculated_cost.dict()
 
     match calculated_cost:
@@ -1179,75 +1396,32 @@ async def adjust_payment_for_tokens(
                     "max_cost": cost.total_msats,
                 },
             )
-            # Finalize by releasing reservation and charging max cost
-            if billing_key.reserved_balance < deducted_max_cost:
-                logger.error(
-                    "reserved_balance below deducted_max_cost before MaxCost finalization — clamping to 0",
-                    extra={
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                        "reserved_balance": billing_key.reserved_balance,
-                        "deducted_max_cost": deducted_max_cost,
-                        "total_cost_msats": cost.total_msats,
-                        "balance": billing_key.balance,
-                        "total_spent": billing_key.total_spent,
-                        "model": model,
-                    },
-                )
-
-            safe_reserved = case(
-                (
-                    col(ApiKey.reserved_balance) >= deducted_max_cost,
-                    col(ApiKey.reserved_balance) - deducted_max_cost,
-                ),
-                else_=0,
+            # Finalize by releasing the reservation and charging max cost.
+            charged = await _charge_reservation_rows(
+                session,
+                billing_key_hash=billing_key.hashed_key,
+                key_hash=key.hashed_key,
+                reserved_msats=deducted_max_cost,
+                charge_msats=cost.total_msats,
             )
-
-            finalize_stmt = (
-                update(ApiKey)
-                .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                .values(
-                    reserved_balance=safe_reserved,
-                    balance=col(ApiKey.balance) - cost.total_msats,
-                    total_spent=col(ApiKey.total_spent) + cost.total_msats,
-                )
-            )
-            result = await session.exec(finalize_stmt)  # type: ignore[call-overload]
-
-            # Also update total_spent and reserved_balance on the child key if it's different
-            if billing_key.hashed_key != key.hashed_key:
-                child_safe_reserved = case(
-                    (
-                        col(ApiKey.reserved_balance) >= deducted_max_cost,
-                        col(ApiKey.reserved_balance) - deducted_max_cost,
-                    ),
-                    else_=0,
-                )
-                child_stmt = (
-                    update(ApiKey)
-                    .where(col(ApiKey.hashed_key) == key.hashed_key)
-                    .values(
-                        total_spent=col(ApiKey.total_spent) + cost.total_msats,
-                        reserved_balance=child_safe_reserved,
-                    )
-                )
-                await session.exec(child_stmt)  # type: ignore[call-overload]
-
-            await session.commit()
-            if result.rowcount == 0:
+            if charged:
+                await session.commit()
+                await _stop_reservation_heartbeat(reservation.release_id)
+            if not charged:
                 logger.error(
                     "Failed to finalize max-cost payment - retrying reservation release",
                     extra={
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                        "key_hash": key_log_hash,
+                        "billing_key_hash": billing_log_hash,
                         "deducted_max_cost": deducted_max_cost,
-                        "current_reserved_balance": billing_key.reserved_balance,
                         "total_cost": cost.total_msats,
                         "model": model,
                     },
                 )
+                cost.charged_msats = 0
                 await release_reservation_only()
             else:
+                cost.charged_msats = cost.total_msats
                 await session.refresh(billing_key)
                 if billing_key.hashed_key != key.hashed_key:
                     await session.refresh(key)
@@ -1314,60 +1488,30 @@ async def adjust_payment_for_tokens(
                         "model": model,
                     },
                 )
-                if billing_key.reserved_balance < deducted_max_cost:
+                if not await _charge_reservation_rows(
+                    session,
+                    billing_key_hash=billing_key.hashed_key,
+                    key_hash=key.hashed_key,
+                    reserved_msats=deducted_max_cost,
+                    charge_msats=total_cost_msats,
+                ):
                     logger.error(
-                        "reserved_balance below deducted_max_cost on exact-cost finalization — clamping to 0",
+                        "Failed to finalize exact-cost payment - releasing reservation",
                         extra={
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "reserved_balance": billing_key.reserved_balance,
+                            "key_hash": key_log_hash,
+                            "billing_key_hash": billing_log_hash,
                             "deducted_max_cost": deducted_max_cost,
-                            "total_cost_msats": total_cost_msats,
-                            "balance": billing_key.balance,
-                            "total_spent": billing_key.total_spent,
+                            "total_cost": total_cost_msats,
                             "model": model,
                         },
                     )
-
-                exact_safe_reserved = case(
-                    (
-                        col(ApiKey.reserved_balance) >= deducted_max_cost,
-                        col(ApiKey.reserved_balance) - deducted_max_cost,
-                    ),
-                    else_=0,
-                )
-
-                finalize_stmt = (
-                    update(ApiKey)
-                    .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                    .values(
-                        reserved_balance=exact_safe_reserved,
-                        balance=col(ApiKey.balance) - total_cost_msats,
-                        total_spent=col(ApiKey.total_spent) + total_cost_msats,
-                    )
-                )
-                await session.exec(finalize_stmt)  # type: ignore[call-overload]
-
-                # Also update total_spent and reserved_balance on the child key if it's different
-                if billing_key.hashed_key != key.hashed_key:
-                    child_exact_safe_reserved = case(
-                        (
-                            col(ApiKey.reserved_balance) >= deducted_max_cost,
-                            col(ApiKey.reserved_balance) - deducted_max_cost,
-                        ),
-                        else_=0,
-                    )
-                    child_stmt = (
-                        update(ApiKey)
-                        .where(col(ApiKey.hashed_key) == key.hashed_key)
-                        .values(
-                            total_spent=col(ApiKey.total_spent) + total_cost_msats,
-                            reserved_balance=child_exact_safe_reserved,
-                        )
-                    )
-                    await session.exec(child_stmt)  # type: ignore[call-overload]
+                    cost.charged_msats = 0
+                    await release_reservation_only()
+                    return cost.dict()
 
                 await session.commit()
+                await _stop_reservation_heartbeat(reservation.release_id)
+                cost.charged_msats = total_cost_msats
                 await session.refresh(billing_key)
                 if billing_key.hashed_key != key.hashed_key:
                     await session.refresh(key)
@@ -1406,50 +1550,70 @@ async def adjust_payment_for_tokens(
                         )
                     ).one()
                     observed_balance = locked_billing_key.balance
-                    actual_charge_msats = min(observed_balance, total_cost_msats)
-                    overrun_safe_reserved = case(
-                        (
-                            col(ApiKey.reserved_balance) >= deducted_max_cost,
-                            col(ApiKey.reserved_balance) - deducted_max_cost,
-                        ),
-                        else_=0,
-                    )
-                    finalize_result = await session.exec(  # type: ignore[call-overload]
-                        update(ApiKey)
-                        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                        .where(col(ApiKey.balance) == observed_balance)
-                        .values(
-                            reserved_balance=overrun_safe_reserved,
-                            balance=col(ApiKey.balance) - actual_charge_msats,
-                            total_spent=col(ApiKey.total_spent) + actual_charge_msats,
+                    observed_reserved = locked_billing_key.reserved_balance
+                    # An overrun may only spend this request's own reservation
+                    # plus funds no other in-flight request has reserved.
+                    # Charging against the raw balance would consume sibling
+                    # reservations and drive the available balance negative.
+                    if observed_reserved < deducted_max_cost:
+                        # Invariant violated — never clamp and charge anyway,
+                        # that would erase sibling reservations. Release only.
+                        logger.error(
+                            "reserved_balance below reservation on overrun finalization — releasing without charge",
+                            extra={
+                                "key_hash": key_log_hash,
+                                "billing_key_hash": billing_log_hash,
+                                "reserved_balance": observed_reserved,
+                                "deducted_max_cost": deducted_max_cost,
+                                "total_cost_msats": total_cost_msats,
+                                "model": model,
+                            },
                         )
-                    )
-                    if finalize_result.rowcount == 1:
+                        await session.rollback()
+                        cost.charged_msats = 0
+                        await release_reservation_only()
+                        return cost.dict()
+                    sibling_reserved = observed_reserved - deducted_max_cost
+                    chargeable_msats = max(0, observed_balance - sibling_reserved)
+                    actual_charge_msats = min(chargeable_msats, total_cost_msats)
+                    if await _charge_reservation_rows(
+                        session,
+                        billing_key_hash=billing_key.hashed_key,
+                        key_hash=key.hashed_key,
+                        reserved_msats=deducted_max_cost,
+                        charge_msats=actual_charge_msats,
+                        extra_billing_guards=(
+                            col(ApiKey.balance) == observed_balance,
+                            col(ApiKey.reserved_balance) == observed_reserved,
+                        ),
+                    ):
                         break
-                    await session.rollback()
                     if not await _claim_reservation_for_charge(reservation, session):
+                        cost.charged_msats = 0
                         return cost.dict()
                 else:
                     await session.rollback()
                     raise RuntimeError("Could not atomically finalize cost overrun")
 
-                if billing_key.hashed_key != key.hashed_key:
-                    child_stmt = (
-                        update(ApiKey)
-                        .where(col(ApiKey.hashed_key) == key.hashed_key)
-                        .values(
-                            reserved_balance=overrun_safe_reserved,
-                            total_spent=col(ApiKey.total_spent) + actual_charge_msats,
-                        )
-                    )
-                    await session.exec(child_stmt)  # type: ignore[call-overload]
-
                 await session.commit()
+                await _stop_reservation_heartbeat(reservation.release_id)
 
                 await session.refresh(billing_key)
                 if billing_key.hashed_key != key.hashed_key:
                     await session.refresh(key)
-                cost.total_msats = actual_charge_msats
+                cost.charged_msats = actual_charge_msats
+                if actual_charge_msats < total_cost_msats:
+                    logger.warning(
+                        "Cost overrun exceeded chargeable funds — shortfall written off",
+                        extra={
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                            "actual_cost_msats": total_cost_msats,
+                            "charged_msats": actual_charge_msats,
+                            "shortfall_msats": total_cost_msats - actual_charge_msats,
+                            "model": model,
+                        },
+                    )
                 logger.info(
                     "Finalized payment with additional charge",
                     extra={
@@ -1492,77 +1656,33 @@ async def adjust_payment_for_tokens(
                     },
                 )
 
-                if billing_key.reserved_balance < deducted_max_cost:
-                    logger.error(
-                        "reserved_balance below deducted_max_cost on refund finalization — clamping to 0",
-                        extra={
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                            "reserved_balance": billing_key.reserved_balance,
-                            "deducted_max_cost": deducted_max_cost,
-                            "total_cost_msats": total_cost_msats,
-                            "refund_amount": refund,
-                            "balance": billing_key.balance,
-                            "total_spent": billing_key.total_spent,
-                            "model": model,
-                        },
-                    )
-
-                refund_safe_reserved = case(
-                    (
-                        col(ApiKey.reserved_balance) >= deducted_max_cost,
-                        col(ApiKey.reserved_balance) - deducted_max_cost,
-                    ),
-                    else_=0,
+                charged = await _charge_reservation_rows(
+                    session,
+                    billing_key_hash=billing_key.hashed_key,
+                    key_hash=key.hashed_key,
+                    reserved_msats=deducted_max_cost,
+                    charge_msats=total_cost_msats,
                 )
+                if charged:
+                    await session.commit()
+                    await _stop_reservation_heartbeat(reservation.release_id)
 
-                refund_stmt = (
-                    update(ApiKey)
-                    .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-                    .values(
-                        reserved_balance=refund_safe_reserved,
-                        balance=col(ApiKey.balance) - total_cost_msats,
-                        total_spent=col(ApiKey.total_spent) + total_cost_msats,
-                    )
-                )
-                result = await session.exec(refund_stmt)  # type: ignore[call-overload]
-
-                # Also update total_spent and reserved_balance on the child key if it's different
-                if billing_key.hashed_key != key.hashed_key:
-                    child_refund_safe_reserved = case(
-                        (
-                            col(ApiKey.reserved_balance) >= deducted_max_cost,
-                            col(ApiKey.reserved_balance) - deducted_max_cost,
-                        ),
-                        else_=0,
-                    )
-                    child_stmt = (
-                        update(ApiKey)
-                        .where(col(ApiKey.hashed_key) == key.hashed_key)
-                        .values(
-                            total_spent=col(ApiKey.total_spent) + total_cost_msats,
-                            reserved_balance=child_refund_safe_reserved,
-                        )
-                    )
-                    await session.exec(child_stmt)  # type: ignore[call-overload]
-
-                await session.commit()
-
-                if result.rowcount == 0:
+                if not charged:
                     logger.error(
                         "Failed to finalize payment - releasing reservation",
                         extra={
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+                            "key_hash": key_log_hash,
+                            "billing_key_hash": billing_log_hash,
                             "deducted_max_cost": deducted_max_cost,
-                            "current_reserved_balance": billing_key.reserved_balance,
                             "total_cost": total_cost_msats,
                             "model": model,
                         },
                     )
+                    cost.charged_msats = 0
                     await release_reservation_only()
                 else:
                     cost.total_msats = total_cost_msats
+                    cost.charged_msats = total_cost_msats
                     await session.refresh(billing_key)
                     if billing_key.hashed_key != key.hashed_key:
                         await session.refresh(key)

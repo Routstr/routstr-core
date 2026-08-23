@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from routstr.core.db import ApiKey
+from routstr.core.db import ApiKey, ReservationRelease
 from routstr.payment.cost_calculation import CostData
 
 
@@ -34,20 +34,30 @@ def _cost_data(total_msats: int) -> CostData:
 
 
 @pytest.mark.asyncio
-async def test_overrun_charges_after_reservation_swept(
+async def test_overrun_with_corrupted_aggregate_releases_without_charging(
     integration_session: AsyncSession,
 ) -> None:
-    """Overrun finalize must charge even when the reservation was already released."""
-    from routstr.auth import adjust_payment_for_tokens, pay_for_request
+    """An overrun whose aggregate reservation was externally zeroed must not
+    charge: subtracting the reservation would have to clamp, which can erase
+    sibling reservations. The reservation is released and the charge dropped.
+    """
+    from routstr import auth
+    from routstr.auth import (
+        adjust_payment_for_tokens,
+        get_reservation_snapshot,
+        pay_for_request,
+    )
 
     deducted_max_cost = 990  # discounted reservation
     actual_token_cost = 1000  # actual cost overruns the reservation
 
-    # Sweeper has zeroed reserved_balance but left balance untouched.
+    # Something zeroed reserved_balance under an active durable reservation.
     key = _make_key(balance=1000, reserved=0)
+    key_hash = key.hashed_key
     integration_session.add(key)
     await integration_session.commit()
     await pay_for_request(key, deducted_max_cost, integration_session)
+    reservation = await get_reservation_snapshot(key, integration_session)
     key.reserved_balance = 0
     integration_session.add(key)
     await integration_session.commit()
@@ -61,20 +71,24 @@ async def test_overrun_charges_after_reservation_swept(
         "routstr.auth.calculate_cost",
         return_value=_cost_data(actual_token_cost),
     ):
-        await adjust_payment_for_tokens(
+        result = await adjust_payment_for_tokens(
             key, response_data, integration_session, deducted_max_cost, None, None
         )
 
-    await integration_session.refresh(key)
+    assert result["charged_msats"] == 0
+    integration_session.expunge_all()
+    key_row = await integration_session.get(ApiKey, key_hash)
+    assert key_row is not None
 
-    assert key.total_spent == actual_token_cost, (
-        f"Request was not billed (total_spent={key.total_spent}) — free response bug"
-    )
-    assert key.balance == 1000 - actual_token_cost, (
-        f"Balance not charged: {key.balance}"
-    )
-    assert key.balance >= 0
-    assert key.reserved_balance == 0
+    assert key_row.total_spent == 0, "corrupted aggregate must not be charged into"
+    assert key_row.balance == 1000
+    assert key_row.reserved_balance == 0
+
+    # The corrupt reservation must reach a terminal state — an active leftover
+    # would be renewed by its heartbeat forever and poison stale cleanup.
+    record = await integration_session.get(ReservationRelease, reservation.release_id)
+    assert record is not None and record.status == "released"
+    assert reservation.release_id not in auth._reservation_heartbeats
 
 
 @pytest.mark.asyncio

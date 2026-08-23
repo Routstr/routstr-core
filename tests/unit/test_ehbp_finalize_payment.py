@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, col, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+import routstr.auth as auth_module
 from routstr.auth import get_reservation_snapshot, pay_for_request
 from routstr.core.db import ApiKey, ReservationRelease
 from routstr.upstream.ehbp import (
+    _inject_cost_response_headers,
     finalize_ehbp_actual_cost_payment,
     finalize_ehbp_max_cost_payment,
 )
@@ -26,7 +28,9 @@ def _make_engine() -> AsyncEngine:
 
 
 @pytest.fixture
-async def session(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncSession, None]:
+async def session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncGenerator[AsyncSession, None]:
     monkeypatch.setattr("routstr.upstream.ehbp.ROUTSTR_FEE_PERCENT", 0)
     engine = _make_engine()
     async with engine.begin() as conn:
@@ -35,6 +39,8 @@ async def session(monkeypatch: pytest.MonkeyPatch) -> AsyncGenerator[AsyncSessio
     try:
         yield db_session
     finally:
+        for release_id in list(auth_module._reservation_heartbeats):
+            await auth_module._stop_reservation_heartbeat(release_id)
         await db_session.close()
         await engine.dispose()
 
@@ -54,9 +60,7 @@ def _fail_nth_api_key_update(
     original_exec = session.exec
     api_key_updates = 0
 
-    async def exec_with_failure(
-        statement: Any, *args: Any, **kwargs: Any
-    ) -> Any:
+    async def exec_with_failure(statement: Any, *args: Any, **kwargs: Any) -> Any:
         nonlocal api_key_updates
         table = getattr(statement, "table", None)
         if getattr(table, "name", None) == "api_keys":
@@ -78,7 +82,7 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
     await pay_for_request(key, 3_000, session)
     reservation = await get_reservation_snapshot(key, session)
 
-    await finalize_ehbp_actual_cost_payment(
+    charged = await finalize_ehbp_actual_cost_payment(
         key,
         session,
         reserved_cost_for_model=3_000,
@@ -93,6 +97,7 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
         reservation_snapshot=reservation,
     )
 
+    assert charged == 1_200
     updated = await _api_key(session, "ehbp-actual")
     assert updated is not None
     assert updated.balance == 8_800
@@ -106,16 +111,14 @@ async def test_finalize_max_cost_payment_updates_parent_and_child_spend(
     session: AsyncSession,
 ) -> None:
     parent = ApiKey(hashed_key="ehbp-parent", balance=10_000)
-    child = ApiKey(
-        hashed_key="ehbp-child", balance=0, parent_key_hash="ehbp-parent"
-    )
+    child = ApiKey(hashed_key="ehbp-child", balance=0, parent_key_hash="ehbp-parent")
     session.add(parent)
     session.add(child)
     await session.commit()
     await pay_for_request(child, 3_000, session)
     reservation = await get_reservation_snapshot(child, session)
 
-    await finalize_ehbp_max_cost_payment(
+    charged = await finalize_ehbp_max_cost_payment(
         child,
         session,
         max_cost_for_model=3_000,
@@ -123,6 +126,7 @@ async def test_finalize_max_cost_payment_updates_parent_and_child_spend(
         reservation_snapshot=reservation,
     )
 
+    assert charged == 3_000
     updated_parent = await _api_key(session, "ehbp-parent")
     updated_child = await _api_key(session, "ehbp-child")
     assert updated_parent is not None
@@ -151,7 +155,7 @@ async def test_finalize_actual_cost_payment_rolls_back_when_parent_update_matche
     rollback_spy = AsyncMock(wraps=session.rollback)
     monkeypatch.setattr(session, "rollback", rollback_spy)
 
-    await finalize_ehbp_actual_cost_payment(
+    charged = await finalize_ehbp_actual_cost_payment(
         key,
         session,
         reserved_cost_for_model=3_000,
@@ -160,15 +164,17 @@ async def test_finalize_actual_cost_payment_rolls_back_when_parent_update_matche
         reservation_snapshot=reservation,
     )
 
+    assert charged == 0
     rollback_spy.assert_awaited_once()
     updated = await _api_key(session, "ehbp-missing-parent")
     assert updated is not None
     assert updated.balance == 10_000
-    assert updated.reserved_balance == 3_000
+    assert updated.reserved_balance == 0
     assert updated.total_spent == 0
     release = await session.get(ReservationRelease, reservation.release_id)
     assert release is not None
-    assert release.status == "active"
+    assert release.status == "released"
+    assert reservation.release_id not in auth_module._reservation_heartbeats
 
 
 @pytest.mark.asyncio
@@ -189,7 +195,7 @@ async def test_finalize_max_cost_payment_rolls_back_parent_when_child_update_mat
     reservation = await get_reservation_snapshot(child, session)
     _fail_nth_api_key_update(session, monkeypatch, target_update=2)
 
-    await finalize_ehbp_max_cost_payment(
+    charged = await finalize_ehbp_max_cost_payment(
         child,
         session,
         max_cost_for_model=3_000,
@@ -197,12 +203,84 @@ async def test_finalize_max_cost_payment_rolls_back_parent_when_child_update_mat
         reservation_snapshot=reservation,
     )
 
+    assert charged == 0
     updated_parent = await _api_key(session, "ehbp-rollback-parent")
     assert updated_parent is not None
     assert updated_parent.balance == 10_000
-    assert updated_parent.reserved_balance == 3_000
+    assert updated_parent.reserved_balance == 0
     assert updated_parent.total_spent == 0
     updated_child = await _api_key(session, "ehbp-missing-child")
     assert updated_child is not None
-    assert updated_child.reserved_balance == 3_000
+    assert updated_child.reserved_balance == 0
     assert updated_child.total_spent == 0
+    release = await session.get(ReservationRelease, reservation.release_id)
+    assert release is not None and release.status == "released"
+    assert reservation.release_id not in auth_module._reservation_heartbeats
+
+
+@pytest.mark.asyncio
+async def test_corrupt_child_aggregate_does_not_erase_parent_sibling_reserve(
+    session: AsyncSession,
+) -> None:
+    parent = ApiKey(hashed_key="ehbp-corrupt-parent", balance=10_000)
+    child = ApiKey(
+        hashed_key="ehbp-corrupt-child",
+        balance=0,
+        parent_key_hash=parent.hashed_key,
+    )
+    session.add(parent)
+    session.add(child)
+    await session.commit()
+    await pay_for_request(child, 3_000, session)
+    reservation = await get_reservation_snapshot(child, session)
+
+    await session.exec(  # type: ignore[call-overload]
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == "ehbp-corrupt-parent")
+        .values(reserved_balance=5_000)
+    )
+    await session.exec(  # type: ignore[call-overload]
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == "ehbp-corrupt-child")
+        .values(reserved_balance=1_000)
+    )
+    await session.commit()
+
+    charged = await finalize_ehbp_actual_cost_payment(
+        child,
+        session,
+        reserved_cost_for_model=3_000,
+        model_id="tinfoil/model",
+        cost_info={"total_msats": 1_200},
+        reservation_snapshot=reservation,
+    )
+
+    assert charged == 0
+    updated_parent = await _api_key(session, "ehbp-corrupt-parent")
+    updated_child = await _api_key(session, "ehbp-corrupt-child")
+    assert updated_parent is not None and updated_child is not None
+    assert updated_parent.balance == 10_000
+    assert updated_parent.reserved_balance == 5_000
+    assert updated_parent.total_spent == 0
+    assert updated_child.reserved_balance == 1_000
+    assert updated_child.total_spent == 0
+    release = await session.get(ReservationRelease, reservation.release_id)
+    assert release is not None and release.status == "released"
+    assert reservation.release_id not in auth_module._reservation_heartbeats
+
+
+def test_zero_debit_ehbp_headers_preserve_computed_cost() -> None:
+    headers: dict[str, str] = {}
+
+    _inject_cost_response_headers(
+        headers,
+        {
+            "total_msats": 0,
+            "computed_msats": 1_500,
+            "input_msats": 1_200,
+            "output_msats": 300,
+        },
+    )
+
+    assert headers["X-Routstr-Cost-Msats"] == "0"
+    assert headers["X-Routstr-Computed-Cost-Msats"] == "1500"

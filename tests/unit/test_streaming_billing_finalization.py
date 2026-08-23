@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -96,7 +97,10 @@ async def test_release_updates_parent_and_child_atomically() -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_rolls_back_partial_parent_child_update() -> None:
+async def test_release_repairs_partial_parent_child_corruption() -> None:
+    """A child aggregate that no longer holds the reservation must not leave
+    the durable row active forever: the release rolls the subtraction back and
+    terminalizes the reservation without touching aggregates."""
     engine = await _engine()
     parent = ApiKey(hashed_key="parent", balance=1_000)
     child = ApiKey(hashed_key="child", parent_key_hash="parent", balance=0)
@@ -109,12 +113,13 @@ async def test_release_rolls_back_partial_parent_child_update() -> None:
         session.add(child)
         await session.commit()
 
-        assert await release_reservation(snapshot, session, 500) is False
+        assert await release_reservation(snapshot, session, 500) is True
         await session.refresh(parent)
         await session.refresh(child)
         record = await session.get(ReservationRelease, snapshot.release_id)
+        # Aggregates untouched — legacy cleanup reconciles them when stale.
         assert (parent.reserved_balance, child.reserved_balance) == (500, 100)
-        assert record is not None and record.status == "active"
+        assert record is not None and record.status == "released"
     await engine.dispose()
 
 
@@ -331,6 +336,73 @@ async def test_responses_streaming_releases_and_raises_on_billing_failure(
     adjust.assert_awaited_once()
     session.rollback.assert_awaited_once()
     release.assert_awaited_once_with(snapshot, session, 500)
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield (
+            b'data: {"type":"response.completed","response":{"model":"test",'
+            b'"usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
+        )
+        yield b"data: [DONE]\n\n"
+
+    upstream_response = MagicMock(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "responses-duplicate"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    cost_data = {
+        "input_tokens": 2,
+        "output_tokens": 1,
+        "input_msats": 1_000,
+        "output_msats": 500,
+        "total_msats": 1_500,
+        "charged_msats": 0,
+        "total_usd": 0.0001,
+    }
+
+    with (
+        patch(
+            "routstr.upstream.base.adjust_payment_for_tokens",
+            AsyncMock(return_value=cost_data),
+        ),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        response = await provider.handle_streaming_responses_completion(
+            response=upstream_response,
+            key=key,
+            max_cost_for_model=500,
+        )
+        chunks = [
+            chunk.decode() if isinstance(chunk, bytes) else chunk
+            async for chunk in response.body_iterator
+        ]
+
+    completed = next(
+        json.loads(line[6:])
+        for line in "".join(chunks).splitlines()
+        if line.startswith("data: {")
+    )
+    nested_usage = completed["response"]["usage"]
+    assert nested_usage["cost_sats"] == 0
+    assert nested_usage["cost"]["total_msats"] == 0
+    assert nested_usage["cost"]["charged_msats"] == 0
+    assert nested_usage["cost"]["computed_msats"] == 1_500
+    assert completed["cost"]["total_msats"] == 0
+    assert completed["cost"]["computed_msats"] == 1_500
 
 
 @pytest.mark.asyncio

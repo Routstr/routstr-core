@@ -96,6 +96,8 @@ export function TemporaryBalances({
   const total = data?.total ?? 0;
   const totals = data?.totals ?? {
     total_balance: 0,
+    total_reserved_balance: 0,
+    total_available_balance: 0,
     total_spent: 0,
     total_requests: 0,
   };
@@ -180,7 +182,7 @@ export function TemporaryBalances({
               <Card>
                 <CardHeader className='flex flex-row items-center justify-between space-y-0 pb-2'>
                   <CardTitle className='text-muted-foreground text-sm font-medium'>
-                    Total Balance
+                    Total Available
                   </CardTitle>
                   <span className='inline-flex size-8 items-center justify-center'>
                     <DollarSign className='size-4 text-green-600 dark:text-green-300' />
@@ -188,7 +190,11 @@ export function TemporaryBalances({
                 </CardHeader>
                 <CardContent className='pt-0'>
                   <p className='text-2xl font-semibold tracking-tight tabular-nums'>
-                    {formatBalance(totals.total_balance)}
+                    {formatBalance(totals.total_available_balance)}
+                  </p>
+                  <p className='text-muted-foreground mt-1 text-xs'>
+                    {formatBalance(totals.total_balance)} raw ·{' '}
+                    {formatBalance(totals.total_reserved_balance)} reserved
                   </p>
                 </CardContent>
               </Card>
@@ -263,7 +269,7 @@ export function TemporaryBalances({
                     <TableHeader>
                       <TableRow>
                         <TableHead>Hashed Key</TableHead>
-                        <TableHead className='text-right'>Balance</TableHead>
+                        <TableHead className='text-right'>Available</TableHead>
                         <TableHead className='text-right'>
                           Total Spent
                         </TableHead>
@@ -284,7 +290,9 @@ export function TemporaryBalances({
                           <TableRow
                             key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-${index}`}
                             className={cn(
-                              balance.balance === 0 && !isChild && 'opacity-60',
+                              balance.available_balance === 0 &&
+                                !isChild &&
+                                'opacity-60',
                               isChild && 'bg-muted/30'
                             )}
                           >
@@ -307,7 +315,19 @@ export function TemporaryBalances({
                                   (Parent)
                                 </span>
                               ) : (
-                                formatBalance(balance.balance)
+                                <div>
+                                  <div>
+                                    {formatBalance(
+                                      balance.available_balance ??
+                                        balance.balance
+                                    )}
+                                  </div>
+                                  <div className='text-muted-foreground text-xs'>
+                                    {formatBalance(balance.balance)} raw ·{' '}
+                                    {formatBalance(balance.reserved_balance)}{' '}
+                                    reserved
+                                  </div>
+                                </div>
                               )}
                             </TableCell>
                             <TableCell className='text-right font-mono'>
@@ -350,7 +370,9 @@ export function TemporaryBalances({
                       <Card
                         key={`${balance.hashed_key}-${balance.parent_key_hash ?? 'root'}-mobile-${index}`}
                         className={cn(
-                          balance.balance === 0 && !isChild && 'opacity-80',
+                          balance.available_balance === 0 &&
+                            !isChild &&
+                            'opacity-80',
                           isChild && 'bg-muted/30'
                         )}
                       >
@@ -372,13 +394,22 @@ export function TemporaryBalances({
                         <CardContent className='grid grid-cols-2 gap-3 p-4 pt-0'>
                           <div>
                             <p className='text-muted-foreground text-xs'>
-                              Balance
+                              Available
                             </p>
                             <p className='font-mono text-sm'>
                               {isChild
                                 ? '(Uses Parent)'
-                                : formatBalance(balance.balance)}
+                                : formatBalance(
+                                    balance.available_balance ?? balance.balance
+                                  )}
                             </p>
+                            {!isChild && (
+                              <p className='text-muted-foreground text-xs'>
+                                {formatBalance(balance.balance)} raw ·{' '}
+                                {formatBalance(balance.reserved_balance)}{' '}
+                                reserved
+                              </p>
+                            )}
                           </div>
                           <div>
                             <p className='text-muted-foreground text-xs'>

@@ -10,17 +10,18 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import case
-from sqlmodel import col, update
 
 from ..auth import (
     ROUTSTR_FEE_PERCENT,
     ReservationSnapshot,
+    _charge_reservation_rows,
     _claim_reservation_for_charge,
+    _stop_reservation_heartbeat,
     _validate_reservation_snapshot,
     get_billing_key,
     get_reservation_snapshot,
     payments_logger,
+    release_reservation,
 )
 from ..core import get_logger
 from ..core.db import (
@@ -191,7 +192,9 @@ def _resolve_ehbp_target_url(
     otherwise the header is ignored so callers cannot redirect other providers
     or leak upstream API keys.
     """
-    override_header = profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
+    override_header = (
+        profile.client_target_url_header if profile else _ENCLAVE_URL_HEADER
+    )
     if not override_header:
         return target_url
     enclave_url = _get_header_case_insensitive(headers, override_header)
@@ -295,9 +298,7 @@ def _build_cost_info(
     return result
 
 
-def _inject_cost_response_headers(
-    headers: dict[str, str], cost_info: dict
-) -> None:
+def _inject_cost_response_headers(headers: dict[str, str], cost_info: dict) -> None:
     """Add per-request cost headers to an EHBP response.
 
     Since EHBP response bodies are opaque encrypted blobs, cost cannot be
@@ -305,6 +306,8 @@ def _inject_cost_response_headers(
     the client/Tinfoil SDK can read without decrypting.
     """
     headers["X-Routstr-Cost-Msats"] = str(cost_info["total_msats"])
+    if "computed_msats" in cost_info:
+        headers["X-Routstr-Computed-Cost-Msats"] = str(cost_info["computed_msats"])
     headers["X-Routstr-Input-Cost-Msats"] = str(cost_info["input_msats"])
     headers["X-Routstr-Output-Cost-Msats"] = str(cost_info["output_msats"])
 
@@ -375,9 +378,7 @@ async def _compute_ehbp_actual_cost(
             resolved_upstream_model = (
                 actual_model_obj.forwarded_model_id or actual_model_obj.id
             )
-            resolved_identity = _normalize_upstream_model_id(
-                resolved_upstream_model
-            )
+            resolved_identity = _normalize_upstream_model_id(resolved_upstream_model)
             if resolved_identity != expected_identity:
                 logger.info(
                     "EHBP served model differs from requested, using actual "
@@ -500,6 +501,18 @@ class EHBPForwardingTarget:
     profile: ConfidentialInferenceProfile | None = None
 
 
+async def _release_failed_ehbp_charge(
+    reservation: ReservationSnapshot, session: AsyncSession
+) -> None:
+    if await release_reservation(reservation, session, reservation.reserved_msats):
+        return
+    await _stop_reservation_heartbeat(reservation.release_id)
+    logger.critical(
+        "Failed to release EHBP reservation after rejected charge",
+        extra={"reservation_id": reservation.release_id},
+    )
+
+
 async def finalize_ehbp_actual_cost_payment(
     key: ApiKey,
     session: AsyncSession,
@@ -507,61 +520,29 @@ async def finalize_ehbp_actual_cost_payment(
     model_id: str,
     cost_info: dict,
     reservation_snapshot: ReservationSnapshot | None = None,
-) -> None:
+) -> int:
     """Finalize an EHBP bearer request using clamped provider usage metrics."""
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
     await _validate_reservation_snapshot(key, reservation, session)
     if not await _claim_reservation_for_charge(reservation, session):
-        return
+        return 0
     reserved_cost_for_model = reservation.reserved_msats
     billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
     billing_key_hash = billing_key.hashed_key
-    total_cost_msats = max(0, int(cost_info.get("total_msats", reserved_cost_for_model)))
+    total_cost_msats = max(
+        0, int(cost_info.get("total_msats", reserved_cost_for_model))
+    )
     now = int(time.time())
 
-    safe_reserved = case(
-        (
-            col(ApiKey.reserved_balance) >= reserved_cost_for_model,
-            col(ApiKey.reserved_balance) - reserved_cost_for_model,
-        ),
-        else_=0,
+    charged = await _charge_reservation_rows(
+        session,
+        billing_key_hash=billing_key_hash,
+        key_hash=key_hash,
+        reserved_msats=reserved_cost_for_model,
+        charge_msats=total_cost_msats,
     )
-    cleared_reserved_at = case(
-        (
-            col(ApiKey.reserved_balance) - reserved_cost_for_model > 0,
-            col(ApiKey.reserved_at),
-        ),
-        else_=None,
-    )
-
-    stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .values(
-            reserved_balance=safe_reserved,
-            reserved_at=cleared_reserved_at,
-            balance=col(ApiKey.balance) - total_cost_msats,
-            total_spent=col(ApiKey.total_spent) + total_cost_msats,
-        )
-    )
-    result = await session.exec(stmt)  # type: ignore[call-overload]
-
-    child_result = None
-    if billing_key.hashed_key != key.hashed_key:
-        child_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .values(
-                reserved_balance=safe_reserved,
-                reserved_at=cleared_reserved_at,
-                total_spent=col(ApiKey.total_spent) + total_cost_msats,
-            )
-        )
-        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
-
-    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
-        await session.rollback()
+    if not charged:
         logger.error(
             "Failed to finalize EHBP usage-based payment",
             extra={
@@ -570,13 +551,13 @@ async def finalize_ehbp_actual_cost_payment(
                 "model": model_id,
                 "reserved_cost_for_model": reserved_cost_for_model,
                 "total_cost_msats": total_cost_msats,
-                "parent_rowcount": result.rowcount,
-                "child_rowcount": getattr(child_result, "rowcount", None),
             },
         )
-        return
+        await _release_failed_ehbp_charge(reservation, session)
+        return 0
 
     await session.commit()
+    await _stop_reservation_heartbeat(reservation.release_id)
     await session.refresh(billing_key)
     if billing_key.hashed_key != key.hashed_key:
         await session.refresh(key)
@@ -609,6 +590,7 @@ async def finalize_ehbp_actual_cost_payment(
             "finalized_at": now,
         },
     )
+    return total_cost_msats
 
 
 async def finalize_ehbp_max_cost_payment(
@@ -617,7 +599,7 @@ async def finalize_ehbp_max_cost_payment(
     max_cost_for_model: int,
     model_id: str,
     reservation_snapshot: ReservationSnapshot | None = None,
-) -> None:
+) -> int:
     """Finalize an EHBP bearer request by charging the reserved max cost.
 
     EHBP responses are encrypted, so Routstr cannot inspect token usage. Unlike
@@ -627,7 +609,7 @@ async def finalize_ehbp_max_cost_payment(
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
     await _validate_reservation_snapshot(key, reservation, session)
     if not await _claim_reservation_for_charge(reservation, session):
-        return
+        return 0
     max_cost_for_model = reservation.reserved_msats
     billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
@@ -635,63 +617,14 @@ async def finalize_ehbp_max_cost_payment(
     total_cost_msats = max(0, int(max_cost_for_model))
     now = int(time.time())
 
-    cleared_reserved_at = case(
-        (
-            col(ApiKey.reserved_balance) - max_cost_for_model > 0,
-            col(ApiKey.reserved_at),
-        ),
-        else_=None,
+    charged = await _charge_reservation_rows(
+        session,
+        billing_key_hash=billing_key_hash,
+        key_hash=key_hash,
+        reserved_msats=max_cost_for_model,
+        charge_msats=total_cost_msats,
     )
-    safe_reserved = case(
-        (
-            col(ApiKey.reserved_balance) >= max_cost_for_model,
-            col(ApiKey.reserved_balance) - max_cost_for_model,
-        ),
-        else_=0,
-    )
-
-    stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == billing_key.hashed_key)
-        .values(
-            reserved_balance=safe_reserved,
-            reserved_at=cleared_reserved_at,
-            balance=col(ApiKey.balance) - total_cost_msats,
-            total_spent=col(ApiKey.total_spent) + total_cost_msats,
-        )
-    )
-    result = await session.exec(stmt)  # type: ignore[call-overload]
-
-    if billing_key.hashed_key != key.hashed_key:
-        child_safe_reserved = case(
-            (
-                col(ApiKey.reserved_balance) >= max_cost_for_model,
-                col(ApiKey.reserved_balance) - max_cost_for_model,
-            ),
-            else_=0,
-        )
-        child_cleared_reserved_at = case(
-            (
-                col(ApiKey.reserved_balance) - max_cost_for_model > 0,
-                col(ApiKey.reserved_at),
-            ),
-            else_=None,
-        )
-        child_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .values(
-                reserved_balance=child_safe_reserved,
-                reserved_at=child_cleared_reserved_at,
-                total_spent=col(ApiKey.total_spent) + total_cost_msats,
-            )
-        )
-        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
-    else:
-        child_result = None
-
-    if result.rowcount == 0 or (child_result is not None and child_result.rowcount == 0):
-        await session.rollback()
+    if not charged:
         logger.error(
             "Failed to finalize EHBP max-cost payment",
             extra={
@@ -699,14 +632,13 @@ async def finalize_ehbp_max_cost_payment(
                 "billing_key_hash": billing_key_hash[:8] + "...",
                 "model": model_id,
                 "max_cost_for_model": max_cost_for_model,
-                "parent_rowcount": result.rowcount,
-                "child_rowcount": getattr(child_result, "rowcount", None),
             },
         )
-        return
+        await _release_failed_ehbp_charge(reservation, session)
+        return 0
 
     await session.commit()
-
+    await _stop_reservation_heartbeat(reservation.release_id)
     await session.refresh(billing_key)
     if billing_key.hashed_key != key.hashed_key:
         await session.refresh(key)
@@ -739,6 +671,7 @@ async def finalize_ehbp_max_cost_payment(
             "finalized_at": now,
         },
     )
+    return total_cost_msats
 
 
 async def send_cashu_refund(
@@ -893,10 +826,9 @@ async def forward_ehbp_request(
             cost_info = await _compute_ehbp_actual_cost(
                 usage_header, model_obj, max_cost_for_model
             )
-            # Use the actual served model for billing when it differs from
-            # the requested model.
             billing_model = cost_info.pop("actual_model", None) or model_obj.id
-            await finalize_ehbp_actual_cost_payment(
+            computed_msats = int(cost_info["total_msats"])
+            charged_msats = await finalize_ehbp_actual_cost_payment(
                 key,
                 session,
                 max_cost_for_model,
@@ -904,7 +836,14 @@ async def forward_ehbp_request(
                 cost_info,
                 reservation_snapshot,
             )
-            cost_data = {**cost_info, "total_usd": 0.0}
+            cost_data = {
+                **cost_info,
+                "total_msats": charged_msats,
+                "charged_msats": charged_msats,
+                "total_usd": 0.0,
+            }
+            if computed_msats != charged_msats:
+                cost_data["computed_msats"] = computed_msats
         else:
             logger.warning(
                 "EHBP usage metrics not found in headers or trailers, "
@@ -915,7 +854,7 @@ async def forward_ehbp_request(
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            await finalize_ehbp_max_cost_payment(
+            charged_msats = await finalize_ehbp_max_cost_payment(
                 key,
                 session,
                 max_cost_for_model,
@@ -923,11 +862,14 @@ async def forward_ehbp_request(
                 reservation_snapshot,
             )
             cost_data = {
-                "total_msats": max_cost_for_model,
+                "total_msats": charged_msats,
+                "charged_msats": charged_msats,
                 "total_usd": 0.0,
                 "input_tokens": 0,
                 "output_tokens": 0,
             }
+            if charged_msats != max_cost_for_model:
+                cost_data["computed_msats"] = max_cost_for_model
 
         # Build the cost_info dict from what adjust_payment_for_tokens returned
         # or from the max-cost fallback. Fields match CostData/MaxCostData.dict().
@@ -940,6 +882,8 @@ async def forward_ehbp_request(
             "input_msats": cost_data.get("input_msats", 0),
             "output_msats": cost_data.get("output_msats", 0),
         }
+        if "computed_msats" in cost_data:
+            cost_info["computed_msats"] = cost_data["computed_msats"]
         cost_usd = cost_data.get("total_usd", 0.0)
 
         # Build response headers, filtering out hop-by-hop headers
@@ -1028,7 +972,9 @@ async def forward_ehbp_x_cashu_request(
         target_url = _resolve_ehbp_target_url(
             target.url, path, headers, provider_type, profile
         )
-        upstream_headers = _prepare_ehbp_upstream_headers(headers, target.headers, profile)
+        upstream_headers = _prepare_ehbp_upstream_headers(
+            headers, target.headers, profile
+        )
         request_body = await request.body()
 
         # Merge query params into the target URL
@@ -1076,9 +1022,7 @@ async def forward_ehbp_x_cashu_request(
             usage_source = (
                 "header"
                 if usage_header_name
-                and any(
-                    k.lower() == usage_header_name.lower() for k, _ in resp.headers
-                )
+                and any(k.lower() == usage_header_name.lower() for k, _ in resp.headers)
                 else ("trailer" if usage_header else "none")
             )
 
