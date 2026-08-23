@@ -52,6 +52,10 @@ logger = get_logger(__name__)
 _ENCLAVE_URL_HEADER = "X-Tinfoil-Enclave-Url"
 _REQUEST_USAGE_HEADER = "X-Tinfoil-Request-Usage-Metrics"
 _RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
+# Client supplies the completion cap via this header on EHBP (opaque-body)
+# requests so the proxy can size the required balance without decrypting the
+# body. It is stripped before the request is forwarded to the enclave.
+_MAX_TOKENS_HEADER = "X-Routstr-Max-Tokens"
 _TINFOIL_PROVIDER_TYPE = "tinfoil"
 _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
 _TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
@@ -68,6 +72,7 @@ def _normalize_upstream_model_id(model_id: str | None) -> str:
 _PROXY_ONLY_HEADERS = frozenset(
     {
         "x-routstr-model",
+        _MAX_TOKENS_HEADER.lower(),
         "x-tinfoil-enclave-url",
         "x-tinfoil-request-usage-metrics",
     }

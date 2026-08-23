@@ -7,6 +7,8 @@ import json
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import Response
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ===========================================================================
 # parse_request_body_json
@@ -62,6 +64,176 @@ def test_parse_json_rejects_non_integer_max_tokens() -> None:
         parse_request_body_json(body, "/v1/chat/completions")
 
     assert exc_info.value.status_code == 400
+
+
+# ===========================================================================
+# _parse_ehbp_max_tokens
+# ===========================================================================
+
+def test_parse_ehbp_max_tokens_valid() -> None:
+    """A numeric header value is parsed to an int."""
+    from routstr.proxy import _parse_ehbp_max_tokens
+
+    assert _parse_ehbp_max_tokens("1024") == 1024
+    assert _parse_ehbp_max_tokens("0") is None
+    assert _parse_ehbp_max_tokens("-5") is None
+    assert _parse_ehbp_max_tokens("") is None
+    assert _parse_ehbp_max_tokens(None) is None
+    assert _parse_ehbp_max_tokens("abc") is None
+    assert _parse_ehbp_max_tokens("12.5") is None
+
+
+def test_validated_ehbp_max_tokens_range() -> None:
+    """The validated helper enforces the 64000-token floor."""
+    from routstr.proxy import (
+        _EHBP_MIN_MAX_TOKENS,
+        _validated_ehbp_max_tokens,
+    )
+
+    # Absent header: no constraint.
+    assert _validated_ehbp_max_tokens("") is None
+    assert _validated_ehbp_max_tokens(None) is None
+
+    # At-or-above the floor: parsed value returned.
+    assert _validated_ehbp_max_tokens(str(_EHBP_MIN_MAX_TOKENS)) == _EHBP_MIN_MAX_TOKENS
+    assert _validated_ehbp_max_tokens("100000") == 100000
+
+    # Below the floor / invalid: rejected.
+    with pytest.raises(ValueError):
+        _validated_ehbp_max_tokens(str(_EHBP_MIN_MAX_TOKENS - 1))
+    with pytest.raises(ValueError):
+        _validated_ehbp_max_tokens("0")
+    with pytest.raises(ValueError):
+        _validated_ehbp_max_tokens("abc")
+
+
+def _ehbp_request(headers: dict) -> MagicMock:
+    request = MagicMock()
+    request.method = "POST"
+    request.headers = {
+        "authorization": "Bearer test-key",
+        "ehbp-encapsulated-key": "abc123",
+        "x-routstr-model": "tinfoil-llama3-3-70b",
+        **headers,
+    }
+    request.body = AsyncMock(return_value=b"sealed-opaque-body")
+    request.state.request_id = "ehbp-max-tokens-test"
+    return request
+
+
+async def test_ehbp_max_tokens_below_min_returns_400() -> None:
+    """A present header below the floor yields a 400 before any DB access."""
+    from routstr.proxy import _proxy
+
+    response = await _proxy(
+        _ehbp_request({"x-routstr-max-tokens": "1024"}),
+        "v1/chat/completions",
+        MagicMock(),
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.body)
+    assert body["error"]["type"] == "invalid_request"
+    assert "at least 64000" in body["error"]["message"]
+
+
+async def test_ehbp_max_tokens_invalid_returns_400() -> None:
+    """A present but unparseable header value returns 400 as well."""
+    from routstr.proxy import _proxy
+
+    response = await _proxy(
+        _ehbp_request({"x-routstr-max-tokens": "not-a-number"}),
+        "v1/chat/completions",
+        MagicMock(),
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.body)
+    assert "at least 64000" in body["error"]["message"]
+
+
+async def test_ehbp_max_tokens_flows_into_discount() -> None:
+    """A valid header cap is passed through to the cost discount."""
+    from routstr.proxy import _proxy
+
+    model = MagicMock()
+    upstream = MagicMock()
+    key = MagicMock()
+    seen: dict[str, object] = {}
+
+    async def fake_discount(
+        max_cost_for_model: int,
+        body: dict,
+        model_obj: object = None,
+        max_tokens: int | None = None,
+    ) -> int:
+        seen["max_tokens"] = max_tokens
+        seen["body"] = body
+        return max_cost_for_model
+
+    with (
+        patch("routstr.proxy.get_candidates", return_value=[(model, upstream)]),
+        patch("routstr.proxy.get_max_cost_for_model", AsyncMock(return_value=100_000)),
+        patch(
+            "routstr.proxy.calculate_discounted_max_cost",
+            side_effect=fake_discount,
+        ),
+        patch("routstr.proxy.check_token_balance"),
+        patch("routstr.proxy.get_bearer_token_key", AsyncMock(return_value=key)),
+        patch("routstr.proxy.pay_for_request", AsyncMock()),
+        patch("routstr.proxy.get_reservation_snapshot", AsyncMock(return_value=None)),
+        patch("routstr.proxy.forward_ehbp_request", AsyncMock(return_value=Response(status_code=200))),
+    ):
+        response = await _proxy(
+            _ehbp_request({"x-routstr-max-tokens": "100000"}),
+            "v1/chat/completions",
+            MagicMock(),
+        )
+
+    assert response.status_code == 200
+    assert seen["max_tokens"] == 100000
+    assert seen["body"] == {}  # opaque body stays opaque
+
+
+async def test_ehbp_max_tokens_absent_is_allowed() -> None:
+    """No header still works (backwards compatible with older SDKs)."""
+    from routstr.proxy import _proxy
+
+    model = MagicMock()
+    upstream = MagicMock()
+    key = MagicMock()
+    seen: dict[str, object] = {}
+
+    async def fake_discount(
+        max_cost_for_model: int,
+        body: dict,
+        model_obj: object = None,
+        max_tokens: int | None = None,
+    ) -> int:
+        seen["max_tokens"] = max_tokens
+        return max_cost_for_model
+
+    with (
+        patch("routstr.proxy.get_candidates", return_value=[(model, upstream)]),
+        patch("routstr.proxy.get_max_cost_for_model", AsyncMock(return_value=100_000)),
+        patch(
+            "routstr.proxy.calculate_discounted_max_cost",
+            side_effect=fake_discount,
+        ),
+        patch("routstr.proxy.check_token_balance"),
+        patch("routstr.proxy.get_bearer_token_key", AsyncMock(return_value=key)),
+        patch("routstr.proxy.pay_for_request", AsyncMock()),
+        patch("routstr.proxy.get_reservation_snapshot", AsyncMock(return_value=None)),
+        patch("routstr.proxy.forward_ehbp_request", AsyncMock(return_value=Response(status_code=200))),
+    ):
+        response = await _proxy(
+            _ehbp_request({}),
+            "v1/chat/completions",
+            MagicMock(),
+        )
+
+    assert response.status_code == 200
+    assert seen["max_tokens"] is None
 
 
 # ===========================================================================

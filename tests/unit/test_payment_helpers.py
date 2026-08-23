@@ -155,3 +155,95 @@ async def test_discounted_max_cost_floors_at_min_request_msat() -> None:
         cost = await calculate_discounted_max_cost(150_000, body, model_obj)
 
     assert cost == 1000
+
+
+async def test_discounted_max_cost_honors_explicit_max_tokens_override() -> None:
+    """The ``max_tokens`` override parameter (opaque/EHBP body) is honored.
+
+    Body is empty (encrypted) so only the override can drive the discount.
+    completion max budget = 100 sats; 80k tokens * 0.001 = 80 sats used => the
+    required balance is trimmed from 100 sats to 80 sats (80000 msats).
+    """
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0  # no prompt-side discount to keep math clean
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(
+            100_000, {}, model_obj, max_tokens=80_000
+        )
+
+    # full max_cost (100 sats = 100000 msats) minus completion discount
+    # (100 - 80 = 20 sats = 20000 msats) => 80000 msats
+    assert cost == 80_000
+
+
+async def test_discounted_max_cost_body_max_completion_tokens_fallback() -> None:
+    """Body ``max_completion_tokens`` is honoured when no override is set."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {"max_completion_tokens": 80_000}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    assert cost == 80_000
+
+
+async def test_discounted_max_cost_override_takes_precedence_over_body() -> None:
+    """An explicit override wins over any body max_tokens value."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    # Body says 10 tokens (would floor to min_request_msat = 1000); the
+    # 80000-token override must win, so the result is 80000 msats.
+    body = {"max_tokens": 10}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(
+            100_000, body, model_obj, max_tokens=80_000
+        )
+
+    assert cost == 80_000
