@@ -101,6 +101,12 @@ class Settings(BaseSettings):
 
     # Network
     cors_origins: list[str] = Field(default_factory=lambda: ["*"], env="CORS_ORIGINS")
+    # Comma-separated METHOD:path pairs adding to the proxy's canonical
+    # endpoint allowlist, e.g. "POST:v1/rerank,GET:batches". Only for upstreams
+    # exposing an endpoint outside the OpenAI-compatible set; each addition
+    # widens what the provider credential can be spent against, so wildcards
+    # and prefixes are not supported.
+    proxy_extra_allowed_paths: str = Field(default="", env="PROXY_EXTRA_ALLOWED_PATHS")
     tor_proxy_url: str = Field(default="socks5://127.0.0.1:9050", env="TOR_PROXY_URL")
     providers_refresh_interval_seconds: int = Field(
         default=0, env="PROVIDERS_REFRESH_INTERVAL_SECONDS"
@@ -192,6 +198,11 @@ SECRET_FIELDS = frozenset({"admin_password", "nsec"})
 # neither store nor shadow them; env is always authoritative.
 ENV_ONLY_FIELDS = frozenset(
     {
+        # Widening the proxy's reachable upstream surface is a deployment
+        # decision, not a runtime toggle: it changes what the provider
+        # credential can be spent against. Keeping it env-only also lets the
+        # proxy parse it once at import without going stale.
+        "proxy_extra_allowed_paths",
         "database_pool_size",
         "database_max_overflow",
         "database_pool_timeout",
