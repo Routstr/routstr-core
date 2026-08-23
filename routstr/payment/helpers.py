@@ -196,9 +196,13 @@ async def calculate_discounted_max_cost(
 
     adjusted = max_cost_for_model
 
-    if messages := body.get("messages"):
-        prompt_tokens = estimate_tokens(messages)
+    messages = body.get("messages")
+    # Estimated over the whole body: a discount driven by message text alone lets
+    # a caller hide prompt weight elsewhere, shrink the reservation, and be billed
+    # for work the reservation never covered.
+    prompt_tokens = estimate_prompt_tokens(body)
 
+    if isinstance(messages, list):
         image_tokens = await estimate_image_tokens_in_messages(messages)
         if image_tokens > 0:
             logger.debug(
@@ -210,6 +214,7 @@ async def calculate_discounted_max_cost(
             )
             prompt_tokens += image_tokens
 
+    if prompt_tokens > 0:
         estimated_prompt_delta_sats = (
             max_prompt_allowed_sats - prompt_tokens * model_pricing.prompt
         )
@@ -260,6 +265,38 @@ def estimate_tokens(messages: list) -> int:
                     if isinstance(item, dict) and item.get("type") == "text"
                 )
     return total // 3
+
+
+def _sum_string_chars(node: Any) -> int:
+    """Recursively sum the length of every string in the tree, keys included.
+
+    Nothing is excluded. Keys count because JSON-schema property names are
+    forwarded to the provider, and no exclusion rule can be trusted here: every
+    part of the body is caller-controlled, so any carve-out (by key name or by
+    value shape) is a place to hide prompt weight for free. Inline image data is
+    therefore counted as text too, which only makes the discount smaller.
+    """
+    if isinstance(node, str):
+        return len(node)
+    if isinstance(node, dict):
+        return sum(
+            len(str(key)) + _sum_string_chars(value) for key, value in node.items()
+        )
+    if isinstance(node, list):
+        return sum(_sum_string_chars(item) for item in node)
+    return 0
+
+
+def estimate_prompt_tokens(body: dict) -> int:
+    """Conservatively estimate prompt tokens for the whole provider-bound body.
+
+    Unlike ``estimate_tokens`` (message text only), this walks every field, so
+    prompt weight hidden in tool schemas, tool-call arguments, ``system``, or
+    any field forwarded in future cannot escape the reservation estimate. It
+    over-estimates rather than under-estimates: the result only shrinks a
+    discount against a reservation that settlement later refunds.
+    """
+    return _sum_string_chars(body) // 3
 
 
 def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
