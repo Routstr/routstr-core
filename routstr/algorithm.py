@@ -340,20 +340,24 @@ def create_model_mappings(
     def alias_priority(model: "Model", alias: str) -> int:
         """Rank how strong the mapping of alias->model is.
 
-        An exact model ID is authoritative and must be cost-ranked against the
-        other exact matches before considering forwarded aliases. This keeps a
-        provider-specific forwarded ID from shadowing a directly available,
+        A provider that serves the requested ID directly is authoritative and
+        must be cost-ranked before providers that only reach it through a
+        forwarded alias, so a forwarded ID cannot shadow a directly available,
         cheaper model with the requested ID.
+
+        "Directly served" covers both the exact model ID and the same ID behind
+        a provider prefix (e.g. ``gpt-oss-120b`` on Tinfoil vs
+        ``openai/gpt-oss-120b`` on OpenRouter). Both name the same model, so
+        they share the top tier and cost decides between them; otherwise the
+        provider whose catalog omits the org prefix would always win on ID
+        spelling regardless of price.
         """
-        if model.id and model.id.lower() == alias:
-            return 5
+        model_base = get_base_model_id(model.id)
+        if (model.id and model.id.lower() == alias) or model_base.lower() == alias:
+            return 4
 
         forwarded_model_id = get_effective_forwarded_model_id(model)
         if forwarded_model_id and forwarded_model_id.lower() == alias:
-            return 4
-
-        model_base = get_base_model_id(model.id)
-        if model_base == alias:
             return 3
         if model.canonical_slug:
             canonical_base = get_base_model_id(model.canonical_slug)
