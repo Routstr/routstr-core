@@ -289,7 +289,61 @@ async def test_proxy_post_unauthorized_access(integration_client: AsyncClient) -
     assert response.status_code in [400, 401]
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "internal/admin",  # unknown endpoint, no API prefix
+        "v1/../admin",  # traversal onto a sibling path
+        "v1//models",  # duplicate separator
+        "%2e%2e/secret",  # encoded dot segment
+    ],
+)
+async def test_authenticated_post_to_unknown_path_is_rejected(
+    authenticated_client: AsyncClient, bad_path: str
+) -> None:
+    """An authenticated POST to an unknown/traversal path must be rejected at
+    the edge (404) and never forwarded — the provider credential must not reach
+    an endpoint the caller merely spelled into the URL. If the guard let it
+    through, forwarding would raise and this would not be a clean 404."""
+    with patch(
+        "routstr.upstream.base.BaseUpstreamProvider.forward_request",
+        AsyncMock(side_effect=AssertionError("must not forward unknown path")),
+    ):
+        response = await authenticated_client.post(
+            f"/{bad_path}",
+            json={"model": "gpt-3.5-turbo", "messages": []},
+        )
+    assert response.status_code == 404
 
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_unknown_path_is_rejected(integration_client: AsyncClient) -> None:
+    """A GET to an unknown (no API prefix) path is rejected at the edge."""
+    response = await integration_client.get("/internal/admin")
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ambiguous_path_is_rejected_before_ehbp_exemption(
+    integration_client: AsyncClient,
+) -> None:
+    """The ambiguous-spelling screen runs before the EHBP header exemption, so
+    an EHBP request cannot smuggle a traversal path past it."""
+    # Percent-encoded so the traversal survives the client to the server, which
+    # decodes it to "v1/../admin" before routing.
+    response = await integration_client.post(
+        "/v1/%2e%2e/admin",
+        content=b"encrypted",
+        headers={
+            "ehbp-encapsulated-key": "x",
+            "x-routstr-model": "gpt-4",
+        },
+    )
+    assert response.status_code == 404
 
 
 @pytest.mark.integration

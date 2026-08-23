@@ -102,10 +102,22 @@ async def test_attestation_trailing_slash_routes_directly_to_tinfoil(
     tinfoil.forward_get_request.assert_awaited_once()
 
 
-@pytest.mark.parametrize("path", ["attestation/foo", "attestationjunk"])
+@pytest.mark.parametrize(
+    ("path", "expected_status"),
+    [
+        # Valid `attestation` segment but not the exact attestation route:
+        # fails model validation (empty body -> unknown model) before auth.
+        ("attestation/foo", 400),
+        # Not a known path segment at all: rejected at the edge before routing.
+        ("attestationjunk", 404),
+    ],
+)
 @pytest.mark.asyncio
 async def test_non_attestation_prefix_does_not_bypass_authentication(
-    monkeypatch: pytest.MonkeyPatch, proxy_app: FastAPI, path: str
+    monkeypatch: pytest.MonkeyPatch,
+    proxy_app: FastAPI,
+    path: str,
+    expected_status: int,
 ) -> None:
     tinfoil = MagicMock()
     tinfoil.provider_type = "tinfoil"
@@ -118,8 +130,9 @@ async def test_non_attestation_prefix_does_not_bypass_authentication(
     ) as client:
         response = await client.get(f"/{path}")
 
-    assert response.status_code == 400
-    assert response.json()["error"]["type"] == "invalid_model"
+    assert response.status_code == expected_status
+    if expected_status == 400:
+        assert response.json()["error"]["type"] == "invalid_model"
     tinfoil.forward_get_request.assert_not_awaited()
 
 

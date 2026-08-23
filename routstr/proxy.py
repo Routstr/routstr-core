@@ -236,6 +236,52 @@ _API_PATH_PREFIXES = (
     "attestation",
 )
 
+# Split the allowlist by spelling so bare tokens anchor to a path segment.
+# A slash-terminated prefix ("v1/") is already segment-anchored under
+# startswith. A bare token ("models") must match a whole segment — exactly or
+# followed by "/" — so "modelsdump" / "attestationadmin" cannot slip through.
+_API_SLASH_PREFIXES = tuple(p for p in _API_PATH_PREFIXES if p.endswith("/"))
+_API_BARE_PREFIXES = tuple(p for p in _API_PATH_PREFIXES if not p.endswith("/"))
+
+
+def _is_ambiguously_spelled_path(path: str) -> bool:
+    """Reject paths whose spelling could resolve somewhere the allowlist did not.
+
+    ``{path:path}`` arrives percent-decoded, so a client that sent ``%2e%2e`` or
+    ``%2f`` shows up here as ``..`` / ``/``. Dot segments, backslashes, duplicate
+    or leading separators, NUL bytes, and any residual encoded separator are
+    treated as unsafe: they let a caller walk off the canonical API surface (and
+    onto a sensitive upstream endpoint) even though the literal prefix check
+    would pass. Reject rather than trying to rewrite the path.
+    """
+    if not path or path != path.strip() or path.startswith("/"):
+        return True
+    if "\x00" in path or "\\" in path:
+        return True
+    # A single trailing slash is canonical (e.g. "attestation/"); ignore it,
+    # then no remaining segment may be empty (covers "//") or a dot segment.
+    core = path[:-1] if path.endswith("/") else path
+    if any(segment in ("", ".", "..") for segment in core.split("/")):
+        return True
+    lowered = path.lower()
+    return "%2e" in lowered or "%2f" in lowered or "%5c" in lowered
+
+
+def _forwarding_allowed(path: str, is_ehbp: bool) -> bool:
+    """Gate which paths may reach an upstream at all.
+
+    The provider credential is attached during forwarding, so an unknown path
+    must never be forwarded on the caller's say-so. A path must resolve to a
+    known API prefix; EHBP requests are identified by header and carry their own
+    encrypted contract. Endpoint permission is derived from this allowlist, not
+    from the client-supplied path.
+    """
+    if is_ehbp:
+        return True
+    if path.startswith(_API_SLASH_PREFIXES):
+        return True
+    return any(path == p or path.startswith(p + "/") for p in _API_BARE_PREFIXES)
+
 
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
 async def proxy(
@@ -255,14 +301,17 @@ async def proxy(
 async def _proxy(
     request: Request, path: str, session: AsyncSession
 ) -> Response | StreamingResponse:
-    # GET requests must hit a known API prefix; otherwise return a 404 (HTML
-    # for browsers, JSON for API clients). POST requests are always forwarded
-    # so that OpenAI-style endpoints work with or without the `v1/` prefix
-    # (e.g. `/chat/completions` as well as `/v1/chat/completions`).
-    if request.method == "GET" and not path.startswith(_API_PATH_PREFIXES):
+    # Screen the path before any routing decision: reject ambiguous spellings,
+    # then require a known API prefix so nothing unknown is forwarded with the
+    # provider credential attached.
+    if _is_ambiguously_spelled_path(path):
         return build_not_found_response(request, path)
 
     headers = dict(request.headers)
+    is_ehbp = "ehbp-encapsulated-key" in headers
+
+    if not _forwarding_allowed(path, is_ehbp):
+        return build_not_found_response(request, path)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
@@ -272,7 +321,6 @@ async def _proxy(
     # extract the model id, so the SDK sends it in X-Routstr-Model. Forward the
     # raw encrypted body to the upstream's /private/ endpoint and stream the
     # encrypted response back untouched — the SDK's SecureClient decrypts it.
-    is_ehbp = "ehbp-encapsulated-key" in headers
     if is_ehbp:
         request_body_dict = {}
         model_id = headers.get("x-routstr-model", "")
