@@ -323,7 +323,9 @@ export function TemporaryBalances({
                                     )}
                                   </div>
                                   <div className='text-muted-foreground text-xs'>
-                                    {formatBalance(balance.balance)} raw ·{' '}
+                                    {formatBalance(balance.balance)} raw
+                                  </div>
+                                  <div className='text-muted-foreground text-xs'>
                                     {formatBalance(balance.reserved_balance)}{' '}
                                     reserved
                                   </div>
@@ -404,11 +406,13 @@ export function TemporaryBalances({
                                   )}
                             </p>
                             {!isChild && (
-                              <p className='text-muted-foreground text-xs'>
-                                {formatBalance(balance.balance)} raw ·{' '}
-                                {formatBalance(balance.reserved_balance)}{' '}
-                                reserved
-                              </p>
+                              <div className='text-muted-foreground text-xs'>
+                                <p>{formatBalance(balance.balance)} raw</p>
+                                <p>
+                                  {formatBalance(balance.reserved_balance)}{' '}
+                                  reserved
+                                </p>
+                              </div>
                             )}
                           </div>
                           <div>

@@ -160,14 +160,14 @@ async def test_revert_with_zero_reserved_balance_repairs_terminally(
     result = await revert_pay_for_request(test_key, integration_session, 100)
 
     integration_session.expunge_all()
-    test_key = await integration_session.get(ApiKey, unique_key)
-    assert test_key is not None
+    updated = await integration_session.get(ApiKey, unique_key)
+    assert updated is not None
 
     assert result is True, "Revert must terminalize the corrupt reservation"
-    assert test_key.reserved_balance == 0, (
-        f"Reserved balance should remain 0, got: {test_key.reserved_balance}"
+    assert updated.reserved_balance == 0, (
+        f"Reserved balance should remain 0, got: {updated.reserved_balance}"
     )
-    assert test_key.total_requests == 0
+    assert updated.total_requests == 0
 
 
 @pytest.mark.asyncio
@@ -203,12 +203,12 @@ async def test_child_corrupt_revert_clamps_zero_request_counts(
     assert await revert_pay_for_request(child, integration_session, 500, snapshot)
 
     integration_session.expunge_all()
-    parent = await integration_session.get(ApiKey, snapshot.billing_key_hash)
-    child = await integration_session.get(ApiKey, snapshot.key_hash)
+    parent_row = await integration_session.get(ApiKey, snapshot.billing_key_hash)
+    child_row = await integration_session.get(ApiKey, snapshot.key_hash)
     release = await integration_session.get(ReservationRelease, snapshot.release_id)
-    assert parent is not None and child is not None
-    assert (parent.total_requests, child.total_requests) == (0, 0)
-    assert (parent.reserved_balance, child.reserved_balance) == (500, 0)
+    assert parent_row is not None and child_row is not None
+    assert (parent_row.total_requests, child_row.total_requests) == (0, 0)
+    assert (parent_row.reserved_balance, child_row.reserved_balance) == (500, 0)
     assert release is not None and release.status == "released"
 
 
@@ -271,14 +271,14 @@ async def test_revert_partial_reserved_balance_repairs_terminally(
     result = await revert_pay_for_request(test_key, integration_session, 500)
 
     integration_session.expunge_all()
-    test_key = await integration_session.get(ApiKey, unique_key)
-    assert test_key is not None
+    updated = await integration_session.get(ApiKey, unique_key)
+    assert updated is not None
 
     assert result is True, "Revert must terminalize the corrupt reservation"
-    assert test_key.reserved_balance == 50, (
-        f"Reserved balance should stay at 50, got: {test_key.reserved_balance}"
+    assert updated.reserved_balance == 50, (
+        f"Reserved balance should stay at 50, got: {updated.reserved_balance}"
     )
-    assert test_key.total_requests == 0
+    assert updated.total_requests == 0
 
 
 @pytest.mark.asyncio

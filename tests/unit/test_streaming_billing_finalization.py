@@ -387,7 +387,7 @@ async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> No
             max_cost_for_model=500,
         )
         chunks = [
-            chunk.decode() if isinstance(chunk, bytes) else chunk
+            chunk if isinstance(chunk, str) else bytes(chunk).decode()
             async for chunk in response.body_iterator
         ]
 
