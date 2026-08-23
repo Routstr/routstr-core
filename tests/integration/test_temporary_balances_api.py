@@ -22,6 +22,7 @@ async def _add_key(
     hashed_key: str,
     *,
     balance: int = 0,
+    reserved_balance: int = 0,
     total_spent: int = 0,
     total_requests: int = 0,
     created_at: int | None = None,
@@ -31,6 +32,7 @@ async def _add_key(
     key = ApiKey(
         hashed_key=hashed_key,
         balance=balance,
+        reserved_balance=reserved_balance,
         total_spent=total_spent,
         total_requests=total_requests,
         parent_key_hash=parent_key_hash,
@@ -155,6 +157,41 @@ async def test_temporary_balances_totals_exclude_child_balance(
     assert totals["total_balance"] == 5000
     assert totals["total_spent"] == 300
     assert totals["total_requests"] == 10
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_child_reservations_are_not_double_counted(
+    integration_client: httpx.AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    await _add_key(
+        integration_session,
+        "parent",
+        balance=5_000,
+        reserved_balance=700,
+        created_at=1_000,
+    )
+    await _add_key(
+        integration_session,
+        "child",
+        reserved_balance=700,
+        parent_key_hash="parent",
+        created_at=1_001,
+    )
+
+    response = await integration_client.get(
+        "/admin/api/temporary-balances", headers=_admin_headers()
+    )
+
+    body = response.json()
+    rows = {row["hashed_key"]: row for row in body["balances"]}
+    assert rows["parent"]["available_balance"] == 4_300
+    assert rows["parent"]["reserved_balance"] == 700
+    assert rows["child"]["available_balance"] is None
+    assert rows["child"]["reserved_balance"] == 700
+    assert body["totals"]["total_reserved_balance"] == 700
+    assert body["totals"]["total_available_balance"] == 4_300
 
 
 @pytest.mark.integration

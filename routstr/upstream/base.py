@@ -83,6 +83,24 @@ def _cost_field(
     return value if isinstance(value, (int, float)) else default
 
 
+def _settled_cost_msats(cost_data: CostMetadata) -> int:
+    charged = _cost_field(cost_data, "charged_msats", -1)
+    if charged >= 0:
+        return int(charged)
+    return int(_cost_field(cost_data, "total_msats"))
+
+
+def _published_cost(cost_data: CostMetadata) -> dict[str, Any]:
+    cost = dict(cost_data) if isinstance(cost_data, dict) else cost_data.dict()
+    computed_msats = int(_cost_field(cost_data, "total_msats"))
+    settled_msats = _settled_cost_msats(cost_data)
+    if computed_msats != settled_msats:
+        cost["computed_msats"] = computed_msats
+    cost["total_msats"] = settled_msats
+    cost["charged_msats"] = settled_msats
+    return cost
+
+
 def _inject_cost_response_headers(
     headers: dict[str, str], cost_data: CostMetadata
 ) -> None:
@@ -93,9 +111,11 @@ def _inject_cost_response_headers(
     usage tracking entry — without them, x-cashu requests show 0.0 for all
     sat cost fields.
     """
-    headers["X-Routstr-Cost-Msats"] = str(
-        int(_cost_field(cost_data, "total_msats"))
-    )
+    settled_msats = _settled_cost_msats(cost_data)
+    computed_msats = int(_cost_field(cost_data, "total_msats"))
+    headers["X-Routstr-Cost-Msats"] = str(settled_msats)
+    if computed_msats != settled_msats:
+        headers["X-Routstr-Computed-Cost-Msats"] = str(computed_msats)
     headers["X-Routstr-Input-Cost-Msats"] = str(
         int(_cost_field(cost_data, "input_msats"))
     )
@@ -122,11 +142,14 @@ def _inject_cost_into_usage(response_json: dict, cost_data: CostMetadata) -> Non
     # data always overwrites any upstream-provided cost values. Using
     # setdefault would silently keep stale upstream values and drop our
     # calculated msats breakdown.
+    computed_msats = int(_cost_field(cost_data, "total_msats"))
+    settled_msats = _settled_cost_msats(cost_data)
     cost_obj: dict[str, int | float] = {
         "base_msats": int(_cost_field(cost_data, "base_msats")),
         "input_msats": int(_cost_field(cost_data, "input_msats")),
         "output_msats": int(_cost_field(cost_data, "output_msats")),
-        "total_msats": int(_cost_field(cost_data, "total_msats")),
+        "total_msats": settled_msats,
+        "charged_msats": settled_msats,
         "cache_read_input_tokens": int(
             _cost_field(cost_data, "cache_read_input_tokens")
         ),
@@ -134,15 +157,15 @@ def _inject_cost_into_usage(response_json: dict, cost_data: CostMetadata) -> Non
             _cost_field(cost_data, "cache_creation_input_tokens")
         ),
         "cache_read_msats": int(_cost_field(cost_data, "cache_read_msats")),
-        "cache_creation_msats": int(
-            _cost_field(cost_data, "cache_creation_msats")
-        ),
+        "cache_creation_msats": int(_cost_field(cost_data, "cache_creation_msats")),
     }
+    if computed_msats != settled_msats:
+        cost_obj["computed_msats"] = computed_msats
     total_usd = float(_cost_field(cost_data, "total_usd", 0.0))
     if total_usd:
         cost_obj["total_usd"] = total_usd
     usage["cost"] = cost_obj
-    usage["cost_sats"] = int(_cost_field(cost_data, "total_msats")) // 1000
+    usage["cost_sats"] = settled_msats // 1000
 
 
 def _is_json_content_type(content_type: str | None) -> bool:
@@ -349,14 +372,8 @@ class BaseUpstreamProvider:
     ) -> None:
         """Unifies the injection of cost and usage metadata across all completion types."""
         self._apply_provider_field(response_json)
-        if isinstance(cost_data, dict):
-            total_msats = cost_data.get("total_msats", 0)
-            cost_dict = cost_data
-        else:
-            total_msats = cost_data.total_msats
-            cost_dict = cost_data.dict()
-
-        sats_cost = total_msats // 1000
+        cost_dict = _published_cost(cost_data)
+        sats_cost = cost_dict["total_msats"] // 1000
 
         # Inject the shared SDK cost contract into every usage shape.
         if isinstance(response_json.get("usage"), dict):
@@ -369,6 +386,14 @@ class BaseUpstreamProvider:
             _inject_cost_into_usage(message, cost_data)
             message["usage"]["remaining_balance_msats"] = key.balance
             self._fold_cache_into_input_tokens(message["usage"])
+
+        nested_response = response_json.get("response")
+        if isinstance(nested_response, dict) and isinstance(
+            nested_response.get("usage"), dict
+        ):
+            _inject_cost_into_usage(nested_response, cost_data)
+            nested_response["usage"]["remaining_balance_msats"] = key.balance
+            self._fold_cache_into_input_tokens(nested_response["usage"])
 
         # Unified Routstr metadata
         response_json["metadata"] = response_json.get("metadata", {})
@@ -1307,18 +1332,12 @@ class BaseUpstreamProvider:
                 )
                 self._fold_cache_into_input_tokens(response_json["usage"])
 
-            # Keep detailed cost
+            published_cost = _published_cost(cost_data)
+            published_cost["sats_cost"] = published_cost["total_msats"] // 1000
+            published_cost["remaining_balance_msats"] = remaining_balance_msats
             response_json["metadata"] = response_json.get("metadata", {})
-            response_json["metadata"]["routstr"] = {"cost": cost_data}
-            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
-                cost_data.get("total_msats", 0) // 1000
-            )
-            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
-                remaining_balance_msats
-            )
-            response_json["cost"] = cost_data
-            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
-            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
+            response_json["metadata"]["routstr"] = {"cost": published_cost.copy()}
+            response_json["cost"] = published_cost
 
             logger.debug(
                 "Payment adjustment completed for non-streaming",
@@ -1609,24 +1628,6 @@ class BaseUpstreamProvider:
                                 },
                             }
 
-                        remaining_balance_msats = fresh_key.balance
-                        sats_cost = cost_data.get("total_msats", 0) // 1000
-
-                        if (
-                            "response" in usage_chunk_data
-                            and isinstance(usage_chunk_data["response"], dict)
-                            and "usage" in usage_chunk_data["response"]
-                        ):
-                            usage_chunk_data["response"]["usage"]["cost"] = (
-                                cost_data.get("total_usd", 0.0)
-                            )
-                            usage_chunk_data["response"]["usage"]["cost_sats"] = (
-                                sats_cost
-                            )
-                            usage_chunk_data["response"]["usage"][
-                                "remaining_balance_msats"
-                            ] = remaining_balance_msats
-
                         try:
                             self.inject_cost_metadata(
                                 usage_chunk_data, cost_data, fresh_key
@@ -1742,18 +1743,12 @@ class BaseUpstreamProvider:
                 )
                 self._fold_cache_into_input_tokens(response_json["usage"])
 
-            # Keep detailed cost
+            published_cost = _published_cost(cost_data)
+            published_cost["sats_cost"] = published_cost["total_msats"] // 1000
+            published_cost["remaining_balance_msats"] = remaining_balance_msats
             response_json["metadata"] = response_json.get("metadata", {})
-            response_json["metadata"]["routstr"] = {"cost": cost_data}
-            response_json["metadata"]["routstr"]["cost"]["sats_cost"] = (
-                cost_data.get("total_msats", 0) // 1000
-            )
-            response_json["metadata"]["routstr"]["cost"]["remaining_balance_msats"] = (
-                remaining_balance_msats
-            )
-            response_json["cost"] = cost_data
-            response_json["cost"]["sats_cost"] = cost_data.get("total_msats", 0) // 1000
-            response_json["cost"]["remaining_balance_msats"] = remaining_balance_msats
+            response_json["metadata"]["routstr"] = {"cost": published_cost.copy()}
+            response_json["cost"] = published_cost
 
             logger.debug(
                 "Payment adjustment completed for non-streaming Responses API",
@@ -2747,9 +2742,7 @@ class BaseUpstreamProvider:
                     event_type = str(event.get("type") or "")
                     prefix = f"event: {event_type}\n" if event_type else ""
                     buffered[index] = annotated._replace(
-                        sse_bytes=(
-                            f"{prefix}data: {json.dumps(event)}\n\n".encode()
-                        )
+                        sse_bytes=(f"{prefix}data: {json.dumps(event)}\n\n".encode())
                     )
 
         async def replay() -> AsyncGenerator[bytes, None]:
@@ -3822,11 +3815,7 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if (
-                        cost_data
-                        and "usage" in data_json
-                        and data_json["usage"]
-                    ):
+                    if cost_data and "usage" in data_json and data_json["usage"]:
                         _inject_cost_into_usage(data_json, cost_data)
                         changed = True
                     if changed:
@@ -4811,11 +4800,7 @@ class BaseUpstreamProvider:
                     if "provider" not in data_json:
                         self._apply_provider_field(data_json)
                         changed = True
-                    if (
-                        cost_data
-                        and "usage" in data_json
-                        and data_json["usage"]
-                    ):
+                    if cost_data and "usage" in data_json and data_json["usage"]:
                         _inject_cost_into_usage(data_json, cost_data)
                         changed = True
                     if changed:

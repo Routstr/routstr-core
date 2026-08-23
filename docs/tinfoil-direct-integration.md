@@ -438,13 +438,18 @@ Routstr returns cost info as response headers:
 
 | Header | Auth | Description |
 |---|---|---|
-| `X-Routstr-Cost-Msats` | Bearer, X-Cashu | Total msats charged for this request |
-| `X-Routstr-Cost-Usd` | Bearer | USD equivalent of the charge |
+| `X-Routstr-Cost-Msats` | Bearer, X-Cashu | Settled msats debited for this request |
+| `X-Routstr-Computed-Cost-Msats` | Bearer, X-Cashu | Computed usage cost, emitted when it differs from the settled debit |
+| `X-Routstr-Cost-Usd` | Bearer | USD equivalent of the computed usage |
 | `X-Routstr-Input-Cost-Msats` | Bearer, X-Cashu | msats attributed to input tokens |
 | `X-Routstr-Output-Cost-Msats` | Bearer, X-Cashu | msats attributed to output tokens |
 
 The client/Tinfoil SDK can read these headers from the HTTP response without
-needing to decrypt the body.
+needing to decrypt the body. A duplicate or rejected finalization can therefore
+report a zero settled debit while preserving the non-zero computed usage cost.
+Normal JSON responses use the same contract: `total_msats` and `charged_msats`
+are settled values, while `computed_msats` retains the usage calculation when
+it differs.
 
 ### Setup
 

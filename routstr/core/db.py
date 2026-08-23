@@ -171,6 +171,55 @@ async def reset_all_reserved_balances(session: AsyncSession) -> None:
     logger.info("Reset reserved balances on startup")
 
 
+async def _transition_stale_reservation(
+    session: AsyncSession, reservation_id: str, cutoff: int
+) -> bool:
+    """Mark one reservation released iff its lease is still older than cutoff.
+
+    ``created_at`` doubles as the heartbeat lease timestamp, so the guard must
+    be part of this update: a reservation renewed between the sweeper's select
+    and this transition is in flight and must survive.
+    """
+    transition = await session.exec(  # type: ignore[call-overload]
+        update(ReservationRelease)
+        .where(col(ReservationRelease.id) == reservation_id)
+        .where(col(ReservationRelease.status) == "active")
+        .where(col(ReservationRelease.created_at) < cutoff)
+        .values(status="released")
+    )
+    return bool(transition.rowcount == 1)
+
+
+async def _release_legacy_aggregate(
+    session: AsyncSession,
+    key_hash: str,
+    observed_reserved: int,
+    observed_reserved_at: int | None,
+) -> bool:
+    """Zero one legacy aggregate reservation iff it is exactly as observed.
+
+    A new reservation committing between the sweeper's read and this update
+    changes ``reserved_balance``/``reserved_at`` in the same transaction that
+    creates its durable row, so this compare-and-swap fails instead of erasing
+    the newcomer's reserved funds.
+    """
+    if observed_reserved <= 0:
+        return False
+    reserved_at_guard = (
+        col(ApiKey.reserved_at).is_(None)
+        if observed_reserved_at is None
+        else col(ApiKey.reserved_at) == observed_reserved_at
+    )
+    result = await session.exec(  # type: ignore[call-overload]
+        update(ApiKey)
+        .where(col(ApiKey.hashed_key) == key_hash)
+        .where(col(ApiKey.reserved_balance) == observed_reserved)
+        .where(reserved_at_guard)
+        .values(reserved_balance=0, reserved_at=None)
+    )
+    return bool(result.rowcount == 1)
+
+
 async def release_stale_reservations(
     session: AsyncSession,
     max_age_seconds: int,
@@ -191,25 +240,22 @@ async def release_stale_reservations(
                 col(ReservationRelease.billing_key_hash) == key_hash,
             )
         )
-    reservations = (await session.exec(query)).all()
+    # Capture primitives: a repair rollback below would expire ORM instances.
+    reservation_rows = [
+        (r.id, r.key_hash, r.billing_key_hash, r.reserved_msats)
+        for r in (await session.exec(query)).all()
+    ]
     released = 0
 
-    for reservation in reservations:
-        transition = await session.exec(  # type: ignore[call-overload]
-            update(ReservationRelease)
-            .where(col(ReservationRelease.id) == reservation.id)
-            .where(col(ReservationRelease.status) == "active")
-            .values(status="released")
-        )
-        if transition.rowcount != 1:
+    for res_id, res_key_hash, res_billing_hash, res_msats in reservation_rows:
+        if not await _transition_stale_reservation(session, res_id, cutoff):
             continue
 
         values = {
-            "reserved_balance": col(ApiKey.reserved_balance)
-            - reservation.reserved_msats,
+            "reserved_balance": col(ApiKey.reserved_balance) - res_msats,
             "reserved_at": case(
                 (
-                    col(ApiKey.reserved_balance) - reservation.reserved_msats > 0,
+                    col(ApiKey.reserved_balance) - res_msats > 0,
                     col(ApiKey.reserved_at),
                 ),
                 else_=None,
@@ -217,24 +263,42 @@ async def release_stale_reservations(
         }
         parent_result = await session.exec(  # type: ignore[call-overload]
             update(ApiKey)
-            .where(col(ApiKey.hashed_key) == reservation.billing_key_hash)
-            .where(col(ApiKey.reserved_balance) >= reservation.reserved_msats)
+            .where(col(ApiKey.hashed_key) == res_billing_hash)
+            .where(col(ApiKey.reserved_balance) >= res_msats)
             .values(**values)
         )
-        if parent_result.rowcount != 1:
-            await session.rollback()
-            return 0
-
-        if reservation.billing_key_hash != reservation.key_hash:
+        aggregates_ok = parent_result.rowcount == 1
+        if aggregates_ok and res_billing_hash != res_key_hash:
             child_result = await session.exec(  # type: ignore[call-overload]
                 update(ApiKey)
-                .where(col(ApiKey.hashed_key) == reservation.key_hash)
-                .where(col(ApiKey.reserved_balance) >= reservation.reserved_msats)
+                .where(col(ApiKey.hashed_key) == res_key_hash)
+                .where(col(ApiKey.reserved_balance) >= res_msats)
                 .values(**values)
             )
-            if child_result.rowcount != 1:
-                await session.rollback()
-                return 0
+            aggregates_ok = child_result.rowcount == 1
+
+        if not aggregates_ok:
+            # The aggregates no longer hold this reservation's msats — the
+            # durable row is corrupt. Repair by terminalizing it WITHOUT
+            # subtracting uncertain aggregates (legacy cleanup below reconciles
+            # any stale remainder) and keep sweeping the rest of the batch:
+            # one corrupt row must not poison all stale cleanup.
+            await session.rollback()
+            if await _transition_stale_reservation(session, res_id, cutoff):
+                await session.commit()
+                released += 1
+                logger.error(
+                    "Released corrupt stale reservation without aggregate subtraction",
+                    extra={
+                        "reservation_id": res_id,
+                        "billing_key_hash": res_billing_hash[:8] + "...",
+                        "reserved_msats": res_msats,
+                    },
+                )
+            continue
+        # Commit each release on its own so a later corrupt record's rollback
+        # cannot discard the healthy releases already processed in this batch.
+        await session.commit()
         released += 1
 
     # Rolling upgrades can leave aggregate reservations created before durable
@@ -256,6 +320,8 @@ async def release_stale_reservations(
         )
 
     for legacy_key in (await session.exec(legacy_query)).all():
+        observed_reserved = legacy_key.reserved_balance
+        observed_reserved_at = legacy_key.reserved_at
         active_owner = (
             await session.exec(
                 select(ReservationRelease.id)
@@ -272,10 +338,10 @@ async def release_stale_reservations(
         ).first()
         if active_owner is not None:
             continue
-        legacy_key.reserved_balance = 0
-        legacy_key.reserved_at = None
-        session.add(legacy_key)
-        released += 1
+        if await _release_legacy_aggregate(
+            session, legacy_key.hashed_key, observed_reserved, observed_reserved_at
+        ):
+            released += 1
 
     await session.commit()
     if released:

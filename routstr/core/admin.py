@@ -69,7 +69,9 @@ async def require_admin_api(request: Request) -> None:
     async with create_session() as session:
         result = await session.exec(select(CliToken).where(CliToken.token == token))
         cli_token = result.first()
-        if cli_token and (cli_token.expires_at is None or cli_token.expires_at > now_ts):
+        if cli_token and (
+            cli_token.expires_at is None or cli_token.expires_at > now_ts
+        ):
             cli_token.last_used_at = now_ts
             session.add(cli_token)
             await session.commit()
@@ -107,7 +109,7 @@ async def get_temporary_balances_api(
         # Aggregate totals across the whole (search-filtered) set, not just the
         # current page. Balance counts only parent (non-child) keys to avoid
         # double-counting, since child keys draw from their parent's balance.
-        totals_result = await session.exec(
+        balance_totals_result = await session.exec(
             select(
                 func.coalesce(
                     func.sum(
@@ -118,11 +120,44 @@ async def get_temporary_balances_api(
                     ),
                     0,
                 ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                col(ApiKey.parent_key_hash).is_(None),
+                                ApiKey.reserved_balance,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                col(ApiKey.parent_key_hash).is_(None),
+                                col(ApiKey.balance) - col(ApiKey.reserved_balance),
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            ).where(*filters)
+        )
+        (
+            total_balance,
+            total_reserved_balance,
+            total_available_balance,
+        ) = balance_totals_result.one()
+        usage_totals_result = await session.exec(
+            select(
                 func.coalesce(func.sum(ApiKey.total_spent), 0),
                 func.coalesce(func.sum(ApiKey.total_requests), 0),
             ).where(*filters)
         )
-        total_balance, total_spent, total_requests = totals_result.one()
+        total_spent, total_requests = usage_totals_result.one()
 
         # Latest created first; keys with no created_at (legacy rows) sort last.
         # Use an explicit CASE rather than relying on dialect NULL-ordering so
@@ -143,6 +178,10 @@ async def get_temporary_balances_api(
             {
                 "hashed_key": key.hashed_key,
                 "balance": key.balance,
+                "reserved_balance": key.reserved_balance,
+                "available_balance": (
+                    key.total_balance if key.parent_key_hash is None else None
+                ),
                 "total_spent": key.total_spent,
                 "total_requests": key.total_requests,
                 "refund_address": key.refund_address,
@@ -158,6 +197,8 @@ async def get_temporary_balances_api(
         "total": total,
         "totals": {
             "total_balance": total_balance,
+            "total_reserved_balance": total_reserved_balance,
+            "total_available_balance": total_available_balance,
             "total_spent": total_spent,
             "total_requests": total_requests,
         },
@@ -256,16 +297,12 @@ async def update_password(request: Request, password_update: PasswordUpdate) -> 
         secret = await get_secret(session)
 
         if not secret.admin_password_hash:
-            raise HTTPException(
-                status_code=500, detail="Admin password not configured"
-            )
+            raise HTTPException(status_code=500, detail="Admin password not configured")
 
         if not vault.verify_password(
             password_update.current_password, secret.admin_password_hash
         ):
-            raise HTTPException(
-                status_code=401, detail="Current password is incorrect"
-            )
+            raise HTTPException(status_code=401, detail="Current password is incorrect")
 
         # Validate new password
         new_password = password_update.new_password.strip()
@@ -883,9 +920,7 @@ async def _active_ppq_claim_in_session(session: AsyncSession, provider_id: int) 
     return claim is not None and not claim.collected and not claim.swept
 
 
-def _require_valid_ppq_auto_topup(
-    provider_type: str, settings: dict | None
-) -> None:
+def _require_valid_ppq_auto_topup(provider_type: str, settings: dict | None) -> None:
     """Reject PPQ auto top-up settings the worker would later refuse."""
     if provider_type != "ppqai":
         return
@@ -1017,9 +1052,7 @@ async def create_upstream_provider(
         else:
             slug = await allocate_unique_provider_slug(session, payload.provider_type)
 
-        _require_valid_ppq_auto_topup(
-            payload.provider_type, payload.provider_settings
-        )
+        _require_valid_ppq_auto_topup(payload.provider_type, payload.provider_settings)
 
         provider = UpstreamProviderRow(
             slug=slug,
@@ -1078,9 +1111,7 @@ async def update_upstream_provider_by_slug(
     lookup = _validate_slug(payload.slug)
     async with create_session() as session:
         result = await session.exec(
-            select(UpstreamProviderRow).where(
-                UpstreamProviderRow.slug == lookup
-            )
+            select(UpstreamProviderRow).where(UpstreamProviderRow.slug == lookup)
         )
         provider = result.first()
         if not provider:
@@ -1910,9 +1941,7 @@ async def get_transactions_api(
         }
 
 
-@admin_router.get(
-    "/api/lightning-invoices", dependencies=[Depends(require_admin_api)]
-)
+@admin_router.get("/api/lightning-invoices", dependencies=[Depends(require_admin_api)])
 async def get_lightning_invoices_api(
     status: str | None = None,
     purpose: str | None = None,
