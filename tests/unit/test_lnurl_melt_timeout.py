@@ -22,10 +22,16 @@ LNURL_DATA = {
 }
 
 
+# 1000 sat minus the 11 sat estimated fee reserve.
+QUOTE_AMOUNT_SAT = 989
+
+
 def _wallet() -> tuple[MagicMock, list[MagicMock]]:
     proofs = [MagicMock(amount=1000)]
     wallet = MagicMock(url="https://mint.test")
-    wallet.melt_quote = AsyncMock(return_value=MagicMock(fee_reserve=1, quote="q"))
+    wallet.melt_quote = AsyncMock(
+        return_value=MagicMock(fee_reserve=1, quote="q", amount=QUOTE_AMOUNT_SAT)
+    )
     wallet.select_to_send = AsyncMock(return_value=(proofs, None))
     return wallet, proofs
 

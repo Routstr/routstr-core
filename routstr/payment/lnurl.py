@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import math
 from collections.abc import Awaitable, Callable
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import httpx
 from cashu.core.base import MeltQuoteState
@@ -40,6 +41,70 @@ class MeltOutcomeAmbiguousError(LNURLError):
     settle, so debits backing it must be kept until reconciliation confirms
     the true outcome.
     """
+
+
+_MAX_LNURL_REDIRECTS = 3
+_NON_PUBLIC_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+def _require_public_https_destination(url: httpx.URL) -> None:
+    """Reject anything that is not a public HTTPS endpoint.
+
+    LNURL destinations and their redirect targets are attacker-influenced, so
+    every hop has to be re-checked: a single ``https://`` origin says nothing
+    about where a 302 points.
+    """
+    if url.scheme != "https":
+        raise LNURLError("LNURL destination must be an HTTPS URL")
+
+    host = (url.host or "").rstrip(".").lower()
+    if not host:
+        raise LNURLError("LNURL destination has no host")
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if host == "localhost" or host.endswith(_NON_PUBLIC_HOST_SUFFIXES):
+            raise LNURLError("LNURL destination is not a public host") from None
+        return
+
+    if not address.is_global:
+        raise LNURLError("LNURL destination is not a public host")
+
+
+async def _fetch_lnurl_json(
+    url: str, params: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """GET an LNURL endpoint, validating the destination at every redirect.
+
+    Response bodies are never echoed: an LNURL service is untrusted, and its
+    payload would otherwise reach operator logs through raised errors.
+    """
+    try:
+        target = httpx.URL(url, params=params) if params else httpx.URL(url)
+    except httpx.InvalidURL as e:
+        raise LNURLError("LNURL destination is not a usable URL") from e
+    _require_public_https_destination(target)
+
+    async with httpx.AsyncClient() as client:
+        for _ in range(_MAX_LNURL_REDIRECTS + 1):
+            response = await client.get(target, follow_redirects=False, timeout=10)
+            if not response.is_redirect:
+                break
+            target = target.join(response.headers.get("location", ""))
+            _require_public_https_destination(target)
+        else:
+            raise LNURLError("LNURL destination exceeded the redirect limit")
+        response.raise_for_status()
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise LNURLError("LNURL response was not valid JSON") from e
+
+    if not isinstance(data, dict):
+        raise LNURLError("LNURL response was not a JSON object")
+    return data
 
 
 async def decode_lnurl(lnurl: str) -> str:
@@ -111,26 +176,29 @@ async def get_lnurl_data(lnurl: str) -> LNURLData:
         httpx.HTTPError: If the HTTP request fails
     """
     url = await decode_lnurl(lnurl)
-
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, follow_redirects=True, timeout=10)
-        response.raise_for_status()
-
-    lnurl_data = response.json()
+    lnurl_data = await _fetch_lnurl_json(url)
 
     # Validate payRequest data
     if lnurl_data.get("tag") != "payRequest":
-        raise LNURLError(
-            f"Invalid LNURL tag: expected 'payRequest', got '{lnurl_data.get('tag')}'"
-        )
+        raise LNURLError("Invalid LNURL tag: expected 'payRequest'")
 
-    if not isinstance(lnurl_data.get("callback"), str):
+    callback_url = lnurl_data.get("callback")
+    if not isinstance(callback_url, str):
         raise LNURLError("Invalid LNURL payRequest: missing callback URL")
+    try:
+        _require_public_https_destination(httpx.URL(callback_url))
+    except httpx.InvalidURL as e:
+        raise LNURLError("Invalid LNURL callback URL") from e
+
+    min_sendable = lnurl_data.get("minSendable", 1000)  # Default 1 sat
+    max_sendable = lnurl_data.get("maxSendable", 1000000000)  # Default 1000 BTC
+    if not isinstance(min_sendable, int) or not isinstance(max_sendable, int):
+        raise LNURLError("Invalid LNURL payRequest: non-integer sendable limits")
 
     return LNURLData(
-        callback_url=lnurl_data["callback"],
-        min_sendable=lnurl_data.get("minSendable", 1000),  # Default 1 sat
-        max_sendable=lnurl_data.get("maxSendable", 1000000000),  # Default 1000 BTC
+        callback_url=callback_url,
+        min_sendable=min_sendable,
+        max_sendable=max_sendable,
     )
 
 
@@ -150,22 +218,10 @@ async def get_lnurl_invoice(
         LNURLError: If the response is invalid
         httpx.HTTPError: If the HTTP request fails
     """
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            callback_url,
-            params={"amount": amount_msat},
-            follow_redirects=True,
-            timeout=10,
-        )
-        response.raise_for_status()
+    invoice_data = await _fetch_lnurl_json(callback_url, params={"amount": amount_msat})
 
-    invoice_data = response.json()
-
-    if "pr" not in invoice_data:
-        # Check if there's an error in the response
-        if "reason" in invoice_data:
-            raise LNURLError(f"LNURL error: {invoice_data['reason']}")
-        raise LNURLError(f"Invalid LNURL invoice response: {invoice_data}")
+    if not isinstance(invoice_data.get("pr"), str):
+        raise LNURLError("LNURL callback returned no invoice")
 
     return invoice_data["pr"], invoice_data
 
@@ -201,12 +257,11 @@ async def raw_send_to_lnurl(
         # Send USD to Lightning Address
         paid = await wallet.send_to_lnurl("user@getalby.com", 50, unit="usd")
     """
-    total_balance = sum(proof.amount for proof in proofs)
-    if amount and total_balance < amount:
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        raise ValueError("A positive integer amount is required to send to an LNURL.")
+    if sum(proof.amount for proof in proofs) < amount:
         raise ValueError("Amount to send is higher than available proofs.")
-    else:
-        assert isinstance(amount, int)
-        total_balance = amount
+    total_balance = amount
     lnurl_data = await get_lnurl_data(lnurl)
 
     if unit == "sat":
@@ -240,11 +295,22 @@ async def raw_send_to_lnurl(
         mint_url=str(wallet.url),
     )
 
+    # The invoice comes from the LNURL service, so its amount is untrusted. The
+    # melt quote is the mint's own reading of it, and it must match what we
+    # asked to send. Checked before the checkpoint and before reserving, so a
+    # mismatch leaves no durable state and no locked proofs behind.
+    quoted_amount = int(melt_quote_resp.amount)
+    expected_amount = final_amount // 1000 if unit == "sat" else final_amount
+    if quoted_amount != expected_amount:
+        raise LNURLError(
+            f"LNURL invoice amount does not match the requested amount "
+            f"(quoted {quoted_amount} {unit}, expected {expected_amount} {unit})"
+        )
+
     if on_melt_quote is not None:
         await on_melt_quote(melt_quote_resp.quote)
 
-    if amount:
-        proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
+    proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
 
     try:
         melt_response = await run_mint_operation(
