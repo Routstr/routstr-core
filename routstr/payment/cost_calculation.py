@@ -69,6 +69,30 @@ def _empty_cost(cls: type[CostData] = CostData) -> CostData:
     )
 
 
+def _unmeasured_cost(max_cost: int) -> MaxCostData:
+    """Build the bounded fallback for a response whose usage cannot be measured.
+
+    Missing usage must NOT settle at zero — that hands out free inference. The
+    request was authorized up to ``max_cost`` (the reservation), so the safe,
+    bounded settlement is to charge exactly that. Token components stay zero
+    because they are genuinely unknown; ``total_msats`` carries the authorized
+    max so max-cost finalization debits the reservation instead of nothing.
+    """
+    return MaxCostData(
+        base_msats=0,
+        input_msats=0,
+        output_msats=0,
+        total_msats=max(0, max_cost),
+        total_usd=0.0,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_input_tokens=0,
+        cache_creation_input_tokens=0,
+        cache_read_msats=0,
+        cache_creation_msats=0,
+    )
+
+
 async def calculate_cost(
     response_data: dict,
     max_cost: int,
@@ -109,10 +133,10 @@ async def calculate_cost(
 
     if usage is None:
         logger.warning(
-            "No usage data in response — billing at MaxCostData with zero "
-            "tokens. Dashboard will show this request as `(0+0)`. Most "
-            "common cause: upstream stream did not include a final usage "
-            "chunk (OpenAI-compat backends require "
+            "No usage data in response — settling at the reserved max cost "
+            "(bounded fallback), not zero. Dashboard will show this request "
+            "as `(0+0)` tokens. Most common cause: upstream stream did not "
+            "include a final usage chunk (OpenAI-compat backends require "
             "`stream_options.include_usage=true`).",
             extra={
                 "max_cost_msats": max_cost,
@@ -122,7 +146,7 @@ async def calculate_cost(
                 else None,
             },
         )
-        return _empty_cost(MaxCostData)
+        return _unmeasured_cost(max_cost)
 
     usage_data = response_data.get("usage") or {}
     if not isinstance(usage_data, dict):

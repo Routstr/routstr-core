@@ -1,9 +1,11 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import BackgroundTasks
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
@@ -517,4 +519,88 @@ async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> 
         assert first.reserved_balance == 500
         assert second.reserved_balance == 0
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_midstream_finalizes_and_stops_heartbeat() -> None:
+    """A client that aborts the socket mid-stream must not leak its reservation.
+
+    Starlette closes the response generator (``aclose``) on disconnect, whose
+    ``finally`` schedules the background finalizer. That finalizer must settle
+    the reservation (charge the reserved max — usage is unknown), reach a
+    terminal durable state, and stop the lease heartbeat so the sweeper is not
+    needed. Driven against a real engine and the real finalizer; the socket
+    abort is modelled deterministically with ``aclose`` (the exact hook
+    Starlette invokes) to keep the test CI-stable.
+    """
+    engine = await _engine()
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key", provider_fee=1.0
+    )
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        key = ApiKey(hashed_key="disconnect-key", balance=1_000)
+        session.add(key)
+        await session.commit()
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
+
+    assert snapshot.release_id in auth_module._reservation_heartbeats
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        # A live stream that never sends a usage chunk or [DONE]; the client
+        # disconnects after the first delta.
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":" there"}}]}\n\n'
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+
+    background_tasks = BackgroundTasks()
+    try:
+        with (
+            patch(
+                "routstr.upstream.base.create_session",
+                side_effect=lambda: AsyncSession(engine, expire_on_commit=False),
+            ),
+            patch(
+                "routstr.upstream.base.adjust_payment_for_tokens",
+                auth_module.adjust_payment_for_tokens,
+            ),
+        ):
+            response = await provider.handle_streaming_chat_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                background_tasks=background_tasks,
+                reservation_snapshot=snapshot,
+            )
+            iterator = cast(
+                AsyncGenerator[bytes, None], response.body_iterator
+            )
+            await iterator.__anext__()  # first chunk reaches the client
+            await iterator.aclose()  # client aborts the socket here
+
+            # Starlette runs the response's background tasks after the abort.
+            for task in background_tasks.tasks:
+                await task()
+    finally:
+        await auth_module._stop_reservation_heartbeat(snapshot.release_id)
+
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        final_key = await session.get(ApiKey, "disconnect-key")
+        record = await session.get(ReservationRelease, snapshot.release_id)
+
+    assert final_key is not None
+    # The reservation reached a single terminal outcome; funds are not locked.
+    assert record is not None and record.status in {"charged", "released"}
+    assert final_key.reserved_balance == 0
+    # Unknown usage settles at the reserved max, never free.
+    assert final_key.total_spent == 500
+    assert final_key.balance == 500
+    # The heartbeat is gone — no forever-renewing task on an abandoned request.
+    assert snapshot.release_id not in auth_module._reservation_heartbeats
     await engine.dispose()

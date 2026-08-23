@@ -92,6 +92,47 @@ async def test_overrun_with_corrupted_aggregate_releases_without_charging(
 
 
 @pytest.mark.asyncio
+async def test_missing_usage_settles_at_reservation_not_zero(
+    integration_session: AsyncSession,
+) -> None:
+    """A response with no usable usage data must settle at the reserved max
+    cost (bounded fallback), never at zero — otherwise the request is free
+    inference. Exercises the REAL calculate_cost, no patching."""
+    from routstr.auth import (
+        adjust_payment_for_tokens,
+        get_reservation_snapshot,
+        pay_for_request,
+    )
+
+    reserved = 4_000
+    key = _make_key(balance=10_000, reserved=0)
+    key_hash = key.hashed_key
+    integration_session.add(key)
+    await integration_session.commit()
+    await pay_for_request(key, reserved, integration_session)
+    reservation = await get_reservation_snapshot(key, integration_session)
+
+    # No `usage` key at all — the upstream stream dropped its final usage chunk.
+    response_data = {"model": "test-model"}
+    result = await adjust_payment_for_tokens(
+        key,
+        response_data,
+        integration_session,
+        reserved,
+        reservation_snapshot=reservation,
+    )
+
+    # Charged the authorized max, not zero.
+    assert result["charged_msats"] == reserved
+    integration_session.expunge_all()
+    key_row = await integration_session.get(ApiKey, key_hash)
+    assert key_row is not None
+    assert key_row.total_spent == reserved, "missing usage must not be free"
+    assert key_row.balance == 10_000 - reserved
+    assert key_row.reserved_balance == 0
+
+
+@pytest.mark.asyncio
 async def test_free_response_path_closed_end_to_end(
     integration_session: AsyncSession,
     patched_db_engine: None,
