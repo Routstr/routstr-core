@@ -46,8 +46,8 @@ async def test_openai_cache_subtraction() -> None:
             "completion_tokens": 100,
             "prompt_tokens_details": {
                 "cached_tokens": 1000  # ← Extracted separately
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -70,7 +70,7 @@ async def test_anthropic_cache_additive(mock_fixed_pricing: None) -> None:
             "output_tokens": 100,
             "cache_creation_input_tokens": 1500,  # ← Additive, not included above
             "cache_read_input_tokens": 0,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -94,8 +94,8 @@ async def test_cache_read_exceeds_prompt_tokens(mock_fixed_pricing: None) -> Non
             "completion_tokens": 50,
             "prompt_tokens_details": {
                 "cached_tokens": 150  # ← Invalid! Greater than prompt
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -120,8 +120,8 @@ async def test_malformed_cache_tokens_coerce_to_zero(mock_fixed_pricing: None) -
             "cache_read_input_tokens": "-50",  # ← String, negative
             "prompt_tokens_details": {
                 "cached_tokens": "invalid"  # ← Non-numeric string
-            }
-        }
+            },
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -143,7 +143,7 @@ async def test_anthropic_cache_not_subtracted(mock_fixed_pricing: None) -> None:
             "input_tokens": 500,
             "completion_tokens": 100,
             "cache_read_input_tokens": 200,  # ← Additive, don't subtract
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -164,10 +164,8 @@ async def test_only_cache_read_tokens(mock_fixed_pricing: None) -> None:
         "usage": {
             "prompt_tokens": 0,
             "completion_tokens": 50,
-            "prompt_tokens_details": {
-                "cached_tokens": 1000
-            }
-        }
+            "prompt_tokens_details": {"cached_tokens": 1000},
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -190,7 +188,7 @@ async def test_only_cache_creation_tokens(mock_fixed_pricing: None) -> None:
             "output_tokens": 100,
             "cache_creation_input_tokens": 2000,
             "cache_read_input_tokens": 0,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -214,7 +212,7 @@ async def test_both_cache_read_and_creation(mock_fixed_pricing: None) -> None:
             "output_tokens": 100,
             "cache_creation_input_tokens": 2000,
             "cache_read_input_tokens": 500,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -237,7 +235,7 @@ async def test_token_field_fallback_order(mock_fixed_pricing: None) -> None:
         "usage": {
             "input_tokens": 250,
             "completion_tokens": 50,
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -258,7 +256,7 @@ async def test_float_token_values_coerced_to_int(mock_fixed_pricing: None) -> No
             "prompt_tokens": 100.7,  # Float
             "completion_tokens": 50.3,  # Float
             "prompt_tokens_details": {"cached_tokens": 25.9},  # Float
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -281,7 +279,7 @@ async def test_boolean_cache_tokens_coerced_to_zero(mock_fixed_pricing: None) ->
             "prompt_tokens": 100,
             "completion_tokens": 50,
             "cache_read_input_tokens": True,  # Boolean
-        }
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -301,10 +299,8 @@ async def test_zero_cache_tokens(mock_fixed_pricing: None) -> None:
         "usage": {
             "prompt_tokens": 100,
             "completion_tokens": 50,
-            "prompt_tokens_details": {
-                "cached_tokens": 0
-            }
-        }
+            "prompt_tokens_details": {"cached_tokens": 0},
+        },
     }
     result = await calculate_cost(response, max_cost=100000)
 
@@ -427,7 +423,7 @@ async def test_truly_empty_usd_cost_response_is_refunded(
             "total_cost": 0.01,  # non-zero USD cost despite no tokens
         },
     }
-    result = await calculate_cost(response, max_cost=100000)
+    result = await calculate_cost(response, max_cost=100000, trusts_reported_cost=True)
 
     assert isinstance(result, CostData)
     assert result.total_msats == 0  # full refund
@@ -455,7 +451,7 @@ async def test_cache_read_only_usd_cost_response_is_billed(
             "total_cost": 0.01,  # non-zero USD cost
         },
     }
-    result = await calculate_cost(response, max_cost=100000)
+    result = await calculate_cost(response, max_cost=100000, trusts_reported_cost=True)
 
     assert isinstance(result, CostData)
     # NOT refunded — the USD cost is billed in full. Pinning the exact value
@@ -494,7 +490,7 @@ async def test_small_usd_cost_components_sum_to_rounded_total(
         },
     }
 
-    result = await calculate_cost(response, max_cost=100000)
+    result = await calculate_cost(response, max_cost=100000, trusts_reported_cost=True)
 
     assert isinstance(result, CostData)
     assert result.total_msats == expected_msats
@@ -525,7 +521,7 @@ async def test_openrouter_upstream_inference_cost_components_are_used() -> None:
         },
     }
 
-    result = await calculate_cost(response, max_cost=100000)
+    result = await calculate_cost(response, max_cost=100000, trusts_reported_cost=True)
 
     assert isinstance(result, CostData)
     assert result.input_msats == 995
@@ -590,6 +586,7 @@ async def test_usd_cache_breakdown_matches_token_priced_path(
         max_cost=100_000,
         model_obj=model,
         provider_fee=1.0,
+        trusts_reported_cost=True,
     )
 
     assert isinstance(token_result, CostData)
@@ -650,6 +647,7 @@ async def test_usd_cache_breakdown_does_not_absorb_total_rounding_remainder(
         max_cost=100_000,
         model_obj=model,
         provider_fee=1.0,
+        trusts_reported_cost=True,
     )
 
     assert isinstance(token_result, CostData)
@@ -687,7 +685,7 @@ async def test_ppq_byok_bills_upstream_inference_cost_plus_fee() -> None:
             },
         },
     }
-    result = await calculate_cost(response, max_cost=100000)
+    result = await calculate_cost(response, max_cost=100000, trusts_reported_cost=True)
 
     assert isinstance(result, CostData)
     # The fix bills upstream_inference_cost + byok_fee (~0.047 USD → ~940k
@@ -719,7 +717,7 @@ async def test_ppq_byok_fee_only_would_undercharge() -> None:
             "prompt_tokens_details": {"cached_tokens": 159301},
         },
     }
-    result = await calculate_cost(response, max_cost=100000)
+    result = await calculate_cost(response, max_cost=100000, trusts_reported_cost=True)
 
     assert isinstance(result, CostData)
     # Without upstream_inference_cost, only the fee is billed — the old bug.

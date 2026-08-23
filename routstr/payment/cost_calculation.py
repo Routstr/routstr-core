@@ -21,6 +21,13 @@ __all__ = [
 
 logger = get_logger(__name__)
 
+# Bounds for surfacing a reported cost that does not resemble what the tokens
+# would have been priced at. These only alert — PPQ.AI BYOK legitimately
+# settles at roughly ten times the reservation, so clamping here would
+# under-charge real traffic.
+REPORTED_COST_TOKEN_RATIO_BOUNDS = (0.2, 5.0)
+REPORTED_COST_RESERVATION_RATIO = 20.0
+
 
 class CostData(BaseModel):
     base_msats: int
@@ -98,6 +105,8 @@ async def calculate_cost(
     max_cost: int,
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
+    *,
+    trusts_reported_cost: bool = False,
 ) -> CostData | MaxCostData | CostDataError:
     """Calculate the cost of an API request based on token usage.
 
@@ -113,6 +122,12 @@ async def calculate_cost(
             pricing already carries the fee baked in). Without it, the fee is
             re-derived from the response's model string, which yields the
             best-ranked provider's fee.
+        trusts_reported_cost: Whether the serving provider type is approved to
+            name its own price (``BaseUpstreamProvider.trusts_reported_cost``).
+            A reported cost pre-empts token pricing and the overrun path will
+            settle it against the key's whole unreserved balance, so an
+            unapproved provider's cost fields are discarded and the request is
+            priced from the tokens it actually reported.
 
     Returns:
         Cost data or error information
@@ -159,6 +174,18 @@ async def calculate_cost(
 
     # Try USD cost first
     usd_cost = _resolve_usd_cost(usage_data, response_data)
+    if usd_cost > 0 and not trusts_reported_cost:
+        logger.warning(
+            "Upstream reported a cost but its provider type is not approved "
+            "to price its own requests — discarding the reported cost and "
+            "billing from token usage.",
+            extra={
+                "model": response_data.get("model", "unknown"),
+                "reported_usd_cost": usd_cost,
+                "max_cost_msats": max_cost,
+            },
+        )
+        usd_cost = 0.0
     if usd_cost > 0:
         truly_empty = (
             input_tokens == 0
@@ -209,29 +236,10 @@ async def calculate_cost(
                 cost_details.get("output_cost")
                 or cost_details.get("upstream_inference_completions_cost")
             )
-            cache_pricing_rates: tuple[float, float, float, float] | None = None
-            if cache_read_tokens > 0 or cache_creation_tokens > 0:
-                try:
-                    cache_pricing_rates = _get_pricing_rates(
-                        response_data, model_obj, provider_fee
-                    )
-                except ValueError:
-                    logger.warning(
-                        "Cache pricing unavailable for USD cost breakdown; "
-                        "leaving cache cost components unknown",
-                        extra={"model": response_data.get("model", "unknown")},
-                    )
-                if cache_pricing_rates is None and settings.fixed_pricing:
-                    fixed_input_rate = (
-                        float(settings.fixed_per_1k_input_tokens) * 1000.0
-                    )
-                    cache_pricing_rates = (
-                        fixed_input_rate,
-                        float(settings.fixed_per_1k_output_tokens) * 1000.0,
-                        fixed_input_rate,
-                        fixed_input_rate,
-                    )
-            return _calculate_from_usd_cost(
+            cache_pricing_rates = _usd_path_pricing_rates(
+                response_data, model_obj, provider_fee
+            )
+            cost = _calculate_from_usd_cost(
                 usd_cost,
                 input_usd,
                 output_usd,
@@ -243,6 +251,10 @@ async def calculate_cost(
                 provider_fee,
                 cache_pricing_rates,
             )
+            _flag_reported_cost_anomalies(
+                cost, max_cost, cache_pricing_rates, response_data
+            )
+            return cost
         except Exception as e:
             logger.warning(
                 "Error calculating cost from usage data",
@@ -319,9 +331,15 @@ def _coerce_usd(value: object) -> float:
     if not isinstance(value, (int, float, str)):
         return 0.0
     try:
-        return max(0.0, float(value))
+        parsed = float(value)
     except (TypeError, ValueError):
         return 0.0
+    # Infinity survives the clamp below and then overflows ``math.ceil``;
+    # NaN is folded to zero here rather than relying on ``max`` comparison
+    # semantics to do it.
+    if not math.isfinite(parsed):
+        return 0.0
+    return max(0.0, parsed)
 
 
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
@@ -364,6 +382,91 @@ def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:
                 return cost
 
     return 0.0
+
+
+def _usd_path_pricing_rates(
+    response_data: dict,
+    model_obj: "Model | None",
+    provider_fee: float | None,
+) -> tuple[float, float, float, float] | None:
+    """Best-effort token rates for the USD path's cache split and plausibility check.
+
+    Unlike the token-priced path this must never fail the request: the upstream
+    total stays authoritative whether or not local rates are known.
+    """
+    rates: tuple[float, float, float, float] | None = None
+    try:
+        rates = _get_pricing_rates(response_data, model_obj, provider_fee)
+    except ValueError:
+        logger.warning(
+            "Local pricing unavailable for USD cost breakdown; "
+            "leaving cache cost components unknown",
+            extra={"model": response_data.get("model", "unknown")},
+        )
+    if rates is None and settings.fixed_pricing:
+        fixed_input_rate = float(settings.fixed_per_1k_input_tokens) * 1000.0
+        return (
+            fixed_input_rate,
+            float(settings.fixed_per_1k_output_tokens) * 1000.0,
+            fixed_input_rate,
+            fixed_input_rate,
+        )
+    return rates
+
+
+def _flag_reported_cost_anomalies(
+    cost: CostData,
+    max_cost: int,
+    pricing_rates: tuple[float, float, float, float] | None,
+    response_data: dict,
+) -> None:
+    """Alert on a trusted provider's cost that does not match its own tokens.
+
+    Both directions matter: over-reporting drains the client up to its
+    authorization, under-reporting bleeds the operator. Neither is clamped —
+    a trusted provider's total is still what gets billed — because the
+    legitimate BYOK spread is wide enough that a clamp would mis-bill real
+    traffic. This exists so the mis-report is visible rather than silent.
+    """
+    model = response_data.get("model", "unknown")
+
+    if pricing_rates is not None:
+        input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
+        token_priced_msats = (
+            cost.input_tokens / 1000 * input_rate
+            + cost.output_tokens / 1000 * output_rate
+            + cost.cache_read_input_tokens / 1000 * cache_read_rate
+            + cost.cache_creation_input_tokens / 1000 * cache_creation_rate
+        )
+        low, high = REPORTED_COST_TOKEN_RATIO_BOUNDS
+        if token_priced_msats > 0:
+            ratio = cost.total_msats / token_priced_msats
+            if ratio < low or ratio > high:
+                logger.warning(
+                    "Upstream-reported cost is implausible against token "
+                    "pricing for the same response — billing it as reported, "
+                    "but the provider is over- or under-reporting.",
+                    extra={
+                        "model": model,
+                        "reported_msats": cost.total_msats,
+                        "token_priced_msats": token_priced_msats,
+                        "ratio": ratio,
+                        "input_tokens": cost.input_tokens,
+                        "output_tokens": cost.output_tokens,
+                    },
+                )
+
+    if max_cost > 0 and cost.total_msats > max_cost * REPORTED_COST_RESERVATION_RATIO:
+        logger.warning(
+            "Upstream-reported cost is far above the reservation it was "
+            "authorized against — the overrun will settle against the key's "
+            "unreserved balance.",
+            extra={
+                "model": model,
+                "reported_msats": cost.total_msats,
+                "max_cost_msats": max_cost,
+            },
+        )
 
 
 def _get_pricing_rates(

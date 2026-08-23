@@ -44,6 +44,10 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
     # provider-attested usage extractor/model binding for it. Keep EHBP disabled
     # until a ConfidentialInferenceProfile can bill it without max-cost fallback.
     supports_ehbp = False
+    # Under BYOK the inference is billed against the user's own upstream key;
+    # only PPQ knows what that cost was, so its report is authoritative and
+    # legitimately exceeds the reservation.
+    trusts_reported_cost = True
 
     def __init__(self, api_key: str, provider_fee: float = 1.0):
         super().__init__(

@@ -17,6 +17,10 @@ class OpenRouterUpstreamProvider(BaseUpstreamProvider):
     platform_url = "https://openrouter.ai/settings/keys"
     supports_anthropic_messages = True
     litellm_provider_prefix = "openrouter/"
+    # OpenRouter picks the serving sub-provider per request, so its reported
+    # cost is the only accurate price — our model rates describe the router's
+    # advertised range, not what this particular request was billed at.
+    trusts_reported_cost = True
 
     def _apply_provider_field(self, response_json: object) -> None:
         """Stamp the ``provider`` field for OpenRouter responses.

@@ -20,9 +20,7 @@ from routstr.payment.cost_calculation import CostData, calculate_cost
 from routstr.payment.models import Architecture, Model, Pricing
 
 
-def _make_model(
-    model_id: str, prompt_sats: float, completion_sats: float
-) -> Model:
+def _make_model(model_id: str, prompt_sats: float, completion_sats: float) -> Model:
     return Model(
         id=model_id,
         name=model_id,
@@ -56,18 +54,14 @@ RESPONSE = {
 
 @pytest.fixture(autouse=True)
 def patch_sats_usd_price() -> None:  # type: ignore[misc]
-    with patch(
-        "routstr.payment.cost_calculation.sats_usd_price", return_value=5.0e-4
-    ):
+    with patch("routstr.payment.cost_calculation.sats_usd_price", return_value=5.0e-4):
         yield
 
 
 @pytest.mark.asyncio
 async def test_served_model_pricing_wins_over_alias_lookup() -> None:
     """With ``model_obj`` given, the alias map is not consulted for pricing."""
-    with patch(
-        "routstr.proxy.get_model_instance", return_value=WINNER
-    ) as alias_lookup:
+    with patch("routstr.proxy.get_model_instance", return_value=WINNER) as alias_lookup:
         result = await calculate_cost(
             dict(RESPONSE), max_cost=100_000, model_obj=SERVED
         )
@@ -97,11 +91,13 @@ async def test_usd_cost_path_applies_given_provider_fee() -> None:
     response["usage"] = dict(RESPONSE["usage"], cost=0.001)  # type: ignore[arg-type]
 
     best_ranked = Mock(provider_fee=1.0)
-    with patch(
-        "routstr.proxy.get_provider_for_model", return_value=[best_ranked]
-    ):
+    with patch("routstr.proxy.get_provider_for_model", return_value=[best_ranked]):
         result = await calculate_cost(
-            response, max_cost=100_000, model_obj=SERVED, provider_fee=1.5
+            response,
+            max_cost=100_000,
+            model_obj=SERVED,
+            provider_fee=1.5,
+            trusts_reported_cost=True,
         )
 
     assert isinstance(result, CostData)
@@ -118,10 +114,10 @@ async def test_usd_cost_path_falls_back_to_best_ranked_fee() -> None:
     response["usage"] = dict(RESPONSE["usage"], cost=0.001)  # type: ignore[arg-type]
 
     best_ranked = Mock(provider_fee=2.0)
-    with patch(
-        "routstr.proxy.get_provider_for_model", return_value=[best_ranked]
-    ):
-        result = await calculate_cost(response, max_cost=100_000)
+    with patch("routstr.proxy.get_provider_for_model", return_value=[best_ranked]):
+        result = await calculate_cost(
+            response, max_cost=100_000, trusts_reported_cost=True
+        )
 
     assert isinstance(result, CostData)
     assert result.total_msats == 4_000
@@ -140,9 +136,7 @@ async def test_x_cashu_cost_uses_served_model_not_upstream_echo() -> None:
     provider = GenericUpstreamProvider("http://upstream.example", "key", 1.0)
     response = dict(RESPONSE, model="totally-unknown-wire-name")
 
-    with patch(
-        "routstr.proxy.get_model_instance", return_value=WINNER
-    ) as alias_lookup:
+    with patch("routstr.proxy.get_model_instance", return_value=WINNER) as alias_lookup:
         cost = await provider.get_x_cashu_cost(
             response, max_cost_for_model=100_000, model_obj=SERVED
         )

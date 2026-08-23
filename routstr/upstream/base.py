@@ -240,6 +240,12 @@ class BaseUpstreamProvider:
     platform_url: str | None = None
 
     supports_anthropic_messages: bool = False
+    # Whether this provider type may price its own requests. A reported cost
+    # pre-empts token pricing and settles against the key's unreserved
+    # balance, so it is opt-in per provider type: only upstreams whose billing
+    # we cannot reconstruct locally (BYOK, dynamic sub-provider routing) get
+    # it. Chained and operator-configured peers stay on token pricing.
+    trusts_reported_cost: bool = False
     # When None, the prefix is detected from `base_url` at dispatch time
     # (see `get_litellm_provider_prefix`). Subclasses set this to lock the
     # provider regardless of URL.
@@ -1047,6 +1053,7 @@ class BaseUpstreamProvider:
                             model_obj,
                             self.provider_fee,
                             reservation_snapshot,
+                            trusts_reported_cost=self.trusts_reported_cost,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1220,6 +1227,7 @@ class BaseUpstreamProvider:
                                 model_obj,
                                 self.provider_fee,
                                 reservation_snapshot,
+                                trusts_reported_cost=self.trusts_reported_cost,
                             )
                             usage_finalized = True
                         except BaseException as e:
@@ -1362,6 +1370,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                trusts_reported_cost=self.trusts_reported_cost,
             )
 
             await session.refresh(key)
@@ -1497,6 +1506,7 @@ class BaseUpstreamProvider:
                             model_obj,
                             self.provider_fee,
                             reservation_snapshot,
+                            trusts_reported_cost=self.trusts_reported_cost,
                         )
                         usage_finalized = True
                     except Exception:
@@ -1627,6 +1637,7 @@ class BaseUpstreamProvider:
                                 model_obj,
                                 self.provider_fee,
                                 reservation_snapshot,
+                                trusts_reported_cost=self.trusts_reported_cost,
                             )
                             usage_finalized = True
                         except BaseException as e:
@@ -1773,6 +1784,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                trusts_reported_cost=self.trusts_reported_cost,
             )
 
             await session.refresh(key)
@@ -1885,6 +1897,7 @@ class BaseUpstreamProvider:
                     model_obj=model_obj,
                     provider_fee=provider_fee,
                     reservation_snapshot=reservation_snapshot,
+                    trusts_reported_cost=self.trusts_reported_cost,
                 )
                 logger.debug(
                     "Finalized generic streaming payment in background",
@@ -1977,6 +1990,7 @@ class BaseUpstreamProvider:
                             model_obj,
                             self.provider_fee,
                             reservation_snapshot,
+                            trusts_reported_cost=self.trusts_reported_cost,
                         )
                         usage_finalized = True
                         return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
@@ -2143,6 +2157,7 @@ class BaseUpstreamProvider:
                                     model_obj,
                                     self.provider_fee,
                                     reservation_snapshot,
+                                    trusts_reported_cost=self.trusts_reported_cost,
                                 )
 
                                 self.inject_cost_metadata(
@@ -2234,6 +2249,7 @@ class BaseUpstreamProvider:
                 model_obj,
                 self.provider_fee,
                 reservation_snapshot,
+                trusts_reported_cost=self.trusts_reported_cost,
             )
 
             self.inject_cost_metadata(response_json, cost_data, key)
@@ -2346,6 +2362,7 @@ class BaseUpstreamProvider:
             model_obj,
             self.provider_fee,
             reservation_snapshot,
+            trusts_reported_cost=self.trusts_reported_cost,
         )
         self.inject_cost_metadata(response_json, cost_data, key)
 
@@ -2501,6 +2518,7 @@ class BaseUpstreamProvider:
                             model_obj,
                             self.provider_fee,
                             reservation_snapshot,
+                            trusts_reported_cost=self.trusts_reported_cost,
                         )
                         usage_finalized = True
                         return (
@@ -2588,6 +2606,7 @@ class BaseUpstreamProvider:
                                     model_obj,
                                     self.provider_fee,
                                     reservation_snapshot,
+                                    trusts_reported_cost=self.trusts_reported_cost,
                                 )
                                 self.inject_cost_metadata(
                                     combined_data, cost_data, fresh_key
@@ -3566,6 +3585,7 @@ class BaseUpstreamProvider:
             max_cost_for_model,
             model_obj,
             self.provider_fee,
+            trusts_reported_cost=self.trusts_reported_cost,
         ):
             case MaxCostData() as cost:
                 logger.debug(

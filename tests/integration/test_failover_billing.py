@@ -59,9 +59,17 @@ def _make_model(
 class _StaticProvider(BaseUpstreamProvider):
     """Upstream provider with a fixed model catalog and no remote refresh."""
 
-    def __init__(self, base_url: str, api_key: str, fee: float, model: Model) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        fee: float,
+        model: Model,
+        trusts_reported_cost: bool = False,
+    ) -> None:
         super().__init__(base_url, api_key, fee)
         self.provider_type = "custom"
+        self.trusts_reported_cost = trusts_reported_cost
         self._static_model = model
 
     def get_cached_models(self) -> list[Model]:
@@ -369,18 +377,24 @@ async def test_version_suffixed_model_id_routes(
 async def fee_split_provider_maps(
     patched_db_engine: None,
 ) -> AsyncGenerator[None, None]:
-    """Same-tail providers whose fees differ; the serving one charges 1.5x."""
+    """Same-tail providers whose fees differ; the serving one charges 1.5x.
+
+    Both are approved to report their own cost, which is what puts billing on
+    the USD path at all.
+    """
     cheap = _StaticProvider(
         CHEAP_BASE_URL,
         "key-cheap",
         1.0,
         _make_model("dual-model", 0.001, 0.002),
+        trusts_reported_cost=True,
     )
     expensive = _StaticProvider(
         EXPENSIVE_BASE_URL,
         "key-expensive",
         1.5,
         _make_model("dual-model", 0.005, 0.010),
+        trusts_reported_cost=True,
     )
     async for _ in _install_providers([cheap, expensive]):
         yield

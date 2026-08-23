@@ -1298,6 +1298,8 @@ async def adjust_payment_for_tokens(
     model_obj: "Model | None" = None,
     provider_fee: float | None = None,
     reservation_snapshot: ReservationSnapshot | None = None,
+    *,
+    trusts_reported_cost: bool = False,
 ) -> dict:
     """
     Adjusts the payment based on token usage in the response.
@@ -1307,6 +1309,10 @@ async def adjust_payment_for_tokens(
     ``model_obj`` is the model that actually served the request; it is passed
     through to ``calculate_cost`` so billing uses the serving candidate's
     pricing instead of re-deriving it from the response's model string.
+
+    ``trusts_reported_cost`` carries the serving provider type's cost-reporting
+    policy; it defaults to off so a caller that cannot name its provider never
+    lets the upstream price itself.
 
     The response's usage object is normalized with the default union parser in
     ``calculate_cost``.
@@ -1375,7 +1381,11 @@ async def adjust_payment_for_tokens(
                 )
 
     calculated_cost = await calculate_cost(
-        response_data, deducted_max_cost, model_obj, provider_fee
+        response_data,
+        deducted_max_cost,
+        model_obj,
+        provider_fee,
+        trusts_reported_cost=trusts_reported_cost,
     )
     if not isinstance(calculated_cost, CostDataError):
         if not await _claim_reservation_for_charge(reservation, session):
