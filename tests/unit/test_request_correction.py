@@ -63,7 +63,9 @@ class TestCorrectRequest:
         assert correct_request(_body(temperature=1), "", set()) is None
 
     def test_returns_none_on_non_object_body(self) -> None:
-        assert correct_request(b"[1, 2, 3]", "`temperature` is deprecated", set()) is None
+        assert (
+            correct_request(b"[1, 2, 3]", "`temperature` is deprecated", set()) is None
+        )
 
     def test_deprecated_model_name_is_not_stripped_as_param(self) -> None:
         """A 'model is deprecated' error must not strip an unrelated body field.
@@ -105,6 +107,36 @@ class TestStripUnsupportedParam:
 
     def test_declines_when_no_match(self) -> None:
         assert strip_unsupported_param({"temperature": 1}, "nope") is None
+
+    def test_never_strips_spend_shaping_params(self) -> None:
+        # Stripping an output cap after the reservation was priced would let
+        # the retry run uncapped and overcharge — the corrector must decline so
+        # the upstream error propagates instead.
+        for param in (
+            "max_tokens",
+            "max_completion_tokens",
+            "max_output_tokens",
+            "max_tokens_to_sample",
+            "n",
+            "best_of",
+        ):
+            body = {"model": "m", param: 4, "messages": []}
+            assert (
+                strip_unsupported_param(body, f"`{param}` is not supported") is None
+            ), param
+            # And through the full pipeline entry point.
+            assert (
+                correct_request(
+                    json.dumps(body).encode(),
+                    f"`{param}` is not supported",
+                    set(),
+                )
+                is None
+            ), param
+
+    def test_spend_shaping_guard_is_case_insensitive(self) -> None:
+        body = {"model": "m", "Max_Tokens": 4}
+        assert strip_unsupported_param(body, "`Max_Tokens` is deprecated") is None
 
 
 class TestExtractErrorMessage:
