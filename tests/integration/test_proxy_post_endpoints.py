@@ -289,7 +289,114 @@ async def test_proxy_post_unauthorized_access(integration_client: AsyncClient) -
     assert response.status_code in [400, 401]
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "internal/admin",  # unknown endpoint, no API prefix
+        "v1/../admin",  # traversal onto a sibling path
+        "v1//models",  # duplicate separator
+        "%2e%2e/secret",  # encoded dot segment
+    ],
+)
+async def test_authenticated_post_to_unknown_path_is_rejected(
+    authenticated_client: AsyncClient, bad_path: str
+) -> None:
+    """An authenticated POST to an unknown/traversal path must be rejected at
+    the edge (404) and never forwarded — the provider credential must not reach
+    an endpoint the caller merely spelled into the URL. If the guard let it
+    through, forwarding would raise and this would not be a clean 404."""
+    with patch(
+        "routstr.upstream.base.BaseUpstreamProvider.forward_request",
+        AsyncMock(side_effect=AssertionError("must not forward unknown path")),
+    ):
+        response = await authenticated_client.post(
+            f"/{bad_path}",
+            json={"model": "gpt-3.5-turbo", "messages": []},
+        )
+    assert response.status_code == 404
 
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        # Unambiguously spelled, under a prefix the proxy serves, but not an
+        # endpoint it offers. These are real upstream routes that manage keys,
+        # org membership, and billing on the same origin as inference.
+        "v1/organization/api_keys",
+        "v1/api_keys",
+        "v1/billing/usage",
+        "v1/admin/keys",
+        # An id segment is honoured one level deep, and only where an endpoint
+        # takes one at all.
+        "v1/chat/completions/abc",
+        "v1/models/gpt-4/secret",
+    ],
+)
+async def test_known_prefix_does_not_carry_an_unknown_endpoint(
+    authenticated_client: AsyncClient, bad_path: str
+) -> None:
+    """A familiar prefix must not be a passport for the rest of the origin.
+
+    Nothing here is traversal-shaped, so the spelling screen lets it by; only
+    the endpoint allowlist stops it. Forwarding raises if the guard misses,
+    so a clean 404 also proves the credential never left."""
+    with patch(
+        "routstr.upstream.base.BaseUpstreamProvider.forward_request",
+        AsyncMock(side_effect=AssertionError("must not forward unknown endpoint")),
+    ):
+        response = await authenticated_client.post(
+            f"/{bad_path}",
+            json={"model": "gpt-3.5-turbo", "messages": []},
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_unknown_path_is_rejected(integration_client: AsyncClient) -> None:
+    """A GET to an unknown (no API prefix) path is rejected at the edge."""
+    response = await integration_client.get("/internal/admin")
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        # Percent-encoded so the traversal survives the client to the server,
+        # which decodes it to "v1/../admin" before routing.
+        "v1/%2e%2e/admin",
+        # Well-spelled, so only the endpoint allowlist can stop it.
+        "v1/organization/api_keys",
+        "anything/encrypted",
+    ],
+)
+async def test_ehbp_request_is_gated_by_the_endpoint_allowlist(
+    integration_client: AsyncClient, bad_path: str
+) -> None:
+    """EHBP hides the body from the proxy, not the destination.
+
+    The encrypted contract covers the request body; it says nothing about which
+    endpoint the provider credential gets spent against, so an EHBP request is
+    screened and allowlisted exactly like any other."""
+    with patch(
+        "routstr.proxy.forward_ehbp_request",
+        AsyncMock(side_effect=AssertionError("must not forward unknown endpoint")),
+    ):
+        response = await integration_client.post(
+            f"/{bad_path}",
+            content=b"encrypted",
+            headers={
+                "ehbp-encapsulated-key": "x",
+                "x-routstr-model": "gpt-4",
+            },
+        )
+    assert response.status_code == 404
 
 
 @pytest.mark.integration

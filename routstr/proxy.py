@@ -26,6 +26,7 @@ from .core.db import (
 )
 from .core.exceptions import UpstreamError
 from .core.not_found import build_not_found_response
+from .core.settings import settings
 from .payment.helpers import (
     calculate_discounted_max_cost,
     check_token_balance,
@@ -221,20 +222,147 @@ async def refresh_model_maps_periodically() -> None:
             )
 
 
-_API_PATH_PREFIXES = (
-    "v1/",
-    "responses",
-    "chat/",
-    "completions",
-    "models",
-    "embeddings",
-    "audio/",
-    "images/",
-    "moderations",
-    "providers",
-    "tee/",
-    "attestation",
+# Canonical endpoints this proxy will forward, keyed by the path with any
+# leading "v1/" and trailing slash removed, mapped to the methods allowed on
+# each. The provider credential is attached during forwarding, so endpoint
+# permission has to come from this table rather than from the client-supplied
+# path: an upstream's key-management, organization, or billing routes live
+# under the same origin and must never be reachable through the proxy.
+_ALLOWED_ENDPOINTS: dict[str, frozenset[str]] = {
+    "chat/completions": frozenset({"POST"}),
+    "completions": frozenset({"POST"}),
+    "responses": frozenset({"POST"}),
+    "messages": frozenset({"POST"}),
+    "embeddings": frozenset({"POST"}),
+    "moderations": frozenset({"POST"}),
+    "rerank": frozenset({"POST"}),
+    "audio/speech": frozenset({"POST"}),
+    "audio/transcriptions": frozenset({"POST"}),
+    "audio/translations": frozenset({"POST"}),
+    "images/generations": frozenset({"POST"}),
+    "images/edits": frozenset({"POST"}),
+    "images/variations": frozenset({"POST"}),
+    "models": frozenset({"GET"}),
+    "attestation": frozenset({"GET"}),
+    "tee/attestation": frozenset({"GET"}),
+}
+
+_ALLOWED_METHODS = frozenset({"GET", "POST"})
+
+
+def _canonical_api_path(path: str) -> str:
+    """Reduce a request path to its allowlist key.
+
+    OpenAI-style clients reach the same endpoint with or without the ``v1/``
+    prefix and with or without a trailing slash, so both spellings collapse to
+    one key. Callers must screen the path with
+    :func:`_is_ambiguously_spelled_path` first — this function assumes the path
+    has no dot segments, empty segments, or encoded separators left to resolve.
+    """
+    core = path[:-1] if path.endswith("/") else path
+    if core.startswith("v1/"):
+        core = core[len("v1/") :]
+    return core
+
+
+def _parse_extra_allowed_endpoints(raw: str) -> dict[str, frozenset[str]]:
+    """Parse operator-configured additions to the endpoint allowlist.
+
+    Deployments whose provider exposes an endpoint outside the canonical set
+    opt in explicitly with ``PROXY_EXTRA_ALLOWED_PATHS``, a comma-separated
+    list of ``METHOD:path`` pairs (e.g. ``POST:v1/rerank,GET:batches``). Every
+    entry must name one concrete method and one unambiguous path; wildcards
+    and bare prefixes are deliberately unsupported, so widening the proxy's
+    reach is always a per-endpoint decision. Malformed entries are dropped
+    with a warning rather than silently widening or narrowing the surface.
+    """
+    extra: dict[str, frozenset[str]] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        method, separator, endpoint = entry.partition(":")
+        method = method.strip().upper()
+        endpoint = endpoint.strip()
+        if not separator or method not in _ALLOWED_METHODS or not endpoint:
+            logger.warning(
+                "Ignoring malformed PROXY_EXTRA_ALLOWED_PATHS entry",
+                extra={"entry": entry},
+            )
+            continue
+        if _is_ambiguously_spelled_path(endpoint):
+            logger.warning(
+                "Ignoring ambiguously spelled PROXY_EXTRA_ALLOWED_PATHS entry",
+                extra={"entry": entry},
+            )
+            continue
+        if any(character in endpoint for character in "*?["):
+            # Refuse glob syntax outright. Kept as a literal endpoint name it
+            # would never match a real request, so the operator would think
+            # they had widened the proxy when they had not.
+            logger.warning(
+                "Ignoring wildcard PROXY_EXTRA_ALLOWED_PATHS entry; "
+                "list each endpoint explicitly",
+                extra={"entry": entry},
+            )
+            continue
+        key = _canonical_api_path(endpoint)
+        extra[key] = extra.get(key, frozenset()) | {method}
+    return extra
+
+
+def _is_ambiguously_spelled_path(path: str) -> bool:
+    """Reject paths whose spelling could resolve somewhere the allowlist did not.
+
+    ``{path:path}`` arrives percent-decoded, so a client that sent ``%2e%2e`` or
+    ``%2f`` shows up here as ``..`` / ``/``. Dot segments, backslashes, duplicate
+    or leading separators, NUL bytes, and any residual encoded separator are
+    treated as unsafe: they let a caller walk off the canonical API surface (and
+    onto a sensitive upstream endpoint) even though the literal prefix check
+    would pass. Reject rather than trying to rewrite the path.
+    """
+    if not path or path != path.strip() or path.startswith("/"):
+        return True
+    if "\x00" in path or "\\" in path:
+        return True
+    # A single trailing slash is canonical (e.g. "attestation/"); ignore it,
+    # then no remaining segment may be empty (covers "//") or a dot segment.
+    core = path[:-1] if path.endswith("/") else path
+    if any(segment in ("", ".", "..") for segment in core.split("/")):
+        return True
+    lowered = path.lower()
+    return "%2e" in lowered or "%2f" in lowered or "%5c" in lowered
+
+
+_EXTRA_ALLOWED_ENDPOINTS = _parse_extra_allowed_endpoints(
+    settings.proxy_extra_allowed_paths
 )
+
+
+def _allowed_methods_for(endpoint: str) -> frozenset[str]:
+    """Return the methods allowed on a canonical endpoint, empty if unknown."""
+    methods = _ALLOWED_ENDPOINTS.get(endpoint, frozenset())
+    methods |= _EXTRA_ALLOWED_ENDPOINTS.get(endpoint, frozenset())
+    return methods
+
+
+def _forwarding_allowed(path: str, method: str) -> bool:
+    """Gate which method/path pairs may reach an upstream at all.
+
+    The provider credential is attached during forwarding, so an unknown
+    endpoint must never be forwarded on the caller's say-so. The path is
+    reduced to its canonical form and looked up in the endpoint table; there is
+    no prefix match, so a known prefix no longer carries an unknown endpoint
+    (``v1/organization/api_keys`` is rejected even though ``v1/`` is familiar).
+
+    EHBP requests are gated by the same table. Their body is opaque to the
+    proxy, which is a reason to constrain the destination more tightly, not to
+    trust the caller's path: the encrypted contract covers the body, never the
+    endpoint the credential is spent against.
+    """
+    if method not in _ALLOWED_METHODS:
+        return False
+    return method in _allowed_methods_for(_canonical_api_path(path))
 
 
 @proxy_router.api_route("/{path:path}", methods=["GET", "POST"], response_model=None)
@@ -255,14 +383,17 @@ async def proxy(
 async def _proxy(
     request: Request, path: str, session: AsyncSession
 ) -> Response | StreamingResponse:
-    # GET requests must hit a known API prefix; otherwise return a 404 (HTML
-    # for browsers, JSON for API clients). POST requests are always forwarded
-    # so that OpenAI-style endpoints work with or without the `v1/` prefix
-    # (e.g. `/chat/completions` as well as `/v1/chat/completions`).
-    if request.method == "GET" and not path.startswith(_API_PATH_PREFIXES):
+    # Screen the path before any routing decision: reject ambiguous spellings,
+    # then require a known API prefix so nothing unknown is forwarded with the
+    # provider credential attached.
+    if _is_ambiguously_spelled_path(path):
         return build_not_found_response(request, path)
 
     headers = dict(request.headers)
+    is_ehbp = "ehbp-encapsulated-key" in headers
+
+    if not _forwarding_allowed(path, request.method):
+        return build_not_found_response(request, path)
 
     is_responses_api = path.startswith("v1/responses") or path.startswith("responses")
     request_body = await request.body()
@@ -272,7 +403,6 @@ async def _proxy(
     # extract the model id, so the SDK sends it in X-Routstr-Model. Forward the
     # raw encrypted body to the upstream's /private/ endpoint and stream the
     # encrypted response back untouched — the SDK's SecureClient decrypts it.
-    is_ehbp = "ehbp-encapsulated-key" in headers
     if is_ehbp:
         request_body_dict = {}
         model_id = headers.get("x-routstr-model", "")
