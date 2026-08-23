@@ -499,7 +499,14 @@ def test_create_model_mappings_exact_model_id_beats_forwarded_id_collision(
 def test_models_endpoint_preserves_catalog_id_when_winner_forwards_elsewhere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each catalog row keeps its requested ID while using its routing winner."""
+    """Each catalog row keeps its requested ID while using its routing winner.
+
+    ``foo`` is served directly by two providers: the cheaper one prefixes the ID
+    (``vendor/foo``) and the pricier one exposes the bare ID while forwarding
+    upstream to ``bar``. Prefix vs bare spelling must not decide the winner, so
+    the cheaper prefixed provider wins ``foo`` while ``bar`` still appears as its
+    own catalog row served by the forwarding provider.
+    """
     base_alias = create_test_model(
         "vendor/foo", prompt_price=0.001, completion_price=0.001
     )
@@ -518,9 +525,9 @@ def test_models_endpoint_preserves_catalog_id_when_winner_forwards_elsewhere(
         disabled_model_keys=set(),
     )
 
-    assert provider_map["foo"][0] == (redirected_exact, redirect_provider)
+    assert provider_map["foo"][0] == (base_alias, base_provider)
     assert unique_models["foo"].id == "foo"
-    assert unique_models["foo"].upstream_provider_id == "redirect"
+    assert unique_models["foo"].upstream_provider_id == "base"
 
     import routstr.proxy as proxy
 
@@ -876,3 +883,74 @@ def test_create_model_mappings_disables_only_matching_provider() -> None:
     )
 
     assert [p for _, p in provider_map["same-id"]] == [provider_a]
+
+
+def test_create_model_mappings_prefixed_openrouter_beats_bare_tinfoil_id() -> None:
+    """Prefix-vs-bare ID spelling must not outrank price for the same model.
+
+    Tinfoil advertises bare model IDs (``gpt-oss-120b``) while OpenRouter keeps
+    the org prefix (``openai/gpt-oss-120b``). Both serve the same model, so the
+    cheaper OpenRouter deployment must win the public ``gpt-oss-120b`` catalog
+    row and route; the bare-ID exact match must not shadow it on spelling alone.
+    """
+    tinfoil_expensive = create_test_model(
+        "gpt-oss-120b", prompt_price=0.01, completion_price=0.01
+    )
+    openrouter_cheap = create_test_model(
+        "openai/gpt-oss-120b", prompt_price=0.001, completion_price=0.001
+    )
+    tinfoil = create_test_provider(
+        "tinfoil",
+        "https://inference.tinfoil.sh/v1",
+        db_id=1,
+        models=[tinfoil_expensive],
+    )
+    openrouter = create_test_provider(
+        "openrouter",
+        "https://openrouter.ai/api/v1",
+        db_id=2,
+        models=[openrouter_cheap],
+    )
+
+    # Discovery order should not matter: Tinfoil (non-OpenRouter) is processed
+    # first, yet the cheaper OpenRouter candidate must still win.
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[tinfoil, openrouter],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["gpt-oss-120b"][0] == (openrouter_cheap, openrouter)
+    assert unique_models["gpt-oss-120b"].upstream_provider_id == "openrouter"
+    assert unique_models["gpt-oss-120b"].pricing.prompt == 0.001
+
+
+def test_create_model_mappings_uppercase_prefixed_base_keeps_top_tier() -> None:
+    """Uppercase prefixed IDs still match the public alias at the direct tier.
+
+    ``Qwen/Qwen2.5-72B`` lowercases to alias ``qwen2.5-72b``; its base name
+    must be compared case-insensitively so it stays a direct match instead of
+    falling to the weakest tier and losing to a forwarded alias on spelling.
+    """
+    prefixed_cheap = create_test_model(
+        "Qwen/Qwen2.5-72B", prompt_price=0.001, completion_price=0.001
+    )
+    forwarded_expensive = create_test_model(
+        "deployment-x", prompt_price=0.1, completion_price=0.1
+    )
+    forwarded_expensive.forwarded_model_id = "qwen2.5-72b"
+    prefixed_provider = create_test_provider(
+        "prefixed", "https://prefixed.example/v1", db_id=1, models=[prefixed_cheap]
+    )
+    forwarded_provider = create_test_provider(
+        "forwarded", "https://forwarded.example/v1", db_id=2, models=[forwarded_expensive]
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[forwarded_provider, prefixed_provider],
+        overrides_by_key={},
+        disabled_model_keys=set(),
+    )
+
+    assert provider_map["qwen2.5-72b"][0] == (prefixed_cheap, prefixed_provider)
+    assert unique_models["qwen2.5-72b"].upstream_provider_id == "prefixed"
