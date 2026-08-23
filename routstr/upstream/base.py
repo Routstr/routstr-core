@@ -127,6 +127,49 @@ def _inject_cost_response_headers(
         headers["X-Routstr-Cost-Usd"] = str(total_usd)
 
 
+def _parse_sse_events(content: str) -> list[tuple[list[str], str]]:
+    """Split a buffered SSE body into ``(field_lines, data)`` pairs.
+
+    ``data`` is the newline-joined payload the SSE spec reassembles from every
+    ``data:`` line of one event, so multi-line JSON survives. Comment/keepalive
+    lines are dropped and events carrying no data at all are skipped; the
+    remaining ``event:``/``id:``/``retry:`` fields stay attached to their event
+    so Responses API framing is preserved on re-emission. A trailing event
+    without its blank-line terminator is still returned.
+    """
+    events: list[tuple[list[str], str]] = []
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    for raw_event in normalized.split("\n\n"):
+        field_lines: list[str] = []
+        data_lines: list[str] = []
+        for line in raw_event.split("\n"):
+            if line.startswith("data:"):
+                data_lines.append(line[len("data:") :].lstrip(" "))
+            elif line and not line.startswith(":"):
+                field_lines.append(line)
+        if not data_lines:
+            continue
+        events.append((field_lines, "\n".join(data_lines)))
+    return events
+
+
+def _responses_usage_payload(data_json: dict) -> dict:
+    """Return the object carrying a Responses API event's model and usage.
+
+    Canonical events nest them under ``response`` (``response.completed`` /
+    ``response.incomplete``); legacy and compat shapes keep them at top level.
+    """
+    nested = data_json.get("response")
+    return nested if isinstance(nested, dict) else data_json
+
+
+def _render_sse_event(field_lines: list[str], data: str) -> str:
+    """Re-frame one parsed event, re-prefixing every line of a multi-line data."""
+    body = "".join(f"{line}\n" for line in field_lines)
+    body += "".join(f"data: {line}\n" for line in data.split("\n"))
+    return body + "\n"
+
+
 def _inject_cost_into_usage(response_json: dict, cost_data: CostMetadata) -> None:
     """Inject cost breakdown into the response body's ``usage.cost`` object.
 
@@ -4670,12 +4713,14 @@ class BaseUpstreamProvider:
 
         Similar to regular streaming but handles Responses API specific tokens like reasoning_tokens.
         """
+        events = _parse_sse_events(content_str)
+
         logger.debug(
             "Processing streaming Responses API response",
             extra={
                 "amount": amount,
                 "unit": unit,
-                "content_lines": len(content_str.strip().split("\\n")),
+                "event_count": len(events),
             },
         )
 
@@ -4685,30 +4730,49 @@ class BaseUpstreamProvider:
         if "content-encoding" in response_headers:
             del response_headers["content-encoding"]
 
-        usage_data = None
-        model = None
+        usage_data: dict | None = None
+        model: str | None = None
         reasoning_tokens = 0
+        cost_data: CostData | MaxCostData | None = None
 
-        lines = content_str.strip().split("\\n")
-        for line in lines:
-            if line.startswith("data: "):
-                try:
-                    data_json = json.loads(line[6:])
-                    if "usage" in data_json:
-                        usage_data = data_json["usage"]
-                        model = data_json.get("model")
-                        # Track reasoning tokens for Responses API
-                        if (
-                            isinstance(usage_data, dict)
-                            and "reasoning_tokens" in usage_data
-                        ):
-                            reasoning_tokens = usage_data.get("reasoning_tokens", 0)
-                    elif "model" in data_json and not model:
-                        model = data_json["model"]
-                except json.JSONDecodeError:
-                    continue
+        for _fields, data in events:
+            if data.strip() == "[DONE]":
+                continue
+            try:
+                data_json = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data_json, dict):
+                continue
+            # Canonical Responses API events carry model and usage nested under
+            # "response" (response.completed/incomplete); older shapes put them
+            # at the top level.
+            payload = _responses_usage_payload(data_json)
+            if isinstance(payload.get("usage"), dict):
+                usage_data = payload["usage"]
+                model = payload.get("model") or model
+                details = usage_data.get("output_tokens_details")
+                if isinstance(details, dict):
+                    reasoning_tokens = details.get("reasoning_tokens", 0)
+                elif "reasoning_tokens" in usage_data:
+                    reasoning_tokens = usage_data["reasoning_tokens"]
+            elif not model and payload.get("model"):
+                model = payload["model"]
 
-        if usage_data and model:
+        if usage_data is None:
+            # Settlement invariant: a terminal request is never silently
+            # zero-billed and never silently keeps the whole token. Unmeasured
+            # usage settles at the authorization ceiling and refunds the rest.
+            logger.warning(
+                "No usage in streaming Responses API response — settling at authorized max",
+                extra={
+                    "model": model,
+                    "amount": amount,
+                    "unit": unit,
+                    "max_cost_msats": max_cost_for_model,
+                },
+            )
+        else:
             logger.debug(
                 "Found usage data in streaming Responses API response",
                 extra={
@@ -4720,97 +4784,99 @@ class BaseUpstreamProvider:
                 },
             )
 
-            response_data = {"usage": usage_data, "model": model}
+        response_data = {"usage": usage_data, "model": model or "unknown"}
+        try:
+            cost_data = await self.get_x_cashu_cost(
+                response_data, max_cost_for_model, model_obj
+            )
+            if cost_data:
+                if unit == "msat":
+                    refund_amount = amount - cost_data.total_msats
+                elif unit == "sat":
+                    refund_amount = amount - (cost_data.total_msats + 999) // 1000
+                else:
+                    raise ValueError(f"Invalid unit: {unit}")
+
+                if refund_amount > 0:
+                    logger.debug(
+                        "Processing refund for streaming Responses API response",
+                        extra={
+                            "original_amount": amount,
+                            "cost_msats": cost_data.total_msats,
+                            "refund_amount": refund_amount,
+                            "unit": unit,
+                            "model": model,
+                            "reasoning_tokens": reasoning_tokens,
+                        },
+                    )
+
+                    refund_token = await self.send_refund(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
+                    )
+                    response_headers["X-Cashu"] = refund_token
+
+                    logger.info(
+                        "Refund processed for streaming Responses API response",
+                        extra={
+                            "refund_amount": refund_amount,
+                            "unit": unit,
+                            "refund_token_preview": refund_token[:20] + "..."
+                            if len(refund_token) > 20
+                            else refund_token,
+                        },
+                    )
+                else:
+                    logger.debug(
+                        "No refund needed for streaming Responses API response",
+                        extra={
+                            "amount": amount,
+                            "cost_msats": cost_data.total_msats,
+                            "model": model,
+                        },
+                    )
+
+                # Inject cost breakdown headers so the SDK's
+                # extractUsageFromResponseHeaders can populate
+                # inputMsats/outputMsats/totalMsats for x-cashu requests.
+                _inject_cost_response_headers(response_headers, cost_data)
+        except Exception as e:
+            logger.error(
+                "Error calculating cost for streaming Responses API response",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "model": model,
+                    "amount": amount,
+                    "unit": unit,
+                },
+            )
+
+        for i, (fields, data) in enumerate(events):
+            if data.strip() == "[DONE]":
+                continue
             try:
-                cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model, model_obj
-                )
-                if cost_data:
-                    if unit == "msat":
-                        refund_amount = amount - cost_data.total_msats
-                    elif unit == "sat":
-                        refund_amount = amount - (cost_data.total_msats + 999) // 1000
-                    else:
-                        raise ValueError(f"Invalid unit: {unit}")
-
-                    if refund_amount > 0:
-                        logger.debug(
-                            "Processing refund for streaming Responses API response",
-                            extra={
-                                "original_amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "model": model,
-                                "reasoning_tokens": reasoning_tokens,
-                            },
-                        )
-
-                        refund_token = await self.send_refund(
-                            refund_amount,
-                            unit,
-                            mint,
-                            request_id=request_id,
-                        )
-                        response_headers["X-Cashu"] = refund_token
-
-                        logger.info(
-                            "Refund processed for streaming Responses API response",
-                            extra={
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "refund_token_preview": refund_token[:20] + "..."
-                                if len(refund_token) > 20
-                                else refund_token,
-                            },
-                        )
-                    else:
-                        logger.debug(
-                            "No refund needed for streaming Responses API response",
-                            extra={
-                                "amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "model": model,
-                            },
-                        )
-
-                    # Inject cost breakdown headers so the SDK's
-                    # extractUsageFromResponseHeaders can populate
-                    # inputMsats/outputMsats/totalMsats for x-cashu requests.
-                    _inject_cost_response_headers(response_headers, cost_data)
-            except Exception as e:
-                logger.error(
-                    "Error calculating cost for streaming Responses API response",
-                    extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "model": model,
-                        "amount": amount,
-                        "unit": unit,
-                    },
-                )
-
-        for i, line in enumerate(lines):
-            if line.startswith("data: "):
-                try:
-                    data_json = json.loads(line[6:])
-                    if not isinstance(data_json, dict):
-                        continue
-                    changed = False
-                    if "provider" not in data_json:
-                        self._apply_provider_field(data_json)
-                        changed = True
-                    if cost_data and "usage" in data_json and data_json["usage"]:
-                        _inject_cost_into_usage(data_json, cost_data)
-                        changed = True
-                    if changed:
-                        lines[i] = "data: " + json.dumps(data_json)
-                except json.JSONDecodeError:
-                    pass
+                data_json = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data_json, dict):
+                continue
+            changed = False
+            if "provider" not in data_json:
+                self._apply_provider_field(data_json)
+                changed = True
+            payload = _responses_usage_payload(data_json)
+            if cost_data and isinstance(payload.get("usage"), dict):
+                _inject_cost_into_usage(payload, cost_data)
+                changed = True
+            if changed:
+                events[i] = (fields, json.dumps(data_json))
 
         async def generate() -> AsyncGenerator[bytes, None]:
-            for line in lines:
-                yield (line + "\\n").encode("utf-8")
+            for fields, data in events:
+                yield _render_sse_event(fields, data).encode("utf-8")
 
         return StreamingResponse(
             generate(),
