@@ -537,7 +537,7 @@ async def test_claim_without_api_key_still_reconciles_via_the_mint(
     async with create_session() as session:
         provider = await session.get(UpstreamProviderRow, 1)
         assert provider is not None
-        provider.api_key = ""
+        provider.set_api_key("")
         session.add(provider)
         await session.commit()
     # Lease expired, so the mint may be consulted.

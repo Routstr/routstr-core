@@ -27,7 +27,7 @@ class PerplexityUpstreamProvider(BaseUpstreamProvider):
         cls, provider_row: "UpstreamProviderRow"
     ) -> "PerplexityUpstreamProvider":
         return cls(
-            api_key=provider_row.api_key,
+            api_key=provider_row.decrypted_api_key(),
             provider_fee=provider_row.provider_fee,
         )
 

@@ -207,9 +207,7 @@ async def test_settings_initialize_discards_unknown_keys() -> None:
 
         # Simulate older persisted key name and an unknown key.
         await session.exec(  # type: ignore
-            text(
-                "UPDATE settings SET data = :data WHERE id = 1"
-            ).bindparams(
+            text("UPDATE settings SET data = :data WHERE id = 1").bindparams(
                 data='{"name":"LegacyNode","nostr_analytics_enabled":false,"unknown_key":123}'
             )
         )
@@ -233,8 +231,8 @@ def test_settings_model_drops_admin_password_field() -> None:
     # admin_password now lives only as a one-way hash in the Secret store; it is
     # no longer a settings field at all.
     assert "admin_password" not in Settings.__fields__
-    # nsec remains a runtime value held in memory; upstream_api_key is ordinary
-    # config that still lives in the persisted blob.
+    # nsec and upstream_api_key remain runtime values held in memory; both are
+    # stripped from the persisted blob and owned by the Secret store.
     assert "nsec" in Settings.__fields__
     assert "upstream_api_key" in Settings.__fields__
 
@@ -264,32 +262,23 @@ async def test_secret_fields_kept_in_memory_but_not_persisted(
 
 
 @pytest.mark.asyncio
-async def test_upstream_api_key_survives_persistence(
+async def test_upstream_api_key_is_never_written_back_to_the_blob(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # upstream_api_key is provider-scoped config, not a vault secret: it has no
-    # encrypted home yet, so it must stay in the settings blob. Stripping it
-    # would load it once, rewrite the blob without it, and lose it on the next
-    # restart. Guard the on-disk survival path: blob-only value, no env.
+    # The blob copy is the plaintext-at-rest exposure. ``bootstrap_secrets``
+    # moves the value into the encrypted Secret store; a settings reload must
+    # never put it back, whatever is live in memory.
     monkeypatch.delenv("UPSTREAM_API_KEY", raising=False)
-    monkeypatch.setattr(settings, "upstream_api_key", "")
+    monkeypatch.setattr(settings, "upstream_api_key", "sk-live-in-memory")
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with AsyncSession(engine, expire_on_commit=False) as session:
         await SettingsService.initialize(session)
-        await session.exec(  # type: ignore
-            text("UPDATE settings SET data = :d WHERE id = 1").bindparams(
-                d=json.dumps({"name": "LegacyNode", "upstream_api_key": "sk-only-in-db"})
-            )
-        )
-        await session.commit()
 
-        # A reload must not drop the key from the blob...
-        await SettingsService.initialize(session)
         blob = await _read_settings_blob(session)
-        assert blob["upstream_api_key"] == "sk-only-in-db"
+        assert "upstream_api_key" not in blob
         # ...and it stays live for the proxy hot path.
-        assert settings.upstream_api_key == "sk-only-in-db"
+        assert settings.upstream_api_key == "sk-live-in-memory"
 
 
 @pytest.mark.asyncio
@@ -324,10 +313,9 @@ async def test_existing_blob_secrets_are_stripped_on_initialize(
         blob = await _read_settings_blob(session)
         assert "admin_password" not in blob
         assert "nsec" not in blob
-        # Non-secret values survive the migration, including upstream_api_key,
-        # which is not vaulted yet and so must stay in the blob.
+        assert "upstream_api_key" not in blob
+        # Non-secret values survive the migration.
         assert blob["name"] == "LegacyNode"
-        assert blob["upstream_api_key"] == "sk-legacy"
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from alembic import command
 from alembic.config import Config
@@ -710,7 +710,9 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
     __tablename__ = "upstream_providers"
     __table_args__ = (
         UniqueConstraint(
-            "base_url", "api_key", name="uq_upstream_providers_base_url_api_key"
+            "base_url",
+            "api_key_fingerprint",
+            name="uq_upstream_providers_base_url_api_key",
         ),
         {"sqlite_autoincrement": True},
     )
@@ -725,7 +727,15 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         description="Provider type: custom, openai, anthropic, azure, openrouter, etc."
     )
     base_url: str = Field(description="Base URL of the upstream API")
-    api_key: str = Field(description="API key for the upstream provider")
+    encrypted_api_key: str = Field(
+        default="",
+        description="Fernet-encrypted API key for the upstream provider",
+    )
+    api_key_fingerprint: str = Field(
+        default="",
+        index=True,
+        description="Keyed digest of the API key, for lookup without decrypting",
+    )
     api_version: str | None = Field(
         default=None, description="API version for Azure OpenAI"
     )
@@ -740,6 +750,52 @@ class UpstreamProviderRow(SQLModel, table=True):  # type: ignore
         back_populates="upstream_provider",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+
+    def __init__(self, api_key: str | None = None, **data: Any) -> None:
+        # ``api_key`` is not a column: taking it here is what makes it impossible
+        # to build a row whose credential is in the clear. SQLAlchemy loads rows
+        # without calling ``__init__``, so this only runs for rows we construct.
+        super().__init__(**data)
+        if api_key is not None:
+            self.set_api_key(api_key)
+
+    def decrypted_api_key(self) -> str:
+        """The usable upstream credential.
+
+        A method rather than a column so every call site is a deliberate
+        decryption point — the row itself only ever holds ciphertext. Raises on
+        a value that is not ciphertext (a hand-edited or half-migrated row)
+        rather than handing it to an upstream as a bearer token.
+        """
+        from .vault import decrypt
+
+        if not self.encrypted_api_key:
+            return ""
+        return decrypt(self.encrypted_api_key)
+
+    def set_api_key(self, api_key: str) -> None:
+        """Store ``api_key`` as ciphertext plus its lookup fingerprint.
+
+        Both columns are written together; letting them drift would either break
+        the duplicate check or point it at the wrong row.
+        """
+        from .vault import encrypt
+
+        self.encrypted_api_key = encrypt(api_key) if api_key else ""
+        self.api_key_fingerprint = provider_api_key_fingerprint(api_key)
+
+
+def provider_api_key_fingerprint(api_key: str) -> str:
+    """The value ``api_key_fingerprint`` holds for ``api_key``.
+
+    Callers building a ``where`` clause need this without a row in hand. Keyless
+    providers (a local Ollama, say) keep an empty fingerprint so they collide
+    with each other on ``base_url`` exactly as they did when the column held
+    plaintext.
+    """
+    from .vault import fingerprint
+
+    return fingerprint(api_key) if api_key else ""
 
 
 class ReservationRelease(SQLModel, table=True):  # type: ignore
@@ -802,6 +858,7 @@ class Secret(SQLModel, table=True):  # type: ignore
     admin_password_hash: str | None = Field(default=None)
     encrypted_nsec: str | None = Field(default=None)
     nsec_state: NsecState = Field(default=NsecState.legacy)
+    encrypted_upstream_api_key: str | None = Field(default=None)
     updated_at: int | None = Field(default=None)
 
 

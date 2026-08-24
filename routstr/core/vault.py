@@ -7,6 +7,11 @@ Fernet/scrypt/HMAC directly:
   mandatory master key. Ciphertext is self-describing (``fernet:v1:`` prefix) so
   a value can be told apart from legacy plaintext and so reading it under the
   wrong key surfaces as a hard error rather than silent corruption.
+- :func:`fingerprint` — keyed HMAC-SHA256, for looking a secret up (or enforcing
+  uniqueness on it) without decrypting every row. Fernet is randomised, so equal
+  plaintexts produce different ciphertexts and cannot be compared directly. The
+  HMAC key is the master key, so a stolen database alone does not let an attacker
+  confirm a guessed secret by recomputing its fingerprint.
 - :func:`hash_password`/:func:`verify_password` — salted scrypt hashing. This is
   *key-independent*: it never reads the master key, so password login and the
   recovery script keep working even when the key is missing.
@@ -33,6 +38,10 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
+
+from .logging import get_logger
+
+logger = get_logger(__name__)
 
 _PREFIX = "fernet:v1:"
 _GEN_COMMAND = (
@@ -215,6 +224,35 @@ def ensure_secret_key() -> str:
     return _read_key_file(path) or _generate_and_persist_key(path)
 
 
+def warn_if_master_key_shares_the_data_volume() -> None:
+    """Warn once at startup when key custody has not been separated from the data.
+
+    Encrypting the database with a key that sits in the same directory protects
+    almost nothing: whoever can copy the volume copies both. The key file is a
+    last-resort default so an upgrading node boots, not a deployment target —
+    ``ROUTSTR_SECRET_KEY`` (or a ``ROUTSTR_SECRET_KEY_FILE`` on separate storage)
+    is what actually makes at-rest encryption worth having.
+    """
+    if os.environ.get("ROUTSTR_SECRET_KEY"):
+        return
+    key_file = _key_file_path()
+    database_dir = _database_dir()
+    if database_dir is None or key_file.parent.resolve() != database_dir.resolve():
+        return
+    logger.warning(
+        "Master key is stored next to the database; copying the volume defeats "
+        "at-rest encryption",
+        extra={
+            "key_file": str(key_file),
+            "remediation": (
+                "set ROUTSTR_SECRET_KEY from a secrets manager, or point "
+                "ROUTSTR_SECRET_KEY_FILE at storage the database backup does not "
+                "include"
+            ),
+        },
+    )
+
+
 def _fernet_from_key(key: str) -> Fernet:
     try:
         return Fernet(key.encode())
@@ -268,6 +306,16 @@ def decrypt(ciphertext: str) -> str:
         raise ValueError("value is not fernet:v1: ciphertext")
     token = ciphertext[len(_PREFIX) :]
     return get_fernet().decrypt(token.encode()).decode()
+
+
+def fingerprint(value: str) -> str:
+    """Keyed, deterministic digest of ``value`` for lookup and uniqueness.
+
+    Uses the same master key as :func:`encrypt` and provisions one the same way,
+    so writing a secret and indexing it cannot end up under different keys.
+    """
+    key = ensure_secret_key()
+    return hmac.new(key.encode(), value.encode(), hashlib.sha256).hexdigest()
 
 
 def hash_password(password: str) -> str:

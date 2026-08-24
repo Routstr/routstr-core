@@ -183,14 +183,12 @@ def _normalize_settings_data(data: dict[str, Any]) -> dict[str, Any]:
 
 # Secrets are credentials, not config: they live in the encrypted/hashed Secret
 # store (and decrypted in-memory for runtime use), never in the persisted
-# settings blob. ``admin_password`` is gone from the model entirely; ``nsec``
-# remains a live field but is stripped from every blob write so it is never
-# written back to plaintext. ``upstream_api_key`` is intentionally *not* here:
-# it has no encrypted home yet (it is node-scoped today but really belongs on a
-# provider), so stripping it would lose it on the next restart. It stays in the
-# blob as before; encrypting it is follow-up work. See ``bootstrap_secrets`` and
+# settings blob. ``admin_password`` is gone from the model entirely; ``nsec`` and
+# ``upstream_api_key`` remain live fields but are stripped from every blob write
+# so they are never written back to plaintext, and ``_scrub_legacy_blob_secrets``
+# clears any copy an older build already persisted. See ``bootstrap_secrets`` and
 # ``routstr.core.vault``.
-SECRET_FIELDS = frozenset({"admin_password", "nsec"})
+SECRET_FIELDS = frozenset({"admin_password", "nsec", "upstream_api_key"})
 
 # Infrastructure the node needs *before* it can open a DB session — so it can
 # never be configured from the DB (chicken-and-egg) and stays env-only. Unlike
@@ -537,6 +535,28 @@ async def _read_raw_settings_blob(db_session: AsyncSession) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+async def _scrub_legacy_upstream_api_key(
+    db_session: AsyncSession, raw_blob: dict[str, Any]
+) -> None:
+    """Drop the plaintext upstream key an older build left in the settings blob.
+
+    ``_strip_secret_fields`` only keeps *new* writes clean, so without this the
+    plaintext survives in the row until the operator happens to save settings.
+    Runs after the value has been taken into the Secret store.
+    """
+    from sqlmodel import text
+
+    if "upstream_api_key" not in raw_blob:
+        return
+    remaining = {k: v for k, v in raw_blob.items() if k != "upstream_api_key"}
+    await db_session.exec(  # type: ignore[call-overload]
+        text("UPDATE settings SET data = :data WHERE id = 1").bindparams(
+            data=json.dumps(remaining)
+        )
+    )
+    await db_session.commit()
+
+
 def _legacy_plaintext(
     raw_blob: dict[str, Any], env_name: str, blob_key: str
 ) -> str | None:
@@ -653,6 +673,29 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
             settings.nsec = legacy_nsec
             changed = True
 
+    # Node-scoped upstream key — reversible Fernet encryption. Env stays
+    # authoritative because it is the only way to rotate this one (the admin
+    # settings endpoint refuses to write secret fields), so unlike the nsec the
+    # vault copy is a fallback rather than the owner.
+    env_upstream_key = os.environ.get("UPSTREAM_API_KEY")
+    if env_upstream_key:
+        settings.upstream_api_key = env_upstream_key
+    elif secret.encrypted_upstream_api_key:
+        try:
+            settings.upstream_api_key = vault.decrypt(secret.encrypted_upstream_api_key)
+        except InvalidToken as exc:
+            raise RuntimeError(
+                "Stored upstream API key cannot be decrypted with the current "
+                "ROUTSTR_SECRET_KEY. The key changed, or this database came from "
+                "another node. Restore the original ROUTSTR_SECRET_KEY to recover."
+            ) from exc
+    else:
+        legacy_upstream_key = raw_blob.get("upstream_api_key")
+        if isinstance(legacy_upstream_key, str) and legacy_upstream_key:
+            secret.encrypted_upstream_api_key = vault.encrypt(legacy_upstream_key)
+            settings.upstream_api_key = legacy_upstream_key
+            changed = True
+
     # Derive npub from whatever nsec we now hold, if not already known.
     if settings.nsec and not settings.npub:
         npub = derive_npub_from_nsec(settings.nsec)
@@ -663,3 +706,6 @@ async def bootstrap_secrets(db_session: AsyncSession) -> None:
         secret.updated_at = int(time.time())
         db_session.add(secret)
         await db_session.commit()
+
+    await _scrub_legacy_upstream_api_key(db_session, raw_blob)
+    vault.warn_if_master_key_shares_the_data_volume()

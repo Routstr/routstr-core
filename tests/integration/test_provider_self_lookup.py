@@ -70,7 +70,7 @@ async def test_self_disable_targets_own_row_after_key_rotation(
     assert provider is not None
 
     # Key is rotated in the DB while `provider` is still live.
-    row.api_key = "sk-rotated"
+    row.set_api_key("sk-rotated")
     integration_session.add(row)  # type: ignore[attr-defined]
     await integration_session.commit()  # type: ignore[attr-defined]
 
@@ -112,7 +112,7 @@ async def test_refresh_models_cache_finds_own_row_after_key_rotation(
     provider = PPQAIUpstreamProvider.from_db_row(row)  # captures sk-original
     assert provider is not None
 
-    row.api_key = "sk-rotated"
+    row.set_api_key("sk-rotated")
     integration_session.add(row)  # type: ignore[attr-defined]
     await integration_session.commit()  # type: ignore[attr-defined]
 

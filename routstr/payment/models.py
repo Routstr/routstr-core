@@ -571,7 +571,7 @@ async def test_model(
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {provider.api_key}",
+        "Authorization": f"Bearer {provider.decrypted_api_key()}",
     }
 
     try:

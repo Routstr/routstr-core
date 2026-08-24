@@ -55,7 +55,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         cls, provider_row: "UpstreamProviderRow"
     ) -> "PPQAIUpstreamProvider":
         return cls(
-            api_key=provider_row.api_key,
+            api_key=provider_row.decrypted_api_key(),
             provider_fee=provider_row.provider_fee,
         )
 

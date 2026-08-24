@@ -129,7 +129,7 @@ async def _reconcile_all_ppq_claims() -> set[int]:
             if not state.get("active"):
                 continue
             active_provider_ids.add(row.id)
-            provider = PPQAIUpstreamProvider.from_db_row(row) if row.api_key else None
+            provider = PPQAIUpstreamProvider.from_db_row(row) if row.encrypted_api_key else None
             await _reconcile_ppq_state(row, provider)
         except Exception as e:
             logger.error(
@@ -190,7 +190,7 @@ async def _check_and_topup_ppq_from_row(row: UpstreamProviderRow) -> None:
             extra={"provider_id": row.id, "problem": problem},
         )
         return
-    if not row.api_key:
+    if not row.encrypted_api_key:
         return
     await _check_and_topup_ppq(row, settings)
 
@@ -228,7 +228,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
-    if not row.api_key:
+    if not row.encrypted_api_key:
         return
 
     # Instantiate provider and check balance

@@ -45,7 +45,7 @@ class AzureUpstreamProvider(BaseUpstreamProvider):
             return None
         return cls(
             base_url=provider_row.base_url,
-            api_key=provider_row.api_key,
+            api_key=provider_row.decrypted_api_key(),
             api_version=provider_row.api_version,
             provider_fee=provider_row.provider_fee,
         )

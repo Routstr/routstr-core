@@ -12,8 +12,15 @@ builds on, independent of any database or app wiring:
   login and the recovery script keep working even if the key is lost.
 - a missing/malformed ``ROUTSTR_SECRET_KEY`` fails fast with the generation
   command in the message.
+- key custody: an externally supplied key is silent, a key sitting beside the
+  database warns that a copied volume defeats the encryption.
+- key custody: an externally supplied key is silent, a key sitting beside the
+  database warns that a copied volume defeats the encryption.
 """
 
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -337,3 +344,63 @@ def test_generated_key_defaults_beside_the_database(
     assert (db_dir / "routstr_secret.key").exists()
     assert not (tmp_path / "routstr_secret.key").exists()  # not the working dir
     assert vault.decrypt(token) == "beside-the-db"
+
+
+@contextmanager
+def _captured_vault_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> Iterator[pytest.LogCaptureFixture]:
+    # The routstr loggers do not propagate to root, so caplog only sees them if
+    # its handler is attached directly.
+    vault_logger = logging.getLogger("routstr.core.vault")
+    vault_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="routstr.core.vault"):
+            yield caplog
+    finally:
+        vault_logger.removeHandler(caplog.handler)
+
+
+def test_key_beside_the_database_warns_that_custody_is_not_separated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Encrypting the data with a key on the same volume protects nothing against
+    # a copied volume, which is the whole threat. The default is deliberately
+    # loud rather than fatal so an upgrading node still boots.
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY_FILE", raising=False)
+    db_dir = tmp_path / "data"
+    db_dir.mkdir()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir}/routstr.db")
+
+    with _captured_vault_warnings(caplog):
+        vault.warn_if_master_key_shares_the_data_volume()
+
+    assert "defeats at-rest encryption" in caplog.text
+
+
+def test_externally_supplied_key_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _use_key(monkeypatch, KEY_A)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/routstr.db")
+
+    with _captured_vault_warnings(caplog):
+        vault.warn_if_master_key_shares_the_data_volume()
+
+    assert caplog.records == []
+
+
+def test_key_file_on_separate_storage_does_not_warn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("ROUTSTR_SECRET_KEY", raising=False)
+    db_dir = tmp_path / "data"
+    db_dir.mkdir()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir}/routstr.db")
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY_FILE", str(tmp_path / "custody" / "key"))
+
+    with _captured_vault_warnings(caplog):
+        vault.warn_if_master_key_shares_the_data_volume()
+
+    assert caplog.records == []

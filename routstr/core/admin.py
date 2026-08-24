@@ -24,6 +24,7 @@ from .db import (
     UpstreamProviderRow,
     create_session,
     get_secret,
+    provider_api_key_fingerprint,
     set_admin_password,
     set_nsec,
 )
@@ -860,8 +861,8 @@ def _serialize_provider(
         "provider_type": provider.provider_type,
         "base_url": provider.base_url,
         "api_key": "[REDACTED]"
-        if (redact_api_key and provider.api_key)
-        else provider.api_key
+        if (redact_api_key and provider.encrypted_api_key)
+        else provider.decrypted_api_key()
         if not redact_api_key
         else "",
         "api_version": provider.api_version,
@@ -971,7 +972,7 @@ async def _apply_provider_update(
     if payload.base_url is not None:
         provider.base_url = payload.base_url
     if payload.api_key is not None:
-        provider.api_key = payload.api_key
+        provider.set_api_key(payload.api_key)
     if payload.api_version is not None:
         provider.api_version = payload.api_version
     if payload.enabled is not None:
@@ -1037,7 +1038,8 @@ async def create_upstream_provider(
         result = await session.exec(
             select(UpstreamProviderRow).where(
                 UpstreamProviderRow.base_url == payload.base_url,
-                UpstreamProviderRow.api_key == payload.api_key,
+                UpstreamProviderRow.api_key_fingerprint
+                == provider_api_key_fingerprint(payload.api_key),
             )
         )
         if result.first():
@@ -1290,9 +1292,10 @@ async def topup_provider_with_token(
 
         async with httpx.AsyncClient() as client:
             clean_url = provider.base_url.rstrip("/")
+            api_key = provider.decrypted_api_key()
             headers = {}
-            if provider.api_key:
-                headers["Authorization"] = f"Bearer {provider.api_key}"
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             resp = await client.post(
                 f"{clean_url}/v1/balance/topup",
                 json={"cashu_token": payload.token},
@@ -1336,16 +1339,13 @@ async def initiate_provider_topup(
 
                 async with httpx.AsyncClient() as client:
                     clean_url = provider.base_url.rstrip("/")
+                    api_key = provider.decrypted_api_key()
                     request_json = {
                         "amount_sats": int(payload.amount),
                         "purpose": "topup",
-                        "api_key": provider.api_key,
+                        "api_key": api_key,
                     }
-                    headers = (
-                        {"Authorization": f"Bearer {provider.api_key}"}
-                        if provider.api_key
-                        else {}
-                    )
+                    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
                     last_status_code = 500
                     last_error_detail: object = "Failed to create top-up invoice"
@@ -1455,11 +1455,10 @@ async def check_topup_status(provider_id: str, invoice_id: str) -> dict[str, obj
 
             async with httpx.AsyncClient() as client:
                 clean_url = provider.base_url.rstrip("/")
+                api_key = provider.decrypted_api_key()
                 resp = await client.get(
                     f"{clean_url}/v1/balance/lightning/invoice/{invoice_id}/status",
-                    headers={"Authorization": f"Bearer {provider.api_key}"}
-                    if provider.api_key
-                    else {},
+                    headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
                 )
                 if resp.status_code == 200:
                     status_data = resp.json()
@@ -1506,9 +1505,10 @@ async def get_provider_balance(provider_id: str) -> dict[str, object]:
             import httpx
 
             clean_url = provider.base_url.rstrip("/")
+            api_key = provider.decrypted_api_key()
             headers = {}
-            if provider.api_key:
-                headers["Authorization"] = f"Bearer {provider.api_key}"
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 try:

@@ -41,9 +41,11 @@ def clean_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No ambient legacy secrets, and a known in-memory settings baseline."""
     monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
     monkeypatch.delenv("NSEC", raising=False)
+    monkeypatch.delenv("UPSTREAM_API_KEY", raising=False)
     monkeypatch.setenv("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY)
     monkeypatch.setattr(settings, "nsec", "")
     monkeypatch.setattr(settings, "npub", "")
+    monkeypatch.setattr(settings, "upstream_api_key", "")
     monkeypatch.setattr(settings, "http_url", "")
 
 
@@ -218,6 +220,79 @@ async def test_fail_fast_when_nsec_encrypted_with_different_key(
     monkeypatch.setenv("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY)
     with pytest.raises(RuntimeError, match="ROUTSTR_SECRET_KEY"):
         await bootstrap_secrets(integration_session)
+
+
+# --- legacy node-scoped upstream API key -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_encrypts_legacy_upstream_api_key_from_blob(
+    clean_secret_env: None, integration_session: AsyncSession
+) -> None:
+    await _create_settings_blob(
+        integration_session, {"name": "Node", "upstream_api_key": "sk-legacy-upstream"}
+    )
+
+    await bootstrap_secrets(integration_session)
+
+    secret = await get_secret(integration_session)
+    assert secret.encrypted_upstream_api_key is not None
+    assert "sk-legacy-upstream" not in secret.encrypted_upstream_api_key
+    assert vault.decrypt(secret.encrypted_upstream_api_key) == "sk-legacy-upstream"
+    assert settings.upstream_api_key == "sk-legacy-upstream"
+
+
+@pytest.mark.asyncio
+async def test_legacy_upstream_api_key_is_removed_from_the_settings_blob(
+    clean_secret_env: None, integration_session: AsyncSession
+) -> None:
+    await _create_settings_blob(
+        integration_session, {"name": "Node", "upstream_api_key": "sk-legacy-upstream"}
+    )
+
+    await bootstrap_secrets(integration_session)
+
+    result = await integration_session.exec(  # type: ignore
+        text("SELECT data FROM settings WHERE id = 1")
+    )
+    row = result.first()
+    assert row is not None
+    blob = json.loads(row[0])
+    assert "upstream_api_key" not in blob
+    assert blob["name"] == "Node"
+
+
+@pytest.mark.asyncio
+async def test_stored_upstream_api_key_under_another_key_fails_closed(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = await get_secret(integration_session)
+    secret.encrypted_upstream_api_key = vault.encrypt("sk-legacy-upstream")
+    integration_session.add(secret)
+    await integration_session.commit()
+
+    monkeypatch.setenv("ROUTSTR_SECRET_KEY", TEST_SECRET_KEY_ALT)
+    with pytest.raises(RuntimeError, match="upstream API key"):
+        await bootstrap_secrets(integration_session)
+
+
+@pytest.mark.asyncio
+async def test_upstream_api_key_env_stays_authoritative(
+    clean_secret_env: None,
+    integration_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = await get_secret(integration_session)
+    secret.encrypted_upstream_api_key = vault.encrypt("sk-stored")
+    integration_session.add(secret)
+    await integration_session.commit()
+    monkeypatch.setenv("UPSTREAM_API_KEY", "sk-rotated")
+
+    await bootstrap_secrets(integration_session)
+
+    assert settings.upstream_api_key == "sk-rotated"
 
 
 # --- encryption is mandatory, key custody is not: upgrade without a key --------

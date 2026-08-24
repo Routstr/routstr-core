@@ -11,7 +11,13 @@ if TYPE_CHECKING:
 from sqlmodel import select
 
 from ..core import get_logger
-from ..core.db import AsyncSession, ModelRow, UpstreamProviderRow, create_session
+from ..core.db import (
+    AsyncSession,
+    ModelRow,
+    UpstreamProviderRow,
+    create_session,
+    provider_api_key_fingerprint,
+)
 from ..core.provider_slugs import allocate_unique_provider_slug
 from ..payment.models import Model
 from .base import BaseUpstreamProvider
@@ -284,7 +290,8 @@ async def _seed_providers_from_settings(
                 result = await session.exec(
                     select(UpstreamProviderRow).where(
                         UpstreamProviderRow.base_url == base_url,
-                        UpstreamProviderRow.api_key == api_key,
+                        UpstreamProviderRow.api_key_fingerprint
+                        == provider_api_key_fingerprint(api_key),
                     )
                 )
                 if not result.first():
@@ -309,7 +316,8 @@ async def _seed_providers_from_settings(
         result = await session.exec(
             select(UpstreamProviderRow).where(
                 UpstreamProviderRow.base_url == ollama_base_url,
-                UpstreamProviderRow.api_key == ollama_api_key,
+                UpstreamProviderRow.api_key_fingerprint
+                == provider_api_key_fingerprint(ollama_api_key),
             )
         )
         if not result.first():
@@ -335,7 +343,8 @@ async def _seed_providers_from_settings(
             result = await session.exec(
                 select(UpstreamProviderRow).where(
                     UpstreamProviderRow.base_url == base_url,
-                    UpstreamProviderRow.api_key == api_key,
+                    UpstreamProviderRow.api_key_fingerprint
+                    == provider_api_key_fingerprint(api_key),
                 )
             )
             if not result.first():
@@ -362,7 +371,8 @@ async def _seed_providers_from_settings(
             result = await session.exec(
                 select(UpstreamProviderRow).where(
                     UpstreamProviderRow.base_url == base_url,
-                    UpstreamProviderRow.api_key == api_key,
+                    UpstreamProviderRow.api_key_fingerprint
+                    == provider_api_key_fingerprint(api_key),
                 )
             )
             if not result.first():
