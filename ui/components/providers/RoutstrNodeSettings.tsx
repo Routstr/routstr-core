@@ -14,10 +14,30 @@ import { Switch } from '@/components/ui/switch';
 interface ProviderSettings {
   topup_mint_url?: string;
   auto_topup?: boolean;
+  topup_threshold_sats?: number;
+  /** Legacy, read-only here: the backend compares it as `x 1000` sats. */
   topup_threshold?: number;
   topup_amount_limit?: number;
   refund_on_expiry?: boolean;
   [key: string]: unknown;
+}
+
+/**
+ * Sats a legacy provider actually tops up below.
+ *
+ * This field has always been labelled Sats, but the backend compared
+ * `topup_threshold` as `balance >= threshold * 1000`, so the number shown here
+ * was never the number in force. Show the figure the backend uses, so editing
+ * starts from the truth instead of silently moving the trigger a thousandfold
+ * on the next save.
+ */
+function thresholdSats(settings: ProviderSettings): number | undefined {
+  if (settings.topup_threshold_sats !== undefined) {
+    return settings.topup_threshold_sats;
+  }
+  return settings.topup_threshold !== undefined
+    ? settings.topup_threshold * 1000
+    : undefined;
 }
 
 interface RoutstrNodeSettingsProps {
@@ -92,19 +112,23 @@ export function RoutstrNodeSettings({
           <div className='border-primary/20 grid gap-4 border-l-2 pt-2 pl-4'>
             <div className='grid gap-2'>
               <Label
-                htmlFor={`${prefix}topup_threshold`}
+                htmlFor={`${prefix}topup_threshold_sats`}
                 className='text-xs font-medium'
               >
                 When credits are below (Sats)
               </Label>
               <Input
-                id={`${prefix}topup_threshold`}
+                id={`${prefix}topup_threshold_sats`}
                 type='number'
                 className='h-9'
                 placeholder='e.g. 1000'
-                value={settings.topup_threshold || ''}
+                value={thresholdSats(settings) ?? ''}
                 onChange={(e) =>
-                  update({ topup_threshold: parseInt(e.target.value) })
+                  update({
+                    topup_threshold_sats: parseInt(e.target.value),
+                    // Drop the legacy key so the saved blob carries one unit.
+                    topup_threshold: undefined,
+                  })
                 }
               />
             </div>

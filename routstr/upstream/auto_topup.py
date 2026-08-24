@@ -200,15 +200,48 @@ def validate_ppq_auto_topup_settings(settings: dict | None) -> str | None:
     return None
 
 
+_legacy_threshold_hinted: set[int] = set()
+
+
+def _routstr_threshold_sats(row: UpstreamProviderRow, settings: dict) -> float:
+    """Balance, in sats, below which a top-up fires.
+
+    ``topup_threshold_sats`` is used as written. A legacy ``topup_threshold``
+    keeps the thousandfold it has always been compared with — reinterpreting it
+    as sats would drop an operator's trigger point by a factor of 1000 on
+    upgrade and leave the peer to run dry. The hint names the value to migrate
+    to, once per provider rather than once per scheduler tick.
+    """
+    explicit = settings.get("topup_threshold_sats")
+    if explicit is not None:
+        return float(typing.cast(int | float, explicit))
+
+    threshold_sats = float(typing.cast(int | float, settings["topup_threshold"])) * 1000
+    if row.id is not None and row.id not in _legacy_threshold_hinted:
+        _legacy_threshold_hinted.add(row.id)
+        logger.warning(
+            "Routstr auto top-up uses the legacy unitless threshold; set "
+            "topup_threshold_sats to state the unit",
+            extra={"provider_id": row.id, "threshold_sats": threshold_sats},
+        )
+    return threshold_sats
+
+
 def validate_routstr_auto_topup_settings(settings: dict | None) -> str | None:
     """Return why enabled Routstr auto top-up settings are invalid, if anything."""
     if not settings or not settings.get("auto_topup"):
         return None
 
-    threshold = settings.get("topup_threshold")
+    threshold_sats = settings.get("topup_threshold_sats")
+    legacy_threshold = settings.get("topup_threshold")
     amount = settings.get("topup_amount_limit")
     mint_url = settings.get("topup_mint_url")
-    if _invalid_topup_number(threshold):
+    if threshold_sats is not None:
+        if _invalid_topup_number(threshold_sats):
+            return "Routstr auto top-up threshold must be a positive number of sats"
+    elif legacy_threshold is None:
+        return "Routstr auto top-up requires a threshold"
+    elif _invalid_topup_number(legacy_threshold):
         return "Routstr auto top-up threshold must be a positive number"
     if _invalid_topup_number(amount, integer=True):
         return "Routstr auto top-up amount must be a positive whole number"
@@ -270,7 +303,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
-    threshold = float(settings["topup_threshold"])
+    threshold_sats = _routstr_threshold_sats(row, settings)
     amount = int(settings["topup_amount_limit"])
     mint_url = str(settings["topup_mint_url"])
 
@@ -293,7 +326,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
-    if balance >= threshold * 1000:
+    if balance >= threshold_sats:
         return
 
     spent_24h_sats = await _routstr_spent_last_24h_sats()
@@ -323,7 +356,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         extra={
             "provider_id": row.id,
             "balance": balance,
-            "threshold": threshold,
+            "threshold_sats": threshold_sats,
             "topup_amount": amount,
             "mint_url": mint_url,
         },
