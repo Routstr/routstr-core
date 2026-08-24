@@ -2622,8 +2622,10 @@ async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
         mint = await find_trusted_mint_with_funds(amount, unit, mint, force_reload=True)
         wallet = await get_wallet(mint, unit)
         available = get_proofs_per_mint_and_unit(wallet, mint, unit, not_reserved=True)
-        proofs, _ = await wallet.select_to_send(available, amount, set_reserved=True)
-        return await raw_send_to_lnurl(wallet, proofs, address, unit)
+        # Hand over unreserved proofs: raw_send_to_lnurl reserves only once the
+        # destination, the invoice amount and the melt quote have all been
+        # accepted, so a rejected refund cannot strand locked proofs.
+        return await raw_send_to_lnurl(wallet, available, address, unit, amount=amount)
 
 
 # class Payment:
