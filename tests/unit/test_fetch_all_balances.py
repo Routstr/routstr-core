@@ -339,7 +339,7 @@ async def test_slow_mints_do_not_exhaust_a_single_connection_pool(
         f"sqlite+aiosqlite:///{tmp_path / 'pool-pressure.db'}",
         pool_size=1,
         max_overflow=0,
-        pool_timeout=0.2,
+        pool_timeout=0.5,
     )
     async with engine.begin() as connection:
         await connection.run_sync(SQLModel.metadata.create_all)
@@ -350,7 +350,7 @@ async def test_slow_mints_do_not_exhaust_a_single_connection_pool(
             yield session
 
     async def slow_filter(proofs, wallet):  # type: ignore[no-untyped-def]
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)
         return proofs
 
     try:
