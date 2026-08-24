@@ -84,7 +84,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "method": request.method,
                     "path": path,
-                    "query_params": dict(request.query_params),
+                    # Names only: query values carry API keys and refund
+                    # tokens on the wallet routes.
+                    "query_param_names": sorted(request.query_params.keys()),
                 },
             )
 

@@ -368,7 +368,7 @@ async def _restore_balance(
     logger.info(
         "refund_wallet_endpoint: balance restored after mint failure",
         extra={
-            "hashed_key": hashed_key,
+            "key_hash": hashed_key[:8],
             "restored_balance": balance,
             "mint_url": mint_url,
         },
@@ -481,7 +481,7 @@ async def refund_wallet_endpoint(
         logger.warning(
             "refund_wallet_endpoint: released stale reservation before refund",
             extra={
-                "hashed_key": key.hashed_key,
+                "key_hash": key.hashed_key[:8],
                 "stale_timeout_seconds": settings.stale_reservation_timeout_seconds,
             },
         )
@@ -555,7 +555,7 @@ async def refund_wallet_endpoint(
                 "refund_wallet_endpoint: cashu token issued",
                 extra={
                     "path": "/v1/wallet/refund",
-                    "token": result["token"],
+                    "token_length": len(result["token"]),
                     "amount": remaining_balance,
                     "currency": key.refund_currency or "sat",
                 },
@@ -570,7 +570,7 @@ async def refund_wallet_endpoint(
             "pending reconciliation",
             extra={
                 "error": str(e),
-                "hashed_key": key.hashed_key,
+                "key_hash": key.hashed_key[:8],
                 "remaining_balance": remaining_balance,
                 "refund_currency": key.refund_currency,
                 "refund_mint_url": key.refund_mint_url,
@@ -608,7 +608,7 @@ async def refund_wallet_endpoint(
             extra={
                 "error": error_msg,
                 "error_type": type(e).__name__,
-                "hashed_key": key.hashed_key,
+                "key_hash": key.hashed_key[:8],
                 "remaining_balance": remaining_balance,
                 "refund_currency": key.refund_currency,
                 "refund_mint_url": key.refund_mint_url,

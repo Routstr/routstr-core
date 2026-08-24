@@ -51,7 +51,7 @@ from pythonjsonlogger import jsonlogger
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .redaction import redact_obj, redact_org_ids
+from .redaction import redact_field, redact_org_ids
 
 # Only use RichHandler when stdout is a real TTY. In non-TTY contexts
 # (docker logs, pipes, CI) Rich pads every line to width and wraps long
@@ -100,8 +100,10 @@ class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
         self.baseFilename = new_filename
         self.current_date = new_date
 
-        # FIX ME: not sure if we need this
-        # self._cleanup_old_files()
+        # `backupCount` alone never prunes these files: the base filename moves
+        # with the date, so the inherited rollover finds no siblings to expire
+        # and every day of logged credentials is retained indefinitely.
+        self._cleanup_old_files()
 
         if not self.delay:
             self.stream = self._open()
@@ -260,13 +262,11 @@ class SecurityFilter(logging.Filter):
 
             # Structured `extra={...}` fields are emitted by the JSON formatter
             # straight from the record dict and never pass through the message
-            # formatting above. Redact organization IDs from any string-valued
-            # extra so they cannot leak via structured logs.
+            # formatting above, so they need their own recursive pass.
             for attr, value in list(record.__dict__.items()):
                 if attr in _NON_EXTRA_RECORD_ATTRS:
                     continue
-                if isinstance(value, (str, dict, list, tuple)):
-                    record.__dict__[attr] = redact_obj(value)
+                record.__dict__[attr] = redact_field(attr, value)
 
         except Exception:
             pass
