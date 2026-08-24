@@ -907,27 +907,43 @@ class UpstreamProviderUpdateBySlug(BaseModel):
     provider_settings: dict | None = None
 
 
-async def _active_ppq_claim_in_session(session: AsyncSession, provider_id: int) -> bool:
+async def _active_auto_topup_claim_in_session(
+    session: AsyncSession, provider_id: int, provider_type: str
+) -> bool:
     """Check for an active claim inside the caller's transaction.
 
     Must share the transaction of whatever destructive write it is guarding —
     a check in its own session leaves a window for a worker to create the
     claim between the check and the commit.
     """
-    from ..upstream.auto_topup import _ppq_state_id_for_provider
+    from ..upstream.auto_topup import (
+        _ppq_state_id_for_provider,
+        _routstr_state_id_for_provider,
+    )
 
-    claim = await session.get(CashuTransaction, _ppq_state_id_for_provider(provider_id))
+    state_id = (
+        _ppq_state_id_for_provider(provider_id)
+        if provider_type == "ppqai"
+        else _routstr_state_id_for_provider(provider_id)
+    )
+    claim = await session.get(CashuTransaction, state_id)
     return claim is not None and not claim.collected and not claim.swept
 
 
-def _require_valid_ppq_auto_topup(provider_type: str, settings: dict | None) -> None:
-    """Reject PPQ auto top-up settings the worker would later refuse."""
-    if provider_type != "ppqai":
+def _require_valid_auto_topup(provider_type: str, settings: dict | None) -> None:
+    """Reject auto top-up settings the worker would later refuse."""
+    from ..upstream.auto_topup import (
+        validate_ppq_auto_topup_settings,
+        validate_routstr_auto_topup_settings,
+    )
+
+    if provider_type == "ppqai":
+        problem = validate_ppq_auto_topup_settings(settings)
+    elif provider_type == "routstr":
+        problem = validate_routstr_auto_topup_settings(settings)
+    else:
         return
 
-    from ..upstream.auto_topup import validate_ppq_auto_topup_settings
-
-    problem = validate_ppq_auto_topup_settings(settings)
     if problem is not None:
         raise HTTPException(status_code=400, detail=problem)
 
@@ -952,16 +968,18 @@ async def _apply_provider_update(
     )
     if (
         provider_type_changed
-        and provider.provider_type == "ppqai"
+        and provider.provider_type in ("ppqai", "routstr")
         and provider.id is not None
-        and await _active_ppq_claim_in_session(session, provider.id)
+        and await _active_auto_topup_claim_in_session(
+            session, provider.id, provider.provider_type
+        )
     ):
-        # Changing the type would orphan the claim: the PPQ endpoints refuse
-        # non-ppqai providers, so nobody could ever inspect or release it.
+        # Changing the type would orphan the claim: the claim endpoints refuse
+        # providers of the wrong type, so nobody could inspect or release it.
         raise HTTPException(
             status_code=409,
             detail=(
-                "This provider has an active PPQ auto top-up claim. Release "
+                "This provider has an active auto top-up claim. Release "
                 "it before changing the provider type"
             ),
         )
@@ -1012,7 +1030,7 @@ async def _apply_provider_update(
         except (json.JSONDecodeError, TypeError):
             effective_settings = None
     if effective_settings is not None:
-        _require_valid_ppq_auto_topup(provider.provider_type, effective_settings)
+        _require_valid_auto_topup(provider.provider_type, effective_settings)
     if payload.provider_settings is not None:
         provider.provider_settings = json.dumps(payload.provider_settings)
 
@@ -1052,7 +1070,7 @@ async def create_upstream_provider(
         else:
             slug = await allocate_unique_provider_slug(session, payload.provider_type)
 
-        _require_valid_ppq_auto_topup(payload.provider_type, payload.provider_settings)
+        _require_valid_auto_topup(payload.provider_type, payload.provider_settings)
 
         provider = UpstreamProviderRow(
             slug=slug,
@@ -1148,16 +1166,19 @@ async def delete_upstream_provider(provider_id: str) -> dict[str, object]:
         # re-reads the provider inside its own transaction, so these two
         # writes serialise — either the claim lands first and this 409s, or
         # the delete lands first and the worker refuses to claim.
-        if provider.provider_type == "ppqai" and await _active_ppq_claim_in_session(
-            session, deleted_id
+        if provider.provider_type in (
+            "ppqai",
+            "routstr",
+        ) and await _active_auto_topup_claim_in_session(
+            session, deleted_id, provider.provider_type
         ):
             # Deleting now would orphan the claim and any funds it tracks:
-            # the PPQ endpoints 404 without the provider row, so the claim
+            # the claim endpoints 404 without the provider row, so the claim
             # could never again be inspected or released.
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "This provider has an active PPQ auto top-up claim. "
+                    "This provider has an active auto top-up claim. "
                     "Resolve and release it before deleting the provider"
                 ),
             )
@@ -1842,6 +1863,72 @@ async def release_ppq_auto_topup_api(
     return {"ok": True, "released": True}
 
 
+_ROUTSTR_RELEASE_ERRORS = {
+    "no_active_claim": "No active Routstr auto top-up claim to release",
+    "stale_state": "The claim changed since it was reviewed; reload and check again",
+    "claim_changed": (
+        "The claim changed while the release was being applied; reload and check again"
+    ),
+}
+
+
+class ReleaseRoutstrAutoTopupRequest(BaseModel):
+    confirmed_peer_reconciled: bool
+    state_token: str | None = None
+
+
+async def _require_routstr_provider(provider_id: int) -> UpstreamProviderRow:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if provider.provider_type != "routstr":
+        raise HTTPException(status_code=400, detail="Provider is not a Routstr node")
+    return provider
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/routstr-auto-topup",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_routstr_auto_topup_api(provider_id: int) -> dict[str, object]:
+    await _require_routstr_provider(provider_id)
+    from ..upstream.auto_topup import get_routstr_auto_topup_state
+
+    return {"ok": True, **await get_routstr_auto_topup_state(provider_id)}
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/routstr-auto-topup/release",
+    dependencies=[Depends(require_admin_api)],
+)
+async def release_routstr_auto_topup_api(
+    provider_id: int, payload: ReleaseRoutstrAutoTopupRequest
+) -> dict[str, object]:
+    await _require_routstr_provider(provider_id)
+    if not payload.confirmed_peer_reconciled:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirm the peer credited or returned the token before releasing",
+        )
+
+    from ..upstream.auto_topup import release_routstr_auto_topup_state
+
+    outcome = await release_routstr_auto_topup_state(
+        provider_id, state_token=payload.state_token
+    )
+    if not outcome.released:
+        raise HTTPException(
+            status_code=409, detail=_ROUTSTR_RELEASE_ERRORS[outcome.reason]
+        )
+
+    logger.warning(
+        "Admin released Routstr auto top-up claim after manual reconciliation",
+        extra={"provider_id": provider_id, "state_token": payload.state_token},
+    )
+    return {"ok": True, "released": True}
+
+
 def _transaction_status(tx: CashuTransaction) -> str:
     """An outgoing admin withdrawal ends at "issued": the node hands the bearer
     token over and never learns whether it was redeemed, so its flags stay false
@@ -1869,10 +1956,11 @@ async def get_transactions_api(
     async with create_session() as session:
         from sqlmodel import col, func
 
-        # Hide only the deterministic PPQ claim-lock rows. Append-only PPQ
-        # payment rows remain visible as the audit trail for irreversible melts.
+        # Hide only the deterministic claim-lock rows. Append-only PPQ payment
+        # rows and auto-topup token rows remain visible as the audit trail.
         base = select(CashuTransaction).where(
-            ~col(CashuTransaction.id).like("ppq-auto-topup-%")
+            ~col(CashuTransaction.id).like("ppq-auto-topup-%"),
+            ~col(CashuTransaction.id).like("routstr-auto-topup-%"),
         )
         if type:
             base = base.where(CashuTransaction.type == type)
