@@ -274,7 +274,9 @@ async def test_waiter_does_not_restore_state_cleared_between_reads() -> None:
     read_calls = 0
     state_cleared = False
 
-    def read_and_clear_after_second_snapshot():
+    def read_and_clear_after_second_snapshot() -> (
+        tuple[float, str | None, int, bool, int] | None
+    ):
         nonlocal read_calls, state_cleared
         read_calls += 1
         state = read_shared_state()

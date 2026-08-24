@@ -2061,23 +2061,23 @@ async def _get_supported_mint_units(mint_url: str) -> list[str]:
     async with node_coordination.exclusive_lock(lock_path):
         state = node_coordination.read_json(state_path)
         if state is not None:
-            units = state.get("units")
+            cached_units = state.get("units")
             maximum_ttl = (
                 _MINT_UNITS_CACHE_SECONDS
-                if isinstance(units, list)
+                if isinstance(cached_units, list)
                 else _BALANCE_FETCH_RETRY_SECONDS
             )
             remaining = _shared_mint_units_remaining(state, maximum_ttl)
             if remaining is not None:
-                if isinstance(units, list) and all(
-                    isinstance(unit, str) for unit in units
+                if isinstance(cached_units, list) and all(
+                    isinstance(unit, str) for unit in cached_units
                 ):
                     _migrate_mint_units_state(state_path, state, remaining, mint_url)
                     _mint_supported_units[mint_url] = (
                         time.monotonic() + remaining,
-                        units,
+                        cached_units,
                     )
-                    return units
+                    return cached_units
                 error = state.get("error")
                 error_code = state.get("error_code")
                 if isinstance(error, str) and isinstance(error_code, str):

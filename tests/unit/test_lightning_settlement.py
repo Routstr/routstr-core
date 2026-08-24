@@ -477,8 +477,8 @@ async def test_paid_state_write_failure_still_reports_non_expirable_outcome() ->
         patch("routstr.lightning._reload_invoice_view", AsyncMock()),
     ):
         definitively_unpaid = await check_invoice_payment(
-            invoice,
-            session,  # type: ignore[arg-type]
+            invoice,  # type: ignore[arg-type]
+            session,
         )
 
     assert definitively_unpaid is False

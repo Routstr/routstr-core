@@ -2231,6 +2231,7 @@ async def test_mint_rate_guard_keeps_cooldown_when_concurrency_is_unlimited() ->
         assert await guard.run(operation) == "ok"
 
     sleep.assert_awaited_once()
+    assert sleep.await_args is not None
     assert sleep.await_args.args[0] == pytest.approx(5, abs=0.1)
     operation.assert_awaited_once()
 
@@ -2272,6 +2273,7 @@ async def test_mint_operation_honors_retry_after_as_minimum() -> None:
 
     assert result == "ok"
     sleep.assert_awaited_once()
+    assert sleep.await_args is not None
     assert sleep.await_args.args[0] == pytest.approx(60.0, abs=0.1)
 
 

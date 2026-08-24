@@ -121,6 +121,7 @@ async def test_shared_failure_cache_io_does_not_mask_mint_outage(
             await validate_bearer_key(token, session)
 
     assert caught.value.status_code == 503
+    assert isinstance(caught.value.detail, dict)
     assert caught.value.detail["error"]["code"] == "cashu_mint_unreachable"
 
 

@@ -4,6 +4,8 @@ import json
 import multiprocessing
 import os
 import time
+from collections.abc import Sequence
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 
 from routstr import node_coordination
@@ -98,7 +100,7 @@ def _slot_worker(root: str, counter_path: str, queue: multiprocessing.Queue) -> 
         queue.put(f"error:{error!r}")
 
 
-def _join(processes: list[multiprocessing.Process]) -> None:
+def _join(processes: Sequence[BaseProcess]) -> None:
     try:
         for process in processes:
             process.join(timeout=10)
