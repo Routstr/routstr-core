@@ -114,6 +114,7 @@ async def test_fragmented_crlf_stream_refunds_and_sets_cost_headers() -> None:
     )
 
     send_refund.assert_awaited_once()
+    assert send_refund.await_args is not None
     assert send_refund.await_args.args[0] == 10_000 - 4000
     assert response.headers["x-cashu"] == "cashuBrefundtoken0123456789"
     assert response.headers["x-routstr-cost-msats"] == "4000"
@@ -125,6 +126,7 @@ async def test_fragmented_crlf_stream_refunds_and_sets_cost_headers() -> None:
 async def test_nested_completion_usage_drives_cost_calculation() -> None:
     _, get_cost, _ = await _settle(_canonical_chunks(), cost_data=_make_cost_data(4000))
 
+    assert get_cost.await_args is not None
     response_data = get_cost.await_args.args[0]
     assert response_data["model"] == "gpt-5-mini"
     assert response_data["usage"]["input_tokens"] == 12
@@ -172,6 +174,8 @@ async def test_multiline_data_payload_is_parsed_and_reframed() -> None:
         chunks, cost_data=_make_cost_data(4000)
     )
 
+    assert get_cost.await_args is not None
+    assert send_refund.await_args is not None
     assert get_cost.await_args.args[0]["usage"]["input_tokens"] == 12
     assert send_refund.await_args.args[0] == 6000
     body = await _collect(response)
@@ -193,6 +197,7 @@ async def test_missing_usage_settles_at_authorized_max() -> None:
     )
 
     send_refund.assert_awaited_once()
+    assert send_refund.await_args is not None
     assert send_refund.await_args.args[0] == 10_000 - 9_000
     assert response.headers["x-cashu"] == "cashuBrefundtoken0123456789"
     assert response.headers["x-routstr-cost-msats"] == "9000"
@@ -209,6 +214,7 @@ async def test_malformed_events_do_not_retain_whole_token() -> None:
         chunks, amount=10_000, max_cost_for_model=9_000
     )
 
+    assert send_refund.await_args is not None
     assert send_refund.await_args.args[0] == 1000
     body = await _collect(response)
     assert b"\\n" not in body
