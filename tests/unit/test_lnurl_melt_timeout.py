@@ -11,6 +11,7 @@ from cashu.core.base import MeltQuoteState
 from routstr.core.settings import settings
 from routstr.mint import MintCooldownError, MintRateGuard
 from routstr.payment.lnurl import (
+    LNURLError,
     MeltOutcomeAmbiguousError,
     raw_send_to_lnurl,
 )
@@ -32,7 +33,10 @@ def _wallet() -> tuple[MagicMock, list[MagicMock]]:
     wallet.melt_quote = AsyncMock(
         return_value=MagicMock(fee_reserve=1, quote="q", amount=QUOTE_AMOUNT_SAT)
     )
+    wallet.melt = AsyncMock()
     wallet.select_to_send = AsyncMock(return_value=(proofs, None))
+    wallet.set_reserved_for_melt = AsyncMock()
+    wallet.set_reserved_for_send = AsyncMock()
     return wallet, proofs
 
 
@@ -50,7 +54,7 @@ def _lnurl_patches() -> tuple[Any, Any]:
 
 
 @pytest.mark.asyncio
-async def test_raw_send_to_lnurl_timeout_keeps_unpaid_outcome_ambiguous() -> None:
+async def test_raw_send_to_lnurl_timeout_reconciled_unpaid_is_retry_safe() -> None:
     wallet, proofs = _wallet()
 
     async def _hang(**kwargs: object) -> None:
@@ -67,12 +71,65 @@ async def test_raw_send_to_lnurl_timeout_keeps_unpaid_outcome_ambiguous() -> Non
         patch.object(settings, "mint_retry_max_attempts", 0),
         data_patch,
         invoice_patch,
-        pytest.raises(MeltOutcomeAmbiguousError, match="outcome is ambiguous"),
+        pytest.raises(LNURLError, match="confirmed that the melt was unpaid") as raised,
     ):
         await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
 
+    assert not isinstance(raised.value, MeltOutcomeAmbiguousError)
     wallet.get_melt_quote.assert_awaited_once_with("q")
-    wallet.set_reserved_for_melt.assert_not_called()
+    wallet.set_reserved_for_melt.assert_awaited_once_with(
+        proofs, reserved=True, quote_id="q"
+    )
+
+
+@pytest.mark.asyncio
+async def test_raw_send_to_lnurl_wrapped_transport_error_is_reconciled_once() -> None:
+    wallet, proofs = _wallet()
+
+    async def _wrapped_transport_error(**kwargs: object) -> None:
+        try:
+            raise httpx.ReadTimeout("response lost")
+        except httpx.ReadTimeout as transport_error:
+            raise Exception("could not pay invoice") from transport_error
+
+    wallet.melt = AsyncMock(side_effect=_wrapped_transport_error)
+    wallet.get_melt_quote = AsyncMock(
+        return_value=MagicMock(state=MeltQuoteState.unpaid)
+    )
+    data_patch, invoice_patch = _lnurl_patches()
+
+    with (
+        patch.object(settings, "mint_retry_max_attempts", 3),
+        data_patch,
+        invoice_patch,
+        pytest.raises(LNURLError, match="confirmed that the melt was unpaid") as raised,
+    ):
+        await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
+
+    assert not isinstance(raised.value, MeltOutcomeAmbiguousError)
+    wallet.melt.assert_awaited_once()
+    wallet.get_melt_quote.assert_awaited_once_with("q")
+    wallet.set_reserved_for_melt.assert_awaited_once_with(
+        proofs, reserved=True, quote_id="q"
+    )
+
+
+@pytest.mark.asyncio
+async def test_raw_send_to_lnurl_does_not_retry_melt_quote_timeout() -> None:
+    wallet, proofs = _wallet()
+    wallet.melt_quote = AsyncMock(side_effect=httpx.ReadTimeout("response lost"))
+    data_patch, invoice_patch = _lnurl_patches()
+
+    with (
+        patch.object(settings, "mint_retry_max_attempts", 3),
+        data_patch,
+        invoice_patch,
+        pytest.raises(httpx.TimeoutException),
+    ):
+        await raw_send_to_lnurl(wallet, proofs, "owner@ln.tld", "sat", amount=1000)
+
+    wallet.melt_quote.assert_awaited_once()
+    wallet.melt.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -98,6 +155,9 @@ async def test_raw_send_to_lnurl_timeout_reconciled_paid_is_success() -> None:
 
     assert paid > 0
     wallet.get_melt_quote.assert_awaited_once_with("q")
+    wallet.set_reserved_for_melt.assert_awaited_once_with(
+        proofs, reserved=True, quote_id="q"
+    )
 
 
 @pytest.mark.asyncio

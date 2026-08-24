@@ -3628,54 +3628,32 @@ class BaseUpstreamProvider:
             extra={"amount": amount, "unit": unit, "mint": mint},
         )
 
-        max_retries = 3
-        last_exception = None
-        refund_token = None
-
-        for attempt in range(max_retries):
-            try:
-                refund_token = await send_token(amount, unit=unit, mint_url=mint)
-                break
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "Refund token creation failed, retrying",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "amount": amount,
-                            "unit": unit,
-                            "mint": mint,
-                        },
-                    )
-                else:
-                    logger.error(
-                        "Failed to create refund token after all retries",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "amount": amount,
-                            "unit": unit,
-                            "mint": mint,
-                        },
-                    )
-
-        if refund_token is None:
+        try:
+            # send_token may perform an irreversible Cashu swap to make exact
+            # denominations. A blanket retry after response loss can dispatch
+            # a second swap, so this call is intentionally single-attempt.
+            refund_token = await send_token(amount, unit=unit, mint_url=mint)
+        except Exception as error:
+            logger.error(
+                "Failed to create refund token",
+                extra={
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                    "amount": amount,
+                    "unit": unit,
+                    "mint": mint,
+                },
+            )
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": {
-                        "message": f"failed to create refund after {max_retries} attempts: {str(last_exception)}",
+                        "message": f"failed to create refund: {error}",
                         "type": "invalid_request_error",
                         "code": "send_token_failed",
                     }
                 },
-            )
+            ) from error
 
         logger.info(
             "Refund token created successfully",
@@ -3683,7 +3661,6 @@ class BaseUpstreamProvider:
                 "amount": amount,
                 "unit": unit,
                 "mint": mint,
-                "attempt": attempt + 1,
                 "token_preview": refund_token[:20] + "..."
                 if len(refund_token) > 20
                 else refund_token,

@@ -40,13 +40,19 @@ def isolate_wallet_runtime_state() -> Generator[None, None, None]:
     wallet_module._MintRateGuard._guards.clear()
     wallet_module._wallets.clear()
     wallet_module._wallet_last_load.clear()
+    wallet_module._wallet_last_mint_load.clear()
     wallet_module._wallet_load_locks.clear()
+    wallet_module._mint_metadata_last_load.clear()
+    wallet_module._mint_metadata_load_locks.clear()
     yield
     settings.mint_max_concurrency = original_concurrency
     wallet_module._MintRateGuard._guards.clear()
     wallet_module._wallets.clear()
     wallet_module._wallet_last_load.clear()
+    wallet_module._wallet_last_mint_load.clear()
     wallet_module._wallet_load_locks.clear()
+    wallet_module._mint_metadata_last_load.clear()
+    wallet_module._mint_metadata_load_locks.clear()
 
 
 @pytest.mark.asyncio
@@ -64,6 +70,63 @@ async def test_get_balance() -> None:
     ):
         balance = await get_balance("sat")
         assert balance == 50000
+
+
+@pytest.mark.asyncio
+async def test_wallet_metadata_is_reused_across_units() -> None:
+    from routstr.wallet import Wallet
+
+    sat_wallet = MagicMock(url="http://mint:3338")
+    sat_wallet.load_mint_keysets = AsyncMock()
+    sat_wallet.activate_keyset = AsyncMock()
+    sat_wallet.load_mint_info = AsyncMock()
+    sat_wallet.load_keysets_from_db = AsyncMock()
+
+    msat_wallet = MagicMock(url="http://mint:3338")
+    msat_wallet.load_mint_keysets = AsyncMock()
+    msat_wallet.activate_keyset = AsyncMock()
+    msat_wallet.load_mint_info = AsyncMock()
+    msat_wallet.load_keysets_from_db = AsyncMock()
+
+    with patch("routstr.wallet.time.monotonic", return_value=1000.0):
+        await Wallet.load_mint(sat_wallet)
+        await Wallet.load_mint(msat_wallet)
+
+    sat_wallet.load_mint_keysets.assert_awaited_once_with(False)
+    sat_wallet.load_mint_info.assert_awaited_once_with(reload=True)
+    msat_wallet.load_mint_keysets.assert_not_awaited()
+    msat_wallet.load_keysets_from_db.assert_awaited_once_with()
+    msat_wallet.load_mint_info.assert_awaited_once_with(reload=False)
+
+
+@pytest.mark.asyncio
+async def test_get_wallet_refreshes_local_proofs_without_reloading_mint() -> None:
+    from routstr import wallet as wallet_module
+    from routstr.wallet import get_wallet
+
+    mock_wallet = Mock(load_mint=AsyncMock(), load_proofs=AsyncMock())
+    with (
+        patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)),
+        patch("routstr.wallet.time.monotonic", return_value=1000.0),
+    ):
+        await get_wallet("http://mint:3338", "sat")
+        wallet_module._wallet_last_load["http://mint:3338_sat"] = 900.0
+        await get_wallet("http://mint:3338", "sat")
+
+    assert mock_wallet.load_mint.await_count == 1
+    assert mock_wallet.load_proofs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_wallet_quote_only_skips_proof_reload() -> None:
+    from routstr.wallet import get_wallet
+
+    mock_wallet = Mock(load_mint=AsyncMock(), load_proofs=AsyncMock())
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=mock_wallet)):
+        await get_wallet("http://mint:3338", "sat", load_proofs=False)
+
+    mock_wallet.load_mint.assert_awaited_once_with()
+    mock_wallet.load_proofs.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2970,6 +3033,7 @@ async def test_load_mint_propagates_rate_limit() -> None:
     from routstr.wallet import Wallet
 
     wallet = Wallet.__new__(Wallet)
+    wallet.url = "https://rate-limited-mint.example"
     error = MintRateLimitedError(
         "Cashu mint rate limited",
         request=httpx.Request("GET", "https://mint.example/v1/keysets"),
@@ -2987,6 +3051,7 @@ async def test_load_mint_propagates_connection_error() -> None:
     from routstr.wallet import Wallet
 
     wallet = Wallet.__new__(Wallet)
+    wallet.url = "https://unavailable-mint.example"
     error = httpx.ConnectError("mint unavailable")
     with (
         patch.object(wallet, "load_mint_keysets", new=AsyncMock(side_effect=error)),
@@ -3002,6 +3067,7 @@ async def test_load_mint_runs_keysets_activation_and_info() -> None:
     from routstr.wallet import Wallet
 
     wallet = Wallet.__new__(Wallet)
+    wallet.url = "https://mint-load.example"
     with (
         patch.object(wallet, "load_mint_keysets", new=AsyncMock()) as load_keysets,
         patch.object(wallet, "activate_keyset", new=AsyncMock()) as activate,

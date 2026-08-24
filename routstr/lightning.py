@@ -215,11 +215,19 @@ async def _request_mint_with_fallback(
             )
             continue
         try:
-            wallet = await get_wallet(mint_url, "sat", retry_on_rate_limit=False)
+            wallet = await get_wallet(
+                mint_url,
+                "sat",
+                retry_on_rate_limit=False,
+                load_proofs=False,
+            )
             quote = await run_mint_operation(
                 lambda: wallet.request_mint(amount_sats),
                 op_name="request_mint_invoice",
                 mint_url=mint_url,
+                # Response loss may leave a valid quote at the mint. Creating a
+                # second quote is not a safe retry without an idempotency key.
+                retry_timeouts=False,
                 retry_on_rate_limit=False,
             )
             return quote.request, quote.quote, mint_url
@@ -471,7 +479,9 @@ async def check_invoice_payment(
             await session.commit()
 
             mint_url = settlement.mint_url or settings.primary_mint
-            wallet = await get_wallet(mint_url, "sat")
+            # Quote status is remote state and does not inspect local proofs.
+            # _mint_invoice_quote loads proofs exactly when settlement needs them.
+            wallet = await get_wallet(mint_url, "sat", load_proofs=False)
             try:
                 mint_status = await run_mint_operation(
                     lambda: wallet.get_mint_quote(settlement.payment_hash),

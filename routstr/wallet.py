@@ -14,6 +14,7 @@ from typing import AsyncGenerator, TypedDict
 import httpx
 from cashu.core.base import MeltQuote, MeltQuoteState, MintQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
+from cashu.wallet.crud import get_keysets as get_cashu_keysets
 from cashu.wallet.helpers import deserialize_token_from_string
 from cashu.wallet.wallet import Wallet as _CashuWallet
 from pydantic_core import PydanticUndefined
@@ -121,6 +122,12 @@ def _mints_to_inspect() -> list[str]:
     return mint_urls
 
 
+_WALLET_PROOF_RELOAD_MIN_INTERVAL_SECONDS = 30
+_WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS = 300
+_mint_metadata_last_load: dict[str, float] = {}
+_mint_metadata_load_locks: dict[str, asyncio.Lock] = {}
+
+
 class Wallet(_CashuWallet):
     """Cashu adapter that preserves HTTP 429 for Routstr's mint policy."""
 
@@ -141,11 +148,37 @@ class Wallet(_CashuWallet):
         _CashuWallet.raise_on_error_request(resp)
 
     async def load_mint(
-        self, keyset_id: str = "", force_old_keysets: bool = False
+        self,
+        keyset_id: str = "",
+        force_old_keysets: bool = False,
+        *,
+        force_refresh: bool = False,
     ) -> None:
-        await self.load_mint_keysets(force_old_keysets)
-        await self.activate_keyset(keyset_id)
-        await self.load_mint_info(reload=True)
+        """Load metadata once per mint URL, then hydrate unit wallets locally."""
+        mint_url = str(self.url)
+        lock = _mint_metadata_load_locks.setdefault(mint_url, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            last = _mint_metadata_last_load.get(mint_url)
+            if (
+                not force_refresh
+                and last is not None
+                and now - last < _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
+            ):
+                try:
+                    await self.load_keysets_from_db()
+                    await self.activate_keyset(keyset_id)
+                    await self.load_mint_info(reload=False)
+                    return
+                except Exception:
+                    # An empty/stale local cache is not authoritative. Fall
+                    # through to one remote refresh under the per-mint lock.
+                    pass
+
+            await self.load_mint_keysets(force_old_keysets)
+            await self.activate_keyset(keyset_id)
+            await self.load_mint_info(reload=True)
+            _mint_metadata_last_load[mint_url] = time.monotonic()
 
 
 class MintConnectionError(Exception):
@@ -1048,6 +1081,7 @@ async def _request_mint_with_fallback(
                     mint_url,
                     settings.primary_mint_unit,
                     retry_on_rate_limit=False,
+                    load_proofs=False,
                 )
             quote = await run_mint_operation(
                 lambda: wallet.request_mint(amount),
@@ -1179,6 +1213,7 @@ async def _calculate_swap_amount(
             lambda: token_wallet.melt_quote(dummy_mint_quote.request),
             op_name="swap_fee_est_melt_quote",
             mint_url=token_mint_url,
+            retry_timeouts=False,
         )
 
         fee_reserve = dummy_melt_quote.fee_reserve
@@ -1416,6 +1451,7 @@ async def swap_to_trusted_mint(
                 lambda: token_wallet.melt_quote(mint_quote.request),
                 op_name="swap_melt_quote",
                 mint_url=token_obj.mint,
+                retry_timeouts=False,
             )
         except Exception as error:
             if is_mint_connection_error(error):
@@ -1796,13 +1832,13 @@ async def _credit_balance_locked(
 
 
 _wallets: dict[str, Wallet] = {}
+# Proofs are local SQLite state and need a short refresh window because another
+# worker process can reserve or spend them. Mint metadata is remote, shared by
+# every operation on a wallet, and changes far less often; refreshing it on the
+# proof cadence caused repeated /keysets, /keys, and /info requests.
 _wallet_last_load: dict[str, float] = {}
+_wallet_last_mint_load: dict[str, float] = {}
 _wallet_load_locks: dict[str, asyncio.Lock] = {}
-# Minimum seconds between full mint info + proof reloads for the same
-# wallet. Prevents redundant mint API calls when get_wallet(load=True)
-# is called rapidly by multiple background tasks (balance fetch, payout,
-# auto-topup all hitting get_wallet within the same cycle).
-_WALLOAD_RELOAD_MIN_INTERVAL_SECONDS = 30
 
 
 async def get_wallet(
@@ -1811,8 +1847,16 @@ async def get_wallet(
     load: bool = True,
     retry_on_rate_limit: bool = True,
     force_reload: bool = False,
+    load_proofs: bool = True,
 ) -> Wallet:
-    global _wallets, _wallet_last_load, _wallet_load_locks
+    """Return a cached wallet, refreshing remote and local state independently.
+
+    ``load=False`` remains the fully offline path. Quote-only callers can use
+    ``load_proofs=False``: mint metadata is initialized when needed, but local
+    proofs are not re-read when the operation cannot spend or inspect them.
+    ``force_reload`` still refreshes every requested layer immediately.
+    """
+    global _wallets, _wallet_last_load, _wallet_last_mint_load, _wallet_load_locks
     id = f"{mint_url}_{unit}"
     lock = _wallet_load_locks.setdefault(id, asyncio.Lock())
     async with lock:
@@ -1821,25 +1865,40 @@ async def get_wallet(
 
         if load:
             now = time.monotonic()
-            last = _wallet_last_load.get(id)
+            last_mint_load = _wallet_last_mint_load.get(id)
             if (
                 force_reload
-                or last is None
-                or now - last >= _WALLOAD_RELOAD_MIN_INTERVAL_SECONDS
+                or last_mint_load is None
+                or now - last_mint_load >= _WALLET_MINT_RELOAD_MIN_INTERVAL_SECONDS
             ):
                 await run_mint_operation(
-                    lambda: _wallets[id].load_mint(),
+                    lambda: (
+                        _wallets[id].load_mint(force_refresh=True)
+                        if force_reload
+                        else _wallets[id].load_mint()
+                    ),
                     op_name="load_mint",
                     mint_url=mint_url,
                     retry_on_rate_limit=retry_on_rate_limit,
                 )
-                await run_mint_operation(
-                    lambda: _wallets[id].load_proofs(reload=True),
-                    op_name="load_proofs",
-                    mint_url=mint_url,
-                    retry_on_rate_limit=retry_on_rate_limit,
-                )
-                _wallet_last_load[id] = time.monotonic()
+                _wallet_last_mint_load[id] = time.monotonic()
+
+            if load_proofs:
+                last_proof_load = _wallet_last_load.get(id)
+                if (
+                    force_reload
+                    or last_proof_load is None
+                    or now - last_proof_load
+                    >= _WALLET_PROOF_RELOAD_MIN_INTERVAL_SECONDS
+                ):
+                    # cashu's load_proofs is local SQLite I/O, not a mint call.
+                    await run_mint_operation(
+                        lambda: _wallets[id].load_proofs(reload=True),
+                        op_name="load_proofs",
+                        mint_url=mint_url,
+                        retry_on_rate_limit=retry_on_rate_limit,
+                    )
+                    _wallet_last_load[id] = time.monotonic()
         return _wallets[id]
 
 
@@ -1912,13 +1971,16 @@ async def _get_supported_mint_units(mint_url: str) -> list[str]:
     if cached is not None and now < cached[0]:
         return cached[1]
 
-    wallet = await get_wallet(mint_url, settings.primary_mint_unit, load=False)
-    keysets = await run_mint_operation(
-        lambda: wallet._get_keysets(),
-        op_name="get_mint_keysets",
-        mint_url=mint_url,
+    # One full remote metadata load populates Cashu's shared SQLite keyset
+    # cache. Discover all advertised units from that cache instead of issuing a
+    # separate /keysets request before each unit wallet loads.
+    wallet = await get_wallet(
+        mint_url,
+        settings.primary_mint_unit,
         retry_on_rate_limit=False,
+        load_proofs=False,
     )
+    keysets = await get_cashu_keysets(mint_url=wallet.url, db=wallet.db)
     units: list[str] = []
     for keyset in keysets:
         if not keyset.active or keyset.unit is None:

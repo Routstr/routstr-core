@@ -107,6 +107,18 @@ async def _fetch_lnurl_json(
     return data
 
 
+def _contains_mint_transport_error(error: BaseException) -> bool:
+    """Detect transport failures wrapped by the Cashu wallet implementation."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, MINT_TRANSPORT_EXCEPTIONS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 async def decode_lnurl(lnurl: str) -> str:
     """Decode LNURL to get the actual URL.
 
@@ -293,6 +305,8 @@ async def raw_send_to_lnurl(
         lambda: wallet.melt_quote(invoice=bolt11_invoice),
         op_name="lnurl_melt_quote",
         mint_url=str(wallet.url),
+        # Creating another quote after response loss only abandons the first.
+        retry_timeouts=False,
     )
 
     # The invoice comes from the LNURL service, so its amount is untrusted. The
@@ -331,8 +345,21 @@ async def raw_send_to_lnurl(
             # reserved as though a Lightning payment could still settle.
             await wallet.set_reserved_for_send(proofs, reserved=False)
             raise
-        if not isinstance(error, MINT_TRANSPORT_EXCEPTIONS):
+        if not _contains_mint_transport_error(error):
             raise
+        # Cashu 0.20 clears melt reservations before wrapping transport errors
+        # in a plain Exception. Restore the durable melt association before
+        # asking for quote state so these proofs cannot be spent again while
+        # the Lightning outcome is unknown.
+        try:
+            await wallet.set_reserved_for_melt(
+                proofs, reserved=True, quote_id=melt_quote_resp.quote
+            )
+        except Exception as reservation_error:
+            raise MeltOutcomeAmbiguousError(
+                "Melt outcome is ambiguous and its proof reservation could not "
+                "be restored; proofs must not be retried"
+            ) from reservation_error
         melt_response = None
         melt_error: BaseException | None = error
     else:
@@ -356,6 +383,10 @@ async def raw_send_to_lnurl(
 
     if quote is not None and quote.state == MeltQuoteState.paid:
         return final_amount
+    if quote is not None and quote.state == MeltQuoteState.unpaid:
+        # get_melt_quote() has authoritatively released the melt reservation;
+        # callers may restore their debit and retry with a new payment plan.
+        raise LNURLError("Cashu mint confirmed that the melt was unpaid") from melt_error
 
     state = getattr(getattr(quote, "state", None), "value", "unknown")
     raise MeltOutcomeAmbiguousError(
