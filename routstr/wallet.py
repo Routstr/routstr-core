@@ -1,6 +1,7 @@
 import asyncio
 import fcntl
 import json
+import math
 import os
 import re
 import time
@@ -19,6 +20,7 @@ from cashu.wallet.wallet import Wallet as _CashuWallet
 from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
+from . import node_coordination
 from .core import db, get_logger
 from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
@@ -64,6 +66,9 @@ _WALLET_OPERATION_LOCK = Path(".wallet") / ".routstr-operation.lock"
 _wallet_operation_depth: ContextVar[int] = ContextVar(
     "wallet_operation_depth", default=0
 )
+_wallet_operation_started_at: ContextVar[float | None] = ContextVar(
+    "wallet_operation_started_at", default=None
+)
 
 
 @asynccontextmanager
@@ -82,6 +87,7 @@ async def wallet_operation_guard() -> AsyncGenerator[None, None]:
     fd = os.open(_WALLET_OPERATION_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     acquired = False
     depth_token = None
+    started_token = None
     try:
         while not acquired:
             try:
@@ -90,9 +96,12 @@ async def wallet_operation_guard() -> AsyncGenerator[None, None]:
             except BlockingIOError:
                 await _scheduler_sleep(0.05)
         depth_token = _wallet_operation_depth.set(1)
+        started_token = _wallet_operation_started_at.set(time.time())
         async with fail_fast_mint_operations():
             yield
     finally:
+        if started_token is not None:
+            _wallet_operation_started_at.reset(started_token)
         if depth_token is not None:
             _wallet_operation_depth.reset(depth_token)
         if acquired:
@@ -1805,6 +1814,34 @@ _wallet_load_locks: dict[str, asyncio.Lock] = {}
 _WALLOAD_RELOAD_MIN_INTERVAL_SECONDS = 30
 
 
+def _wallet_refresh_paths(wallet_id: str) -> tuple[Path, Path]:
+    key = node_coordination.state_key(wallet_id)
+    directory = node_coordination.NODE_STATE_DIR / "wallet-refresh"
+    return directory / f"{key}.json", directory / f"{key}.lock"
+
+
+def _wallet_refreshed_at(path: Path) -> float | None:
+    value = node_coordination.read_json(path)
+    if value is None or value.get("version") != 1:
+        return None
+    refreshed_at = value.get("refreshed_at")
+    if not isinstance(refreshed_at, (int, float)):
+        return None
+    now = time.time()
+    if refreshed_at < 0 or refreshed_at > now + 60:
+        return None
+    return float(refreshed_at)
+
+
+async def _load_wallet_from_shared_db(wallet: Wallet) -> bool:
+    try:
+        await wallet.load_proofs(reload=True)
+        await wallet.activate_keyset()
+    except Exception:
+        return False
+    return bool(wallet.keysets)
+
+
 async def get_wallet(
     mint_url: str,
     unit: str = "sat",
@@ -1822,24 +1859,38 @@ async def get_wallet(
         if load:
             now = time.monotonic()
             last = _wallet_last_load.get(id)
-            if (
+            needs_reload = (
                 force_reload
                 or last is None
                 or now - last >= _WALLOAD_RELOAD_MIN_INTERVAL_SECONDS
-            ):
-                await run_mint_operation(
-                    lambda: _wallets[id].load_mint(),
-                    op_name="load_mint",
-                    mint_url=mint_url,
-                    retry_on_rate_limit=retry_on_rate_limit,
-                )
-                await run_mint_operation(
-                    lambda: _wallets[id].load_proofs(reload=True),
-                    op_name="load_proofs",
-                    mint_url=mint_url,
-                    retry_on_rate_limit=retry_on_rate_limit,
-                )
-                _wallet_last_load[id] = time.monotonic()
+            )
+            if needs_reload:
+                marker_path, marker_lock_path = _wallet_refresh_paths(id)
+                requested_at = _wallet_operation_started_at.get() or time.time()
+                async with node_coordination.exclusive_lock(marker_lock_path):
+                    refreshed_at = _wallet_refreshed_at(marker_path)
+                    shared_refresh_is_fresh = refreshed_at is not None and (
+                        refreshed_at >= requested_at
+                        if force_reload
+                        else time.time() - refreshed_at
+                        < _WALLOAD_RELOAD_MIN_INTERVAL_SECONDS
+                    )
+                    loaded_locally = False
+                    if shared_refresh_is_fresh:
+                        loaded_locally = await _load_wallet_from_shared_db(_wallets[id])
+                    if not loaded_locally:
+                        await run_mint_operation(
+                            lambda: _wallets[id].load_mint(),
+                            op_name="load_mint",
+                            mint_url=mint_url,
+                            retry_on_rate_limit=retry_on_rate_limit,
+                        )
+                        node_coordination.write_json(
+                            marker_path,
+                            {"version": 1, "refreshed_at": time.time()},
+                        )
+                        await _wallets[id].load_proofs(reload=True)
+                    _wallet_last_load[id] = time.monotonic()
         return _wallets[id]
 
 
@@ -1906,37 +1957,175 @@ _balance_fetch_locks: dict[str, asyncio.Lock] = {}
 _mint_supported_units: dict[str, tuple[float, list[str]]] = {}
 
 
+class CachedMintUnitDiscoveryError(Exception):
+    def __init__(self, message: str, error_code: str):
+        self.error_code = error_code
+        super().__init__(message)
+
+
+def _mint_units_paths(mint_url: str) -> tuple[Path, Path]:
+    key = node_coordination.state_key(mint_url)
+    directory = node_coordination.NODE_STATE_DIR / "mint-units"
+    return directory / f"{key}.json", directory / f"{key}.lock"
+
+
+def _shared_mint_units_remaining(
+    state: dict[str, object], maximum_ttl: float
+) -> float | None:
+    version = state.get("version")
+    expires_at = state.get("expires_at")
+    if (
+        version not in (1, 2)
+        or not isinstance(expires_at, (int, float))
+        or isinstance(expires_at, bool)
+    ):
+        return None
+    wall_deadline = float(expires_at)
+    if not math.isfinite(wall_deadline):
+        return None
+
+    remaining = wall_deadline - time.time()
+    if version == 2:
+        monotonic_until = state.get("monotonic_until")
+        ttl_seconds = state.get("ttl_seconds")
+        boot_id = state.get("boot_id")
+        if (
+            not isinstance(monotonic_until, (int, float))
+            or isinstance(monotonic_until, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(boot_id, (str, type(None)))
+        ):
+            return None
+        monotonic_deadline = float(monotonic_until)
+        persisted_ttl = float(ttl_seconds)
+        if (
+            not math.isfinite(monotonic_deadline)
+            or not math.isfinite(persisted_ttl)
+            or persisted_ttl <= 0
+        ):
+            return None
+        maximum_ttl = min(maximum_ttl, persisted_ttl)
+        if boot_id is not None and boot_id == node_coordination.NODE_BOOT_ID:
+            remaining = monotonic_deadline - time.monotonic()
+
+    if not math.isfinite(remaining) or remaining <= 0:
+        return None
+    return min(remaining, maximum_ttl)
+
+
+def _mint_units_cache_state(ttl_seconds: float) -> dict[str, object]:
+    return {
+        "version": 2,
+        "boot_id": node_coordination.NODE_BOOT_ID,
+        "monotonic_until": time.monotonic() + ttl_seconds,
+        "expires_at": time.time() + ttl_seconds,
+        "ttl_seconds": ttl_seconds,
+    }
+
+
+def _write_mint_units_state(
+    path: Path, state: dict[str, object], mint_url: str
+) -> None:
+    try:
+        node_coordination.write_json(path, state)
+    except (OSError, ValueError) as error:
+        logger.warning(
+            "Unable to persist mint unit discovery cache",
+            extra={"mint_url": mint_url, "error": str(error)},
+        )
+
+
+def _migrate_mint_units_state(
+    path: Path, state: dict[str, object], remaining: float, mint_url: str
+) -> None:
+    if (
+        node_coordination.NODE_BOOT_ID is None
+        or state.get("boot_id") == node_coordination.NODE_BOOT_ID
+    ):
+        return
+    migrated = _mint_units_cache_state(remaining)
+    for key in ("units", "error", "error_code"):
+        if key in state:
+            migrated[key] = state[key]
+    _write_mint_units_state(path, migrated, mint_url)
+
+
 async def _get_supported_mint_units(mint_url: str) -> list[str]:
     now = time.monotonic()
     cached = _mint_supported_units.get(mint_url)
     if cached is not None and now < cached[0]:
         return cached[1]
 
-    wallet = await get_wallet(mint_url, settings.primary_mint_unit, load=False)
-    keysets = await run_mint_operation(
-        lambda: wallet._get_keysets(),
-        op_name="get_mint_keysets",
-        mint_url=mint_url,
-        retry_on_rate_limit=False,
-    )
-    units: list[str] = []
-    for keyset in keysets:
-        if not keyset.active or keyset.unit is None:
-            continue
-        unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
-        if unit and unit not in units:
-            units.append(unit)
-    if not units:
-        units = [settings.primary_mint_unit]
-    elif settings.primary_mint_unit in units:
-        units.remove(settings.primary_mint_unit)
-        units.insert(0, settings.primary_mint_unit)
+    state_path, lock_path = _mint_units_paths(mint_url)
+    async with node_coordination.exclusive_lock(lock_path):
+        state = node_coordination.read_json(state_path)
+        if state is not None:
+            units = state.get("units")
+            maximum_ttl = (
+                _MINT_UNITS_CACHE_SECONDS
+                if isinstance(units, list)
+                else _BALANCE_FETCH_RETRY_SECONDS
+            )
+            remaining = _shared_mint_units_remaining(state, maximum_ttl)
+            if remaining is not None:
+                if isinstance(units, list) and all(
+                    isinstance(unit, str) for unit in units
+                ):
+                    _migrate_mint_units_state(state_path, state, remaining, mint_url)
+                    _mint_supported_units[mint_url] = (
+                        time.monotonic() + remaining,
+                        units,
+                    )
+                    return units
+                error = state.get("error")
+                error_code = state.get("error_code")
+                if isinstance(error, str) and isinstance(error_code, str):
+                    _migrate_mint_units_state(state_path, state, remaining, mint_url)
+                    raise CachedMintUnitDiscoveryError(error, error_code)
 
-    _mint_supported_units[mint_url] = (
-        time.monotonic() + _MINT_UNITS_CACHE_SECONDS,
-        units,
-    )
-    return units
+        wallet = await get_wallet(mint_url, settings.primary_mint_unit, load=False)
+        try:
+            keysets = await run_mint_operation(
+                lambda: wallet._get_keysets(),
+                op_name="get_mint_keysets",
+                mint_url=mint_url,
+                retry_on_rate_limit=False,
+            )
+        except Exception as error:
+            error_code = (
+                "rate_limited"
+                if is_mint_rate_limited(error)
+                else "unreachable"
+                if is_mint_connection_error(error)
+                else "mint_error"
+            )
+            failure_state = _mint_units_cache_state(_BALANCE_FETCH_RETRY_SECONDS)
+            failure_state.update({"error": str(error)[:1024], "error_code": error_code})
+            _write_mint_units_state(state_path, failure_state, mint_url)
+            raise
+
+        units: list[str] = []
+        for keyset in keysets:
+            if not keyset.active or keyset.unit is None:
+                continue
+            unit = keyset.unit if isinstance(keyset.unit, str) else keyset.unit.name
+            if unit and unit not in units:
+                units.append(unit)
+        if not units:
+            units = [settings.primary_mint_unit]
+        elif settings.primary_mint_unit in units:
+            units.remove(settings.primary_mint_unit)
+            units.insert(0, settings.primary_mint_unit)
+
+        supported_state = _mint_units_cache_state(_MINT_UNITS_CACHE_SECONDS)
+        supported_state["units"] = units
+        _write_mint_units_state(state_path, supported_state, mint_url)
+        _mint_supported_units[mint_url] = (
+            time.monotonic() + _MINT_UNITS_CACHE_SECONDS,
+            units,
+        )
+        return units
 
 
 def _balance_error(
@@ -1976,16 +2165,21 @@ async def fetch_all_balances(
             try:
                 mint_units[mint_url] = await _get_supported_mint_units(mint_url)
             except Exception as error:
-                connection_failure = is_mint_connection_error(error)
-                rate_limited = is_mint_rate_limited(error)
-                error_code = (
+                cached_error_code = getattr(error, "error_code", None)
+                connection_failure = cached_error_code == "unreachable" or (
+                    cached_error_code is None and is_mint_connection_error(error)
+                )
+                rate_limited = cached_error_code == "rate_limited" or (
+                    cached_error_code is None and is_mint_rate_limited(error)
+                )
+                error_code = cached_error_code or (
                     "rate_limited"
                     if rate_limited
                     else "unreachable"
                     if connection_failure
                     else "mint_error"
                 )
-                if connection_failure:
+                if connection_failure and cached_error_code is None:
                     MintRateGuard.get(mint_url).apply_cooldown(
                         _BALANCE_FETCH_RETRY_SECONDS, reason="unreachable"
                     )

@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 
 lightning_router = APIRouter(prefix="/lightning")
 
+
 # Avoid duplicate work within one process. Cross-process settlement is fenced
 # by claiming a paid quote before minting and by the final conditional update.
 @dataclass
@@ -285,9 +286,7 @@ async def create_invoice(
             # A key's liabilities are attributed to a single refund mint. Keep
             # top-up collateral on that same mint so balances and payouts cannot
             # misclassify funds held by another mint as owner profit.
-            allowed_mints = [
-                topup_api_key.refund_mint_url or settings.primary_mint
-            ]
+            allowed_mints = [topup_api_key.refund_mint_url or settings.primary_mint]
         bolt11, payment_hash, mint_url = await generate_lightning_invoice(
             request.amount_sats, description, allowed_mints=allowed_mints
         )
@@ -471,7 +470,7 @@ async def check_invoice_payment(
             await session.commit()
 
             mint_url = settlement.mint_url or settings.primary_mint
-            wallet = await get_wallet(mint_url, "sat")
+            wallet = await get_wallet(mint_url, "sat", load=False)
             try:
                 mint_status = await run_mint_operation(
                     lambda: wallet.get_mint_quote(settlement.payment_hash),
@@ -532,6 +531,7 @@ async def check_invoice_payment(
 
             # Quote-linked proof verification makes an ambiguous mint response
             # retryable without crediting unrelated wallet balance growth.
+            wallet = await get_wallet(mint_url, "sat")
             await _mint_invoice_quote(wallet, settlement)
             minted = True
 
@@ -553,9 +553,7 @@ async def check_invoice_payment(
                     "invoice_id": settlement.id,
                     "amount_sats": settlement.amount_sats,
                     "purpose": settlement.purpose,
-                    "api_key_hash": api_key_hash[:8] + "..."
-                    if api_key_hash
-                    else None,
+                    "api_key_hash": api_key_hash[:8] + "..." if api_key_hash else None,
                 },
             )
             return False
@@ -577,9 +575,7 @@ async def check_invoice_payment(
                         )
                         await state_session.commit()
                     if pending.rowcount == 1:
-                        _publish_invoice_value(
-                            invoice, "status", "settlement_pending"
-                        )
+                        _publish_invoice_value(invoice, "status", "settlement_pending")
                 except Exception as state_error:
                     logger.critical(
                         "Paid invoice reconciliation state could not be persisted",

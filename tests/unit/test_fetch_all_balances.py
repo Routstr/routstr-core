@@ -151,6 +151,245 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     wallet._get_keysets.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "write_error",
+    [OSError("disk full"), ValueError("cache state too large")],
+    ids=["os-error", "value-error"],
+)
+@pytest.mark.asyncio
+async def test_supported_mint_units_survive_cache_write_failure(
+    write_error: Exception,
+) -> None:
+    from routstr.wallet import _get_supported_mint_units
+
+    keyset = MagicMock(active=True, unit="sat")
+    wallet = MagicMock()
+    wallet._get_keysets = AsyncMock(return_value=[keyset])
+    mint_url = f"http://mint-write-failure-{type(write_error).__name__}:3338"
+    with (
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.node_coordination.write_json", side_effect=write_error),
+    ):
+        assert await _get_supported_mint_units(mint_url) == ["sat"]
+
+
+@pytest.mark.parametrize(
+    "write_error",
+    [OSError("disk full"), ValueError("cache state too large")],
+    ids=["os-error", "value-error"],
+)
+@pytest.mark.asyncio
+async def test_supported_mint_unit_error_survives_cache_write_failure(
+    write_error: Exception,
+) -> None:
+    from routstr.wallet import _get_supported_mint_units
+
+    error = httpx.ConnectError("mint unavailable")
+    wallet = MagicMock()
+    wallet._get_keysets = AsyncMock(side_effect=error)
+    mint_url = f"http://mint-error-write-failure-{type(write_error).__name__}:3338"
+    with (
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.node_coordination.write_json", side_effect=write_error),
+        pytest.raises(httpx.ConnectError) as caught,
+    ):
+        await _get_supported_mint_units(mint_url)
+
+    assert caught.value is error
+
+
+@pytest.mark.parametrize(
+    "write_error",
+    [OSError("disk full"), ValueError("cache state too large")],
+    ids=["os-error", "value-error"],
+)
+@pytest.mark.asyncio
+async def test_supported_mint_units_survive_migration_write_failure(
+    write_error: Exception,
+) -> None:
+    from routstr import node_coordination
+    from routstr.wallet import _get_supported_mint_units, _mint_units_paths
+
+    mint_url = f"http://mint-migration-write-failure-{type(write_error).__name__}:3338"
+    state_path, _ = _mint_units_paths(mint_url)
+    node_coordination.write_json(
+        state_path,
+        {"version": 1, "expires_at": 10_030.0, "units": ["sat", "usd"]},
+    )
+    get_wallet = AsyncMock()
+    with (
+        patch("routstr.node_coordination.NODE_BOOT_ID", "boot-a"),
+        patch("routstr.wallet.time.monotonic", return_value=100.0),
+        patch("routstr.wallet.time.time", return_value=10_000.0),
+        patch("routstr.wallet.get_wallet", get_wallet),
+        patch("routstr.wallet.node_coordination.write_json", side_effect=write_error),
+    ):
+        assert await _get_supported_mint_units(mint_url) == ["sat", "usd"]
+
+    get_wallet.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shared_supported_units_ignore_backward_wall_step() -> None:
+    from routstr import node_coordination
+    from routstr.wallet import _get_supported_mint_units, _mint_units_paths
+
+    mint_url = "http://mint-wall-step:3338"
+    state_path, _ = _mint_units_paths(mint_url)
+    node_coordination.write_json(
+        state_path,
+        {
+            "version": 2,
+            "boot_id": "boot-a",
+            "monotonic_until": 130.0,
+            "expires_at": 10_030.0,
+            "ttl_seconds": 30.0,
+            "units": ["sat", "usd"],
+        },
+    )
+    get_wallet = AsyncMock()
+    with (
+        patch("routstr.node_coordination.NODE_BOOT_ID", "boot-a"),
+        patch("routstr.wallet.time.monotonic", return_value=110.0),
+        patch("routstr.wallet.time.time", return_value=6_400.0),
+        patch("routstr.wallet.get_wallet", get_wallet),
+    ):
+        assert await _get_supported_mint_units(mint_url) == ["sat", "usd"]
+
+    get_wallet.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shared_mint_error_expires_despite_backward_wall_step() -> None:
+    from routstr import node_coordination
+    from routstr.wallet import _get_supported_mint_units, _mint_units_paths
+
+    mint_url = "http://mint-error-wall-step:3338"
+    state_path, _ = _mint_units_paths(mint_url)
+    node_coordination.write_json(
+        state_path,
+        {
+            "version": 2,
+            "boot_id": "boot-a",
+            "monotonic_until": 130.0,
+            "expires_at": 10_030.0,
+            "ttl_seconds": 30.0,
+            "error": "old failure",
+            "error_code": "unreachable",
+        },
+    )
+    keyset = MagicMock(active=True, unit="sat")
+    wallet = MagicMock()
+    wallet._get_keysets = AsyncMock(return_value=[keyset])
+    with (
+        patch("routstr.node_coordination.NODE_BOOT_ID", "boot-a"),
+        patch("routstr.wallet.time.monotonic", return_value=131.0),
+        patch("routstr.wallet.time.time", return_value=6_400.0),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+    ):
+        assert await _get_supported_mint_units(mint_url) == ["sat"]
+
+    wallet._get_keysets.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_legacy_mint_error_fallback_is_bounded_and_migrated() -> None:
+    from routstr import node_coordination
+    from routstr.wallet import (
+        CachedMintUnitDiscoveryError,
+        _get_supported_mint_units,
+        _mint_units_paths,
+    )
+
+    mint_url = "http://legacy-mint-error:3338"
+    state_path, _ = _mint_units_paths(mint_url)
+    node_coordination.write_json(
+        state_path,
+        {
+            "version": 1,
+            "expires_at": 10_030.0,
+            "error": "old failure",
+            "error_code": "unreachable",
+        },
+    )
+    with (
+        patch("routstr.node_coordination.NODE_BOOT_ID", "boot-a"),
+        patch("routstr.wallet.time.monotonic", return_value=100.0),
+        patch("routstr.wallet.time.time", return_value=6_400.0),
+        pytest.raises(CachedMintUnitDiscoveryError, match="old failure"),
+    ):
+        await _get_supported_mint_units(mint_url)
+
+    migrated = node_coordination.read_json(state_path)
+    assert migrated is not None
+    assert migrated["version"] == 2
+    assert migrated["monotonic_until"] == 160.0
+
+    keyset = MagicMock(active=True, unit="sat")
+    wallet = MagicMock()
+    wallet._get_keysets = AsyncMock(return_value=[keyset])
+    with (
+        patch("routstr.node_coordination.NODE_BOOT_ID", "boot-a"),
+        patch("routstr.wallet.time.monotonic", return_value=161.0),
+        patch("routstr.wallet.time.time", return_value=6_400.0),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+    ):
+        assert await _get_supported_mint_units(mint_url) == ["sat"]
+
+    wallet._get_keysets.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [("expires_at", float("nan")), ("monotonic_until", float("inf"))],
+)
+async def test_shared_mint_units_reject_non_finite_deadlines(
+    field: str, value: float
+) -> None:
+    from routstr import node_coordination
+    from routstr.wallet import _get_supported_mint_units, _mint_units_paths
+
+    mint_url = f"http://mint-non-finite-{field}:3338"
+    state_path, _ = _mint_units_paths(mint_url)
+    state: dict[str, object] = {
+        "version": 2,
+        "boot_id": node_coordination.NODE_BOOT_ID,
+        "monotonic_until": 130.0,
+        "expires_at": 10_030.0,
+        "ttl_seconds": 30.0,
+        "units": ["stale"],
+    }
+    state[field] = value
+    node_coordination.write_json(state_path, state)
+    keyset = MagicMock(active=True, unit="sat")
+    wallet = MagicMock()
+    wallet._get_keysets = AsyncMock(return_value=[keyset])
+    with (
+        patch("routstr.wallet.time.monotonic", return_value=100.0),
+        patch("routstr.wallet.time.time", return_value=10_000.0),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+    ):
+        assert await _get_supported_mint_units(mint_url) == ["sat"]
+
+    wallet._get_keysets.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_supported_mint_unit_failure_is_cached() -> None:
+    from routstr.wallet import CachedMintUnitDiscoveryError, _get_supported_mint_units
+
+    wallet = MagicMock()
+    wallet._get_keysets = AsyncMock(side_effect=RuntimeError("invalid keysets"))
+    with patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)):
+        with pytest.raises(RuntimeError, match="invalid keysets"):
+            await _get_supported_mint_units("http://mint:3338")
+        with pytest.raises(CachedMintUnitDiscoveryError, match="invalid keysets"):
+            await _get_supported_mint_units("http://mint:3338")
+
+    wallet._get_keysets.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
     from routstr.core.settings import settings
@@ -162,6 +401,7 @@ async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.db.create_session", _fake_session),
         patch("routstr.mint.time.monotonic", return_value=10),
+        patch("routstr.mint.time.time", return_value=10),
         patch("routstr.wallet.logger.warning") as warning,
     ):
         first = await fetch_all_balances(units=["sat"])
@@ -181,6 +421,7 @@ async def test_fetch_all_balances_backs_off_after_connection_failure() -> None:
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.db.create_session", _fake_session),
         patch("routstr.mint.time.monotonic", return_value=71),
+        patch("routstr.mint.time.time", return_value=71),
         patch("routstr.wallet.logger.warning"),
     ):
         await fetch_all_balances(units=["sat"])
@@ -220,6 +461,7 @@ async def test_balance_failure_applies_mint_cooldown_to_other_units() -> None:
         patch("routstr.wallet.get_wallet", get_wallet),
         patch("routstr.wallet.db.create_session", _fake_session),
         patch("routstr.mint.time.monotonic", return_value=10),
+        patch("routstr.mint.time.time", return_value=10),
         patch("routstr.wallet.logger.warning") as warning,
     ):
         details, *_ = await fetch_all_balances(units=["sat", "msat"])

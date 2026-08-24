@@ -4,11 +4,13 @@ import math
 import time
 import typing
 import uuid
+from pathlib import Path
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, or_, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from .. import node_coordination
 from ..core import get_logger
 from ..core.db import (
     CashuTransaction,
@@ -228,26 +230,129 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         )
         return
 
-    if not row.api_key:
+    if not row.api_key or row.id is None:
         return
 
-    # Instantiate provider and check balance
+    lock_fd = node_coordination.try_lock(_routstr_topup_lock_path(row.id))
+    if lock_fd is None:
+        logger.debug(
+            "Skipping overlapping auto top-up check",
+            extra={"provider_id": row.id},
+        )
+        return
+    try:
+        await _check_and_topup_routstr_locked(
+            row, threshold=threshold, amount=amount, mint_url=mint_url
+        )
+    finally:
+        node_coordination.unlock(lock_fd)
+
+
+def _routstr_topup_lock_path(provider_id: int | str) -> Path:
+    return (
+        node_coordination.NODE_STATE_DIR
+        / "auto-topup"
+        / f"{node_coordination.state_key(str(provider_id))}.lock"
+    )
+
+
+async def _pending_routstr_topup(
+    provider_id: int | str,
+) -> CashuTransaction | None:
+    request_id = f"routstr-auto-topup:{provider_id}"
+    async with create_session() as session:
+        return (
+            await session.exec(
+                select(CashuTransaction).where(
+                    CashuTransaction.type == "out",
+                    CashuTransaction.source == "auto_topup",
+                    CashuTransaction.request_id == request_id,
+                    CashuTransaction.collected == False,  # noqa: E712
+                    CashuTransaction.swept == False,  # noqa: E712
+                )
+            )
+        ).first()
+
+
+async def _has_pending_routstr_topup(provider_id: int | str) -> bool:
+    return await _pending_routstr_topup(provider_id) is not None
+
+
+async def get_routstr_auto_topup_state(provider_id: int) -> dict[str, object]:
+    """Return the pending reservation without exposing its bearer token."""
+    transaction = await _pending_routstr_topup(provider_id)
+    if transaction is None:
+        return {"active": False}
+    return {
+        "active": True,
+        "state_token": transaction.id,
+        "created_at": transaction.created_at,
+        "amount": transaction.amount,
+        "unit": transaction.unit,
+        "mint_url": transaction.mint_url,
+    }
+
+
+class RoutstrReleaseOutcome(typing.NamedTuple):
+    released: bool
+    reason: str
+
+
+async def release_routstr_auto_topup_state(
+    provider_id: int, *, state_token: str | None
+) -> RoutstrReleaseOutcome:
+    """Release a reservation after an operator confirms the token was not used."""
+    async with node_coordination.exclusive_lock(_routstr_topup_lock_path(provider_id)):
+        transaction = await _pending_routstr_topup(provider_id)
+        if transaction is None:
+            return RoutstrReleaseOutcome(False, "no_active_reservation")
+        if transaction.id != state_token:
+            return RoutstrReleaseOutcome(False, "stale_state")
+
+        await release_token_reservation(transaction.token)
+        async with create_session() as session:
+            result = await session.exec(  # type: ignore[call-overload]
+                update(CashuTransaction)
+                .where(
+                    col(CashuTransaction.id) == state_token,
+                    col(CashuTransaction.request_id)
+                    == f"routstr-auto-topup:{provider_id}",
+                    col(CashuTransaction.source) == "auto_topup",
+                    col(CashuTransaction.collected) == False,  # noqa: E712
+                    col(CashuTransaction.swept) == False,  # noqa: E712
+                )
+                .values(swept=True)
+            )
+            if (getattr(result, "rowcount", 0) or 0) != 1:
+                await session.rollback()
+                return RoutstrReleaseOutcome(False, "reservation_changed")
+            await session.commit()
+    return RoutstrReleaseOutcome(True, "released")
+
+
+async def _check_and_topup_routstr_locked(
+    row: UpstreamProviderRow, *, threshold: float, amount: int, mint_url: str
+) -> None:
+    if row.id is None or await _has_pending_routstr_topup(row.id):
+        logger.warning(
+            "Skipping auto top-up while a previous token needs reconciliation",
+            extra={"provider_id": row.id},
+        )
+        return
+
     provider = RoutstrUpstreamProvider.from_db_row(row)
     if provider is None:
         return
     balance = await provider.get_balance()
-
     if balance is None:
         logger.warning(
             "Could not fetch balance for auto top-up",
             extra={"provider_id": row.id, "base_url": row.base_url},
         )
         return
-
     if balance >= threshold * 1000:
         return
 
-    # Balance is below threshold - create token and top up
     logger.info(
         "Auto top-up triggered",
         extra={
@@ -258,22 +363,22 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
             "mint_url": mint_url,
         },
     )
-
     try:
         token = await send_token(amount, "sat", mint_url)
-    except Exception as e:
+    except Exception as error:
         logger.error(
             "Failed to create cashu token for auto top-up",
             extra={
                 "provider_id": row.id,
                 "amount": amount,
                 "mint_url": mint_url,
-                "error": str(e),
+                "error": str(error),
             },
         )
         return
 
     actual_mint_url = token_mint_url(token, mint_url)
+    request_id = f"routstr-auto-topup:{row.id}"
     try:
         await store_cashu_transaction(
             token=token,
@@ -281,6 +386,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
             unit="sat",
             mint_url=actual_mint_url,
             typ="out",
+            request_id=request_id,
             collected=False,
             source="auto_topup",
         )
@@ -308,44 +414,48 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         return
 
     result = await provider.topup(token)
-
     if "error" in result:
         logger.error(
-            "Auto top-up upstream call failed",
+            "Auto top-up upstream call failed; token requires manual reconciliation",
             extra={
                 "provider_id": row.id,
                 "error": result["error"],
+                "admin_action": (
+                    f"GET /admin/api/upstream-providers/{row.id}/routstr-auto-topup"
+                ),
             },
         )
-    else:
-        async with create_session() as session:
-            transaction = (
-                await session.exec(
-                    select(CashuTransaction).where(
-                        CashuTransaction.token == token,
-                        CashuTransaction.type == "out",
-                        CashuTransaction.source == "auto_topup",
-                    )
-                )
-            ).first()
-            if transaction is None:
-                logger.critical(
-                    "Completed auto top-up transaction is missing from the database",
-                    extra={"provider_id": row.id, "mint_url": mint_url},
-                )
-            else:
-                transaction.collected = True
-                session.add(transaction)
-                await session.commit()
+        return
 
-        logger.info(
-            "Auto top-up completed successfully",
-            extra={
-                "provider_id": row.id,
-                "amount": amount,
-                "new_balance_approx": balance + amount,
-            },
-        )
+    async with create_session() as session:
+        transaction = (
+            await session.exec(
+                select(CashuTransaction).where(
+                    CashuTransaction.token == token,
+                    CashuTransaction.type == "out",
+                    CashuTransaction.source == "auto_topup",
+                    CashuTransaction.request_id == request_id,
+                )
+            )
+        ).first()
+        if transaction is None:
+            logger.critical(
+                "Completed auto top-up transaction is missing from the database",
+                extra={"provider_id": row.id, "mint_url": mint_url},
+            )
+        else:
+            transaction.collected = True
+            session.add(transaction)
+            await session.commit()
+
+    logger.info(
+        "Auto top-up completed successfully",
+        extra={
+            "provider_id": row.id,
+            "amount": amount,
+            "new_balance_approx": balance + amount,
+        },
+    )
 
 
 def _ppq_state_id(row: UpstreamProviderRow) -> str:

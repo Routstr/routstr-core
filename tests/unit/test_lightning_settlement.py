@@ -3,7 +3,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import httpx
 import pytest
@@ -173,6 +173,25 @@ async def test_quote_not_found_is_definitively_unpaid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unpaid_quote_poll_does_not_reload_mint_metadata() -> None:
+    _invoice_settlement_locks.clear()
+    invoice = _invoice()
+    session = AsyncMock()
+    wallet = Mock(
+        get_mint_quote=AsyncMock(
+            return_value=Mock(paid=False, state=MintQuoteState.unpaid)
+        )
+    )
+    get_wallet = AsyncMock(return_value=wallet)
+
+    with patch("routstr.lightning.get_wallet", get_wallet):
+        assert await check_invoice_payment(invoice, session) is True  # type: ignore[arg-type]
+
+    get_wallet.assert_awaited_once_with("http://mint:3338", "sat", load=False)
+    wallet.get_mint_quote.assert_awaited_once_with("quote-1")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "message",
     [
@@ -291,8 +310,9 @@ async def test_ambiguous_invoice_mint_timeout_remains_recoverable() -> None:
     async def owned_session() -> AsyncIterator[AsyncMock]:
         yield state_session
 
+    get_wallet = AsyncMock(return_value=wallet)
     with (
-        patch("routstr.lightning.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.lightning.get_wallet", get_wallet),
         patch("routstr.lightning.create_session", owned_session),
         patch(
             "routstr.lightning._mint_invoice_quote",
@@ -307,6 +327,10 @@ async def test_ambiguous_invoice_mint_timeout_remains_recoverable() -> None:
     session.rollback.assert_not_awaited()
     # One commit closes the initial read transaction before external I/O.
     session.commit.assert_awaited_once()
+    assert get_wallet.await_args_list == [
+        call("http://mint:3338", "sat", load=False),
+        call("http://mint:3338", "sat"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -327,9 +351,7 @@ async def test_quote_not_found_after_payment_confirmation_is_not_unpaid() -> Non
         patch("routstr.lightning.create_session", owned_session),
         patch(
             "routstr.lightning._mint_invoice_quote",
-            AsyncMock(
-                side_effect=Exception("Mint Error: quote not found (Code: 0)")
-            ),
+            AsyncMock(side_effect=Exception("Mint Error: quote not found (Code: 0)")),
         ),
         patch("routstr.lightning._reload_invoice_view", AsyncMock()),
     ):
@@ -423,7 +445,8 @@ async def test_recover_applies_authoritative_expiry_helper() -> None:
         ) as expire_invoice,
     ):
         response = await recover_invoice(
-            InvoiceRecoverRequest(bolt11="lnbc-test"), session  # type: ignore[arg-type]
+            InvoiceRecoverRequest(bolt11="lnbc-test"),
+            session,  # type: ignore[arg-type]
         )
 
     assert response.status == "expired"
@@ -454,7 +477,8 @@ async def test_paid_state_write_failure_still_reports_non_expirable_outcome() ->
         patch("routstr.lightning._reload_invoice_view", AsyncMock()),
     ):
         definitively_unpaid = await check_invoice_payment(
-            invoice, session  # type: ignore[arg-type]
+            invoice,
+            session,  # type: ignore[arg-type]
         )
 
     assert definitively_unpaid is False
@@ -470,7 +494,8 @@ async def test_settlement_pending_invoice_does_not_expire() -> None:
 
     with patch("routstr.lightning.check_invoice_payment", check):
         response = await get_invoice_status(
-            invoice.id, session  # type: ignore[arg-type]
+            invoice.id,
+            session,  # type: ignore[arg-type]
         )
 
     check.assert_awaited_once_with(invoice, session)
@@ -561,7 +586,8 @@ async def test_recovery_reaches_the_mint_for_an_invoice_past_grace() -> None:
 
     with patch("routstr.lightning.check_invoice_payment", check):
         response = await recover_invoice(
-            InvoiceRecoverRequest(bolt11="lnbc-test"), session  # type: ignore[arg-type]
+            InvoiceRecoverRequest(bolt11="lnbc-test"),
+            session,  # type: ignore[arg-type]
         )
 
     check.assert_awaited_once()

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import socket
 import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
 import httpx
 
+from . import node_coordination
 from .core.logging import get_logger
 from .core.settings import settings
 
@@ -28,6 +31,17 @@ MINT_TRANSPORT_COOLDOWN_SECONDS = 30.0
 _MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS = 60.0
 _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 7 * 60 * 60
 
+
+def _read_boot_id() -> str | None:
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+# Monotonic clocks are shared by processes on one boot but reset on reboot.
+_NODE_BOOT_ID = _read_boot_id()
 _fail_fast_depth: ContextVar[int] = ContextVar("mint_fail_fast_depth", default=0)
 
 
@@ -75,7 +89,7 @@ async def fail_fast_mint_operations() -> AsyncGenerator[None, None]:
 
 
 class MintRateGuard:
-    """Limit concurrency and remember per-mint cooldown/probe state."""
+    """Apply one node-wide concurrency and cooldown policy per mint."""
 
     _guards: dict[str, "MintRateGuard"] = {}
 
@@ -84,15 +98,11 @@ class MintRateGuard:
         concurrency = settings.mint_max_concurrency
         guard = cls._guards.get(mint_url)
         if guard is None or guard._max_concurrency != concurrency:
-            previous = guard
             guard = cls(mint_url, concurrency)
-            if previous is not None:
-                # Concurrency changed at runtime: keep the live cooldown/backoff
-                # state so an active 429 cooldown is not silently discarded.
-                guard._cooldown_until = previous._cooldown_until
-                guard._cooldown_reason = previous._cooldown_reason
-                guard._consecutive_rate_limits = previous._consecutive_rate_limits
-                guard._needs_probe = previous._needs_probe
+            with node_coordination.blocking_lock(guard._state_lock_path):
+                state = guard._read_shared_state()
+                if state is not None:
+                    guard._write_local_state(*state[:4])
             cls._guards[mint_url] = guard
         return guard
 
@@ -107,37 +117,169 @@ class MintRateGuard:
         self._consecutive_rate_limits = 0
         self._needs_probe = False
         self._probe_lock = asyncio.Lock()
+        self._key = node_coordination.state_key(mint_url)
+
+    @property
+    def _directory(self) -> Path:
+        return node_coordination.NODE_STATE_DIR / "mints" / self._key
+
+    @property
+    def _state_path(self) -> Path:
+        return self._directory / "state.json"
+
+    @property
+    def _state_lock_path(self) -> Path:
+        return self._directory / "state.lock"
+
+    @property
+    def _probe_lock_path(self) -> Path:
+        return self._directory / "probe.lock"
+
+    def _read_shared_state(
+        self,
+    ) -> tuple[float, str | None, int, bool, int] | None:
+        value = node_coordination.read_json(self._state_path)
+        version = value.get("version") if value is not None else None
+        if value is None or version not in (1, 2, 3):
+            return None
+        try:
+            consecutive = int(value["consecutive_rate_limits"])
+            needs_probe = value["needs_probe"]
+            generation = int(value.get("generation", 0))
+            reason = value.get("reason")
+            same_boot = (
+                version == 3
+                and _NODE_BOOT_ID is not None
+                and value.get("boot_id") == _NODE_BOOT_ID
+            )
+            if same_boot:
+                cooldown_until = float(value["monotonic_until"])
+                now = time.monotonic()
+            else:
+                wall_until = float(value["cooldown_until"])
+                wall_now = time.time()
+                if (
+                    not math.isfinite(wall_until)
+                    or wall_until < 0
+                    or wall_until
+                    > wall_now + _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS + 60
+                ):
+                    return None
+                cooldown_until = time.monotonic() + max(0.0, wall_until - wall_now)
+                now = time.monotonic()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if (
+            not math.isfinite(cooldown_until)
+            or cooldown_until < 0
+            or cooldown_until > now + _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS + 60
+            or not 0 <= consecutive <= 1024
+            or not 0 <= generation <= 2**63 - 1
+            or not isinstance(needs_probe, bool)
+            or (reason is not None and not isinstance(reason, str))
+        ):
+            return None
+        return cooldown_until, reason, consecutive, needs_probe, generation
+
+    def _write_shared_state(
+        self,
+        cooldown_until: float,
+        reason: str | None,
+        consecutive: int,
+        needs_probe: bool,
+        generation: int,
+    ) -> None:
+        remaining = max(0.0, cooldown_until - time.monotonic())
+        node_coordination.write_json(
+            self._state_path,
+            {
+                "version": 3,
+                "boot_id": _NODE_BOOT_ID,
+                "monotonic_until": cooldown_until,
+                "cooldown_until": time.time() + remaining,
+                "reason": reason,
+                "consecutive_rate_limits": consecutive,
+                "needs_probe": needs_probe,
+                "generation": generation,
+            },
+        )
+        self._cooldown_until = cooldown_until
+        self._cooldown_reason = reason
+        self._consecutive_rate_limits = consecutive
+        self._needs_probe = needs_probe
+
+    def _sync_shared_state(self) -> None:
+        state = self._read_shared_state()
+        if state is None:
+            return
+        self._write_local_state(*state[:4])
+
+    def _write_local_state(
+        self,
+        cooldown_until: float,
+        reason: str | None,
+        consecutive: int,
+        needs_probe: bool,
+    ) -> None:
+        self._cooldown_until = cooldown_until
+        self._cooldown_reason = reason
+        self._consecutive_rate_limits = consecutive
+        self._needs_probe = needs_probe
 
     def apply_cooldown(self, delay: float, *, reason: str | None = None) -> None:
-        deadline = time.monotonic() + max(0.0, delay)
-        if deadline >= self._cooldown_until:
-            self._cooldown_until = deadline
-            if reason is not None:
-                self._cooldown_reason = reason
-        elif self._cooldown_reason is None and reason is not None:
-            self._cooldown_reason = reason
-        self._needs_probe = True
+        delay = max(0.0, delay)
+        with node_coordination.blocking_lock(self._state_lock_path):
+            state = self._read_shared_state()
+            current_until, current_reason, consecutive, _, generation = state or (
+                0.0,
+                None,
+                self._consecutive_rate_limits,
+                False,
+                0,
+            )
+            deadline = time.monotonic() + delay
+            if deadline >= current_until:
+                current_until = deadline
+                if reason is not None:
+                    current_reason = reason
+            elif current_reason is None and reason is not None:
+                current_reason = reason
+            self._write_shared_state(
+                current_until, current_reason, consecutive, True, generation + 1
+            )
 
     def apply_rate_limit_cooldown(self, retry_after: float | None = None) -> float:
-        remaining = self.cooldown_remaining()
-        if remaining > 0 and self._cooldown_reason == "rate_limited":
+        with node_coordination.blocking_lock(self._state_lock_path):
+            state = self._read_shared_state()
+            current_until, reason, consecutive, _, generation = state or (
+                0.0,
+                None,
+                0,
+                False,
+                0,
+            )
+            remaining = max(0.0, current_until - time.monotonic())
             minimum = min(
                 _MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS,
                 max(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, retry_after or 0.0),
             )
-            if minimum > remaining:
-                self.apply_cooldown(minimum, reason="rate_limited")
-                return minimum
-            return remaining
-
-        self._consecutive_rate_limits += 1
-        base = max(_MINT_RATE_LIMIT_BASE_COOLDOWN_SECONDS, retry_after or 0.0)
-        multiplier = 2 ** min(self._consecutive_rate_limits - 1, 10)
-        delay = min(_MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS, base * multiplier)
-        self.apply_cooldown(delay, reason="rate_limited")
-        return delay
+            if remaining > 0 and reason == "rate_limited":
+                delay = max(remaining, minimum)
+            else:
+                consecutive += 1
+                multiplier = 2 ** min(consecutive - 1, 10)
+                delay = min(_MINT_RATE_LIMIT_MAX_COOLDOWN_SECONDS, minimum * multiplier)
+            self._write_shared_state(
+                time.monotonic() + delay,
+                "rate_limited",
+                consecutive,
+                True,
+                generation + 1,
+            )
+            return delay
 
     def cooldown_remaining(self) -> float:
+        self._sync_shared_state()
         return max(0.0, self._cooldown_until - time.monotonic())
 
     def cooldown_reason(self) -> str | None:
@@ -151,8 +293,13 @@ class MintRateGuard:
     async def _wait_for_cooldown(self) -> None:
         while True:
             self._raise_if_wait_forbidden()
+            shared_state = self._read_shared_state()
+            if shared_state is not None:
+                self._write_local_state(*shared_state[:4])
+            wait = max(0.0, self._cooldown_until - time.monotonic())
             deadline = self._cooldown_until
-            wait = max(0.0, deadline - time.monotonic())
+            shared_deadline = shared_state[0] if shared_state is not None else None
+            generation = shared_state[4] if shared_state is not None else None
             if wait <= 0:
                 return
             logger.debug(
@@ -160,72 +307,157 @@ class MintRateGuard:
                 extra={"mint_url": self._mint_url, "wait_seconds": round(wait, 2)},
             )
             await asyncio.sleep(wait)
+            if shared_deadline is not None and generation is not None:
+                with node_coordination.blocking_lock(self._state_lock_path):
+                    current = self._read_shared_state()
+                    if (
+                        current is not None
+                        and current[4] == generation
+                        and current[0] <= time.monotonic()
+                    ):
+                        self._write_shared_state(
+                            0.0, current[1], current[2], True, generation + 1
+                        )
+            self._sync_shared_state()
             if self._cooldown_until <= deadline:
                 return
 
+    @asynccontextmanager
+    async def _node_slot(self) -> AsyncGenerator[None, None]:
+        if self._max_concurrency <= 0:
+            yield
+            return
+        fd: int | None = None
+        try:
+            while fd is None:
+                for slot in range(self._max_concurrency):
+                    fd = node_coordination.try_lock(
+                        self._directory / f"slot-{slot}.lock"
+                    )
+                    if fd is not None:
+                        break
+                if fd is None:
+                    await asyncio.sleep(0.05)
+            yield
+        finally:
+            if fd is not None:
+                node_coordination.unlock(fd)
+
+    async def _acquire_probe_lock(self) -> int:
+        while True:
+            fd = node_coordination.try_lock(self._probe_lock_path)
+            if fd is not None:
+                return fd
+            if _fail_fast_depth.get():
+                raise MintCooldownError(self._mint_url, self.cooldown_remaining())
+            await asyncio.sleep(0.05)
+
+    def _clear_shared_state(self, expected_generation: int) -> bool:
+        with node_coordination.blocking_lock(self._state_lock_path):
+            state = self._read_shared_state()
+            if state is None:
+                if expected_generation != 0:
+                    return False
+                self._write_shared_state(0.0, None, 0, False, 1)
+                return True
+            if state[4] != expected_generation:
+                self._write_local_state(*state[:4])
+                return False
+            self._write_shared_state(0.0, None, 0, False, expected_generation + 1)
+            return True
+
     async def _run_probe(self, factory: Callable[[], Awaitable[Any]]) -> Any:
         await self._wait_for_cooldown()
-        logger.info(
-            "Mint cooldown ended; sending one probe request",
-            extra={"event": "mint_cooldown_probe_started", "mint_url": self._mint_url},
-        )
+        if self._read_shared_state() is None:
+            self._cooldown_until = 0.0
+            self._needs_probe = True
+        fd: int | None = await self._acquire_probe_lock()
         try:
-            result = await factory()
-        except Exception as error:
-            if is_mint_rate_limited(error):
-                retry_after = None
-                if isinstance(error, httpx.HTTPStatusError):
-                    retry_after = parse_retry_after(error.response.headers)
-                self.apply_rate_limit_cooldown(retry_after)
-            else:
-                self.apply_cooldown(1.0)
-            logger.warning(
-                "Mint cooldown probe failed",
+            self._sync_shared_state()
+            if self.cooldown_remaining() > 0:
+                assert fd is not None
+                node_coordination.unlock(fd)
+                fd = None
+                await self._wait_for_cooldown()
+                return await self._run_probe(factory)
+            if not self._needs_probe:
+                assert fd is not None
+                node_coordination.unlock(fd)
+                fd = None
+                return await self.run(factory)
+            state = self._read_shared_state()
+            probe_generation = state[4] if state is not None else 0
+            logger.info(
+                "Mint cooldown ended; sending one probe request",
                 extra={
-                    "event": "mint_cooldown_probe_failed",
+                    "event": "mint_cooldown_probe_started",
                     "mint_url": self._mint_url,
-                    "error": str(error),
-                    "error_type": type(error).__name__,
-                    "cooldown_seconds": round(self.cooldown_remaining(), 2),
-                    "consecutive_rate_limits": self._consecutive_rate_limits,
                 },
             )
-            raise
-
-        self._needs_probe = False
-        self._cooldown_until = 0.0
-        self._cooldown_reason = None
-        self._consecutive_rate_limits = 0
-        logger.info(
-            "Mint cooldown probe succeeded; restoring normal concurrency",
-            extra={
-                "event": "mint_cooldown_probe_succeeded",
-                "mint_url": self._mint_url,
-            },
-        )
-        return result
+            try:
+                async with self._node_slot():
+                    result = await factory()
+            except Exception as error:
+                if is_mint_rate_limited(error):
+                    retry_after = None
+                    if isinstance(error, httpx.HTTPStatusError):
+                        retry_after = parse_retry_after(error.response.headers)
+                    self.apply_rate_limit_cooldown(retry_after)
+                else:
+                    self.apply_cooldown(1.0)
+                logger.warning(
+                    "Mint cooldown probe failed",
+                    extra={
+                        "event": "mint_cooldown_probe_failed",
+                        "mint_url": self._mint_url,
+                        "error": str(error),
+                        "error_type": type(error).__name__,
+                        "cooldown_seconds": round(self.cooldown_remaining(), 2),
+                        "consecutive_rate_limits": self._consecutive_rate_limits,
+                    },
+                )
+                raise
+            state_cleared = self._clear_shared_state(probe_generation)
+            logger.info(
+                "Mint cooldown probe succeeded",
+                extra={
+                    "event": "mint_cooldown_probe_succeeded",
+                    "mint_url": self._mint_url,
+                    "state_cleared": state_cleared,
+                },
+            )
+            return result
+        finally:
+            if fd is not None:
+                node_coordination.unlock(fd)
 
     async def run(self, factory: Callable[[], Awaitable[Any]]) -> Any:
         while True:
             self._raise_if_wait_forbidden()
+            self._sync_shared_state()
             if self._needs_probe or self.cooldown_remaining() > 0:
                 if _fail_fast_depth.get() and self._probe_lock.locked():
                     raise MintCooldownError(self._mint_url, self.cooldown_remaining())
                 async with self._probe_lock:
                     self._raise_if_wait_forbidden()
-                    if self.cooldown_remaining() > 0:
-                        self._needs_probe = True
-                    if self._needs_probe:
+                    self._sync_shared_state()
+                    if self._needs_probe or self.cooldown_remaining() > 0:
                         return await self._run_probe(factory)
                 continue
 
             if self._semaphore is None:
-                return await factory()
+                async with self._node_slot():
+                    self._sync_shared_state()
+                    if self._needs_probe:
+                        continue
+                    return await factory()
             async with self._semaphore:
-                self._raise_if_wait_forbidden()
-                if self._needs_probe:
-                    continue
-                return await factory()
+                async with self._node_slot():
+                    self._raise_if_wait_forbidden()
+                    self._sync_shared_state()
+                    if self._needs_probe:
+                        continue
+                    return await factory()
 
 
 def mint_cooldown_remaining(mint_url: str) -> float:

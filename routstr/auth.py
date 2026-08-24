@@ -31,7 +31,10 @@ from .payment.cost_calculation import (
     calculate_cost,
 )
 from .redemption_cache import (
+    MAX_TRANSIENT_TTL_SECONDS,
     TERMINAL_REDEMPTION_CODES,
+    TRANSIENT_REDEMPTION_CODES,
+    TRANSIENT_TTL_SECONDS,
     CachedRedemptionFailure,
     redemption_negative_cache,
 )
@@ -188,19 +191,30 @@ def _cached_failure_to_http_exception(
     )
 
 
-def _maybe_cache_terminal_redemption_failure(hashed_key: str, error: Exception) -> None:
-    """Record a redemption failure in the negative cache if it can never succeed.
-
-    Transient classifications (mint unreachable, rate-limited) are never
-    cached — only codes in TERMINAL_REDEMPTION_CODES, which are permanent
-    properties of the token itself.
-    """
+def _maybe_cache_redemption_failure(hashed_key: str, error: Exception) -> None:
+    """Cache sanitized redemption failures for their configured lifetime."""
     classified = classify_redemption_error(error)
     if classified is None:
         return
     error_type, status_code, message, code = classified
-    if code not in TERMINAL_REDEMPTION_CODES:
+    ttl_seconds: float | None = None
+    if code in TRANSIENT_REDEMPTION_CODES:
+        ttl_seconds = TRANSIENT_TTL_SECONDS
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            retry_after = getattr(current, "retry_after_seconds", None)
+            if isinstance(retry_after, (int, float)):
+                ttl_seconds = min(
+                    MAX_TRANSIENT_TTL_SECONDS,
+                    max(1.0, float(retry_after)),
+                )
+                break
+            current = current.__cause__ or current.__context__
+    elif code not in TERMINAL_REDEMPTION_CODES:
         return
+
     redemption_negative_cache.put(
         hashed_key,
         CachedRedemptionFailure(
@@ -209,10 +223,15 @@ def _maybe_cache_terminal_redemption_failure(hashed_key: str, error: Exception) 
             message=message,
             code=code,
         ),
+        ttl_seconds=ttl_seconds,
     )
     logger.info(
-        "Cached terminal redemption failure; further attempts rejected locally",
-        extra={"key_hash": hashed_key[:8] + "...", "code": code},
+        "Cached redemption failure; further attempts rejected locally",
+        extra={
+            "key_hash": hashed_key[:8] + "...",
+            "code": code,
+            "ttl_seconds": ttl_seconds,
+        },
     )
 
 
@@ -431,7 +450,7 @@ async def _validate_bearer_key_locked(
 
             if cached_failure := redemption_negative_cache.get(hashed_key):
                 logger.info(
-                    "Rejecting known-dead Cashu token from negative cache",
+                    "Rejecting Cashu token with a cached redemption failure",
                     extra={
                         "key_hash": hashed_key[:8] + "...",
                         "code": cached_failure.code,
@@ -506,6 +525,7 @@ async def _validate_bearer_key_locked(
             )
             try:
                 msats = await credit_balance(bearer_key, new_key, session)
+                redemption_negative_cache.discard(hashed_key)
                 logger.debug(
                     "AUTH: credit_balance returned successfully", extra={"msats": msats}
                 )
@@ -518,7 +538,7 @@ async def _validate_bearer_key_locked(
                     },
                 )
                 await session.rollback()
-                _maybe_cache_terminal_redemption_failure(hashed_key, credit_error)
+                _maybe_cache_redemption_failure(hashed_key, credit_error)
                 raise redemption_error_to_http_exception(credit_error) from credit_error
 
             if msats <= 0:

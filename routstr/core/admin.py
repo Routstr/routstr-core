@@ -1770,6 +1770,74 @@ async def get_log_dates_api(request: Request) -> dict[str, object]:
     return {"dates": dates}
 
 
+_ROUTSTR_RELEASE_ERRORS = {
+    "no_active_reservation": "No pending Routstr auto top-up to release",
+    "stale_state": (
+        "The reservation changed since it was reviewed; reload and check again"
+    ),
+    "reservation_changed": (
+        "The reservation changed while the release was being applied; reload and check again"
+    ),
+}
+
+
+class ReleaseRoutstrAutoTopupRequest(BaseModel):
+    confirmed_token_was_not_used: bool
+    state_token: str | None = None
+
+
+async def _require_routstr_provider(provider_id: int) -> UpstreamProviderRow:
+    async with create_session() as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    if provider.provider_type != "routstr":
+        raise HTTPException(status_code=400, detail="Provider is not Routstr")
+    return provider
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/routstr-auto-topup",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_routstr_auto_topup_api(provider_id: int) -> dict[str, object]:
+    await _require_routstr_provider(provider_id)
+    from ..upstream.auto_topup import get_routstr_auto_topup_state
+
+    return {"ok": True, **await get_routstr_auto_topup_state(provider_id)}
+
+
+@admin_router.post(
+    "/api/upstream-providers/{provider_id}/routstr-auto-topup/release",
+    dependencies=[Depends(require_admin_api)],
+)
+async def release_routstr_auto_topup_api(
+    provider_id: int, payload: ReleaseRoutstrAutoTopupRequest
+) -> dict[str, object]:
+    await _require_routstr_provider(provider_id)
+    if not payload.confirmed_token_was_not_used:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirm the Cashu token was not used before releasing",
+        )
+
+    from ..upstream.auto_topup import release_routstr_auto_topup_state
+
+    outcome = await release_routstr_auto_topup_state(
+        provider_id, state_token=payload.state_token
+    )
+    if not outcome.released:
+        raise HTTPException(
+            status_code=409, detail=_ROUTSTR_RELEASE_ERRORS[outcome.reason]
+        )
+
+    logger.warning(
+        "Admin released Routstr auto top-up after manual reconciliation",
+        extra={"provider_id": provider_id, "state_token": payload.state_token},
+    )
+    return {"ok": True, "released": True}
+
+
 _PPQ_RELEASE_ERRORS = {
     "no_active_claim": "No active PPQ claim to release",
     "stale_state": ("The claim changed since it was reviewed; reload and check again"),

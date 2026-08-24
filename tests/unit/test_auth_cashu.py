@@ -73,6 +73,86 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
     assert await session.get(ApiKey, hashed_key) is None
 
 
+@pytest.mark.asyncio
+async def test_transient_redemption_retry_is_suppressed(
+    session: AsyncSession,
+) -> None:
+    token = "cashuAtransient_retry"
+    token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
+    credit = AsyncMock(side_effect=httpx.ConnectError("mint unavailable"))
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch("routstr.auth.credit_balance", new=credit),
+    ):
+        for _ in range(2):
+            with pytest.raises(HTTPException) as caught:
+                await validate_bearer_key(token, session)
+            assert caught.value.status_code == 503
+
+    credit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shared_failure_cache_io_does_not_mask_mint_outage(
+    session: AsyncSession,
+) -> None:
+    token = "cashuAshared_cache_io_failure"
+    token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch(
+            "routstr.auth.credit_balance",
+            new=AsyncMock(side_effect=httpx.ConnectError("mint unavailable")),
+        ),
+        patch(
+            "routstr.redemption_cache.node_coordination.write_json",
+            side_effect=OSError("disk unavailable"),
+        ),
+    ):
+        with pytest.raises(HTTPException) as caught:
+            await validate_bearer_key(token, session)
+
+    assert caught.value.status_code == 503
+    assert caught.value.detail["error"]["code"] == "cashu_mint_unreachable"
+
+
+@pytest.mark.asyncio
+async def test_transient_redemption_retry_recovers_after_expiry(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from routstr.redemption_cache import redemption_negative_cache
+
+    now = 0.0
+    monkeypatch.setattr(redemption_negative_cache, "_clock", lambda: now)
+    monkeypatch.setattr(redemption_negative_cache, "_wall_clock", lambda: now)
+    token = "cashuAtransient_retry_after_expiry"
+    token_obj = SimpleNamespace(mint="http://mint:3338", unit="sat")
+    credit = AsyncMock(side_effect=[httpx.ConnectError("mint unavailable"), 1_000])
+
+    from routstr.core.settings import settings
+
+    with (
+        patch.object(settings, "cashu_mints", ["http://mint:3338"]),
+        patch("routstr.auth.deserialize_token_from_string", return_value=token_obj),
+        patch("routstr.auth.credit_balance", new=credit),
+    ):
+        with pytest.raises(HTTPException):
+            await validate_bearer_key(token, session)
+        now = 31.0
+        key = await validate_bearer_key(token, session)
+
+    assert key.hashed_key == hashlib.sha256(token.encode()).hexdigest()
+    assert credit.await_count == 2
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_type", "expected_message", "expected_code"),
     [

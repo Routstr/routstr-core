@@ -80,6 +80,51 @@ async def test_get_wallet_force_reload_bypasses_reload_interval() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_wallet_uses_node_shared_metadata_refresh() -> None:
+    from routstr import wallet as wallet_module
+    from routstr.wallet import get_wallet
+
+    first = Mock(load_mint=AsyncMock(), load_proofs=AsyncMock(), keysets={"a": Mock()})
+    second = Mock(
+        load_mint=AsyncMock(),
+        load_proofs=AsyncMock(),
+        activate_keyset=AsyncMock(),
+        keysets={"a": Mock()},
+    )
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(side_effect=[first, second])):
+        await get_wallet("http://mint:3338", "sat")
+        wallet_module._wallets.clear()
+        wallet_module._wallet_last_load.clear()
+        wallet_module._wallet_load_locks.clear()
+        await get_wallet("http://mint:3338", "sat")
+
+    first.load_mint.assert_awaited_once()
+    second.load_mint.assert_not_awaited()
+    second.load_proofs.assert_awaited_once_with(reload=True)
+    second.activate_keyset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forced_reload_is_deduplicated_inside_wallet_operation() -> None:
+    from routstr.wallet import get_wallet, wallet_operation_guard
+
+    wallet = Mock(
+        load_mint=AsyncMock(),
+        load_proofs=AsyncMock(),
+        activate_keyset=AsyncMock(),
+        keysets={"a": Mock()},
+    )
+    with patch("routstr.wallet.Wallet.with_db", AsyncMock(return_value=wallet)):
+        async with wallet_operation_guard():
+            await get_wallet("http://mint:3338", "sat", force_reload=True)
+            await get_wallet("http://mint:3338", "sat", force_reload=True)
+
+    wallet.load_mint.assert_awaited_once()
+    assert wallet.load_proofs.await_count == 2
+    wallet.activate_keyset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_public_recieve_token_holds_wallet_operation_guard() -> None:
     inside_guard = False
 
@@ -2099,9 +2144,11 @@ async def test_mint_rate_guard_exponentially_backs_off_repeated_429s() -> None:
     expected_delays = [60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 25200]
     now = 0.0
 
-    with patch("routstr.mint.time.monotonic") as monotonic:
+    with (
+        patch("routstr.mint.time.monotonic", side_effect=lambda: now),
+        patch("routstr.mint.time.time", side_effect=lambda: now),
+    ):
         for index, expected in enumerate(expected_delays, start=1):
-            monotonic.return_value = now
             assert guard.apply_rate_limit_cooldown(60) == expected
             assert guard._consecutive_rate_limits == index
             if index == 1:
@@ -2111,7 +2158,6 @@ async def test_mint_rate_guard_exponentially_backs_off_repeated_429s() -> None:
                 assert guard._consecutive_rate_limits == 1
             now += expected + 1
 
-        monotonic.return_value = now
         operation = AsyncMock(return_value="ok")
         assert await guard.run(operation) == "ok"
         assert guard._consecutive_rate_limits == 0
@@ -2168,16 +2214,24 @@ async def test_mint_rate_guard_keeps_cooldown_when_concurrency_is_unlimited() ->
     from routstr.wallet import _MintRateGuard
 
     operation = AsyncMock(return_value="ok")
+    now = 0.0
+
+    async def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
     with (
         patch.object(settings, "mint_max_concurrency", 0),
-        patch("routstr.mint.time.monotonic", return_value=0),
-        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
+        patch("routstr.mint.time.monotonic", side_effect=lambda: now),
+        patch("routstr.mint.time.time", side_effect=lambda: now),
+        patch("routstr.mint.asyncio.sleep", AsyncMock(side_effect=advance)) as sleep,
     ):
         guard = _MintRateGuard.get("http://mint:3338")
         guard.apply_cooldown(5)
         assert await guard.run(operation) == "ok"
 
-    sleep.assert_awaited_once_with(5)
+    sleep.assert_awaited_once()
+    assert sleep.await_args.args[0] == pytest.approx(5, abs=0.1)
     operation.assert_awaited_once()
 
 
@@ -2199,18 +2253,26 @@ async def test_mint_operation_honors_retry_after_as_minimum() -> None:
             )
         return "ok"
 
-    sleep = AsyncMock()
+    now = 0.1
+
+    async def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    sleep = AsyncMock(side_effect=advance)
     with patch.object(settings, "mint_retry_max_attempts", 1):
         with patch.object(settings, "mint_operation_timeout_seconds", 0):
             with patch.object(settings, "mint_max_concurrency", 1):
-                with patch("routstr.mint.time.monotonic", return_value=0.1):
-                    with patch("routstr.mint.asyncio.sleep", sleep):
-                        result = await _mint_operation(
-                            factory, mint_url="http://mint:3338"
-                        )
+                with (
+                    patch("routstr.mint.time.monotonic", side_effect=lambda: now),
+                    patch("routstr.mint.time.time", side_effect=lambda: now),
+                    patch("routstr.mint.asyncio.sleep", sleep),
+                ):
+                    result = await _mint_operation(factory, mint_url="http://mint:3338")
 
     assert result == "ok"
-    sleep.assert_awaited_once_with(60.0)
+    sleep.assert_awaited_once()
+    assert sleep.await_args.args[0] == pytest.approx(60.0, abs=0.1)
 
 
 @pytest.mark.asyncio
@@ -2219,10 +2281,18 @@ async def test_mint_operation_timeout_excludes_adaptive_cooldown() -> None:
     from routstr.wallet import _mint_operation, _MintRateGuard
 
     operation = AsyncMock(return_value="ok")
+    now = 0.0
+
+    async def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
     with (
         patch.object(settings, "mint_max_concurrency", 1),
         patch.object(settings, "mint_operation_timeout_seconds", 0.01),
-        patch("routstr.mint.asyncio.sleep", AsyncMock()) as sleep,
+        patch("routstr.mint.time.monotonic", side_effect=lambda: now),
+        patch("routstr.mint.time.time", side_effect=lambda: now),
+        patch("routstr.mint.asyncio.sleep", AsyncMock(side_effect=advance)) as sleep,
     ):
         guard = _MintRateGuard.get("http://mint:3338")
         guard.apply_cooldown(60)
@@ -2245,11 +2315,19 @@ async def test_default_timeout_allows_retry_after_rate_limit_cooldown() -> None:
             "ok",
         ]
     )
+    now = 0.0
+
+    async def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
     with (
         patch.object(settings, "mint_retry_max_attempts", 3),
         patch.object(settings, "mint_operation_timeout_seconds", 30),
         patch.object(settings, "mint_max_concurrency", 1),
-        patch("routstr.mint.asyncio.sleep", AsyncMock()),
+        patch("routstr.mint.time.monotonic", side_effect=lambda: now),
+        patch("routstr.mint.time.time", side_effect=lambda: now),
+        patch("routstr.mint.asyncio.sleep", AsyncMock(side_effect=advance)),
     ):
         assert await _mint_operation(operation, mint_url="http://mint:3338") == "ok"
 

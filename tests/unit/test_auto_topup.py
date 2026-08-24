@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,15 @@ async def test_ppq_balance_rejects_boolean_api_value() -> None:
     provider.check_balance = AsyncMock(return_value={"balance": False})  # type: ignore[method-assign]
 
     assert await provider.get_balance() is None
+
+
+@pytest.fixture(autouse=True)
+def _no_pending_routstr_topup(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    pending = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        "routstr.upstream.auto_topup._has_pending_routstr_topup", pending
+    )
+    return pending
 
 
 def _row() -> MagicMock:
@@ -103,6 +113,7 @@ async def test_auto_topup_persists_before_sending_and_marks_success_collected() 
         unit="sat",
         mint_url="https://fallback-mint.test",
         typ="out",
+        request_id="routstr-auto-topup:provider-1",
         collected=False,
         source="auto_topup",
     )
@@ -174,6 +185,101 @@ async def test_auto_topup_does_not_send_untracked_token() -> None:
 
     reclaim.assert_awaited_once_with("cashu-token")
     provider.topup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_auto_topups_create_one_token(
+    _no_pending_routstr_topup: AsyncMock,
+) -> None:
+    persisted = False
+    transaction = CashuTransaction(
+        token="cashu-token", amount=50, unit="sat", source="auto_topup"
+    )
+    topup_started = asyncio.Event()
+    finish_topup = asyncio.Event()
+
+    async def has_pending(_: object) -> bool:
+        return persisted and not transaction.collected
+
+    async def store(**_: object) -> bool:
+        nonlocal persisted
+        persisted = True
+        return True
+
+    async def topup(_: str) -> dict[str, int]:
+        topup_started.set()
+        await finish_topup.wait()
+        return {"balance": 50}
+
+    provider = MagicMock()
+    provider.get_balance = AsyncMock(return_value=0)
+    provider.topup = AsyncMock(side_effect=topup)
+    _no_pending_routstr_topup.side_effect = has_pending
+
+    with (
+        patch(
+            "routstr.upstream.auto_topup.RoutstrUpstreamProvider.from_db_row",
+            return_value=provider,
+        ),
+        patch(
+            "routstr.upstream.auto_topup.send_token",
+            AsyncMock(return_value="cashu-token"),
+        ) as send,
+        patch(
+            "routstr.upstream.auto_topup.store_cashu_transaction",
+            AsyncMock(side_effect=store),
+        ),
+        patch(
+            "routstr.upstream.auto_topup.create_session",
+            return_value=_Session(transaction),
+        ),
+    ):
+        first = asyncio.create_task(_check_and_topup(_row()))
+        await topup_started.wait()
+        second = asyncio.create_task(_check_and_topup(_row()))
+        try:
+            await asyncio.sleep(0.1)
+            assert _no_pending_routstr_topup.await_count == 1
+        finally:
+            finish_topup.set()
+            await asyncio.gather(first, second)
+
+    assert transaction.collected is True
+    assert _no_pending_routstr_topup.await_count == 1
+    send.assert_awaited_once()
+    provider.topup.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_auto_topup_blocks_new_token(
+    _no_pending_routstr_topup: AsyncMock,
+) -> None:
+    _no_pending_routstr_topup.return_value = True
+    with (
+        patch(
+            "routstr.upstream.auto_topup.RoutstrUpstreamProvider.from_db_row"
+        ) as provider_factory,
+        patch("routstr.upstream.auto_topup.send_token", AsyncMock()) as send,
+    ):
+        await _check_and_topup(_row())
+
+    provider_factory.assert_not_called()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_topup_lock_is_released_after_exception() -> None:
+    provider = MagicMock()
+    provider.get_balance = AsyncMock(side_effect=[RuntimeError("failed"), 200_000])
+    with patch(
+        "routstr.upstream.auto_topup.RoutstrUpstreamProvider.from_db_row",
+        return_value=provider,
+    ):
+        first = await asyncio.gather(_check_and_topup(_row()), return_exceptions=True)
+        await _check_and_topup(_row())
+
+    assert isinstance(first[0], RuntimeError)
+    assert provider.get_balance.await_count == 2
 
 
 def _ppq_row() -> MagicMock:
