@@ -155,3 +155,35 @@ async def test_admin_listing_still_shows_a_malformed_stored_rate(
     }
 
     assert listed == {"bad-rate"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_one_unreadable_stored_price_does_not_blank_the_catalog(
+    integration_session: AsyncSession,
+) -> None:
+    """A single unparseable row must cost that row, not every model on the node.
+
+    Stored pricing is JSON written by whatever produced the row, so a
+    non-numeric rate is reachable from a legacy import or a foreign writer.
+    Parsing it raises out of the row-to-model conversion, and because the
+    conversion ran inside the catalog loop the exception took the whole listing
+    with it — one bad row and the node advertised nothing at all.
+    """
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="good",
+        pricing={"prompt": 1e-06, "completion": 2e-06},
+    )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="unreadable",
+        pricing={"prompt": "not-a-number", "completion": 2e-06},
+    )
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+
+    assert served == {"good"}

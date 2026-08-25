@@ -1018,3 +1018,43 @@ def test_create_model_mappings_excludes_an_override_with_a_malformed_price(
 
     assert "shared-model" not in provider_map
     assert "shared-model" not in unique_models
+
+
+def test_create_model_mappings_survives_an_unreadable_override_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One row that cannot be read must not empty the whole routing map.
+
+    Stored pricing is JSON from whatever wrote the row, so converting it can
+    raise. Converting an override while walking a provider's catalog let that
+    exception unwind the entire map build: at boot the node came up routing
+    nothing, and on a later refresh the map it already had went permanently
+    stale. The sibling loop over override-only rows already skips and logs such
+    a row.
+    """
+    broken = create_test_model("broken-model")
+    healthy = create_test_model("healthy-model")
+    provider = create_test_provider(
+        "custom",
+        "https://custom.example/v1",
+        db_id=5,
+        models=[broken, healthy],
+    )
+
+    def raising_row_to_model(row: Any, *args: Any, **kwargs: Any) -> Model:
+        raise ValueError("value is not a valid float")
+
+    monkeypatch.setattr("routstr.payment.models._row_to_model", raising_row_to_model)
+    override_row = SimpleNamespace(
+        id="broken-model", upstream_provider_id=5, enabled=True
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("broken-model", 5): (override_row, 1.0)},
+        disabled_model_keys=set(),
+    )
+
+    assert "broken-model" not in provider_map
+    assert "healthy-model" in provider_map
+    assert "healthy-model" in unique_models

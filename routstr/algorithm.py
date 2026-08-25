@@ -237,9 +237,27 @@ def create_model_mappings(
             # Apply overrides only for this provider's model row.
             if model_key is not None and model_key in overrides_by_key:
                 override_row, provider_fee = overrides_by_key[model_key]
-                model_to_use = _row_to_model(
-                    override_row, apply_provider_fee=True, provider_fee=provider_fee
-                )
+                try:
+                    model_to_use = _row_to_model(
+                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    )
+                except Exception as exc:
+                    # Stored pricing is JSON from whatever wrote the row, so
+                    # converting it can raise. Doing that inside this loop let
+                    # one such row unwind the whole map build: at boot the node
+                    # came up routing nothing, and on a later refresh the map it
+                    # already had went permanently stale. The sibling loop over
+                    # override-only rows already skips and logs such a row.
+                    logger.warning(
+                        "Skipping invalid model override while building model mappings",
+                        extra={
+                            "model_id": model.id,
+                            "upstream_provider_id": upstream_db_id,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
             else:
                 model_to_use = model
 
