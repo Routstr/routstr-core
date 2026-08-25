@@ -315,3 +315,98 @@ async def test_all_quotes_unusable_keeps_the_last_good_price(
     )
 
     assert btc_usd_price() == pytest.approx(90000.0)
+
+
+# ---------------------------------------------------------------------------
+# Catalog ingest — a malformed rate must never become a stored price
+# ---------------------------------------------------------------------------
+
+
+class _CatalogResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _CatalogClient:
+    """Stands in for ``httpx.AsyncClient`` against the OpenRouter catalog."""
+
+    def __init__(self, models: list[dict[str, Any]]) -> None:
+        self._models = models
+
+    async def __aenter__(self) -> "_CatalogClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def get(self, url: str, timeout: int | None = None) -> _CatalogResponse:
+        if url.endswith("/embeddings/models"):
+            return _CatalogResponse({"data": []})
+        return _CatalogResponse({"data": self._models})
+
+
+def _catalog_entry(model_id: str, pricing: dict[str, Any]) -> dict[str, Any]:
+    return {"id": model_id, "name": model_id, "pricing": pricing}
+
+
+def _patch_openrouter_catalog(models: list[dict[str, Any]]) -> Any:
+    return patch(
+        "routstr.payment.models.httpx.AsyncClient",
+        lambda *args, **kwargs: _CatalogClient(models),
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_rate",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "inf", "negative-inf"],
+)
+@pytest.mark.asyncio
+async def test_non_finite_catalog_rate_is_not_imported(bad_rate: float) -> None:
+    """A non-finite rate in the upstream catalog is junk, not a price.
+
+    ``json.loads`` accepts the bare ``NaN``/``Infinity`` literals and overflows
+    ``1e999`` to ``inf``, so an upstream feed can deliver one. The import filter
+    rejects a negative and a both-zero price, but every comparison with ``NaN``
+    is False and ``inf`` reads as a large positive, so both sailed through and
+    became a stored price the node would advertise and bill on.
+    """
+    with _patch_openrouter_catalog(
+        [
+            _catalog_entry("bad", {"prompt": bad_rate, "completion": "0.000002"}),
+            _catalog_entry("good", {"prompt": "0.000001", "completion": "0.000002"}),
+        ]
+    ):
+        from routstr.payment.models import async_fetch_openrouter_models
+
+        models = await async_fetch_openrouter_models()
+
+    assert [m["id"] for m in models] == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_oversized_catalog_rate_does_not_empty_the_catalog() -> None:
+    """An integer too large to be a float must cost one model, not all of them.
+
+    ``float()`` raises ``OverflowError`` — not ``ValueError`` — for such a
+    value, so the coercion guard in the import filter did not catch it and the
+    exception unwound the whole fetch. The node then imported nothing at all
+    from an upstream whose catalog was fine apart from one entry.
+    """
+    with _patch_openrouter_catalog(
+        [
+            _catalog_entry("bad", {"prompt": 10**400, "completion": 2}),
+            _catalog_entry("good", {"prompt": "0.000001", "completion": "0.000002"}),
+        ]
+    ):
+        from routstr.payment.models import async_fetch_openrouter_models
+
+        models = await async_fetch_openrouter_models()
+
+    assert [m["id"] for m in models] == ["good"]

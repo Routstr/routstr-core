@@ -522,3 +522,110 @@ async def test_unresolvable_model_fails_closed(
         for rec in caplog.records
         if rec.levelno >= logging.WARNING
     )
+
+
+# ---------------------------------------------------------------------------
+# rate validation — a malformed rate is not a resolved price, at any rung
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_finite_litellm_rate_is_not_a_resolved_price() -> None:
+    """A non-finite entry in the cost map must not answer the resolution chain.
+
+    The litellm rung rejects negatives and a both-zero entry, but every
+    comparison with ``NaN`` is False and ``inf`` reads as a large positive, so
+    either would be reported as a resolved price — enabling the model at a rate
+    the node cannot bill on. Fail closed instead: the model imports disabled,
+    which is what "no source knows this price" already means here.
+    """
+    payload = {
+        "data": [
+            {"id": "nan-priced-model", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    cost_entry = {
+        "input_cost_per_token": float("nan"),
+        "output_cost_per_token": float("inf"),
+        "max_input_tokens": 8192,
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[])
+        with patch("routstr.payment.models.litellm_cost_entry", lambda _id: cost_entry):
+            with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+                models = await GenericUpstreamProvider(
+                    base_url="http://x"
+                ).fetch_models()
+
+    model = _model_by_id(models, "nan-priced-model")
+    assert model.enabled is False
+    assert model.pricing.prompt == 0.0
+    assert model.pricing.completion == 0.0
+
+
+@pytest.mark.asyncio
+async def test_non_finite_openrouter_rate_is_not_a_resolved_price() -> None:
+    """``float("Infinity")`` parses happily from a feed string, so the
+    OpenRouter rung's coercion accepted it and reported an infinite rate as a
+    resolved price. It is not a price; the model must import disabled."""
+    payload = {
+        "data": [
+            {"id": "or-nonfinite-xyz", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    feed = [
+        {
+            "id": "or-nonfinite-xyz",
+            "pricing": {"prompt": "Infinity", "completion": "0.000002"},
+            "context_length": 8192,
+        }
+    ]
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=feed)
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "or-nonfinite-xyz")
+    assert model.enabled is False
+    assert model.pricing.prompt == 0.0
+    assert model.pricing.completion == 0.0
+
+
+@pytest.mark.asyncio
+async def test_non_finite_openrouter_cache_rate_is_dropped_not_carried() -> None:
+    """A malformed *cache* rate must cost the cache rate, not the model.
+
+    The catalog import filter only inspects prompt and completion, so an entry
+    with two sound token rates and an unusable ``input_cache_read`` reaches the
+    resolver intact. Carrying that rate through would price every cached input
+    token at ``inf``; dropping it falls back to the full input rate, which is
+    what a missing cache rate already means.
+    """
+    payload = {
+        "data": [
+            {"id": "or-badcache-xyz", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    feed = [
+        {
+            "id": "or-badcache-xyz",
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000002",
+                "input_cache_read": "Infinity",
+            },
+            "context_length": 8192,
+        }
+    ]
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=feed)
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "or-badcache-xyz")
+    assert model.enabled is True
+    assert model.pricing.prompt == pytest.approx(1e-06)
+    assert model.pricing.input_cache_read == 0.0

@@ -168,7 +168,7 @@ def backfill_cache_pricing(model_id: str, pricing: Pricing) -> Pricing:
 
 
 def _has_valid_pricing(model: dict) -> bool:
-    """Check if model has valid pricing (not free, no negative values)."""
+    """Check if model has valid pricing (usable rates, and not free)."""
     pricing = model.get("pricing", {})
     if not pricing:
         return False
@@ -176,10 +176,16 @@ def _has_valid_pricing(model: dict) -> bool:
     try:
         prompt = float(pricing.get("prompt", 0))
         completion = float(pricing.get("completion", 0))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        # An integer too large for a float raises OverflowError, not
+        # ValueError, so it escaped this coercion guard and unwound the whole
+        # fetch — one junk entry cost the node the entire upstream catalog.
         return False
 
-    if prompt < 0 or completion < 0:
+    # `NaN`/`±inf` are not prices, and neither is caught by the checks below:
+    # every comparison with `NaN` is False, and `inf` reads as a large positive
+    # rate that would be advertised and billed on.
+    if not is_usable_rate(prompt) or not is_usable_rate(completion):
         return False
 
     if prompt == 0 and completion == 0:
