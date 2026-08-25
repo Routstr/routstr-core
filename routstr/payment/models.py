@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import random
 
 import httpx
@@ -56,6 +57,29 @@ class Pricing(BaseModel):
     max_prompt_cost: float = 0.0  # in sats not msats
     max_completion_cost: float = 0.0  # in sats not msats
     max_cost: float = 0.0  # in sats not msats
+
+
+def is_usable_rate(rate: float) -> bool:
+    """True if a single billable rate is a number a request could be billed on.
+
+    The one definition of a usable rate, so every guard that asks the question
+    answers it identically. A rate qualifies only when it is finite and
+    non-negative; zero is usable (it means "free", which is a real price) but
+    ``NaN``, ``±inf`` and negatives are not prices at all.
+
+    Non-finite: ``inf > 0`` is True, so an infinite rate reads as chargeable and
+    would be served, routed and billed as ``inf``; ``NaN`` poisons every total it
+    enters and defeats ordinary comparisons, since ``NaN > 0``, ``NaN < 0`` and
+    ``NaN == 0`` are all False. Negative: a negative rate produces a negative
+    cost, which the settlement path subtracts from the balance — it pays the
+    caller to make requests.
+
+    Both reach a stored row from upstream catalogs as well as the admin edge
+    (``json.loads`` accepts the bare ``NaN``/``Infinity`` literals and overflows
+    ``1e999`` to ``inf``), so the check belongs in one shared place rather than
+    at each writer.
+    """
+    return math.isfinite(rate) and rate >= 0.0
 
 
 class TopProvider(BaseModel):
