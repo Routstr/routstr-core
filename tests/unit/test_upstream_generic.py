@@ -629,3 +629,41 @@ async def test_non_finite_openrouter_cache_rate_is_dropped_not_carried() -> None
     assert model.enabled is True
     assert model.pricing.prompt == pytest.approx(1e-06)
     assert model.pricing.input_cache_read == 0.0
+
+
+@pytest.mark.asyncio
+async def test_negative_openrouter_cache_rate_is_dropped_not_carried() -> None:
+    """A negative rate is as unusable as a non-finite one, and arrives the same way.
+
+    The coercion that reads a feed price rejected ``NaN``/``inf`` but returned a
+    negative unchanged, and the catalog import filter that would have caught one
+    inspects only prompt and completion. So a negative cache rate was the single
+    malformed value that still reached a stored price — where it prices cached
+    input tokens at a credit rather than a charge.
+    """
+    payload = {
+        "data": [
+            {"id": "or-negcache-xyz", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    feed = [
+        {
+            "id": "or-negcache-xyz",
+            "pricing": {
+                "prompt": "0.000001",
+                "completion": "0.000002",
+                "input_cache_read": "-0.0000005",
+            },
+            "context_length": 8192,
+        }
+    ]
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=feed)
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "or-negcache-xyz")
+    assert model.enabled is True
+    assert model.pricing.prompt == pytest.approx(1e-06)
+    assert model.pricing.input_cache_read == 0.0
