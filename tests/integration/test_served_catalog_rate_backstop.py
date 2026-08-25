@@ -19,7 +19,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ModelRow, UpstreamProviderRow
 from routstr.payment.models import list_models
-from routstr.proxy import reinitialize_upstreams
 
 _ARCHITECTURE = json.dumps(
     {
@@ -42,7 +41,6 @@ async def _make_provider(session: AsyncSession) -> int:
     session.add(provider)
     await session.commit()
     await session.refresh(provider)
-    await reinitialize_upstreams()
     assert provider.id is not None
     return provider.id
 
