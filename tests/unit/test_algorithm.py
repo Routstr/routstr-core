@@ -954,3 +954,67 @@ def test_create_model_mappings_uppercase_prefixed_base_keeps_top_tier() -> None:
 
     assert provider_map["qwen2.5-72b"][0] == (prefixed_cheap, prefixed_provider)
     assert unique_models["qwen2.5-72b"].upstream_provider_id == "prefixed"
+
+
+def test_create_model_mappings_excludes_a_malformed_price() -> None:
+    """A rate that is not a number must not be routable.
+
+    A negative or non-finite rate reads as a real price to every truthiness
+    check, so the candidate was built into the map and served. The cost
+    calculation cannot price on such a rate, so every request on the model fell
+    through to the flat maximum reservation — or, for a negative rate, billed a
+    negative amount that settlement credits back to the caller.
+    """
+    healthy = create_test_model("healthy-model")
+    for bad_rate in (float("nan"), float("inf"), -1.0):
+        broken = create_test_model("broken-model", prompt_price=bad_rate)
+        provider = create_test_provider(
+            "custom",
+            "https://custom.example/v1",
+            db_id=1,
+            models=[broken, healthy],
+        )
+
+        _, provider_map, unique_models = create_model_mappings(
+            upstreams=[provider],
+            overrides_by_key={},
+            disabled_model_keys=set(),
+        )
+
+        assert "broken-model" not in provider_map, bad_rate
+        assert "broken-model" not in unique_models, bad_rate
+        # One unroutable candidate must not cost the provider its other models.
+        assert "healthy-model" in provider_map, bad_rate
+
+
+def test_create_model_mappings_excludes_an_override_with_a_malformed_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override row carrying a malformed rate is unroutable too.
+
+    An override replaces the discovered model's price, so a provider whose
+    catalog is sound still routes at whatever the row says. The guard has to sit
+    after the override is applied, not before it.
+    """
+    discovered = create_test_model("shared-model")
+    provider = create_test_provider(
+        "custom", "https://custom.example/v1", db_id=3, models=[discovered]
+    )
+    override_model = create_test_model("shared-model", prompt_price=float("-inf"))
+
+    monkeypatch.setattr(
+        "routstr.payment.models._row_to_model",
+        lambda *args, **kwargs: override_model,
+    )
+    override_row = SimpleNamespace(
+        id="shared-model", upstream_provider_id=3, enabled=True
+    )
+
+    _, provider_map, unique_models = create_model_mappings(
+        upstreams=[provider],
+        overrides_by_key={("shared-model", 3): (override_row, 1.0)},
+        disabled_model_keys=set(),
+    )
+
+    assert "shared-model" not in provider_map
+    assert "shared-model" not in unique_models

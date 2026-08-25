@@ -97,6 +97,19 @@ def is_usable_rate(rate: float) -> bool:
     return math.isfinite(rate) and rate >= 0.0
 
 
+def has_usable_pricing(pricing: Pricing) -> bool:
+    """True if every billable rate is a number a request could be billed on.
+
+    Free is usable — a rate of zero is a real price. This asks only whether the
+    price is well-formed. One unusable rate disqualifies the whole price even
+    alongside a valid one, since a request can bill on the bad field: a positive
+    ``completion`` must not hide a negative ``prompt``.
+    """
+    return all(
+        is_usable_rate(getattr(pricing, field)) for field in BILLABLE_PRICING_FIELDS
+    )
+
+
 class TopProvider(BaseModel):
     context_length: int | None = None
     max_completion_tokens: int | None = None
@@ -354,21 +367,39 @@ async def list_models(
     rows = (await session.exec(query)).all()  # type: ignore
     provider_result = await session.exec(select(UpstreamProviderRow))
     providers_by_id = {p.id: p for p in provider_result.all()}
-    return [
-        _row_to_model(
+
+    models: list[Model] = []
+    for r in rows:
+        if not include_disabled and not (
+            r.upstream_provider_id in providers_by_id
+            and providers_by_id[r.upstream_provider_id].enabled
+        ):
+            continue
+        model = _row_to_model(
             r,
             apply_provider_fee=apply_fees,
             provider_fee=providers_by_id[r.upstream_provider_id].provider_fee
             if r.upstream_provider_id in providers_by_id
             else 1.01,
         )
-        for r in rows
-        if include_disabled
-        or (
-            r.upstream_provider_id in providers_by_id
-            and providers_by_id[r.upstream_provider_id].enabled
-        )
-    ]
+        # Served-map backstop for legacy rows and writers that bypass the admin
+        # edge: a negative or non-finite rate is not a price. Serving one
+        # advertises a rate the cost calculation cannot bill on, so the request
+        # falls through to the flat maximum reservation — or, if the rate is
+        # negative, bills an amount settlement credits back to the caller.
+        # ``include_disabled`` is the operator's listing, which must keep showing
+        # the row so it can be repaired.
+        if not include_disabled and not has_usable_pricing(model.pricing):
+            logger.warning(
+                "Withholding model with an unusable stored rate from the catalog",
+                extra={
+                    "model_id": r.id,
+                    "upstream_provider_id": r.upstream_provider_id,
+                },
+            )
+            continue
+        models.append(model)
+    return models
 
 
 def _calculate_usd_max_costs(model: Model) -> tuple[float, float, float]:

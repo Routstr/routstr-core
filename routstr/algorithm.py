@@ -135,8 +135,20 @@ def create_model_mappings(
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
     """
-    from .payment.models import _row_to_model
+    from .payment.models import _row_to_model, has_usable_pricing
     from .upstream.helpers import resolve_model_alias
+
+    def _unusable_price(model: "Model") -> bool:
+        """A candidate may only route on rates a request can be billed against.
+
+        Mirrors the served-catalog backstop in ``list_models``: a negative or
+        non-finite rate is not a price, and the cost calculation cannot bill on
+        one, so every request on the model would be charged the full maximum
+        reservation instead. Applies to provider-discovered models as well as
+        persisted overrides — no override row need exist for a malformed price
+        to be built into the candidate map.
+        """
+        return not has_usable_pricing(model.pricing)
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
@@ -231,6 +243,9 @@ def create_model_mappings(
             else:
                 model_to_use = model
 
+            if _unusable_price(model_to_use):
+                continue
+
             forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
 
             # Get all aliases for this model
@@ -296,6 +311,8 @@ def create_model_mappings(
             )
             continue
         if not model_to_use.enabled:
+            continue
+        if _unusable_price(model_to_use):
             continue
 
         forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
