@@ -6,12 +6,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, RootModel, field_validator
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..payment.models import _row_to_model, list_models
+from ..payment.models import (
+    BILLABLE_PRICING_FIELDS,
+    _row_to_model,
+    is_usable_rate,
+    list_models,
+)
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
@@ -519,6 +524,36 @@ class ModelCreate(BaseModel):
     alias_ids: list[str] | None = None
     enabled: bool = True
     forwarded_model_id: str | None = None
+
+    @field_validator("pricing")
+    @classmethod
+    def _validate_pricing(cls, value: dict[str, object]) -> dict[str, object]:
+        """Reject a malformed, non-finite or negative billable rate at the edge.
+
+        A present-but-invalid rate would otherwise slip through: a non-numeric
+        string coerces to $0 on the read path (an unpriced-looking row), while a
+        negative or ``NaN``/``inf`` value is truthy and reads back as a real
+        price, so the model could be enabled and bill a nonsensical amount.
+        Surfacing a 422 reports the client bug as a client bug instead of
+        persisting it. Absent rates and numeric strings (``"0.000005"``) stay
+        valid — the stored JSON accepts both.
+        """
+        for field in BILLABLE_PRICING_FIELDS:
+            raw = value.get(field)
+            if raw is None:
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+                raise ValueError(f"{field} must be a non-negative number")
+            try:
+                rate = float(raw)
+            except (ValueError, OverflowError):
+                # An integer too large for a float raises OverflowError, which
+                # pydantic does not convert into a validation error — unhandled
+                # it escapes as a 500 for what is still a bad client value.
+                raise ValueError(f"{field} must be a number, got {raw!r}")
+            if not is_usable_rate(rate):
+                raise ValueError(f"{field} must be a finite, non-negative number")
+        return value
 
 
 def _normalize_forwarded_model_id(value: str | None) -> str | None:

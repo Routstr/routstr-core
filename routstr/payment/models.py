@@ -59,6 +59,21 @@ class Pricing(BaseModel):
     max_cost: float = 0.0  # in sats not msats
 
 
+# The rates a request can bill on. Derived fields (``max_*_cost``) are excluded
+# — they are computed carriers, not charged rates. One definition, shared by the
+# admin write edge and the served/routed guards, so they all cover the same set.
+BILLABLE_PRICING_FIELDS = (
+    "prompt",
+    "completion",
+    "request",
+    "image",
+    "web_search",
+    "internal_reasoning",
+    "input_cache_read",
+    "input_cache_write",
+)
+
+
 def is_usable_rate(rate: float) -> bool:
     """True if a single billable rate is a number a request could be billed on.
 
