@@ -189,6 +189,12 @@ class _ExchangeResponse:
         self._payload = payload
 
     def json(self) -> dict[str, Any]:
+        # A quote given as an exception stands for a response body that never
+        # produced one: an exchange answering with an HTML error page raises
+        # out of `.json()` before any price is read.
+        quote = next(iter(self._payload.values()))
+        if isinstance(quote, BaseException):
+            raise quote
         return self._payload
 
 
@@ -200,9 +206,10 @@ class _ExchangeClient:
 
     async def get(self, url: str) -> _ExchangeResponse:
         if "kraken" in url:
-            return _ExchangeResponse(
-                {"result": {"XXBTZUSD": {"c": [self._quotes["kraken"]]}}}
-            )
+            quote = self._quotes["kraken"]
+            if isinstance(quote, BaseException):
+                return _ExchangeResponse({"error": quote})
+            return _ExchangeResponse({"result": {"XXBTZUSD": {"c": [quote]}}})
         if "coinbase" in url:
             return _ExchangeResponse({"data": {"amount": self._quotes["coinbase"]}})
         return _ExchangeResponse({"price": self._quotes["binance"]})
@@ -292,6 +299,31 @@ async def test_boolean_exchange_quote_does_not_set_the_node_price(
 
     await refresh_price_with(
         {"kraken": True, "coinbase": "100000.0", "binance": "100000.0"}
+    )
+
+    assert btc_usd_price() == pytest.approx(100000.0)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_exchange_response_drops_only_that_quote(
+    refresh_price_with: Any,
+) -> None:
+    """An exchange whose response never yields a quote costs one quote.
+
+    The price is aggregated across three exchanges precisely so that one of them
+    having a bad day is survivable. A body that is not JSON, or whose shape moved
+    under the reader, raises before any number is seen; unhandled, it aborted the
+    whole aggregation and left the node on a stale rate even though two healthy
+    quotes were already in hand.
+    """
+    from routstr.payment.price import btc_usd_price
+
+    await refresh_price_with(
+        {
+            "kraken": ValueError("Expecting value: line 1 column 1 (char 0)"),
+            "coinbase": "100000.0",
+            "binance": "100000.0",
+        }
     )
 
     assert btc_usd_price() == pytest.approx(100000.0)

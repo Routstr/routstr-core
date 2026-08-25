@@ -308,3 +308,85 @@ async def test_admin_model_listing_shows_a_non_finite_stored_rate(
     assert resp.status_code == 200
     listed = {m["id"]: m for m in resp.json()["db_models"]}
     assert listed["inf-rate"]["pricing"]["prompt"] == "inf"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_malformed_auxiliary_rate_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """Validation spans every billable rate, not just the token rates.
+
+    ``prompt``/``completion`` are the rates most prices are built from, but the
+    request, image, search, reasoning and cache rates are billed too. A negative
+    or non-finite value in any of them is the same defect and must be answered
+    the same way.
+    """
+    provider_id = await _make_provider(integration_session)
+
+    for field, bad in (
+        ("request", -1.0),
+        ("image", -0.5),
+        ("web_search", float("inf")),
+        ("internal_reasoning", float("nan")),
+        ("input_cache_read", -1e-06),
+        ("input_cache_write", float("-inf")),
+        ("completion", -1.0),
+    ):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider_id}/models",
+            headers=_admin_headers(),
+            json=_payload(
+                provider_id, model_id="aux-rate", pricing=_pricing(**{field: bad})
+            ),
+        )
+
+        assert resp.status_code == 422, field
+        assert (
+            await integration_session.get(ModelRow, ("aux-rate", provider_id)) is None
+        ), field
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_single_model_shows_a_non_finite_stored_rate(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The single-model view answers like the listing it is opened from.
+
+    It is the other view of a row the served-catalog backstop holds back, so it
+    has the same duty to name the rate that needs fixing rather than rendering
+    it as ``null``.
+    """
+    provider_id = await _make_provider(integration_session)
+    integration_session.add(
+        ModelRow(
+            id="inf-one",
+            name="inf-one",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": float("inf"), "completion": 2e-06}),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="inf-one",
+        )
+    )
+    await integration_session.commit()
+
+    resp = await integration_client.get(
+        f"/admin/api/upstream-providers/{provider_id}/models/inf-one",
+        headers=_admin_headers(),
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["pricing"]["prompt"] == "inf"

@@ -187,3 +187,71 @@ async def test_one_unreadable_stored_price_does_not_blank_the_catalog(
     served = {m.id for m in await list_models(integration_session, provider_id)}
 
     assert served == {"good"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    [
+        "image",
+        "web_search",
+        "internal_reasoning",
+        "input_cache_read",
+        "input_cache_write",
+    ],
+)
+async def test_served_catalog_excludes_a_malformed_auxiliary_rate(
+    integration_session: AsyncSession, field: str
+) -> None:
+    """The backstop covers every billable rate, not only the token rates.
+
+    A price whose ``prompt``/``completion`` are sound can still carry a
+    malformed request, image, search, reasoning or cache rate — the catalog
+    import filter never inspects those — and the request that hits one is billed
+    against it just the same.
+    """
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="good",
+        pricing={"prompt": 1e-06, "completion": 2e-06},
+    )
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="bad-aux",
+        pricing={"prompt": 1e-06, "completion": 2e-06, field: -1.0},
+    )
+
+    served = {m.id for m in await list_models(integration_session, provider_id)}
+
+    assert served == {"good"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_negative_request_rate_is_clamped_on_read_and_still_served(
+    integration_session: AsyncSession,
+) -> None:
+    """``request`` is the one billable rate the row-to-model conversion repairs.
+
+    It clamps a negative stored ``request`` to zero before the price is built,
+    so the backstop never sees one and the row is served at a zero request rate
+    — money-safe, and the reason ``request`` is absent from the list of rates
+    above. Pinned here so that if the clamp goes, this rate joins that list
+    rather than quietly becoming the one unguarded field.
+    """
+    provider_id = await _make_provider(integration_session)
+    await _insert_row(
+        integration_session,
+        provider_id,
+        model_id="neg-request",
+        pricing={"prompt": 1e-06, "completion": 2e-06, "request": -1.0},
+    )
+
+    served = await list_models(integration_session, provider_id)
+
+    assert [m.id for m in served] == ["neg-request"]
+    assert served[0].pricing.request == 0.0
