@@ -259,3 +259,52 @@ async def test_non_finite_literal_price_is_rejected_in_batch_override(
 
     assert resp.status_code == 422
     assert await integration_session.get(ModelRow, ("odd-batch", provider_id)) is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_admin_model_listing_shows_a_non_finite_stored_rate(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The operator must be able to see the rate that needs fixing.
+
+    The admin listing deliberately includes disabled models, so it is the one
+    view that still carries a row the served-catalog backstop holds back.
+    FastAPI's encoder rendered a stored ``Infinity`` rate as ``null``, which is
+    indistinguishable from a rate the row never carried — the operator could see
+    the row but not the reason it was withheld. Render the offending value as
+    text instead, as the 422 handler already does.
+    """
+    provider_id = await _make_provider(integration_session)
+    integration_session.add(
+        ModelRow(
+            id="inf-rate",
+            name="inf-rate",
+            description="d",
+            created=0,
+            context_length=8192,
+            architecture=json.dumps(
+                {
+                    "modality": "text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "unknown",
+                    "instruct_type": None,
+                }
+            ),
+            pricing=json.dumps({"prompt": float("inf"), "completion": 2e-06}),
+            upstream_provider_id=provider_id,
+            enabled=True,
+            forwarded_model_id="inf-rate",
+        )
+    )
+    await integration_session.commit()
+
+    resp = await integration_client.get(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+    )
+
+    assert resp.status_code == 200
+    listed = {m["id"]: m for m in resp.json()["db_models"]}
+    assert listed["inf-rate"]["pricing"]["prompt"] == "inf"

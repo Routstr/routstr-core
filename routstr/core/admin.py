@@ -35,6 +35,7 @@ from .db import (
 from .db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
+from .exceptions import json_compliant
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
@@ -1273,8 +1274,13 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
                 "provider_type": provider.provider_type,
                 "base_url": provider.base_url,
             },
-            "db_models": [m.dict() for m in db_models],
-            "remote_models": [m.dict() for m in filtered_remote_models],
+            # This listing includes disabled models, so it is the one view that
+            # still carries a row the served-catalog backstop holds back —
+            # including one whose stored rate is not a usable number. The
+            # encoder would report that rate as `null`, indistinguishable from a
+            # missing one; show the operator the value that needs fixing.
+            "db_models": [json_compliant(m.dict()) for m in db_models],
+            "remote_models": [json_compliant(m.dict()) for m in filtered_remote_models],
         }
 
 
