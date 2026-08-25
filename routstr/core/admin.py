@@ -682,9 +682,13 @@ async def get_provider_model(provider_id: str, model_id: str) -> dict[str, objec
             raise HTTPException(
                 status_code=404, detail="Model not found for this provider"
             )
-        return _row_to_model(
-            row, apply_provider_fee=False, provider_fee=provider.provider_fee
-        ).dict()  # type: ignore
+        # Same duty as the listing this view is opened from: a stored rate that
+        # is not a usable number must be shown as it is, not encoded as `null`.
+        return json_compliant(  # type: ignore[return-value]
+            _row_to_model(
+                row, apply_provider_fee=False, provider_fee=provider.provider_fee
+            ).dict()
+        )
 
 
 @admin_router.delete(
