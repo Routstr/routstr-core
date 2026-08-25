@@ -209,3 +209,53 @@ async def test_oversized_integer_price_is_rejected(
 
     assert resp.status_code == 422
     assert await integration_session.get(ModelRow, ("huge-price", provider_id)) is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_non_finite_literal_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A bare ``Infinity``/``NaN`` literal gets the same 422 as any other rate.
+
+    ``json`` accepts both literals, so the edge sees a real float and rejects
+    it — but pydantic echoes the offending value back in the error's ``input``
+    field, and the response encoder runs with ``allow_nan=False``. Serializing
+    that reply raised "Out of range float values are not JSON compliant", so the
+    422 escaped as a 500 and reported a client's bad rate as a server fault.
+    """
+    provider_id = await _make_provider(integration_session)
+
+    for literal in ("Infinity", "-Infinity", "NaN"):
+        resp = await integration_client.post(
+            f"/admin/api/upstream-providers/{provider_id}/models",
+            headers={**_admin_headers(), "Content-Type": "application/json"},
+            content=_raw_model_body(provider_id, "odd-price", literal),
+        )
+
+        assert resp.status_code == 422, literal
+        assert (
+            await integration_session.get(ModelRow, ("odd-price", provider_id)) is None
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_non_finite_literal_price_is_rejected_in_batch_override(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """The batch path shares the same carrier, so it must answer 422 too."""
+    provider_id = await _make_provider(integration_session)
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/batch-override",
+        headers={**_admin_headers(), "Content-Type": "application/json"},
+        content=(
+            '{"models": ['
+            + _raw_model_body(provider_id, "odd-batch", "Infinity")
+            + "]}"
+        ),
+    )
+
+    assert resp.status_code == 422
+    assert await integration_session.get(ModelRow, ("odd-batch", provider_id)) is None
