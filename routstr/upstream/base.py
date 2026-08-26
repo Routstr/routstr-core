@@ -1076,9 +1076,6 @@ class BaseUpstreamProvider:
                                 )
                             )
                 except Exception:
-                    # Preserve the original stream exception. If the database
-                    # cannot even be opened/read, stale-reservation cleanup is
-                    # the only safe recovery path.
                     logger.exception(
                         "Fallback stream billing recovery could not access the database",
                         extra={"key_hash": key.hashed_key[:8] + "..."},
@@ -1551,9 +1548,6 @@ class BaseUpstreamProvider:
                                 )
                             )
                 except Exception:
-                    # Preserve the original stream exception. If the database
-                    # cannot even be opened/read, stale-reservation cleanup is
-                    # the only safe recovery path.
                     logger.exception(
                         "Fallback Responses billing recovery could not access the database",
                         extra={"key_hash": key.hashed_key[:8] + "..."},
@@ -3686,9 +3680,7 @@ class BaseUpstreamProvider:
         )
 
         try:
-            # send_token may perform an irreversible Cashu swap to make exact
-            # denominations. A blanket retry after response loss can dispatch
-            # a second swap, so this call is intentionally single-attempt.
+            # Token creation may swap proofs, so it is unsafe to retry.
             refund_token = await send_token(amount, unit=unit, mint_url=mint)
         except Exception as error:
             logger.error(

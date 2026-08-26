@@ -1,5 +1,3 @@
-"""Refund token issuance must not repeat an ambiguous Cashu swap."""
-
 from unittest.mock import AsyncMock, patch
 
 import httpx

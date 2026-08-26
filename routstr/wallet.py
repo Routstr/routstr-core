@@ -154,7 +154,6 @@ class Wallet(_CashuWallet):
         *,
         force_refresh: bool = False,
     ) -> None:
-        """Load metadata once per mint URL, then hydrate unit wallets locally."""
         mint_url = str(self.url)
         lock = _mint_metadata_load_locks.setdefault(mint_url, asyncio.Lock())
         async with lock:
@@ -171,8 +170,6 @@ class Wallet(_CashuWallet):
                     await self.load_mint_info(reload=False)
                     return
                 except Exception:
-                    # An empty/stale local cache is not authoritative. Fall
-                    # through to one remote refresh under the per-mint lock.
                     pass
 
             await self.load_mint_keysets(force_old_keysets)
@@ -593,7 +590,6 @@ async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str
 async def send_token_from_owner_locked(
     amount: int, unit: str, mint_url: str | None = None
 ) -> str:
-    """Create an owner-funded token while the caller holds the wallet guard."""
     _, token = await _send_locked(amount, unit, mint_url, owner_only=True)
     return token
 
@@ -1866,10 +1862,7 @@ async def _credit_balance_locked(
 
 
 _wallets: dict[str, Wallet] = {}
-# Proofs are local SQLite state and need a short refresh window because another
-# worker process can reserve or spend them. Mint metadata is remote, shared by
-# every operation on a wallet, and changes far less often; refreshing it on the
-# proof cadence caused repeated /keysets, /keys, and /info requests.
+# Proofs require a shorter refresh interval than remote mint metadata.
 _wallet_last_load: dict[str, float] = {}
 _wallet_last_mint_load: dict[str, float] = {}
 _wallet_load_locks: dict[str, asyncio.Lock] = {}
@@ -1883,13 +1876,6 @@ async def get_wallet(
     force_reload: bool = False,
     load_proofs: bool = True,
 ) -> Wallet:
-    """Return a cached wallet, refreshing remote and local state independently.
-
-    ``load=False`` remains the fully offline path. Quote-only callers can use
-    ``load_proofs=False``: mint metadata is initialized when needed, but local
-    proofs are not re-read when the operation cannot spend or inspect them.
-    ``force_reload`` still refreshes every requested layer immediately.
-    """
     global _wallets, _wallet_last_load, _wallet_last_mint_load, _wallet_load_locks
     id = f"{mint_url}_{unit}"
     lock = _wallet_load_locks.setdefault(id, asyncio.Lock())
@@ -1925,7 +1911,6 @@ async def get_wallet(
                     or now - last_proof_load
                     >= _WALLET_PROOF_RELOAD_MIN_INTERVAL_SECONDS
                 ):
-                    # cashu's load_proofs is local SQLite I/O, not a mint call.
                     await run_mint_operation(
                         lambda: _wallets[id].load_proofs(reload=True),
                         op_name="load_proofs",
@@ -2005,9 +1990,7 @@ async def _get_supported_mint_units(mint_url: str) -> list[str]:
     if cached is not None and now < cached[0]:
         return cached[1]
 
-    # One full remote metadata load populates Cashu's shared SQLite keyset
-    # cache. Discover all advertised units from that cache instead of issuing a
-    # separate /keysets request before each unit wallet loads.
+    # A metadata load populates Cashu's shared keyset cache for all units.
     wallet = await get_wallet(
         mint_url,
         settings.primary_mint_unit,

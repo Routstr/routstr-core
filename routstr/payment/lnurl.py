@@ -107,7 +107,6 @@ async def _fetch_lnurl_json(
 
 
 def _contains_mint_transport_error(error: BaseException) -> bool:
-    """Detect transport failures wrapped by the Cashu wallet implementation."""
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
@@ -321,15 +320,10 @@ async def raw_send_to_lnurl(
             f"({min_sendable_sat} - {max_sendable_sat} {unit})"
         )
 
-    # Start at the caller's gross budget and converge downward from the mint's
-    # exact reserve plus NUT-02 input fees. Starting below the budget with a
-    # percentage heuristic silently underpays even when the exact fees are tiny.
     final_amount = amount_msat
 
     selected_proofs: list[Proof] | None = None
-    # Fee reserves can change with the invoice amount. Each quote reduces the
-    # candidate by its exact shortfall, so this bounded fixed-point search keeps
-    # the largest amount the gross budget can fund without Cashu coin selection.
+    # Find the largest amount covered by the budget after reserve and input fees.
     for _ in range(8):
         if final_amount < lnurl_data["min_sendable"]:
             raise LNURLError("Cashu melt fees leave no payable LNURL amount")
@@ -340,7 +334,7 @@ async def raw_send_to_lnurl(
             lambda: wallet.melt_quote(invoice=bolt11_invoice),
             op_name="lnurl_melt_quote",
             mint_url=str(wallet.url),
-            # Creating another quote after response loss only abandons the first.
+            # Quote creation is unsafe to retry without idempotency.
             retry_timeouts=False,
         )
 
@@ -392,10 +386,7 @@ async def raw_send_to_lnurl(
             raise
         if not _contains_mint_transport_error(error):
             raise
-        # Cashu 0.20 clears melt reservations before wrapping transport errors
-        # in a plain Exception. Restore the durable melt association before
-        # asking for quote state so these proofs cannot be spent again while
-        # the Lightning outcome is unknown.
+        # Cashu clears reservations on transport errors despite an unknown outcome.
         try:
             await wallet.set_reserved_for_melt(
                 proofs, reserved=True, quote_id=melt_quote_resp.quote
@@ -414,8 +405,6 @@ async def raw_send_to_lnurl(
     if melt_state == MeltQuoteState.paid:
         return final_amount
     if melt_state == MeltQuoteState.unpaid:
-        # A direct unpaid response is authoritative: the mint rejected the melt
-        # and Cashu has already cleared its quote-linked reservation.
         await wallet.set_reserved_for_send(proofs, reserved=False)
         raise LNURLError("Cashu mint confirmed that the melt was unpaid")
 
@@ -425,8 +414,7 @@ async def raw_send_to_lnurl(
             op_name="reconcile_lnurl_melt_quote",
             mint_url=str(wallet.url),
             retry_timeouts=False,
-            # One direct state lookup is required to reconcile the just-dispatched
-            # melt even though its transport failure opened the mint cooldown.
+            # Reconciliation must bypass the cooldown opened by this failure.
             allow_during_cooldown=True,
         )
     except Exception as reconciliation_error:
@@ -438,10 +426,7 @@ async def raw_send_to_lnurl(
     if quote is not None and quote.state == MeltQuoteState.paid:
         return final_amount
     if quote is not None and quote.state == MeltQuoteState.unpaid:
-        # Reaching reconciliation means melt was dispatched and either lost its
-        # response or returned pending. A just-dispatched quote can briefly read
-        # UNPAID before transitioning. Cashu clears the reservation while
-        # refreshing that state, so restore it and require later reconciliation.
+        # A just-dispatched quote can briefly report unpaid before transitioning.
         try:
             await wallet.set_reserved_for_melt(
                 proofs, reserved=True, quote_id=melt_quote_resp.quote

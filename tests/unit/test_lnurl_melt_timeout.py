@@ -32,7 +32,6 @@ LNURL_DATA = {
 }
 
 
-# Exact planning pays 999 sat from a 1000 sat budget with a 1 sat reserve.
 QUOTE_AMOUNT_SAT = 999
 
 

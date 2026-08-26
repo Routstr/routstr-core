@@ -39,11 +39,6 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
     options: dict[str, int | float | bool] = {"pool_pre_ping": pool_pre_ping}
     connect_args: dict[str, object] = {}
     if is_sqlite and not is_memory_sqlite:
-        # SQLite's default busy_timeout is only 5s, and aiosqlite does not set
-        # one of its own. Without this, concurrent payment-settlement writes
-        # across the pooled engine wait just 5s, then raise
-        # sqlite3.OperationalError: database is locked. Give writers a real
-        # chance to acquire the single SQLite write lock.
         connect_args["timeout"] = settings.database_busy_timeout
     if not is_memory_sqlite:
         options.update(

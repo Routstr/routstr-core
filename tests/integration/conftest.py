@@ -73,7 +73,6 @@ from routstr.mint import MintRateGuard  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def isolate_mint_rate_guards() -> Iterator[None]:
-    """Do not let one integration test's simulated outage poison the next."""
     MintRateGuard._guards.clear()
     yield
     MintRateGuard._guards.clear()

@@ -24,7 +24,7 @@ _PPQ_CIRCUIT_COOLDOWN_SECONDS = 30.0
 
 
 class PPQCircuitOpenError(RuntimeError):
-    """PPQ safe reads are suppressed until one probe is allowed."""
+    pass
 
 
 @dataclass
@@ -51,12 +51,10 @@ async def _safe_read_request(
     headers: dict[str, str],
     json: dict[str, object] | None = None,
 ) -> httpx.Response:
-    """Retry safe reads, then open one process-local circuit per PPQ origin."""
     state = _ppq_circuits.setdefault(_ppq_origin(url), _PPQCircuitState())
     loop = asyncio.get_running_loop()
     if state.loop is not loop:
-        # Runtime uses one long-lived loop; pytest and some embedded hosts do
-        # not. Preserve circuit state while replacing a loop-bound lock.
+        # Locks cannot be reused across event loops.
         state.lock = asyncio.Lock()
         state.loop = loop
     async with state.lock:
@@ -323,8 +321,6 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
                 return models
 
         except Exception:
-            # The base refresh handler preserves the last good model cache when
-            # fetching raises; [] would look like a valid empty catalog.
             raise
 
     async def on_upstream_error_redirect(

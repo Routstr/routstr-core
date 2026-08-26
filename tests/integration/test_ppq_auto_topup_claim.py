@@ -313,8 +313,6 @@ async def test_ppq_payment_audit_row_is_visible_and_survives_next_claim(
     assert audit["collected"] is True
     assert "lnbc-secret-invoice" not in audit["token"]
 
-    # The durable cooldown blocks an immediate duplicate, then the claim lock
-    # can be reused without overwriting audit history after it expires.
     assert await _claim_ppq_topup(_row()) is None
     async with create_session() as session:
         state = await session.get(CashuTransaction, _ppq_state_id_for_provider(1))

@@ -1367,9 +1367,7 @@ async def initiate_provider_topup(
                         else {}
                     )
 
-                    # This POST creates a Cashu mint quote upstream. Without an
-                    # idempotency key, retrying a timeout or 5xx can create a
-                    # second invoice while abandoning the first.
+                    # Quote creation is unsafe to retry without idempotency.
                     resp = await client.post(
                         f"{clean_url}/v1/balance/lightning/invoice",
                         json=request_json,

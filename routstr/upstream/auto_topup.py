@@ -366,9 +366,7 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
 
     try:
         async with wallet_operation_guard():
-            # The cap, owner-liability check, proof reservation, and outgoing
-            # audit row share one wallet mutation scope. The audit row must be
-            # durable before another worker can recheck the rolling cap.
+            # Keep the spend cap and audit mutation in one wallet lock.
             spent_24h_sats = await _routstr_spent_last_24h_sats()
             if spent_24h_sats + amount > ROUTSTR_MAX_DAILY_TOPUP_SATS:
                 raise ValueError("Routstr auto top-up daily spend cap reached")
@@ -420,9 +418,6 @@ async def _check_and_topup(row: UpstreamProviderRow) -> None:
         await _release_routstr_claim(row, operation_id)
         return
 
-    # The audit row and SENT claim committed together before this network call,
-    # so a worker crash cannot make reconciliation treat reserved proofs as an
-    # unspent CLAIMED attempt.
     result = await provider.topup(token)
 
     if "error" in result:
@@ -713,7 +708,6 @@ async def _persist_routstr_token_and_mark_sent(
     amount: int,
     mint_url: str,
 ) -> None:
-    """Commit the bearer-token audit row and SENT claim atomically."""
     state_id = _routstr_state_id(row)
     async with create_session() as session:
         state = await session.get(CashuTransaction, state_id)
@@ -1123,8 +1117,6 @@ async def _set_ppq_state_terminal(
             .values(
                 collected=collected,
                 swept=swept,
-                # For successful payments this timestamps the durable cooldown,
-                # not merely when the original claim was created.
                 created_at=int(time.time()) if collected else CashuTransaction.created_at,
             )
         )
@@ -1513,8 +1505,7 @@ async def _check_and_topup_ppq(row: UpstreamProviderRow, settings: dict) -> None
     if balance >= threshold_usd:
         return
 
-    # A single stale/partial balance response must never create an invoice.
-    # Read the uncached endpoint again and require independent agreement.
+    # Require two low-balance reads before creating an invoice.
     confirmed_balance = await provider.get_balance()
     if (
         confirmed_balance is None

@@ -239,7 +239,6 @@ def mint_cooldown_reason(mint_url: str) -> str | None:
 
 
 def is_mint_transport_error(error: BaseException) -> bool:
-    """Return whether an exception chain contains a mint transport failure."""
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:

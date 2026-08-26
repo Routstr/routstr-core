@@ -28,7 +28,6 @@ LNURL_DATA = {
     "max_sendable": 100_000_000,
 }
 
-# The exact plan spends the 1000 sat gross budget as 999 sat + 1 sat reserve.
 EXPECTED_QUOTE_SAT = 999
 
 
@@ -142,7 +141,6 @@ async def test_raw_send_to_lnurl_accepts_exact_invoice() -> None:
 
 @pytest.mark.asyncio
 async def test_raw_send_to_lnurl_msat_unit_compares_in_wallet_unit() -> None:
-    # 1_000_000 msat gross minus the exact 1 msat reserve leaves 999_999 msat.
     wallet, proofs = _wallet()
     proofs[0].amount = 1_000_000
     wallet.melt_quote = AsyncMock(

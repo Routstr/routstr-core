@@ -114,8 +114,6 @@ async def test_api_key_generation_invalid_token(
 async def test_duplicate_token_handling(
     integration_client: AsyncClient, testmint_wallet: Any, db_snapshot: Any
 ) -> None:
-    """Concurrent duplicate redemption credits once and deterministically replays."""
-
     amount = 500
     token = await testmint_wallet.mint_tokens(amount)
     integration_client.headers["Authorization"] = f"Bearer {token}"
@@ -134,7 +132,6 @@ async def test_duplicate_token_handling(
     assert api_key1 == api_key2
     assert balance1 == balance2 == amount * 1000
 
-    # The real DB contains one logical credit. A later replay is also mutation-free.
     await db_snapshot.capture()
     replay = await integration_client.get("/v1/wallet/info")
     assert replay.status_code == 200

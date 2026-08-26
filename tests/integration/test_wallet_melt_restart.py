@@ -95,7 +95,6 @@ async def test_melt_recovery_is_findable_by_quote_after_restart(
 async def test_paid_reconciliation_invalidates_recovered_proofs_after_restart(
     tmp_path: Path,
 ) -> None:
-    """Actual Wallet.get_melt_quote consumes quote-linked proofs after restart."""
     wallet = await _wallet(tmp_path)
     await _seed_ambiguous_melt(wallet)
 
@@ -143,7 +142,6 @@ async def test_send_style_reservation_would_not_be_reconcilable(
 async def test_unpaid_reconciliation_releases_recovered_proofs_after_restart(
     tmp_path: Path,
 ) -> None:
-    """Actual Wallet.get_melt_quote releases proofs after an unpaid answer."""
     wallet = await _wallet(tmp_path)
     await _seed_ambiguous_melt(wallet)
 

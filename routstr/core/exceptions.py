@@ -40,8 +40,6 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     path = request.url.path
 
     # 4xx is client behaviour; the uvicorn access log already records it.
-    # Retryable mint outages are expected dependency failures, not application
-    # faults, so keep them visible without flooding the error stream.
     if status_code >= 500:
         error_type = None
         if isinstance(detail, dict):
