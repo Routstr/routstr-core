@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import math
+import time
 import traceback
 import typing
 import uuid
@@ -17,9 +18,11 @@ from pydantic.v1 import BaseModel
 
 from ..auth import (
     ReservationSnapshot,
-    adjust_payment_for_tokens,
     get_reservation_snapshot,
     release_reservation,
+)
+from ..auth import (
+    adjust_payment_for_tokens as _adjust_payment_for_tokens,
 )
 from ..core import get_logger
 from ..core.db import (
@@ -62,6 +65,7 @@ from .cache_breakpoints import (
     is_explicit_cache_model,
 )
 from .count_tokens import count_tokens_locally
+from .http_client import get_upstream_http_client
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 
@@ -95,6 +99,44 @@ async def _finalize_and_close_stream(
             await _aclose_if_needed(response)
         finally:
             await _aclose_if_needed(client)
+
+
+async def adjust_payment_for_tokens(
+    key: ApiKey,
+    response_data: dict,
+    session: AsyncSession,
+    deducted_max_cost: int,
+    model_obj: Model | None = None,
+    provider_fee: float | None = None,
+    reservation_snapshot: ReservationSnapshot | None = None,
+) -> dict:
+    """Settle payment while exposing the latency that delays final responses."""
+    started = time.perf_counter()
+    succeeded = False
+    try:
+        result = await _adjust_payment_for_tokens(
+            key,
+            response_data,
+            session,
+            deducted_max_cost,
+            model_obj,
+            provider_fee,
+            reservation_snapshot,
+        )
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "model": response_data.get("model", "unknown"),
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -2937,10 +2979,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
+        client = get_upstream_http_client()
 
         try:
             if transformed_body is not None:
@@ -3000,7 +3039,6 @@ class BaseUpstreamProvider:
                         },
                     )
                     await response.aclose()
-                    await client.aclose()
                     raise UpstreamError(
                         f"Upstream {self.provider_type} returned {response.status_code} "
                         f"for model {original_model_id or 'unknown'}: "
@@ -3016,7 +3054,6 @@ class BaseUpstreamProvider:
                     )
                 finally:
                     await response.aclose()
-                    await client.aclose()
                 return mapped_error
 
             if (
@@ -3039,17 +3076,20 @@ class BaseUpstreamProvider:
                     is_streaming = client_wants_streaming and upstream_is_streaming
 
                     if is_streaming and response.status_code == 200:
-                        result = await self.handle_streaming_messages_completion(
-                            response,
-                            key,
-                            max_cost_for_model,
-                            requested_model=original_model_id,
-                            model_obj=model_obj,
-                            reservation_snapshot=reservation_snapshot,
-                        )
+                        try:
+                            result = await self.handle_streaming_messages_completion(
+                                response,
+                                key,
+                                max_cost_for_model,
+                                requested_model=original_model_id,
+                                model_obj=model_obj,
+                                reservation_snapshot=reservation_snapshot,
+                            )
+                        except BaseException:
+                            await response.aclose()
+                            raise
                         background_tasks = BackgroundTasks()
                         background_tasks.add_task(response.aclose)
-                        background_tasks.add_task(client.aclose)
                         result.background = background_tasks
                         return result
 
@@ -3067,7 +3107,6 @@ class BaseUpstreamProvider:
                             )
                         finally:
                             await response.aclose()
-                            await client.aclose()
 
                 if path.endswith("messages/count_tokens"):
                     if response.status_code == 200:
@@ -3084,7 +3123,6 @@ class BaseUpstreamProvider:
                             )
                         finally:
                             await response.aclose()
-                            await client.aclose()
 
                 if path.endswith("chat/completions"):
                     client_wants_streaming = False
@@ -3130,7 +3168,6 @@ class BaseUpstreamProvider:
                             requested_model=original_model_id,
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
-                            client=client,
                         )
 
                 # Handle both non-streaming chat completions and embeddings
@@ -3147,14 +3184,12 @@ class BaseUpstreamProvider:
                         )
                     finally:
                         await response.aclose()
-                        await client.aclose()
 
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
             background_tasks.add_task(
                 self._finalize_generic_streaming_payment,
                 key.hashed_key,
@@ -3185,7 +3220,6 @@ class BaseUpstreamProvider:
             raise
 
         except httpx.RequestError as exc:
-            await client.aclose()
             error_type = type(exc).__name__
             error_details = str(exc)
 
@@ -3215,7 +3249,6 @@ class BaseUpstreamProvider:
             raise UpstreamError(error_message, status_code=502)
 
         except Exception as exc:
-            await client.aclose()
             tb = traceback.format_exc()
 
             logger.error(
@@ -3305,10 +3338,7 @@ class BaseUpstreamProvider:
             },
         )
 
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
+        client = get_upstream_http_client()
 
         try:
             if transformed_body is not None:
@@ -3367,7 +3397,6 @@ class BaseUpstreamProvider:
                         },
                     )
                     await response.aclose()
-                    await client.aclose()
                     raise UpstreamError(
                         f"Upstream {self.provider_type} returned {response.status_code} "
                         f"for model {original_model_id or 'unknown'}: "
@@ -3383,7 +3412,6 @@ class BaseUpstreamProvider:
                     )
                 finally:
                     await response.aclose()
-                    await client.aclose()
                 return mapped_error
 
             if path.startswith("responses"):
@@ -3407,7 +3435,6 @@ class BaseUpstreamProvider:
                         requested_model=original_model_id,
                         model_obj=model_obj,
                         reservation_snapshot=reservation_snapshot,
-                        client=client,
                     )
 
                 if response.status_code == 200:
@@ -3423,14 +3450,12 @@ class BaseUpstreamProvider:
                         )
                     finally:
                         await response.aclose()
-                        await client.aclose()
 
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
 
             background_tasks = BackgroundTasks()
             background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
             background_tasks.add_task(
                 self._finalize_generic_streaming_payment,
                 key.hashed_key,
@@ -3461,7 +3486,6 @@ class BaseUpstreamProvider:
             raise
 
         except httpx.RequestError as exc:
-            await client.aclose()
             error_type = type(exc).__name__
             error_details = str(exc)
 
@@ -3491,7 +3515,6 @@ class BaseUpstreamProvider:
             raise UpstreamError(error_message, status_code=502)
 
         except Exception as exc:
-            await client.aclose()
             tb = traceback.format_exc()
 
             logger.error(
@@ -3540,66 +3563,70 @@ class BaseUpstreamProvider:
             },
         )
 
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=request.stream(),
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                )
+        client = get_upstream_http_client()
+        response: httpx.Response | None = None
+        try:
+            response = await client.send(
+                client.build_request(
+                    request.method,
+                    url,
+                    headers=headers,
+                    content=request.stream(),
+                    params=self.prepare_params(path, request.query_params),
+                ),
+                stream=True,
+            )
 
-                logger.debug(
-                    "GET request forwarded",
-                    extra={
-                        "path": path,
-                        "status_code": response.status_code,
-                        "provider": self.provider_type,
-                    },
-                )
-                if response.status_code != 200:
-                    try:
-                        mapped = await self.forward_upstream_error_response(
-                            request, path, response
-                        )
-                    finally:
-                        await response.aclose()
-                    return mapped
+            logger.debug(
+                "GET request forwarded",
+                extra={
+                    "path": path,
+                    "status_code": response.status_code,
+                    "provider": self.provider_type,
+                },
+            )
+            if response.status_code != 200:
+                try:
+                    mapped = await self.forward_upstream_error_response(
+                        request, path, response
+                    )
+                finally:
+                    await response.aclose()
+                return mapped
 
-                response_headers = dict(response.headers)
-                response_headers.pop("content-encoding", None)
-                response_headers.pop("content-length", None)
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=response_headers,
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Error forwarding GET request",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
-                )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
-                )
+            response_headers = dict(response.headers)
+            response_headers.pop("content-encoding", None)
+            response_headers.pop("content-length", None)
+            background_tasks = BackgroundTasks()
+            background_tasks.add_task(response.aclose)
+            return StreamingResponse(
+                response.aiter_bytes(),
+                status_code=response.status_code,
+                headers=response_headers,
+                background=background_tasks,
+            )
+        except Exception as exc:
+            if response is not None:
+                await response.aclose()
+            tb = traceback.format_exc()
+            logger.error(
+                "Error forwarding GET request",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "method": request.method,
+                    "url": url,
+                    "path": path,
+                    "query_params": dict(request.query_params),
+                    "traceback": tb,
+                },
+            )
+            return create_error_response(
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
+            )
 
     async def get_x_cashu_cost(
         self,

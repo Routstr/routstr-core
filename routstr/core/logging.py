@@ -37,9 +37,11 @@ If you need to modify these messages, ensure you also update the parsing logic i
 - routstr/core/log_manager.py
 """
 
+import copy
 import logging.config
 import logging.handlers
 import os
+import queue
 import re
 import sys
 import tomllib
@@ -125,6 +127,52 @@ class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
                     os.remove(file_path)
                 except OSError:
                     pass
+
+
+class QueuedDailyRotatingFileHandler(logging.Handler):
+    """Queue records so request handlers never perform rotating-file I/O."""
+
+    def __init__(self, filename: str, **kwargs: Any) -> None:
+        super().__init__()
+        self._target = DailyRotatingFileHandler(filename, **kwargs)
+        self._queue: queue.Queue[logging.LogRecord] = queue.Queue()
+        self._listener = logging.handlers.QueueListener(self._queue, self._target)
+        self._closed = False
+        self._listener.start()
+
+    def setFormatter(self, fmt: logging.Formatter | None) -> None:
+        super().setFormatter(fmt)
+        self._target.setFormatter(fmt)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.acquire()
+        try:
+            if not self._closed:
+                self._queue.put_nowait(copy.copy(record))
+        finally:
+            self.release()
+
+    def flush(self) -> None:
+        if self._closed:
+            return
+        self._queue.join()
+        self._target.flush()
+
+    def close(self) -> None:
+        self.acquire()
+        try:
+            if self._closed:
+                return
+            self._closed = True
+        finally:
+            self.release()
+
+        try:
+            self._listener.stop()
+            self._target.flush()
+            self._target.close()
+        finally:
+            super().close()
 
 
 def get_package_version() -> str:
@@ -356,7 +404,7 @@ def setup_logging() -> None:
         "handlers": {
             "console": console_handler,
             "file": {
-                "()": DailyRotatingFileHandler,
+                "()": QueuedDailyRotatingFileHandler,
                 "level": log_level,
                 "formatter": "json",
                 "filename": "logs/app.log",

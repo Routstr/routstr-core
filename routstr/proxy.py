@@ -10,7 +10,6 @@ from sqlmodel import select
 from .algorithm import create_model_mappings
 from .auth import (
     ReservationSnapshot,
-    get_reservation_snapshot,
     pay_for_request,
     revert_pay_for_request,
     validate_bearer_key,
@@ -610,9 +609,10 @@ async def _proxy(
 
     reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
-        await pay_for_request(key, max_cost_for_model, session)
-        reservation_snapshot = await get_reservation_snapshot(key, session)
-        # Snapshot validation performs SELECTs after pay_for_request commits.
+        reservation_snapshot = await pay_for_request(
+            key, max_cost_for_model, session
+        )
+        # pay_for_request refreshes the key after committing the reservation.
         # End that read transaction before waiting on upstream response headers.
         await _finish_read_transaction(session)
 
@@ -639,15 +639,17 @@ async def _proxy(
                     key, session, max_cost_for_model, reservation_snapshot
                 )
                 try:
-                    await pay_for_request(key, candidate_max, session)
+                    reservation_snapshot = await pay_for_request(
+                        key, candidate_max, session
+                    )
                 except HTTPException:
                     if i == len(candidates) - 1:
                         raise
-                    await pay_for_request(key, max_cost_for_model, session)
-                    reservation_snapshot = await get_reservation_snapshot(key, session)
+                    reservation_snapshot = await pay_for_request(
+                        key, max_cost_for_model, session
+                    )
                     await _finish_read_transaction(session)
                     continue
-                reservation_snapshot = await get_reservation_snapshot(key, session)
                 await _finish_read_transaction(session)
                 max_cost_for_model = candidate_max
 

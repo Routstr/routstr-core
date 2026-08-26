@@ -642,8 +642,8 @@ async def get_billing_key(key: ApiKey, session: AsyncSession) -> ApiKey:
 
 async def pay_for_request(
     key: ApiKey, cost_per_request: int, session: AsyncSession
-) -> int:
-    """Process payment for a request."""
+) -> ReservationSnapshot:
+    """Reserve funds and return the durable identity for this request."""
     # Ensure cost_per_request is at least the minimum allowed request cost
     cost_per_request = max(cost_per_request, settings.min_request_msat)
 
@@ -929,7 +929,7 @@ async def pay_for_request(
         },
     )
 
-    return cost_per_request
+    return reservation
 
 
 async def revert_pay_for_request(

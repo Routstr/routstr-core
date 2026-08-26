@@ -54,6 +54,7 @@ import httpx
 from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model
+from .http_client import get_upstream_http_client
 from .messages_dispatch import (
     ANTHROPIC_ONLY_FIELDS,
     aggregate_anthropic_events_to_message,
@@ -302,11 +303,10 @@ async def _post_and_stream(
     api_key: str,
     payload: dict,
     log_extra: dict[str, Any] | None,
-) -> tuple[httpx.AsyncClient, httpx.Response]:
-    """POST to upstream chat-completions and return (client, response) for
-    streaming. Caller is responsible for closing both."""
+) -> httpx.Response:
+    """POST to upstream chat-completions and return a streaming response."""
     url = f"{base_url.rstrip('/')}/chat/completions"
-    client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, read=120.0))
+    client = get_upstream_http_client()
     try:
         request = client.build_request(
             "POST",
@@ -317,10 +317,10 @@ async def _post_and_stream(
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
             },
+            timeout=httpx.Timeout(120.0, read=120.0),
         )
         response = await client.send(request, stream=True)
     except Exception as exc:
-        await client.aclose()
         logger.error(
             "Gemini messages dispatch HTTP error",
             extra={"error": str(exc), "url": url, **(log_extra or {})},
@@ -334,7 +334,6 @@ async def _post_and_stream(
             body_bytes = await response.aread()
         finally:
             await response.aclose()
-            await client.aclose()
         body_text = body_bytes.decode("utf-8", errors="replace")
         logger.error(
             "Gemini messages dispatch upstream error",
@@ -350,7 +349,7 @@ async def _post_and_stream(
             status_code=response.status_code,
         )
 
-    return client, response
+    return response
 
 
 async def dispatch_gemini_messages(
@@ -441,9 +440,7 @@ async def dispatch_gemini_messages(
         },
     )
 
-    http_client, response = await _post_and_stream(
-        base_url, api_key, openai_kwargs, log_extra
-    )
+    response = await _post_and_stream(base_url, api_key, openai_kwargs, log_extra)
 
     async def line_iter() -> AsyncGenerator[str, None]:
         try:
@@ -451,7 +448,6 @@ async def dispatch_gemini_messages(
                 yield line
         finally:
             await response.aclose()
-            await http_client.aclose()
 
     anthropic_event_iter = _openai_chunks_to_anthropic_events(
         line_iter(), requested_model
