@@ -40,7 +40,8 @@ _ppq_circuits: dict[str, _PPQCircuitState] = {}
 
 def _ppq_origin(url: str) -> str:
     parsed = httpx.URL(url)
-    return f"{parsed.scheme}://{parsed.host}:{parsed.port}"
+    port = parsed.port or {"https": 443, "http": 80}.get(parsed.scheme, 0)
+    return f"{parsed.scheme}://{parsed.host}:{port}"
 
 
 async def _safe_read_request(
@@ -66,9 +67,7 @@ async def _safe_read_request(
 
         for attempt in range(1, _PPQ_SAFE_READ_ATTEMPTS + 1):
             try:
-                response = await client.request(
-                    method, url, headers=headers, json=json
-                )
+                response = await client.request(method, url, headers=headers, json=json)
                 response.raise_for_status()
                 state.consecutive_failures = 0
                 state.cooldown_until = 0.0
@@ -209,119 +208,109 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         url = f"{self.base_url}/models"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await _safe_read_request(
-                    client, "GET", url, headers=headers
-                )
-                data = response.json()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await _safe_read_request(client, "GET", url, headers=headers)
+            data = response.json()
 
-                models_data = data.get("data", [])
+            models_data = data.get("data", [])
 
-                or_models = [
-                    Model(**model)  # type: ignore
-                    for model in await async_fetch_openrouter_models()
-                ]
+            or_models = [
+                Model(**model)  # type: ignore
+                for model in await async_fetch_openrouter_models()
+            ]
 
-                models = []
-                for model_data in models_data:
-                    try:
-                        ppqai_model = PPQAIModel.parse_obj(model_data)
-                        if ppqai_model.id in self.IGNORED_MODEL_IDS:
-                            continue
+            models = []
+            for model_data in models_data:
+                try:
+                    ppqai_model = PPQAIModel.parse_obj(model_data)
+                    if ppqai_model.id in self.IGNORED_MODEL_IDS:
+                        continue
 
-                        or_model = next(
-                            (
-                                model
-                                for model in or_models
-                                if (model.id == ppqai_model.id)
-                                or (model.id.split("/")[-1] == ppqai_model.id)
-                                or (model.id == ppqai_model.id.split("/")[-1])
-                            ),
-                            None,
-                        )
+                    or_model = next(
+                        (
+                            model
+                            for model in or_models
+                            if (model.id == ppqai_model.id)
+                            or (model.id.split("/")[-1] == ppqai_model.id)
+                            or (model.id == ppqai_model.id.split("/")[-1])
+                        ),
+                        None,
+                    )
 
-                        if or_model:
-                            input_price = None
-                            if ppqai_model.pricing.api:
-                                input_price = ppqai_model.pricing.api.get(
-                                    "input_per_1M"
-                                )
-                            elif ppqai_model.pricing.input_per_1M_tokens:
-                                input_price = ppqai_model.pricing.input_per_1M_tokens
+                    if or_model:
+                        input_price = None
+                        if ppqai_model.pricing.api:
+                            input_price = ppqai_model.pricing.api.get("input_per_1M")
+                        elif ppqai_model.pricing.input_per_1M_tokens:
+                            input_price = ppqai_model.pricing.input_per_1M_tokens
 
-                            if input_price is not None:
-                                or_model.pricing.prompt = input_price / 1_000_000
+                        if input_price is not None:
+                            or_model.pricing.prompt = input_price / 1_000_000
 
-                            output_price = None
-                            if ppqai_model.pricing.api:
-                                output_price = ppqai_model.pricing.api.get(
-                                    "output_per_1M"
-                                )
-                            elif ppqai_model.pricing.output_per_1M_tokens:
-                                output_price = ppqai_model.pricing.output_per_1M_tokens
+                        output_price = None
+                        if ppqai_model.pricing.api:
+                            output_price = ppqai_model.pricing.api.get("output_per_1M")
+                        elif ppqai_model.pricing.output_per_1M_tokens:
+                            output_price = ppqai_model.pricing.output_per_1M_tokens
 
-                            if output_price is not None:
-                                or_model.pricing.completion = output_price / 1_000_000
+                        if output_price is not None:
+                            or_model.pricing.completion = output_price / 1_000_000
 
-                            if cl := ppqai_model.context_length:
-                                or_model.context_length = cl
-                            models.append(or_model)
-                        else:
-                            input_price = 0.0
-                            if ppqai_model.pricing.api:
-                                input_price = ppqai_model.pricing.api.get(
-                                    "input_per_1M", 0.0
-                                )
-                            elif ppqai_model.pricing.input_per_1M_tokens:
-                                input_price = ppqai_model.pricing.input_per_1M_tokens
-
-                            output_price = 0.0
-                            if ppqai_model.pricing.api:
-                                output_price = ppqai_model.pricing.api.get(
-                                    "output_per_1M", 0.0
-                                )
-                            elif ppqai_model.pricing.output_per_1M_tokens:
-                                output_price = ppqai_model.pricing.output_per_1M_tokens
-
-                            models.append(
-                                Model(
-                                    id=ppqai_model.id,
-                                    name=ppqai_model.name,
-                                    created=ppqai_model.created_at // 1000,
-                                    description=f"{ppqai_model.provider or 'PPQ.AI'} model",
-                                    context_length=ppqai_model.context_length,
-                                    architecture=Architecture(
-                                        modality="text->text",
-                                        input_modalities=["text"],
-                                        output_modalities=["text"],
-                                        tokenizer="Unknown",
-                                        instruct_type=None,
-                                    ),
-                                    pricing=Pricing(
-                                        prompt=input_price / 1_000_000,
-                                        completion=output_price / 1_000_000,
-                                        request=0.0,
-                                        image=0.0,
-                                        web_search=0.0,
-                                        internal_reasoning=0.0,
-                                    ),
-                                )
+                        if cl := ppqai_model.context_length:
+                            or_model.context_length = cl
+                        models.append(or_model)
+                    else:
+                        input_price = 0.0
+                        if ppqai_model.pricing.api:
+                            input_price = ppqai_model.pricing.api.get(
+                                "input_per_1M", 0.0
                             )
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to parse PPQ.AI model",
-                            extra={
-                                "model_id": model_data.get("id", "unknown"),
-                                "error": str(e),
-                                "error_type": type(e).__name__,
-                            },
+                        elif ppqai_model.pricing.input_per_1M_tokens:
+                            input_price = ppqai_model.pricing.input_per_1M_tokens
+
+                        output_price = 0.0
+                        if ppqai_model.pricing.api:
+                            output_price = ppqai_model.pricing.api.get(
+                                "output_per_1M", 0.0
+                            )
+                        elif ppqai_model.pricing.output_per_1M_tokens:
+                            output_price = ppqai_model.pricing.output_per_1M_tokens
+
+                        models.append(
+                            Model(
+                                id=ppqai_model.id,
+                                name=ppqai_model.name,
+                                created=ppqai_model.created_at // 1000,
+                                description=f"{ppqai_model.provider or 'PPQ.AI'} model",
+                                context_length=ppqai_model.context_length,
+                                architecture=Architecture(
+                                    modality="text->text",
+                                    input_modalities=["text"],
+                                    output_modalities=["text"],
+                                    tokenizer="Unknown",
+                                    instruct_type=None,
+                                ),
+                                pricing=Pricing(
+                                    prompt=input_price / 1_000_000,
+                                    completion=output_price / 1_000_000,
+                                    request=0.0,
+                                    image=0.0,
+                                    web_search=0.0,
+                                    internal_reasoning=0.0,
+                                ),
+                            )
                         )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse PPQ.AI model",
+                        extra={
+                            "model_id": model_data.get("id", "unknown"),
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
-                return models
-
-        except Exception:
-            raise
+            return models
 
     async def on_upstream_error_redirect(
         self, status_code: int, error_message: str
@@ -443,9 +432,7 @@ class PPQAIUpstreamProvider(BaseUpstreamProvider):
         )
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await _safe_read_request(
-                client, "GET", url, headers=headers
-            )
+            response = await _safe_read_request(client, "GET", url, headers=headers)
             status_data = response.json()
 
             is_paid = status_data.get("status") == "Settled"

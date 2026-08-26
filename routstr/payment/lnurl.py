@@ -9,8 +9,8 @@ from cashu.core.base import MeltQuoteState
 from cashu.wallet.wallet import Proof, Wallet
 
 from ..mint import (
-    MINT_TRANSPORT_EXCEPTIONS,
     is_mint_rate_limited,
+    is_mint_transport_error,
     run_mint_operation,
 )
 
@@ -104,17 +104,6 @@ async def _fetch_lnurl_json(
     if not isinstance(data, dict):
         raise LNURLError("LNURL response was not a JSON object")
     return data
-
-
-def _contains_mint_transport_error(error: BaseException) -> bool:
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, MINT_TRANSPORT_EXCEPTIONS):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
 
 
 async def decode_lnurl(lnurl: str) -> str:
@@ -260,8 +249,11 @@ def _select_melt_proofs(
         selected_amount += proof.amount
         input_fees = int(wallet.get_fees_for_proofs(selected))
         required = quote_amount + fee_reserve + input_fees
-        if required <= gross_budget and selected_amount >= required:
-            return selected, 0
+        if selected_amount >= required:
+            if required <= gross_budget:
+                return selected, 0
+            # Covered but over budget; more proofs only raise input fees.
+            break
     return None, max(1, required - min(selected_amount, gross_budget))
 
 
@@ -362,6 +354,7 @@ async def raw_send_to_lnurl(
     if on_melt_quote is not None:
         await on_melt_quote(melt_quote_resp.quote)
 
+    assert selected_proofs is not None
     proofs = selected_proofs
     await wallet.set_reserved_for_send(proofs, reserved=True)
 
@@ -384,7 +377,7 @@ async def raw_send_to_lnurl(
             # reserved as though a Lightning payment could still settle.
             await wallet.set_reserved_for_send(proofs, reserved=False)
             raise
-        if not _contains_mint_transport_error(error):
+        if not is_mint_transport_error(error):
             raise
         # Cashu clears reservations on transport errors despite an unknown outcome.
         try:

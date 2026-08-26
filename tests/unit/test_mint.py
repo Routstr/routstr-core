@@ -132,6 +132,54 @@ async def test_wrapped_transport_failure_opens_central_cooldown() -> None:
     MintRateGuard._guards.pop(mint_url, None)
 
 
+@pytest.mark.asyncio
+async def test_timeout_retry_succeeds_without_opening_cooldown() -> None:
+    from routstr.core.settings import settings
+
+    mint_url = "https://retryable-timeout.test"
+    MintRateGuard._guards.pop(mint_url, None)
+    calls = 0
+
+    async def flaky() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("first attempt stalled")
+        return "ok"
+
+    with (
+        patch.object(settings, "mint_retry_max_attempts", 2),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()),
+    ):
+        result = await run_mint_operation(flaky, mint_url=mint_url)
+
+    assert result == "ok"
+    assert calls == 2
+    assert MintRateGuard.get(mint_url).cooldown_remaining() == 0.0
+    MintRateGuard._guards.pop(mint_url, None)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_timeout_retries_open_transport_cooldown() -> None:
+    from routstr.core.settings import settings
+
+    mint_url = "https://exhausted-timeout.test"
+    MintRateGuard._guards.pop(mint_url, None)
+
+    async def always_timeout() -> None:
+        raise httpx.ReadTimeout("stalled")
+
+    with (
+        patch.object(settings, "mint_retry_max_attempts", 1),
+        patch("routstr.mint.asyncio.sleep", AsyncMock()),
+        pytest.raises(httpx.TimeoutException),
+    ):
+        await run_mint_operation(always_timeout, mint_url=mint_url)
+
+    assert MintRateGuard.get(mint_url).cooldown_remaining() > 29
+    MintRateGuard._guards.pop(mint_url, None)
+
+
 async def test_guard_concurrency_change_preserves_cooldown_state() -> None:
     from routstr.core.settings import settings
 

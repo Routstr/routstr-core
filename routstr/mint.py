@@ -306,11 +306,8 @@ async def run_mint_operation(
         except MintCooldownError:
             raise
         except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
-            if guard is not None:
-                guard.apply_cooldown(
-                    MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
-                )
             if retry_timeouts and attempt < max_attempts - 1:
+                # Cooldown opens only after retries; earlier would stretch each backoff to a full cooldown wait.
                 backoff = (2**attempt) + (time.monotonic() % 1.0)
                 logger.warning(
                     "Mint operation timed out, retrying",
@@ -323,6 +320,10 @@ async def run_mint_operation(
                 )
                 await asyncio.sleep(backoff)
                 continue
+            if guard is not None:
+                guard.apply_cooldown(
+                    MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
+                )
             raise httpx.TimeoutException(
                 f"{op_name} timed out (attempts: {attempt + 1})"
             ) from exc

@@ -7,7 +7,7 @@ import math
 import traceback
 import typing
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, Mapping, Self, cast
 
 import httpx
@@ -80,6 +80,21 @@ async def _aclose_if_needed(resource: object | None) -> None:
     result = close()
     if inspect.isawaitable(result):
         await result
+
+
+async def _finalize_and_close_stream(
+    finalize: Callable[[], Awaitable[None]] | None,
+    response: object | None,
+    client: httpx.AsyncClient | None,
+) -> None:
+    try:
+        if finalize is not None:
+            await finalize()
+    finally:
+        try:
+            await _aclose_if_needed(response)
+        finally:
+            await _aclose_if_needed(client)
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -1049,9 +1064,7 @@ class BaseUpstreamProvider:
                     return
                 try:
                     async with create_session() as new_session:
-                        fresh_key = await new_session.get(
-                            key.__class__, key.hashed_key
-                        )
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
                         if not fresh_key:
                             return
                         try:
@@ -1318,14 +1331,15 @@ class BaseUpstreamProvider:
                 )
                 raise
             finally:
-                try:
-                    if not usage_finalized:
-                        await finalize_db_only()
-                finally:
-                    try:
-                        await _aclose_if_needed(response)
-                    finally:
-                        await _aclose_if_needed(client)
+                # Shielded so a client disconnect cannot cancel billing
+                # finalization or leak the upstream connection.
+                await asyncio.shield(
+                    _finalize_and_close_stream(
+                        None if usage_finalized else finalize_db_only,
+                        response,
+                        client,
+                    )
+                )
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -1521,9 +1535,7 @@ class BaseUpstreamProvider:
                     return
                 try:
                     async with create_session() as new_session:
-                        fresh_key = await new_session.get(
-                            key.__class__, key.hashed_key
-                        )
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
                         if not fresh_key:
                             return
                         try:
@@ -1750,14 +1762,15 @@ class BaseUpstreamProvider:
                 )
                 raise
             finally:
-                try:
-                    if not usage_finalized:
-                        await finalize_db_only()
-                finally:
-                    try:
-                        await _aclose_if_needed(response)
-                    finally:
-                        await _aclose_if_needed(client)
+                # Shielded so a client disconnect cannot cancel billing
+                # finalization or leak the upstream connection.
+                await asyncio.shield(
+                    _finalize_and_close_stream(
+                        None if usage_finalized else finalize_db_only,
+                        response,
+                        client,
+                    )
+                )
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
