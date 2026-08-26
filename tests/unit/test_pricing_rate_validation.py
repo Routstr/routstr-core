@@ -93,6 +93,30 @@ async def test_unusable_token_rate_falls_back_to_max_cost(bad_rate: float) -> No
 
 
 @pytest.mark.parametrize(
+    ("prompt", "completion", "expected_msats"),
+    [(0.0, 0.0, 0), (0.0, 2e-06, 1), (1e-06, 0.0, 1)],
+    ids=["free", "free-input", "free-output"],
+)
+@pytest.mark.asyncio
+async def test_a_rate_of_zero_is_billed_as_free_not_as_missing(
+    prompt: float, completion: float, expected_msats: int
+) -> None:
+    """Zero is a price, and the request must be billed on it.
+
+    The gate that decides a model has no token pricing was a truthiness test, so
+    a free rate read as an absent one and the request was charged the whole
+    reservation instead — on a model priced at zero for that side, which is a
+    price the catalog serves and the router routes.
+    """
+    model = _model(Pricing(prompt=prompt, completion=completion))
+
+    cost = await calculate_cost(_usage_response(), max_cost=1234, model_obj=model)
+
+    assert isinstance(cost, CostData)
+    assert cost.total_msats == expected_msats
+
+
+@pytest.mark.parametrize(
     "junk", [float("inf"), float("nan"), "Infinity"], ids=["inf", "nan", "inf-string"]
 )
 @pytest.mark.asyncio

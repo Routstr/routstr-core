@@ -270,11 +270,11 @@ async def calculate_cost(
         input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
 
     # Truthiness is not the question: `NaN` and a negative rate are both truthy
-    # and sailed past this gate into the token math.
+    # and sailed past this gate into the token math, while a rate of zero is a
+    # price — free — and reading it as a missing one charged the whole
+    # reservation for a request the model serves for nothing.
     rates = (input_rate, output_rate, cache_read_rate, cache_creation_rate)
-    if not all(is_usable_rate(rate) for rate in rates) or not (
-        input_rate and output_rate
-    ):
+    if not all(is_usable_rate(rate) for rate in rates):
         logger.warning(
             "No usable token pricing — billing at flat MaxCostData. "
             "Token counts %s in the upstream response but cannot be "
