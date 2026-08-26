@@ -16,7 +16,7 @@ DO NOT modify or remove these messages without updating the usage tracking logic
    - The 'token_cost', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
 
 3. "Max cost payment finalized" (INFO) - routstr/auth.py
-   - Used as the successful completion fallback when token usage is unavailable
+   - Used for explicit flat-price/MaxCostData settlements; missing usage alone must not create this charge
    - The 'charged_amount', 'model', 'input_tokens', and 'output_tokens' fields are extracted for dashboard metrics
 
 4. "Payment processed successfully" (INFO) - routstr/auth.py

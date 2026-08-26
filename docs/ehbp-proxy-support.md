@@ -58,10 +58,10 @@ Contains the shared opaque EHBP transport and billing helpers:
 - `EHBPForwardingTarget` — provider-specific target URL plus extra headers
 - `forward_ehbp_request()` — forwards the encrypted body, captures Tinfoil
   usage from a response header or streaming HTTP trailer, and finalizes bearer
-  billing at actual cost (falling back to max cost when usage is unavailable)
+  billing at actual cost (releasing the reservation when usage is unavailable)
 - `forward_ehbp_x_cashu_request()` — redeems the Cashu token, refunds the full
   token on upstream failure, and refunds the difference between the redeemed
-  amount and actual cost (or max cost when usage is unavailable)
+  amount and actual cost (or the full amount when usage is unavailable)
 
 ### Provider support
 
@@ -84,7 +84,7 @@ The proxy is a **blind relay** for EHBP requests. It cannot decrypt the body
 Cost tracking happens at the proxy level. Routstr reserves or redeems up to
 `max_cost_for_model`, then Tinfoil's out-of-band usage header/trailer allows it
 to finalize at actual token cost. If trusted usage is missing or invalid, the
-proxy safely falls back to max-cost billing.
+proxy releases/refunds rather than treating the authorization ceiling as usage.
 
 ## End-to-end flow
 

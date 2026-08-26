@@ -319,10 +319,10 @@ async def _compute_ehbp_actual_cost(
 ) -> dict:
     """Compute the actual cost in msats from Tinfoil usage metrics.
 
-    Falls back to ``max_cost_for_model`` when usage is absent (streaming) or
-    cannot be priced. The result is clamped to ``[min_request_msat,
-    max_cost_for_model]`` so the refund never exceeds the reservation and is
-    never zero.
+    When usage is present, the result is clamped to ``[min_request_msat,
+    max_cost_for_model]``. Missing or unpriceable usage returns zero: encrypted
+    EHBP bodies cannot be estimated locally, and the authorization ceiling is
+    not evidence of consumption.
 
     When the usage-metrics header includes ``model=<name>`` and it differs
     from ``model_obj.id``, the actual served model's pricing is used for the
@@ -335,7 +335,7 @@ async def _compute_ehbp_actual_cost(
     """
     usage_dict = parse_tinfoil_usage_metrics(usage_header)
     if usage_dict is None:
-        return _build_cost_info(max_cost_for_model)
+        return _build_cost_info(0)
 
     # The enclave may serve a different model than the one requested (e.g.
     # due to failover).  The usage-metrics header's ``model=<name>`` carries
@@ -406,19 +406,19 @@ async def _compute_ehbp_actual_cost(
         )
     except Exception as e:
         logger.warning(
-            "EHBP usage cost calculation failed, falling back to max cost",
+            "EHBP usage cost calculation failed; releasing instead of charging max cost",
             extra={
                 "model": pricing_model_id,
                 "error": str(e),
                 "usage": usage_dict,
             },
         )
-        return _build_cost_info(max_cost_for_model, actual_model=actual_model)
+        return _build_cost_info(0, actual_model=actual_model)
 
     if isinstance(cost, MaxCostData):
         logger.warning(
-            "EHBP calculate_cost returned MaxCostData (no model pricing), "
-            "falling back to max cost",
+            "EHBP calculate_cost returned MaxCostData (no usable pricing); "
+            "releasing instead of charging max cost",
             extra={
                 "model": pricing_model_id,
                 "max_cost_for_model": max_cost_for_model,
@@ -426,7 +426,7 @@ async def _compute_ehbp_actual_cost(
                 "cost_total_msats": cost.total_msats,
             },
         )
-        return _build_cost_info(max_cost_for_model, actual_model=actual_model)
+        return _build_cost_info(0, actual_model=actual_model)
     if isinstance(cost, CostData):
         actual = max(int(cost.total_msats), int(settings.min_request_msat))
         clamped = min(actual, max_cost_for_model)
@@ -450,13 +450,13 @@ async def _compute_ehbp_actual_cost(
         )
     # CostDataError
     logger.warning(
-        "EHBP usage cost calculation error, falling back to max cost",
+        "EHBP usage cost calculation error; releasing instead of charging max cost",
         extra={
             "model": pricing_model_id,
             "error": getattr(cost, "message", str(cost)),
         },
     )
-    return _build_cost_info(max_cost_for_model, actual_model=actual_model)
+    return _build_cost_info(0, actual_model=actual_model)
 
 
 def _extract_usage_from_response(
@@ -600,78 +600,25 @@ async def finalize_ehbp_max_cost_payment(
     model_id: str,
     reservation_snapshot: ReservationSnapshot | None = None,
 ) -> int:
-    """Finalize an EHBP bearer request by charging the reserved max cost.
+    """Release an unmeasured EHBP request without charging its reservation.
 
-    EHBP responses are encrypted, so Routstr cannot inspect token usage. Unlike
-    normal completion handlers, this intentionally charges the pre-reserved max
-    cost and releases the reservation.
+    The legacy name is retained for compatibility with internal callers. EHBP
+    responses are encrypted, so no local estimate is possible when the trusted
+    usage header/trailer is absent.
     """
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
     await _validate_reservation_snapshot(key, reservation, session)
-    if not await _claim_reservation_for_charge(reservation, session):
-        return 0
-    max_cost_for_model = reservation.reserved_msats
-    billing_key = await get_billing_key(key, session)
-    key_hash = key.hashed_key
-    billing_key_hash = billing_key.hashed_key
-    total_cost_msats = max(0, int(max_cost_for_model))
-    now = int(time.time())
-
-    charged = await _charge_reservation_rows(
-        session,
-        billing_key_hash=billing_key_hash,
-        key_hash=key_hash,
-        reserved_msats=max_cost_for_model,
-        charge_msats=total_cost_msats,
-    )
-    if not charged:
-        logger.error(
-            "Failed to finalize EHBP max-cost payment",
-            extra={
-                "key_hash": key_hash[:8] + "...",
-                "billing_key_hash": billing_key_hash[:8] + "...",
-                "model": model_id,
-                "max_cost_for_model": max_cost_for_model,
-            },
-        )
-        await _release_failed_ehbp_charge(reservation, session)
-        return 0
-
-    await session.commit()
-    await _stop_reservation_heartbeat(reservation.release_id)
-    await session.refresh(billing_key)
-    if billing_key.hashed_key != key.hashed_key:
-        await session.refresh(key)
-
-    if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
-        fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
-        try:
-            await accumulate_routstr_fee(session, fee_msats)
-        except Exception as e:
-            logger.warning(
-                "Failed to accumulate Routstr fee for EHBP request",
-                extra={"error": str(e), "fee_msats": fee_msats},
-            )
-
-    payments_logger.info(
-        "FINALIZE",
+    key_log_hash = key.hashed_key[:8] + "..."
+    await release_reservation(reservation, session, reservation.reserved_msats)
+    logger.warning(
+        "Released unmeasured EHBP reservation without charging max cost",
         extra={
-            "event": "finalize",
-            "key_hash": key.hashed_key[:8] + "...",
-            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "key_hash": key_log_hash,
             "model": model_id,
-            "cost_reserved": max_cost_for_model,
-            "cost_charged": total_cost_msats,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "balance": billing_key.balance,
-            "reserved_balance": billing_key.reserved_balance,
-            "total_spent": billing_key.total_spent,
-            "finalize_type": "ehbp_max_cost",
-            "finalized_at": now,
+            "max_cost_for_model": max_cost_for_model,
         },
     )
-    return total_cost_msats
+    return 0
 
 
 async def send_cashu_refund(
@@ -846,8 +793,8 @@ async def forward_ehbp_request(
                 cost_data["computed_msats"] = computed_msats
         else:
             logger.warning(
-                "EHBP usage metrics not found in headers or trailers, "
-                "falling back to max-cost billing",
+                "EHBP usage metrics not found in headers or trailers; "
+                "releasing instead of charging the authorization ceiling",
                 extra={
                     "model": model_obj.id,
                     "provider": provider_type,
@@ -868,11 +815,9 @@ async def forward_ehbp_request(
                 "input_tokens": 0,
                 "output_tokens": 0,
             }
-            if charged_msats != max_cost_for_model:
-                cost_data["computed_msats"] = max_cost_for_model
 
-        # Build the cost_info dict from what adjust_payment_for_tokens returned
-        # or from the max-cost fallback. Fields match CostData/MaxCostData.dict().
+        # Build the cost_info dict from measured usage or the unmeasured-release
+        # fallback. Fields match CostData/MaxCostData.dict().
         cost_info = {
             "total_msats": cost_data.get("total_msats", max_cost_for_model),
             "input_tokens": cost_data.get("input_tokens", 0),
