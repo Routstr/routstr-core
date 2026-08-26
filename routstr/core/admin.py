@@ -6,12 +6,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, RootModel, field_validator
 from pydantic.v1 import ValidationError as PydanticValidationError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from ..payment.models import _row_to_model, list_models
+from ..payment.models import (
+    REQUIRED_PRICING_FIELDS,
+    _row_to_model,
+    list_models,
+)
+from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
@@ -30,6 +35,7 @@ from .db import (
 from .db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
+from .exceptions import json_compliant
 from .log_manager import log_manager
 from .logging import get_logger
 from .provider_slugs import allocate_unique_provider_slug
@@ -520,6 +526,38 @@ class ModelCreate(BaseModel):
     enabled: bool = True
     forwarded_model_id: str | None = None
 
+    @field_validator("pricing")
+    @classmethod
+    def _validate_pricing(cls, value: dict[str, object]) -> dict[str, object]:
+        """Reject a rate that is malformed, non-finite, negative or not there.
+
+        A present-but-invalid rate would otherwise slip through: a non-numeric
+        string coerces to $0 on the read path (an unpriced-looking row), while a
+        negative or ``NaN``/``inf`` value is truthy and reads back as a real
+        price, so the model could be enabled and bill a nonsensical amount.
+        Surfacing a 422 reports the client bug as a client bug instead of
+        persisting it. Numeric strings (``"0.000005"``) stay valid, and so does
+        an omitted auxiliary rate — the stored JSON accepts both.
+        """
+        for field in BILLABLE_PRICING_FIELDS:
+            if field not in value:
+                # ``dict.get`` cannot tell this from an explicit ``null``, so
+                # both were skipped and a row that ``Pricing`` cannot parse was
+                # written — and then raised out of the response that reads it
+                # back, after the row had been committed.
+                if field in REQUIRED_PRICING_FIELDS:
+                    raise ValueError(f"{field} is required")
+                continue
+            # The shared coercion also absorbs the OverflowError an oversized
+            # integer raises, which pydantic does not convert into a validation
+            # error — unhandled it escaped as a 500 for a bad client value.
+            if coerce_rate(value[field]) is None:
+                raise ValueError(
+                    f"{field} must be a finite, non-negative number, "
+                    f"got {value[field]!r}"
+                )
+        return value
+
 
 def _normalize_forwarded_model_id(value: str | None) -> str | None:
     if value is None:
@@ -646,9 +684,13 @@ async def get_provider_model(provider_id: str, model_id: str) -> dict[str, objec
             raise HTTPException(
                 status_code=404, detail="Model not found for this provider"
             )
-        return _row_to_model(
-            row, apply_provider_fee=False, provider_fee=provider.provider_fee
-        ).dict()  # type: ignore
+        # Same duty as the listing this view is opened from: a stored rate that
+        # is not a usable number must be shown as it is, not encoded as `null`.
+        return json_compliant(  # type: ignore[return-value]
+            _row_to_model(
+                row, apply_provider_fee=False, provider_fee=provider.provider_fee
+            ).dict()
+        )
 
 
 @admin_router.delete(
@@ -1238,8 +1280,13 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
                 "provider_type": provider.provider_type,
                 "base_url": provider.base_url,
             },
-            "db_models": [m.dict() for m in db_models],
-            "remote_models": [m.dict() for m in filtered_remote_models],
+            # This listing includes disabled models, so it is the one view that
+            # still carries a row the served-catalog backstop holds back —
+            # including one whose stored rate is not a usable number. The
+            # encoder would report that rate as `null`, indistinguishable from a
+            # missing one; show the operator the value that needs fixing.
+            "db_models": [json_compliant(m.dict()) for m in db_models],
+            "remote_models": [json_compliant(m.dict()) for m in filtered_remote_models],
         }
 
 

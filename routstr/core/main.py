@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,7 +34,11 @@ from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
-from .exceptions import general_exception_handler, http_exception_handler
+from .exceptions import (
+    general_exception_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
 from .logging import get_logger, setup_logging
 from .middleware import LoggingMiddleware
 from .not_found import _NOT_FOUND_HTML, not_found_catch_all  # noqa: F401
@@ -289,6 +294,7 @@ app.add_middleware(LoggingMiddleware)
 
 # Add exception handlers
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 

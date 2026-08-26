@@ -135,8 +135,20 @@ def create_model_mappings(
     Returns:
         Tuple of (model_instances, provider_map, unique_models)
     """
-    from .payment.models import _row_to_model
+    from .payment.models import _row_to_model, has_usable_pricing
     from .upstream.helpers import resolve_model_alias
+
+    def _unusable_price(model: "Model") -> bool:
+        """A candidate may only route on rates a request can be billed against.
+
+        Mirrors the served-catalog backstop in ``list_models``: a negative or
+        non-finite rate is not a price, and the cost calculation cannot bill on
+        one, so every request on the model would be charged the full maximum
+        reservation instead. Applies to provider-discovered models as well as
+        persisted overrides — no override row need exist for a malformed price
+        to be built into the candidate map.
+        """
+        return not has_usable_pricing(model.pricing)
 
     candidates: dict[str, list[tuple["Model", "BaseUpstreamProvider"]]] = {}
     unique_models: dict[str, "Model"] = {}
@@ -225,11 +237,32 @@ def create_model_mappings(
             # Apply overrides only for this provider's model row.
             if model_key is not None and model_key in overrides_by_key:
                 override_row, provider_fee = overrides_by_key[model_key]
-                model_to_use = _row_to_model(
-                    override_row, apply_provider_fee=True, provider_fee=provider_fee
-                )
+                try:
+                    model_to_use = _row_to_model(
+                        override_row, apply_provider_fee=True, provider_fee=provider_fee
+                    )
+                except Exception as exc:
+                    # Stored pricing is JSON from whatever wrote the row, so
+                    # converting it can raise. Doing that inside this loop let
+                    # one such row unwind the whole map build: at boot the node
+                    # came up routing nothing, and on a later refresh the map it
+                    # already had went permanently stale. The sibling loop over
+                    # override-only rows already skips and logs such a row.
+                    logger.warning(
+                        "Skipping invalid model override while building model mappings",
+                        extra={
+                            "model_id": model.id,
+                            "upstream_provider_id": upstream_db_id,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    continue
             else:
                 model_to_use = model
+
+            if _unusable_price(model_to_use):
+                continue
 
             forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
 
@@ -296,6 +329,8 @@ def create_model_mappings(
             )
             continue
         if not model_to_use.enabled:
+            continue
+        if _unusable_price(model_to_use):
             continue
 
         forwarded_model_id = get_effective_forwarded_model_id(model_to_use)
