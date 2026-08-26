@@ -1,10 +1,11 @@
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.upstream.base as base_module
+from routstr.core.db import ApiKey
 
 
 @pytest.mark.asyncio
@@ -17,9 +18,11 @@ async def test_payment_settlement_logs_its_duration(
     log_info = Mock()
     monkeypatch.setattr(base_module, "_adjust_payment_for_tokens", settle)
     monkeypatch.setattr(base_module.logger, "info", log_info)
-    key = SimpleNamespace(hashed_key="abcdefgh1234")
+    key = ApiKey(hashed_key="abcdefgh1234", balance=0)
+    session = AsyncSession()
 
-    result = await base_module.adjust_payment_for_tokens(key, {}, object(), 10)
+    result = await base_module.adjust_payment_for_tokens(key, {}, session, 10)
+    await session.close()
 
     assert result == {"total_cost": 1}
     log_info.assert_called_once()
@@ -40,10 +43,12 @@ async def test_payment_settlement_logs_failure_without_swallowing_it(
     log_info = Mock()
     monkeypatch.setattr(base_module, "_adjust_payment_for_tokens", fail)
     monkeypatch.setattr(base_module.logger, "info", log_info)
-    key = SimpleNamespace(hashed_key="abcdefgh1234")
+    key = ApiKey(hashed_key="abcdefgh1234", balance=0)
+    session = AsyncSession()
 
     with pytest.raises(RuntimeError, match="database locked"):
-        await base_module.adjust_payment_for_tokens(key, {}, object(), 10)
+        await base_module.adjust_payment_for_tokens(key, {}, session, 10)
+    await session.close()
 
     extra = log_info.call_args.kwargs["extra"]
     assert extra["settlement_duration_ms"] >= 0
