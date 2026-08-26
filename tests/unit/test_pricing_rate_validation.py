@@ -77,12 +77,9 @@ def _usage_response() -> dict[str, Any]:
 async def test_unusable_token_rate_falls_back_to_max_cost(bad_rate: float) -> None:
     """An unusable configured rate must not be billed on.
 
-    The "no token pricing configured" gate is a truthiness test, and ``NaN`` and
-    negative floats are both truthy, so an unusable rate passes the guard that
-    exists to catch it. It then reaches the integer conversion in the token math,
-    which raises ``ValueError`` for ``NaN`` and ``OverflowError`` for ``inf`` —
-    after the upstream response has already been served, where the streaming
-    handlers swallow it and the request goes unbilled.
+    It reached the token math, which raises after the response was already
+    served — where the streaming handlers swallow it and the request goes
+    unbilled.
     """
     model = _model(Pricing(prompt=bad_rate, completion=1.0))
 
@@ -124,11 +121,8 @@ async def test_junk_cost_component_still_bills_the_reported_total(junk: Any) -> 
     """A malformed component must not discard the upstream's real total cost.
 
     ``cost_details`` only splits the total across input and output; the total is
-    the authoritative billed amount. A non-finite component poisons the
-    proportional allocation (``inf / inf`` is ``NaN``), which raised out of the
-    USD path and was swallowed by the broad handler around it — so the request
-    silently fell through to token-estimated pricing and was billed at a small
-    fraction of what the upstream actually charged.
+    the authoritative billed amount. A non-finite component poisoned the split,
+    and the request fell through to token estimation for a fraction of it.
     """
     model = _model(Pricing(prompt=1e-06, completion=2e-06))
     response = {
@@ -289,14 +283,9 @@ async def test_unusable_exchange_quote_does_not_set_the_node_price(
 ) -> None:
     """One exchange returning junk must not set the price the node bills at.
 
-    The feed takes the ``min()`` of the quotes it collects, so an unusable quote
-    does not merely join the sample — it *wins*, and poisons the rate every model
-    and every request is priced at until the next refresh. Zero then divides by
-    zero on the USD path, ``NaN`` raises out of the integer conversion, and a
-    negative rate produces a negative charge that settlement credits back to the
-    caller.
-
-    The two healthy quotes must still price the node.
+    The feed takes the ``min()`` of what it collects, so an unusable quote does
+    not merely join the sample — it *wins*. The two healthy quotes must still
+    price the node.
     """
     from routstr.payment.price import btc_usd_price
 
@@ -351,11 +340,8 @@ async def test_an_unreadable_exchange_response_drops_only_that_quote(
 ) -> None:
     """An exchange whose response never yields a quote costs one quote.
 
-    The price is aggregated across three exchanges precisely so that one of them
-    having a bad day is survivable. A body that is not JSON, or whose shape moved
-    under the reader, raises before any number is seen; unhandled, it aborted the
-    whole aggregation and left the node on a stale rate even though two healthy
-    quotes were already in hand.
+    The price is aggregated across three exchanges so that one of them having a
+    bad day is survivable; unhandled, the raise aborted the whole aggregation.
     """
     from routstr.payment.price import btc_usd_price
 

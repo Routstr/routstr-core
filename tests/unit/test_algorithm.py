@@ -1025,12 +1025,9 @@ def test_create_model_mappings_survives_an_unreadable_override_row(
 ) -> None:
     """One row that cannot be read must not empty the whole routing map.
 
-    Stored pricing is JSON from whatever wrote the row, so converting it can
-    raise. Converting an override while walking a provider's catalog let that
-    exception unwind the entire map build: at boot the node came up routing
-    nothing, and on a later refresh the map it already had went permanently
-    stale. The sibling loop over override-only rows already skips and logs such
-    a row.
+    Converting an override while walking a provider's catalog let the exception
+    unwind the entire map build: the node came up routing nothing. The sibling
+    loop over override-only rows already skips and logs such a row.
     """
     broken = create_test_model("broken-model")
     healthy = create_test_model("healthy-model")

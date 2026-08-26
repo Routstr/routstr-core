@@ -189,12 +189,9 @@ async def test_a_rate_that_is_not_there_is_rejected(
 ) -> None:
     """A rate given as ``null``, or a required rate left out, is not a price.
 
-    The validator read both through ``dict.get``, which cannot tell an absent
-    key from an explicit ``null``, and skipped both. ``Pricing`` declares
-    ``prompt`` and ``completion`` without a default and every rate as a float,
-    so such a row is written with a 200 and then fails to parse on read — and
-    a row that will not parse is withheld from the catalog, leaving the operator
-    a model that was accepted and is nowhere to be seen.
+    ``dict.get`` cannot tell the two apart and skipped both, so a row
+    ``Pricing`` cannot parse was committed and the response that reads it back
+    raised.
     """
     provider_id = await _make_provider(integration_session)
 
@@ -351,12 +348,9 @@ async def test_admin_model_listing_shows_a_non_finite_stored_rate(
 ) -> None:
     """The operator must be able to see the rate that needs fixing.
 
-    The admin listing deliberately includes disabled models, so it is the one
-    view that still carries a row the served-catalog backstop holds back.
-    FastAPI's encoder rendered a stored ``Infinity`` rate as ``null``, which is
-    indistinguishable from a rate the row never carried — the operator could see
-    the row but not the reason it was withheld. Render the offending value as
-    text instead, as the 422 handler already does.
+    The admin listing is the one view that still carries a row the served
+    catalog holds back, and its encoder rendered a stored ``Infinity`` as
+    ``null`` — indistinguishable from a rate the row never carried.
     """
     provider_id = await _make_provider(integration_session)
     integration_session.add(
