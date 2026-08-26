@@ -5,6 +5,7 @@ import httpx
 
 from ..core import get_logger
 from ..core.settings import settings
+from .rates import is_usable_rate
 
 logger = get_logger(__name__)
 
@@ -22,16 +23,11 @@ def _parse_quote(raw: object, exchange: str) -> float | None:
     raises out of the integer conversion in settlement, and a negative rate
     produces a negative charge that is credited back to the caller.
 
-    ``is_usable_rate`` is the same predicate the billable-rate guards use, so
-    "finite and non-negative" has one definition; a quote is stricter still and
-    must be positive, since a BTC price of zero is a broken feed, not free money.
-    Imported lazily because ``payment.models`` imports this module.
+    A quote is stricter than a billable rate: it must be positive, since a BTC
+    price of zero is a broken feed, not free money.
     """
-    from .models import is_usable_rate
-
-    # A boolean is a shape change, not a price: `float(True)` is a finite,
-    # positive 1.0 that passes every numeric guard below and then wins the
-    # `min()`, pricing the node at one dollar per bitcoin.
+    # `float(True)` is a finite, positive 1.0 that passes every guard below and
+    # would then win the `min()`, pricing the node at one dollar per bitcoin.
     if isinstance(raw, bool):
         logger.warning(
             "Non-numeric price quote — ignoring this exchange",

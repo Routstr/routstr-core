@@ -6,6 +6,7 @@ from pydantic.v1 import BaseModel
 from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
+from .rates import is_usable_rate
 from .usage import normalize_usage, parse_token_count
 
 if TYPE_CHECKING:
@@ -268,16 +269,8 @@ async def calculate_cost(
     else:
         input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
 
-    # Local import mirrors this module's existing lazy pricing imports.
-    from .models import is_usable_rate
-
-    # An unusable rate is not "no pricing" to Python's truthiness: `NaN` and a
-    # negative float are both truthy, so they sailed past this gate — the one
-    # guard meant to catch a rate that cannot be billed on — and reached the
-    # token math, which raises `ValueError` on `NaN` and `OverflowError` on
-    # `inf` *after* the response was served (the streaming handlers swallow
-    # that, so the request goes unbilled), while a negative produced a negative
-    # charge. Ask whether each rate is usable rather than whether it is truthy.
+    # Truthiness is not the question: `NaN` and a negative rate are both truthy
+    # and sailed past this gate into the token math.
     rates = (input_rate, output_rate, cache_read_rate, cache_creation_rate)
     if not all(is_usable_rate(rate) for rate in rates) or not (
         input_rate and output_rate
@@ -343,9 +336,6 @@ def _coerce_usd(value: object) -> float:
     ``0.0`` means "no usable figure" to every caller, which is the same thing an
     absent field means, so the caller's existing ``> 0`` checks handle it.
     """
-    # Local import mirrors this module's existing lazy pricing imports.
-    from .models import is_usable_rate
-
     if value is None or isinstance(value, bool):
         return 0.0
     if not isinstance(value, (int, float, str)):
@@ -355,8 +345,7 @@ def _coerce_usd(value: object) -> float:
         amount = float(value)
     except (TypeError, ValueError, OverflowError):
         return 0.0
-    # `is_usable_rate` also rejects negatives, which the previous `max(0.0, …)`
-    # clamped to zero — same outcome, stated once instead of inline.
+    # A negative is rejected here, where the previous `max(0.0, …)` clamped it.
     return amount if is_usable_rate(amount) else 0.0
 
 

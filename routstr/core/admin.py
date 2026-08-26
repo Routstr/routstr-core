@@ -12,11 +12,10 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import (
-    BILLABLE_PRICING_FIELDS,
     _row_to_model,
-    is_usable_rate,
     list_models,
 )
+from ..payment.rates import BILLABLE_PRICING_FIELDS, is_usable_rate
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault

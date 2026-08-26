@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..payment.rates import is_usable_rate
+
 
 @dataclass
 class ResolvedPricing:
@@ -68,15 +70,10 @@ def _as_float(value: object) -> float | None:
     """OpenRouter reports prices as strings; coerce, ``None`` if not a real rate.
 
     Every caller reads a *price* out of a feed, so this asks the shared
-    billable-rate question rather than merely parsing: ``float("Infinity")`` and
-    ``float("NaN")`` parse happily from a feed string, ``json.loads`` accepts the
-    bare literals and overflows ``1e999`` to ``inf``, and a negative parses
-    cleanly into a rate that credits the caller. An oversized integer raises
-    ``OverflowError`` rather than ``ValueError``, so that is caught too.
+    billable-rate question rather than merely parsing: ``float("Infinity")``,
+    ``float("NaN")`` and a negative all parse cleanly from a feed string. An
+    oversized integer raises ``OverflowError`` rather than ``ValueError``.
     """
-    # Lazy, like the litellm lookup below: the resolver stays import-light.
-    from ..payment.models import is_usable_rate
-
     try:
         parsed = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError, OverflowError):
@@ -90,9 +87,9 @@ def _as_int(value: object) -> int | None:
 
 
 def _from_litellm(model_id: str) -> ResolvedPricing | None:
-    # Lazy import so the resolver stays import-light and shares the exact
-    # lookup semantics used by cache-rate backfill.
-    from ..payment.models import is_usable_rate, litellm_cost_entry
+    # Lazy import so the resolver shares the exact lookup semantics used by
+    # cache-rate backfill without importing the models module at load time.
+    from ..payment.models import litellm_cost_entry
 
     info = litellm_cost_entry(model_id)
     if info is None:
@@ -106,10 +103,8 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
     # moderation/rerank tiers do this) — treating 0/0 as resolved would serve
     # the model for free. Reject it (and any negative) so the caller falls
     # through, mirroring async_fetch_openrouter_models' _has_valid_pricing.
-    # A malformed entry is junk, not a price: `inf` would bill an infinite
-    # amount, `NaN` poisons every total it enters, and a negative credits the
-    # caller. `NaN` also defeats the both-zero guard below on its own, since
-    # every comparison against it is False.
+    # Checked before the both-zero guard below: `NaN` defeats that guard on its
+    # own, since every comparison against it is False.
     if not is_usable_rate(prompt) or not is_usable_rate(completion):
         return None
     if prompt == 0 and completion == 0:
