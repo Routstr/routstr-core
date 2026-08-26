@@ -197,9 +197,9 @@ Properties:
 
 This is the only architecture that preserves end-to-end encryption from the user to the PPQ/Tinfoil enclave while still letting Routstr mediate payment. The key requirement is that usage/cost metadata must be returned outside the encrypted body, ideally as a response header available before body streaming begins.
 
-## Current Routstr problem
+## Original Routstr problem
 
-The current EHBP implementation charges successful EHBP requests at `max_cost_for_model` because Routstr cannot decrypt the response body:
+The original EHBP implementation charged successful EHBP requests at `max_cost_for_model` because Routstr could not decrypt the response body:
 
 ```text
 successful EHBP request -> charge full reserved max cost
@@ -369,7 +369,7 @@ Possible approaches:
 
 - PPQ private models are billed per actual input/output tokens.
 - Private model rates are available from `GET /v1/models?type=all`.
-- Current Routstr EHBP billing at max cost is wrong for PPQ private models.
+- Max-cost EHBP fallback is wrong for PPQ private models; current code releases/refunds when trusted usage metadata is absent.
 - Direct Tinfoil integration inside Routstr would enable exact usage billing but would make Routstr see plaintext.
 - A blind EHBP relay preserves privacy but requires PPQ/Tinfoil to expose usage/cost in plaintext headers/trailers.
 - The preferred solution is to keep Routstr blind and have PPQ return billing metadata outside the encrypted body.
@@ -410,8 +410,9 @@ and `routstr/upstream/ehbp.py`.
     actual served model's pricing is used for cost calculation.
   - `forward_ehbp_request()` (bearer auth): if `X-Tinfoil-Usage-Metrics` is
     present in the response header, finalizes with `adjust_payment_for_tokens()`
-    for exact billing; otherwise falls back to max-cost. Billing uses the
-    actual served model when it differs from the requested one.
+    for exact billing; otherwise releases the reservation. The encrypted body
+    cannot be estimated locally, and the authorization ceiling is not billed.
+    Billing uses the actual served model when it differs from the requested one.
   - `forward_ehbp_x_cashu_request()`: if usage is available, computes the
     refund from actual cost instead of max cost, using the actual served
     model's pricing when applicable.
@@ -425,10 +426,10 @@ and `routstr/upstream/ehbp.py`.
 |---|---|---|
 | Bearer, non-streaming | `X-Tinfoil-Usage-Metrics` response header | Exact token cost via `adjust_payment_for_tokens` |
 | Bearer, streaming | `X-Tinfoil-Usage-Metrics` HTTP trailer | Exact token cost (h11 captures trailers) |
-| Bearer, no usage header/trailer | N/A | Max-cost fallback |
+| Bearer, no usage header/trailer | N/A | Release reservation; zero charge |
 | X-Cashu, non-streaming | `X-Tinfoil-Usage-Metrics` response header | Refund = `redeemed - actual_cost` |
 | X-Cashu, streaming | `X-Tinfoil-Usage-Metrics` HTTP trailer | Refund = `redeemed - actual_cost` (h11 captures trailers) |
-| X-Cashu, no usage header/trailer | N/A | Refund = `redeemed - max_cost` |
+| X-Cashu, no usage header/trailer | N/A | Full refund |
 
 ### Cost response headers
 

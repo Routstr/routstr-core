@@ -240,12 +240,12 @@ class TestResolveEhbpTargetUrl:
 
 class TestComputeEhbpActualCost:
     @pytest.mark.asyncio
-    async def test_no_usage_falls_back_to_max_cost(self) -> None:
+    async def test_no_usage_does_not_charge_authorization_ceiling(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
         model_obj.forwarded_model_id = "llama3-3-70b"
         result = await _compute_ehbp_actual_cost(None, model_obj, 100_000)
-        assert result["total_msats"] == 100_000
+        assert result["total_msats"] == 0
         assert result["input_tokens"] == 0
         assert result["output_tokens"] == 0
 
@@ -285,7 +285,7 @@ class TestComputeEhbpActualCost:
             assert result["output_msats"] == 20
 
     @pytest.mark.asyncio
-    async def test_max_cost_data_falls_back(self) -> None:
+    async def test_unpriceable_usage_does_not_charge_authorization_ceiling(self) -> None:
         model_obj = MagicMock()
         model_obj.id = "llama3-3-70b"
         model_obj.forwarded_model_id = "llama3-3-70b"
@@ -309,7 +309,7 @@ class TestComputeEhbpActualCost:
                 model_obj,
                 50_000,
             )
-            assert result["total_msats"] == 50_000
+            assert result["total_msats"] == 0
             assert result["input_tokens"] == 0
             assert result["output_tokens"] == 0
 

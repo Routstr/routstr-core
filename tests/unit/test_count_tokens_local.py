@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream import count_tokens as count_tokens_module
-from routstr.upstream.count_tokens import count_tokens_locally
+from routstr.upstream.count_tokens import MissingUsageEstimator, count_tokens_locally
 
 
 def _make_model(model_id: str = "anthropic/claude-3-5-sonnet") -> Model:
@@ -152,6 +152,94 @@ def test_supports_anthropic_system_block_list() -> None:
 
     payload = _read_payload(response)
     assert payload["input_tokens"] > 0
+
+
+def test_missing_usage_estimator_prices_request_and_streamed_output() -> None:
+    model = _make_model()
+    request_body = _body(
+        {
+            "model": model.id,
+            "messages": [{"role": "user", "content": "price this prompt"}],
+        }
+    )
+
+    with (
+        patch.object(count_tokens_module, "_count_with_litellm", return_value=17),
+        patch.object(count_tokens_module, "_count_text_with_litellm", return_value=5),
+    ):
+        estimator = MissingUsageEstimator(request_body, model)
+        estimator.observe(
+            {
+                "model": "provider/model",
+                "choices": [{"delta": {"content": "estimated output"}}],
+            }
+        )
+        response = estimator.response_data("provider/model")
+
+    assert response == {
+        "model": "provider/model",
+        "usage": {
+            "input_tokens": 17,
+            "output_tokens": 5,
+            "total_tokens": 22,
+            "estimated": True,
+        },
+    }
+
+
+def test_missing_usage_estimator_skips_responses_api_done_events() -> None:
+    estimator = MissingUsageEstimator(b"{}", None)
+    estimator.observe({"type": "response.output_text.delta", "delta": "streamed"})
+    estimator.observe({"type": "response.output_text.done", "text": "streamed"})
+    estimator.observe(
+        {
+            "type": "response.content_part.done",
+            "part": {"type": "output_text", "text": "streamed"},
+        }
+    )
+
+    assert estimator.output_text == "streamed"
+
+
+def test_missing_usage_estimator_openai_dialect() -> None:
+    model = _make_model()
+    request_body = _body(
+        {
+            "model": model.id,
+            "messages": [{"role": "user", "content": "price this prompt"}],
+        }
+    )
+
+    with (
+        patch.object(count_tokens_module, "_count_with_litellm", return_value=17),
+        patch.object(count_tokens_module, "_count_text_with_litellm", return_value=5),
+    ):
+        estimator = MissingUsageEstimator(request_body, model)
+        estimator.observe({"choices": [{"delta": {"content": "estimated output"}}]})
+        response = estimator.openai_response_data("provider/model")
+
+    assert response == {
+        "model": "provider/model",
+        "usage": {
+            "prompt_tokens": 17,
+            "completion_tokens": 5,
+            "total_tokens": 22,
+            "estimated": True,
+        },
+    }
+
+
+def test_missing_usage_estimator_does_not_count_response_metadata() -> None:
+    estimator = MissingUsageEstimator(b"{}", None)
+    estimator.observe(
+        {
+            "id": "chatcmpl-this-is-not-generated-text",
+            "model": "also-not-generated-text",
+            "choices": [{"delta": {"role": "assistant"}}],
+        }
+    )
+
+    assert estimator.output_text == ""
 
 
 def test_uses_forwarded_model_id_when_present() -> None:

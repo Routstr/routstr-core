@@ -74,19 +74,17 @@ def _usage_response() -> dict[str, Any]:
     ids=["nan", "inf", "negative"],
 )
 @pytest.mark.asyncio
-async def test_unusable_token_rate_falls_back_to_max_cost(bad_rate: float) -> None:
-    """An unusable configured rate must not be billed on.
-
-    It reached the token math, which raises after the response was already
-    served — where the streaming handlers swallow it and the request goes
-    unbilled.
-    """
+async def test_unusable_token_rate_never_charges_the_reservation(
+    bad_rate: float,
+) -> None:
+    """An unusable configured rate must not turn authorization into usage."""
     model = _model(Pricing(prompt=bad_rate, completion=1.0))
 
     cost = await calculate_cost(_usage_response(), max_cost=1234, model_obj=model)
 
     assert isinstance(cost, MaxCostData)
-    assert cost.total_msats == 1234
+    assert cost.total_msats == 0
+    assert (cost.input_tokens, cost.output_tokens) == (1000, 500)
 
 
 @pytest.mark.parametrize(
