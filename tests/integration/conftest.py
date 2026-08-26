@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, Iterator, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,6 +68,15 @@ os.environ.pop("ADMIN_PASSWORD", None)
 
 from routstr.core.db import ApiKey, get_session  # noqa: E402
 from routstr.core.main import app, lifespan  # noqa: E402
+from routstr.mint import MintRateGuard  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolate_mint_rate_guards() -> Iterator[None]:
+    """Do not let one integration test's simulated outage poison the next."""
+    MintRateGuard._guards.clear()
+    yield
+    MintRateGuard._guards.clear()
 
 
 @pytest.fixture(scope="session")

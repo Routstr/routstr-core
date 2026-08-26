@@ -26,6 +26,7 @@ from routstr.wallet import (
     recieve_token,
     send,
     send_token,
+    send_token_from_owner_locked,
 )
 
 
@@ -456,6 +457,33 @@ async def test_send_token() -> None:
 
 
 @pytest.mark.asyncio
+async def test_owner_only_token_rejects_customer_backed_proofs() -> None:
+    mint = "http://mint:3338"
+    proof = Mock(amount=1000, reserved=False)
+    wallet = Mock(keysets={}, proofs=[proof], select_to_send=AsyncMock())
+
+    with (
+        patch(
+            "routstr.wallet.find_trusted_mint_with_funds",
+            AsyncMock(return_value=mint),
+        ),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch(
+            "routstr.wallet.get_proofs_per_mint_and_unit",
+            return_value=[proof],
+        ),
+        patch(
+            "routstr.wallet._owner_balance_for_mint_and_unit",
+            AsyncMock(return_value=50),
+        ),
+        pytest.raises(ValueError, match="Owner Cashu balance"),
+    ):
+        await send_token_from_owner_locked(100, "sat", mint)
+
+    wallet.select_to_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_release_token_reservation_unreserves_local_proofs() -> None:
     from routstr.wallet import release_token_reservation
 
@@ -693,6 +721,38 @@ async def test_credit_balance() -> None:
             assert mock_session.exec.called  # Atomic UPDATE statement
             assert mock_session.commit.called
             assert mock_session.refresh.called
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_token_credits_exactly_once() -> None:
+    key = Mock(balance=0, hashed_key="duplicate-key")
+    session = AsyncMock()
+    session.exec.return_value.rowcount = 1
+    session.refresh = AsyncMock()
+    receive = AsyncMock(
+        side_effect=[
+            (1000, "sat", "https://mint.test"),
+            ValueError("Mint Error: proofs already spent (Code: 11001)"),
+        ]
+    )
+    store = AsyncMock()
+
+    with (
+        patch("routstr.wallet.recieve_token", receive),
+        patch("routstr.wallet.store_cashu_transaction", store),
+    ):
+        results = await asyncio.gather(
+            credit_balance("cashuAduplicate", key, session),
+            credit_balance("cashuAduplicate", key, session),
+            return_exceptions=True,
+        )
+
+    assert sum(result == 1_000_000 for result in results) == 1
+    failure = next(result for result in results if isinstance(result, Exception))
+    classified = classify_redemption_error(failure)
+    assert classified is not None and classified[3] == "cashu_token_already_spent"
+    assert session.exec.await_count == 1
+    store.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
@@ -34,11 +35,14 @@ async def test_structured_http_error_uses_standard_error_envelope() -> None:
         "details": {"mint": "https://mint.example"},
     }
 
-    response = await http_exception_handler(
-        request,
-        HTTPException(status_code=503, detail={"error": error}),
-    )
+    with patch("routstr.core.exceptions.logger") as logger:
+        response = await http_exception_handler(
+            request,
+            HTTPException(status_code=503, detail={"error": error}),
+        )
 
+    logger.warning.assert_called_once()
+    logger.error.assert_not_called()
     assert response.status_code == 503
     assert json.loads(response.body) == {
         "detail": {"error": error},

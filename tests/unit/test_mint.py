@@ -10,6 +10,7 @@ from routstr.mint import (
     MintRateGuard,
     MintRateLimitedError,
     fail_fast_mint_operations,
+    run_mint_operation,
 )
 from routstr.wallet import Wallet
 
@@ -101,6 +102,34 @@ async def test_cashu_429_dispatches_through_wallet_override() -> None:
         pytest.raises(MintRateLimitedError),
     ):
         await wallet.mint_quote(1, Unit.sat)
+
+
+@pytest.mark.asyncio
+async def test_wrapped_transport_failure_opens_central_cooldown() -> None:
+    mint_url = "https://transport-failure.test"
+    MintRateGuard._guards.pop(mint_url, None)
+
+    async def wrapped_failure() -> None:
+        try:
+            raise httpx.ReadTimeout("body stalled")
+        except httpx.ReadTimeout as error:
+            raise Exception("wallet wrapper") from error
+
+    with pytest.raises(Exception, match="wallet wrapper"):
+        await run_mint_operation(
+            wrapped_failure,
+            mint_url=mint_url,
+            retry_timeouts=False,
+        )
+
+    guard = MintRateGuard.get(mint_url)
+    assert guard.cooldown_remaining() > 29
+    probe = AsyncMock()
+    async with fail_fast_mint_operations():
+        with pytest.raises(MintCooldownError):
+            await guard.run(probe)
+    probe.assert_not_awaited()
+    MintRateGuard._guards.pop(mint_url, None)
 
 
 async def test_guard_concurrency_change_preserves_cooldown_state() -> None:

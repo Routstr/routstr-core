@@ -524,7 +524,11 @@ async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int
 
 
 async def _send_locked(
-    amount: int, unit: str, mint_url: str | None = None
+    amount: int,
+    unit: str,
+    mint_url: str | None = None,
+    *,
+    owner_only: bool = False,
 ) -> tuple[int, str]:
     effective_mint_url = await find_trusted_mint_with_funds(
         amount, unit, mint_url, force_reload=True
@@ -534,6 +538,12 @@ async def _send_locked(
         wallet, effective_mint_url, unit, not_reserved=True
     )
     proofs_for_mint = sum(proof.amount for proof in proofs)
+    if owner_only:
+        owner_balance = await _owner_balance_for_mint_and_unit(
+            effective_mint_url, unit, proofs_for_mint
+        )
+        if owner_balance < amount:
+            raise ValueError("Owner Cashu balance is insufficient for auto top-up")
     all_proofs = get_proofs_per_mint_and_unit(wallet, effective_mint_url, unit)
     reserved_for_mint = sum(p.amount for p in all_proofs if p.reserved)
 
@@ -577,6 +587,14 @@ async def _send_locked(
 
 async def send_token(amount: int, unit: str, mint_url: str | None = None) -> str:
     _, token = await send(amount, unit, mint_url)
+    return token
+
+
+async def send_token_from_owner_locked(
+    amount: int, unit: str, mint_url: str | None = None
+) -> str:
+    """Create an owner-funded token while the caller holds the wallet guard."""
+    _, token = await _send_locked(amount, unit, mint_url, owner_only=True)
     return token
 
 
@@ -1824,9 +1842,25 @@ async def _credit_balance_locked(
         )
         return amount
     except Exception as e:
-        logger.error(
-            "credit_balance: Error during token redemption",
-            extra={"error": str(e), "error_type": type(e).__name__},
+        classification = classify_redemption_error(e)
+        expected_codes = {
+            "cashu_token_already_spent",
+            "cashu_source_mint_unreachable",
+            "cashu_mint_unreachable",
+            "cashu_mint_rate_limited",
+        }
+        log = (
+            logger.info
+            if classification is not None and classification[3] in expected_codes
+            else logger.error
+        )
+        log(
+            "credit_balance: Token redemption failed",
+            extra={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "error_code": classification[3] if classification else None,
+            },
         )
         raise
 

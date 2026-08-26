@@ -177,6 +177,8 @@ class MintRateGuard:
                 if isinstance(error, httpx.HTTPStatusError):
                     retry_after = parse_retry_after(error.response.headers)
                 self.apply_rate_limit_cooldown(retry_after)
+            elif is_mint_transport_error(error):
+                self.apply_cooldown(MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport")
             else:
                 self.apply_cooldown(1.0)
             logger.warning(
@@ -236,6 +238,18 @@ def mint_cooldown_reason(mint_url: str) -> str | None:
     return MintRateGuard.get(mint_url).cooldown_reason()
 
 
+def is_mint_transport_error(error: BaseException) -> bool:
+    """Return whether an exception chain contains a mint transport failure."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, MINT_TRANSPORT_EXCEPTIONS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def is_mint_rate_limited(error: BaseException) -> bool:
     """Return whether an exception chain represents HTTP 429/cooldown."""
 
@@ -269,6 +283,7 @@ async def run_mint_operation(
     mint_url: str = "",
     retry_timeouts: bool = True,
     retry_on_rate_limit: bool = True,
+    allow_during_cooldown: bool = False,
 ) -> Any:
     """Run one mint operation with bounded concurrency and adaptive cooldown."""
 
@@ -282,7 +297,7 @@ async def run_mint_operation(
         return await factory()
 
     async def invoke() -> Any:
-        if guard is not None:
+        if guard is not None and not allow_during_cooldown:
             return await guard.run(timed_factory)
         return await timed_factory()
 
@@ -292,6 +307,10 @@ async def run_mint_operation(
         except MintCooldownError:
             raise
         except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
+            if guard is not None:
+                guard.apply_cooldown(
+                    MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
+                )
             if retry_timeouts and attempt < max_attempts - 1:
                 backoff = (2**attempt) + (time.monotonic() % 1.0)
                 logger.warning(
@@ -310,6 +329,10 @@ async def run_mint_operation(
             ) from exc
         except Exception as exc:
             if not is_mint_rate_limited(exc):
+                if guard is not None and is_mint_transport_error(exc):
+                    guard.apply_cooldown(
+                        MINT_TRANSPORT_COOLDOWN_SECONDS, reason="transport"
+                    )
                 raise
 
             backoff = (2**attempt) + (time.monotonic() % 1.0)
