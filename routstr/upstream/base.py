@@ -64,7 +64,7 @@ from .cache_breakpoints import (
     inject_anthropic_cache_breakpoints,
     is_explicit_cache_model,
 )
-from .count_tokens import count_tokens_locally
+from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .http_client import get_upstream_http_client
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
@@ -747,8 +747,8 @@ class BaseUpstreamProvider:
 
         # OpenAI-compatible streaming responses omit ``usage`` unless the
         # request sets ``stream_options.include_usage = true``. Without it
-        # we can't reconcile token counts at end of stream and the
-        # request gets billed at max-cost with zero tokens. Discriminate
+        # we can't reconcile token counts at end of stream and must use
+        # the local request/response estimator. Discriminate
         # chat-completions-shaped requests by the ``messages`` field so we
         # don't poke unrelated endpoints.
         if (
@@ -1063,6 +1063,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         client: httpx.AsyncClient | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1082,6 +1083,8 @@ class BaseUpstreamProvider:
                 reservation_snapshot = await get_reservation_snapshot(
                     snapshot_key, snapshot_session
                 )
+
+        usage_estimator = MissingUsageEstimator(request_body, model_obj)
 
         logger.debug(
             "Processing streaming chat completion",
@@ -1112,7 +1115,7 @@ class BaseUpstreamProvider:
                         try:
                             await adjust_payment_for_tokens(
                                 fresh_key,
-                                {"model": last_model_seen or "unknown", "usage": None},
+                                usage_estimator.response_data(last_model_seen),
                                 new_session,
                                 max_cost_for_model,
                                 model_obj,
@@ -1199,6 +1202,7 @@ class BaseUpstreamProvider:
                     obj = None
 
                 if isinstance(obj, dict):
+                    usage_estimator.observe(obj)
                     self._apply_provider_field(obj)
                     if obj.get("model"):
                         last_model_seen = str(obj.get("model"))
@@ -1288,13 +1292,8 @@ class BaseUpstreamProvider:
                     if fresh_key:
                         cost_data: dict
                         try:
-                            adjustment_input = (
-                                usage_chunk_data
-                                if usage_chunk_data is not None
-                                else {
-                                    "model": last_model_seen or "unknown",
-                                    "usage": None,
-                                }
+                            adjustment_input = usage_estimator.billing_data(
+                                usage_chunk_data, last_model_seen
                             )
                             cost_data = await adjust_payment_for_tokens(
                                 fresh_key,
@@ -1403,6 +1402,7 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1443,6 +1443,13 @@ class BaseUpstreamProvider:
                 response_json["model"] = requested_model
             if "id" not in response_json or not isinstance(response_json["id"], str):
                 response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
+
+            if not isinstance(response_json.get("usage"), dict):
+                usage_estimator = MissingUsageEstimator(request_body, model_obj)
+                usage_estimator.observe(response_json)
+                response_json["usage"] = usage_estimator.openai_response_data(
+                    response_json.get("model")
+                )["usage"]
 
             cost_data = await adjust_payment_for_tokens(
                 key,
@@ -1542,6 +1549,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         client: httpx.AsyncClient | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1553,6 +1561,8 @@ class BaseUpstreamProvider:
         Returns:
             StreamingResponse with cost data injected at the end
         """
+        usage_estimator = MissingUsageEstimator(request_body, model_obj)
+
         logger.debug(
             "Processing streaming Responses API completion",
             extra={
@@ -1583,7 +1593,7 @@ class BaseUpstreamProvider:
                         try:
                             await adjust_payment_for_tokens(
                                 fresh_key,
-                                {"model": last_model_seen or "unknown", "usage": None},
+                                usage_estimator.response_data(last_model_seen),
                                 new_session,
                                 max_cost_for_model,
                                 model_obj,
@@ -1675,8 +1685,11 @@ class BaseUpstreamProvider:
                         "response.incomplete",
                     ):
                         usage_chunk_data = obj
+                        if not usage_estimator.output_text:
+                            usage_estimator.observe(obj)
                         return
 
+                    usage_estimator.observe(obj)
                     yield prefix + b"data: " + json.dumps(obj).encode() + b"\n\n"
                 else:
                     if final:
@@ -1716,13 +1729,8 @@ class BaseUpstreamProvider:
                     if fresh_key:
                         cost_data: dict
                         try:
-                            adjustment_input = (
-                                usage_chunk_data
-                                if usage_chunk_data is not None
-                                else {
-                                    "model": last_model_seen or "unknown",
-                                    "usage": None,
-                                }
+                            adjustment_input = usage_estimator.billing_data(
+                                usage_chunk_data, last_model_seen
                             )
                             cost_data = await adjust_payment_for_tokens(
                                 fresh_key,
@@ -1834,6 +1842,7 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
     ) -> Response:
         """Handle non-streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1872,6 +1881,13 @@ class BaseUpstreamProvider:
                     and "reasoning_tokens" in response_json["usage"],
                 },
             )
+
+            if not isinstance(response_json.get("usage"), dict):
+                usage_estimator = MissingUsageEstimator(request_body, model_obj)
+                usage_estimator.observe(response_json)
+                response_json["usage"] = usage_estimator.response_data(
+                    response_json.get("model")
+                )["usage"]
 
             if requested_model:
                 response_json["model"] = requested_model
@@ -1987,9 +2003,9 @@ class BaseUpstreamProvider:
                 return
 
             try:
-                # Finalize with "unknown" model and no usage to release reservation/charge max cost
-                # (no routed identity here by design: the None usage settles at
-                # MaxCostData before any pricing lookup can happen).
+                # Generic opaque streams have no request/response token seam.
+                # Missing usage therefore releases the reservation; the hold is
+                # never treated as evidence of consumption.
                 await adjust_payment_for_tokens(
                     key,
                     {"model": "unknown", "usage": None},
@@ -2024,7 +2040,10 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse:
+        usage_estimator = MissingUsageEstimator(request_body, model_obj)
+
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
@@ -2078,13 +2097,9 @@ class BaseUpstreamProvider:
                         usage_finalized = True
                         return None
                     try:
-                        fallback: dict = {
-                            "model": last_model_seen or "unknown",
-                            "usage": None,
-                        }
                         cost_data = await adjust_payment_for_tokens(
                             fresh_key,
-                            fallback,
+                            usage_estimator.response_data(last_model_seen),
                             new_session,
                             max_cost_for_model,
                             model_obj,
@@ -2123,6 +2138,7 @@ class BaseUpstreamProvider:
                                 try:
                                     data = json.loads(line[6:])
                                     if isinstance(data, dict):
+                                        usage_estimator.observe(data)
                                         msg = data.get("message", {})
                                         if msg and msg.get("model"):
                                             last_model_seen = str(msg.get("model"))
@@ -2320,6 +2336,7 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
     ) -> Response:
         try:
             content = await response.aread()
@@ -2338,6 +2355,12 @@ class BaseUpstreamProvider:
             if path.endswith("count_tokens") and "usage" not in response_json:
                 input_tokens = response_json.get("input_tokens", 0)
                 response_json["usage"] = {"input_tokens": input_tokens}
+            elif not isinstance(response_json.get("usage"), dict):
+                usage_estimator = MissingUsageEstimator(request_body, model_obj)
+                usage_estimator.observe(response_json)
+                response_json["usage"] = usage_estimator.response_data(
+                    response_json.get("model")
+                )["usage"]
 
             cost_data = await adjust_payment_for_tokens(
                 key,
@@ -2445,11 +2468,18 @@ class BaseUpstreamProvider:
                 requested_model,
                 model_obj,
                 reservation_snapshot,
+                request_body,
             )
 
         response_json = messages_dispatch.coerce_litellm_payload(result)
         if requested_model and "model" in response_json:
             response_json["model"] = requested_model
+        if not isinstance(response_json.get("usage"), dict):
+            usage_estimator = MissingUsageEstimator(request_body, model_obj)
+            usage_estimator.observe(response_json)
+            response_json["usage"] = usage_estimator.response_data(
+                response_json.get("model")
+            )["usage"]
 
         cost_data = await adjust_payment_for_tokens(
             key,
@@ -2563,9 +2593,12 @@ class BaseUpstreamProvider:
         requested_model: str | None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Re-emit a litellm Anthropic-event iterator as live SSE bytes
         with cost reconciliation appended at end of stream."""
+
+        usage_estimator = MissingUsageEstimator(request_body, model_obj)
 
         async def stream_with_cost() -> AsyncGenerator[bytes, None]:
             usage_finalized = False
@@ -2583,12 +2616,10 @@ class BaseUpstreamProvider:
                 if usage_finalized:
                     return None
                 logger.warning(
-                    "Finalizing /v1/messages stream with no usage data — "
-                    "client will be billed at max-cost with zero tokens. "
-                    "Likely cause: upstream omitted `usage` from the SSE "
-                    "stream (check that the request includes "
-                    "`stream_options.include_usage=true` and that the "
-                    "upstream actually emits a final usage chunk).",
+                    "Finalizing /v1/messages stream with locally estimated "
+                    "usage because the upstream omitted `usage` from SSE. "
+                    "Check that the upstream emits a final usage chunk; the "
+                    "reservation ceiling will not be used as the charge.",
                     extra={
                         "key_hash": key.hashed_key[:8] + "...",
                         "model": last_model_seen or "unknown",
@@ -2602,13 +2633,9 @@ class BaseUpstreamProvider:
                         usage_finalized = True
                         return None
                     try:
-                        fallback: dict = {
-                            "model": last_model_seen or "unknown",
-                            "usage": None,
-                        }
                         cost_data = await adjust_payment_for_tokens(
                             fresh_key,
-                            fallback,
+                            usage_estimator.response_data(last_model_seen),
                             new_session,
                             max_cost_for_model,
                             model_obj,
@@ -2641,6 +2668,7 @@ class BaseUpstreamProvider:
                 async for annotated in messages_dispatch.stream_annotated_events(
                     iterator, requested_model
                 ):
+                    usage_estimator.observe(annotated.event)
                     if annotated.model:
                         last_model_seen = annotated.model
                     # Anthropic SSE reports usage cumulatively across
@@ -3084,6 +3112,7 @@ class BaseUpstreamProvider:
                                 requested_model=original_model_id,
                                 model_obj=model_obj,
                                 reservation_snapshot=reservation_snapshot,
+                                request_body=request_body,
                             )
                         except BaseException:
                             await response.aclose()
@@ -3104,6 +3133,7 @@ class BaseUpstreamProvider:
                                 requested_model=original_model_id,
                                 model_obj=model_obj,
                                 reservation_snapshot=reservation_snapshot,
+                                request_body=request_body,
                             )
                         finally:
                             await response.aclose()
@@ -3120,6 +3150,7 @@ class BaseUpstreamProvider:
                                 requested_model=original_model_id,
                                 model_obj=model_obj,
                                 reservation_snapshot=reservation_snapshot,
+                                request_body=request_body,
                             )
                         finally:
                             await response.aclose()
@@ -3168,6 +3199,7 @@ class BaseUpstreamProvider:
                             requested_model=original_model_id,
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
+                            request_body=request_body,
                         )
 
                 # Handle both non-streaming chat completions and embeddings
@@ -3181,6 +3213,7 @@ class BaseUpstreamProvider:
                             requested_model=original_model_id,
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
+                            request_body=request_body,
                         )
                     finally:
                         await response.aclose()
@@ -3435,6 +3468,7 @@ class BaseUpstreamProvider:
                         requested_model=original_model_id,
                         model_obj=model_obj,
                         reservation_snapshot=reservation_snapshot,
+                        request_body=transformed_body,
                     )
 
                 if response.status_code == 200:
@@ -3447,6 +3481,7 @@ class BaseUpstreamProvider:
                             requested_model=original_model_id,
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
+                            request_body=transformed_body,
                         )
                     finally:
                         await response.aclose()
@@ -4826,11 +4861,11 @@ class BaseUpstreamProvider:
                 model = payload["model"]
 
         if usage_data is None:
-            # Settlement invariant: a terminal request is never silently
-            # zero-billed and never silently keeps the whole token. Unmeasured
-            # usage settles at the authorization ceiling and refunds the rest.
+            # No request body is available at this X-Cashu settlement seam, so
+            # an auditable input/output estimate cannot be built. Refund the
+            # token rather than treating the authorization ceiling as usage.
             logger.warning(
-                "No usage in streaming Responses API response — settling at authorized max",
+                "No usage in streaming Responses API response — refunding instead of charging the authorized max",
                 extra={
                     "model": model,
                     "amount": amount,

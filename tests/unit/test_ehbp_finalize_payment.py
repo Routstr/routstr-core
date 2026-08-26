@@ -107,7 +107,7 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
 
 
 @pytest.mark.asyncio
-async def test_finalize_max_cost_payment_updates_parent_and_child_spend(
+async def test_unmeasured_ehbp_releases_parent_and_child_reservation(
     session: AsyncSession,
 ) -> None:
     parent = ApiKey(hashed_key="ehbp-parent", balance=10_000)
@@ -126,19 +126,19 @@ async def test_finalize_max_cost_payment_updates_parent_and_child_spend(
         reservation_snapshot=reservation,
     )
 
-    assert charged == 3_000
+    assert charged == 0
     updated_parent = await _api_key(session, "ehbp-parent")
     updated_child = await _api_key(session, "ehbp-child")
     assert updated_parent is not None
     assert updated_child is not None
-    assert updated_parent.balance == 7_000
+    assert updated_parent.balance == 10_000
     assert updated_parent.reserved_balance == 0
     assert updated_parent.reserved_at is None
-    assert updated_parent.total_spent == 3_000
+    assert updated_parent.total_spent == 0
     assert updated_child.balance == 0
     assert updated_child.reserved_balance == 0
     assert updated_child.reserved_at is None
-    assert updated_child.total_spent == 3_000
+    assert updated_child.total_spent == 0
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_finalize_actual_cost_payment_rolls_back_when_parent_update_matche
 
 
 @pytest.mark.asyncio
-async def test_finalize_max_cost_payment_rolls_back_parent_when_child_update_matches_no_rows(
+async def test_unmeasured_ehbp_release_is_safe_when_charge_update_would_fail(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,11 +207,13 @@ async def test_finalize_max_cost_payment_rolls_back_parent_when_child_update_mat
     updated_parent = await _api_key(session, "ehbp-rollback-parent")
     assert updated_parent is not None
     assert updated_parent.balance == 10_000
-    assert updated_parent.reserved_balance == 0
+    # The injected partial-update failure rolls aggregate subtraction back;
+    # terminal fencing prevents a charge or retry from consuming those funds.
+    assert updated_parent.reserved_balance == 3_000
     assert updated_parent.total_spent == 0
     updated_child = await _api_key(session, "ehbp-missing-child")
     assert updated_child is not None
-    assert updated_child.reserved_balance == 0
+    assert updated_child.reserved_balance == 3_000
     assert updated_child.total_spent == 0
     release = await session.get(ReservationRelease, reservation.release_id)
     assert release is not None and release.status == "released"

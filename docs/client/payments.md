@@ -38,8 +38,9 @@ Every time you make a request to `/v1/chat/completions` (or others), the cost is
 `Cost = (Input_Tokens * Price_Input) + (Output_Tokens * Price_Output) + Request_Fee`
 
 - Prices are defined per model (see `/v1/models`).
-- If you stream the response, the balance is deducted incrementally or finalized at the end of the stream.
-- If your balance hits 0 mid-stream, the connection is closed.
+- Routstr reserves an authorization ceiling before forwarding, then finalizes the request at measured token cost.
+- If a successful upstream omits usage, Routstr estimates input tokens from the provider-bound request and output tokens from the returned body or streamed deltas, then applies normal model pricing.
+- A reservation is only a temporary hold. Missing usage or unusable prices must never turn the full reservation into the charge; if no auditable estimate can be priced, the reservation is released without charge.
 
 ### Headers
 

@@ -92,12 +92,15 @@ async def test_overrun_with_corrupted_aggregate_releases_without_charging(
 
 
 @pytest.mark.asyncio
-async def test_missing_usage_settles_at_reservation_not_zero(
+async def test_missing_usage_never_turns_reservation_into_charge(
     integration_session: AsyncSession,
 ) -> None:
-    """A response with no usable usage data must settle at the reserved max
-    cost (bounded fallback), never at zero — otherwise the request is free
-    inference. Exercises the REAL calculate_cost, no patching."""
+    """A reservation is an authorization ceiling, not evidence of usage.
+
+    Upstream handlers should provide locally estimated usage when possible. If
+    no measurement or estimate reaches settlement, release the reservation
+    rather than charging its full value.
+    """
     from routstr.auth import (
         adjust_payment_for_tokens,
         get_reservation_snapshot,
@@ -122,13 +125,12 @@ async def test_missing_usage_settles_at_reservation_not_zero(
         reservation_snapshot=reservation,
     )
 
-    # Charged the authorized max, not zero.
-    assert result["charged_msats"] == reserved
+    assert result["charged_msats"] == 0
     integration_session.expunge_all()
     key_row = await integration_session.get(ApiKey, key_hash)
     assert key_row is not None
-    assert key_row.total_spent == reserved, "missing usage must not be free"
-    assert key_row.balance == 10_000 - reserved
+    assert key_row.total_spent == 0
+    assert key_row.balance == 10_000
     assert key_row.reserved_balance == 0
 
 

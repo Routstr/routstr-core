@@ -22,6 +22,7 @@ from routstr.auth import (
 )
 from routstr.core.db import ApiKey, ReservationRelease
 from routstr.payment.cost_calculation import MaxCostData
+from routstr.payment.models import Architecture, Model, Pricing
 from routstr.upstream.base import BaseUpstreamProvider
 
 
@@ -671,16 +672,14 @@ async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> 
 
 
 @pytest.mark.asyncio
-async def test_client_disconnect_midstream_finalizes_and_stops_heartbeat() -> None:
-    """A client that aborts the socket mid-stream must not leak its reservation.
+async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat() -> (
+    None
+):
+    """A client abort releases the hold after charging only estimated usage.
 
-    Starlette closes the response generator (``aclose``) on disconnect, whose
-    ``finally`` schedules the background finalizer. That finalizer must settle
-    the reservation (charge the reserved max — usage is unknown), reach a
-    terminal durable state, and stop the lease heartbeat so the sweeper is not
-    needed. Driven against a real engine and the real finalizer; the socket
-    abort is modelled deterministically with ``aclose`` (the exact hook
-    Starlette invokes) to keep the test CI-stable.
+    Starlette closes the response generator (``aclose``) on disconnect. The
+    finalizer still has the request and streamed deltas, so it can estimate
+    usage without converting the reservation ceiling into the charge.
     """
     engine = await _engine()
     provider = BaseUpstreamProvider(
@@ -707,6 +706,26 @@ async def test_client_disconnect_midstream_finalizes_and_stops_heartbeat() -> No
     )
     upstream_response.aiter_bytes = aiter_bytes
 
+    model = Model(
+        id="test-model",
+        name="test-model",
+        created=0,
+        description="",
+        context_length=8_192,
+        architecture=Architecture(
+            modality="text",
+            input_modalities=["text"],
+            output_modalities=["text"],
+            tokenizer="unknown",
+            instruct_type=None,
+        ),
+        pricing=Pricing(prompt=0.01, completion=0.02),
+        sats_pricing=Pricing(prompt=0.01, completion=0.02),
+    )
+    request_body = json.dumps(
+        {"model": model.id, "messages": [{"role": "user", "content": "hi"}]}
+    ).encode()
+
     background_tasks = BackgroundTasks()
     try:
         with (
@@ -718,13 +737,24 @@ async def test_client_disconnect_midstream_finalizes_and_stops_heartbeat() -> No
                 "routstr.upstream.base.adjust_payment_for_tokens",
                 auth_module.adjust_payment_for_tokens,
             ),
+            patch("routstr.upstream.count_tokens._count_with_litellm", return_value=3),
+            patch(
+                "routstr.upstream.count_tokens._count_text_with_litellm",
+                return_value=2,
+            ),
+            patch(
+                "routstr.payment.cost_calculation.sats_usd_price",
+                return_value=5.0e-5,
+            ),
         ):
             response = await provider.handle_streaming_chat_completion(
                 response=upstream_response,
                 key=key,
                 max_cost_for_model=500,
                 background_tasks=background_tasks,
+                model_obj=model,
                 reservation_snapshot=snapshot,
+                request_body=request_body,
             )
             iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
             await iterator.__anext__()  # first chunk reaches the client
@@ -744,9 +774,9 @@ async def test_client_disconnect_midstream_finalizes_and_stops_heartbeat() -> No
     # The reservation reached a single terminal outcome; funds are not locked.
     assert record is not None and record.status in {"charged", "released"}
     assert final_key.reserved_balance == 0
-    # Unknown usage settles at the reserved max, never free.
-    assert final_key.total_spent == 500
-    assert final_key.balance == 500
+    # 3 input tokens × 10 msats + 2 output tokens × 20 msats = 70 msats.
+    assert final_key.total_spent == 70
+    assert final_key.balance == 930
     # The heartbeat is gone — no forever-renewing task on an abandoned request.
     assert snapshot.release_id not in auth_module._reservation_heartbeats
     await engine.dispose()
