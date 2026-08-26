@@ -315,14 +315,31 @@ async def test_boolean_exchange_quote_does_not_set_the_node_price(
 
     ``float(True)`` is ``1.0``, which is finite and positive, so a payload whose
     price field turned into a boolean passes every numeric guard — and then
-    *wins* the ``min()``, pricing the whole node at one dollar per bitcoin. The
-    node's other coercions all reject ``bool`` before the numeric check for this
-    reason; this one is the exception.
+    *wins* the ``min()``, pricing the whole node at one dollar per bitcoin.
     """
     from routstr.payment.price import btc_usd_price
 
     await refresh_price_with(
         {"kraken": True, "coinbase": "100000.0", "binance": "100000.0"}
+    )
+
+    assert btc_usd_price() == pytest.approx(100000.0)
+
+
+@pytest.mark.asyncio
+async def test_an_underflowing_exchange_quote_does_not_set_the_node_price(
+    refresh_price_with: Any,
+) -> None:
+    """A quote too small to survive the sats conversion is not a price.
+
+    ``1e-320`` is positive, so it passes the guards and wins the ``min()``, but
+    the node prices in sats and ``1e-320 / 100_000_000`` underflows to ``0.0``
+    — a zero sats price divides by zero on every model's rate.
+    """
+    from routstr.payment.price import btc_usd_price
+
+    await refresh_price_with(
+        {"kraken": "1e-320", "coinbase": "100000.0", "binance": "100000.0"}
     )
 
     assert btc_usd_price() == pytest.approx(100000.0)

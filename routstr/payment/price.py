@@ -12,6 +12,8 @@ logger = get_logger(__name__)
 BTC_USD_PRICE: float | None = None
 SATS_USD_PRICE: float | None = None
 
+SATS_PER_BTC = 100_000_000
+
 
 def _parse_quote(raw: object, exchange: str) -> float | None:
     """Coerce an exchange quote to a price, or ``None`` if it is not one.
@@ -20,10 +22,12 @@ def _parse_quote(raw: object, exchange: str) -> float | None:
     of what it collects: an unusable quote does not merely join the sample, it
     *wins* it, and the result is the rate every model and every request on the
     node is priced at. A quote is stricter than a billable rate — it must be
-    positive, since a BTC price of zero is a broken feed, not free money.
+    positive, and positive *after* the sats conversion the node prices in: a
+    subnormal quote survives every guard here and still underflows to a zero
+    sats price, which then divides by zero on every model's rate.
     """
     price = coerce_rate(raw)
-    if price is None or price <= 0:
+    if price is None or price <= 0 or price / SATS_PER_BTC <= 0:
         logger.warning(
             "Unusable price quote — ignoring this exchange",
             extra={"exchange": exchange, "quote": repr(raw)},
@@ -141,7 +145,7 @@ async def _update_prices() -> None:
         )
         return
     BTC_USD_PRICE = btc_price
-    SATS_USD_PRICE = btc_price / 100_000_000
+    SATS_USD_PRICE = btc_price / SATS_PER_BTC
 
 
 def btc_usd_price() -> float:
