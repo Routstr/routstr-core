@@ -150,6 +150,28 @@ async def test_malformed_price_string_is_rejected(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_boolean_price_is_rejected(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """A JSON ``true`` coerces to a finite, positive ``1.0`` — a dollar per
+    token — so it passes every numeric guard. The write edge asks the same
+    coercion the catalog readers do, and answers a 422."""
+    provider_id = await _make_provider(integration_session)
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id, model_id="bool-price", pricing=_pricing(prompt=True)
+        ),
+    )
+
+    assert resp.status_code == 422
+    assert await integration_session.get(ModelRow, ("bool-price", provider_id)) is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_numeric_string_price_is_still_accepted(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:

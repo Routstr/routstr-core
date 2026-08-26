@@ -15,7 +15,7 @@ from ..payment.models import (
     _row_to_model,
     list_models,
 )
-from ..payment.rates import BILLABLE_PRICING_FIELDS, is_usable_rate
+from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
 from ..proxy import refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
@@ -542,17 +542,13 @@ class ModelCreate(BaseModel):
             raw = value.get(field)
             if raw is None:
                 continue
-            if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
-                raise ValueError(f"{field} must be a non-negative number")
-            try:
-                rate = float(raw)
-            except (ValueError, OverflowError):
-                # An integer too large for a float raises OverflowError, which
-                # pydantic does not convert into a validation error — unhandled
-                # it escapes as a 500 for what is still a bad client value.
-                raise ValueError(f"{field} must be a number, got {raw!r}")
-            if not is_usable_rate(rate):
-                raise ValueError(f"{field} must be a finite, non-negative number")
+            # The shared coercion also absorbs the OverflowError an oversized
+            # integer raises, which pydantic does not convert into a validation
+            # error — unhandled it escaped as a 500 for a bad client value.
+            if coerce_rate(raw) is None:
+                raise ValueError(
+                    f"{field} must be a finite, non-negative number, got {raw!r}"
+                )
         return value
 
 

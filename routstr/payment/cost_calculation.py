@@ -6,7 +6,7 @@ from pydantic.v1 import BaseModel
 from ..core import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
-from .rates import is_usable_rate
+from .rates import coerce_rate, is_usable_rate
 from .usage import normalize_usage, parse_token_count
 
 if TYPE_CHECKING:
@@ -336,17 +336,11 @@ def _coerce_usd(value: object) -> float:
     ``0.0`` means "no usable figure" to every caller, which is the same thing an
     absent field means, so the caller's existing ``> 0`` checks handle it.
     """
-    if value is None or isinstance(value, bool):
-        return 0.0
-    if not isinstance(value, (int, float, str)):
-        return 0.0
-    try:
-        # An oversized integer raises OverflowError, not ValueError.
-        amount = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
-    # A negative is rejected here, where the previous `max(0.0, …)` clamped it.
-    return amount if is_usable_rate(amount) else 0.0
+    # A cost figure is coerced exactly like a rate; only the way an unusable one
+    # is reported differs. A negative is rejected here, where the previous
+    # `max(0.0, …)` clamped it.
+    amount = coerce_rate(value)
+    return amount if amount is not None else 0.0
 
 
 def _resolve_usd_cost(usage_data: dict, response_data: dict) -> float:

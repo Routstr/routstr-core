@@ -442,3 +442,23 @@ async def test_oversized_catalog_rate_does_not_empty_the_catalog() -> None:
         models = await async_fetch_openrouter_models()
 
     assert [m["id"] for m in models] == ["good"]
+
+
+@pytest.mark.asyncio
+async def test_boolean_catalog_rate_is_not_imported() -> None:
+    """A JSON ``true`` is a change of shape, not a price.
+
+    Python coerces it to a finite, positive ``1.0`` — a dollar per token — so it
+    passes every numeric guard and must be rejected before coercion.
+    """
+    with _patch_openrouter_catalog(
+        [
+            _catalog_entry("bad", {"prompt": True, "completion": "0.000002"}),
+            _catalog_entry("good", {"prompt": "0.000001", "completion": "0.000002"}),
+        ]
+    ):
+        from routstr.payment.models import async_fetch_openrouter_models
+
+        models = await async_fetch_openrouter_models()
+
+    assert [m["id"] for m in models] == ["good"]

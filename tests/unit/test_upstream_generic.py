@@ -667,3 +667,60 @@ async def test_negative_openrouter_cache_rate_is_dropped_not_carried() -> None:
     assert model.enabled is True
     assert model.pricing.prompt == pytest.approx(1e-06)
     assert model.pricing.input_cache_read == 0.0
+
+
+@pytest.mark.asyncio
+async def test_boolean_litellm_rate_is_not_a_resolved_price() -> None:
+    """``isinstance(True, int)`` is True, so a boolean passed the cost map's own
+    numeric check and resolved as a rate of ``1.0`` — a dollar per token."""
+    payload = {
+        "data": [
+            {"id": "bool-priced-model", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    cost_entry = {
+        "input_cost_per_token": True,
+        "output_cost_per_token": 2e-06,
+        "max_input_tokens": 8192,
+    }
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=[])
+        with patch("routstr.payment.models.litellm_cost_entry", lambda _id: cost_entry):
+            with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+                models = await GenericUpstreamProvider(
+                    base_url="http://x"
+                ).fetch_models()
+
+    model = _model_by_id(models, "bool-priced-model")
+    assert model.enabled is False
+    assert model.pricing.prompt == 0.0
+    assert model.pricing.completion == 0.0
+
+
+@pytest.mark.asyncio
+async def test_boolean_openrouter_rate_is_not_a_resolved_price() -> None:
+    """The same coercion reads a feed's ``true`` as a rate of ``1.0``; the model
+    must import disabled rather than priced at a dollar per token."""
+    payload = {
+        "data": [
+            {"id": "or-bool-xyz", "object": "model", "owned_by": "mystery"},
+        ]
+    }
+    feed = [
+        {
+            "id": "or-bool-xyz",
+            "pricing": {"prompt": True, "completion": "0.000002"},
+            "context_length": 8192,
+        }
+    ]
+
+    with _patch_models_endpoint(payload):
+        or_feed = AsyncMock(return_value=feed)
+        with patch("routstr.payment.models.async_fetch_openrouter_models", or_feed):
+            models = await GenericUpstreamProvider(base_url="http://x").fetch_models()
+
+    model = _model_by_id(models, "or-bool-xyz")
+    assert model.enabled is False
+    assert model.pricing.prompt == 0.0
+    assert model.pricing.completion == 0.0

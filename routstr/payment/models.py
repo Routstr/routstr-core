@@ -12,7 +12,7 @@ from ..core.db import ModelRow, UpstreamProviderRow, get_session
 from ..core.logging import get_logger
 from ..core.settings import settings
 from .price import sats_usd_price
-from .rates import BILLABLE_PRICING_FIELDS, is_usable_rate
+from .rates import BILLABLE_PRICING_FIELDS, coerce_rate, is_usable_rate
 
 logger = get_logger(__name__)
 
@@ -163,19 +163,12 @@ def _has_valid_pricing(model: dict) -> bool:
     if not pricing:
         return False
 
-    try:
-        prompt = float(pricing.get("prompt", 0))
-        completion = float(pricing.get("completion", 0))
-    except (ValueError, TypeError, OverflowError):
-        # An integer too large for a float raises OverflowError, not
-        # ValueError, so it escaped this coercion guard and unwound the whole
-        # fetch — one junk entry cost the node the entire upstream catalog.
-        return False
-
-    # `NaN`/`±inf` are not prices, and neither is caught by the checks below:
-    # every comparison with `NaN` is False, and `inf` reads as a large positive
-    # rate that would be advertised and billed on.
-    if not is_usable_rate(prompt) or not is_usable_rate(completion):
+    # Coercion runs before the both-zero test below, which `NaN` would defeat
+    # on its own — and one entry the coercion chokes on must not unwind the
+    # whole fetch, which once cost the node an entire upstream catalog.
+    prompt = coerce_rate(pricing.get("prompt", 0))
+    completion = coerce_rate(pricing.get("completion", 0))
+    if prompt is None or completion is None:
         return False
 
     if prompt == 0 and completion == 0:

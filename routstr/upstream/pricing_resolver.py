@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..payment.rates import is_usable_rate
+from ..payment.rates import coerce_rate
 
 
 @dataclass
@@ -67,18 +67,8 @@ def estimate_context_length(model_id: str) -> int:
 
 
 def _as_float(value: object) -> float | None:
-    """OpenRouter reports prices as strings; coerce, ``None`` if not a real rate.
-
-    Every caller reads a *price* out of a feed, so this asks the shared
-    billable-rate question rather than merely parsing: ``float("Infinity")``,
-    ``float("NaN")`` and a negative all parse cleanly from a feed string. An
-    oversized integer raises ``OverflowError`` rather than ``ValueError``.
-    """
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return parsed if is_usable_rate(parsed) else None
+    """OpenRouter reports prices as strings; coerce, ``None`` if not a real rate."""
+    return coerce_rate(value)
 
 
 def _as_int(value: object) -> int | None:
@@ -95,18 +85,15 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
     if info is None:
         return None
 
-    prompt = info.get("input_cost_per_token")
-    completion = info.get("output_cost_per_token")
-    if not isinstance(prompt, (int, float)) or not isinstance(completion, (int, float)):
+    prompt = coerce_rate(info.get("input_cost_per_token"))
+    completion = coerce_rate(info.get("output_cost_per_token"))
+    if prompt is None or completion is None:
         return None
     # A both-zero entry is litellm listing a model without a real price (free
     # moderation/rerank tiers do this) — treating 0/0 as resolved would serve
-    # the model for free. Reject it (and any negative) so the caller falls
-    # through, mirroring async_fetch_openrouter_models' _has_valid_pricing.
-    # Checked before the both-zero guard below: `NaN` defeats that guard on its
-    # own, since every comparison against it is False.
-    if not is_usable_rate(prompt) or not is_usable_rate(completion):
-        return None
+    # the model for free. Reject it so the caller falls through, mirroring
+    # async_fetch_openrouter_models' _has_valid_pricing. Coercion runs first:
+    # `NaN` would defeat this guard on its own, every comparison being False.
     if prompt == 0 and completion == 0:
         return None
 
@@ -115,8 +102,8 @@ def _from_litellm(model_id: str) -> ResolvedPricing | None:
         input_modalities.append("image")
 
     return ResolvedPricing(
-        prompt=float(prompt),
-        completion=float(completion),
+        prompt=prompt,
+        completion=completion,
         # max_input_tokens is the context window; max_tokens is litellm's
         # completion cap (it tracks max_output_tokens for ~94% of models), so
         # it is never a context source. A missing window falls to the id-based

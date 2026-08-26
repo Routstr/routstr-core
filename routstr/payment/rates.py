@@ -46,3 +46,26 @@ def is_usable_rate(rate: float) -> bool:
     they do with the answer, not why the answer matters.
     """
     return math.isfinite(rate) and rate >= 0.0
+
+
+def coerce_rate(value: object) -> float | None:
+    """Coerce a value from outside the node to a usable rate, or ``None``.
+
+    The one coercion, shared by every reader of a rate the node did not compute
+    itself: an upstream catalog, the LiteLLM cost map, the exchange feed and the
+    admin write edge. Each of them was parsing for itself, and they disagreed —
+    which is how a boolean became a price on some paths and not others.
+
+    A boolean is rejected outright: it is a change of shape, not a rate, and
+    Python would make ``True`` a finite, positive ``1.0`` that passes every
+    numeric guard downstream — a dollar per token. A numeric string is accepted,
+    because feeds report prices as strings. An oversized integer raises
+    ``OverflowError`` rather than ``ValueError``, so that is caught too.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        rate = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return rate if is_usable_rate(rate) else None

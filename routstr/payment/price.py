@@ -5,7 +5,7 @@ import httpx
 
 from ..core import get_logger
 from ..core.settings import settings
-from .rates import is_usable_rate
+from .rates import coerce_rate
 
 logger = get_logger(__name__)
 
@@ -19,40 +19,14 @@ def _parse_quote(raw: object, exchange: str) -> float | None:
     Every quote passes through here because the aggregator takes the ``min()``
     of what it collects: an unusable quote does not merely join the sample, it
     *wins* it, and the result is the rate every model and every request on the
-    node is priced at. A zero divides by zero on the USD cost path, ``NaN``
-    raises out of the integer conversion in settlement, and a negative rate
-    produces a negative charge that is credited back to the caller.
-
-    A quote is stricter than a billable rate: it must be positive, since a BTC
-    price of zero is a broken feed, not free money.
+    node is priced at. A quote is stricter than a billable rate — it must be
+    positive, since a BTC price of zero is a broken feed, not free money.
     """
-    # `float(True)` is a finite, positive 1.0 that passes every guard below and
-    # would then win the `min()`, pricing the node at one dollar per bitcoin.
-    if isinstance(raw, bool):
-        logger.warning(
-            "Non-numeric price quote — ignoring this exchange",
-            extra={"exchange": exchange, "quote": repr(raw)},
-        )
-        return None
-
-    try:
-        price = float(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError) as e:
-        logger.warning(
-            "Unparseable price quote — ignoring this exchange",
-            extra={
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "exchange": exchange,
-                "quote": repr(raw),
-            },
-        )
-        return None
-
-    if not is_usable_rate(price) or price <= 0:
+    price = coerce_rate(raw)
+    if price is None or price <= 0:
         logger.warning(
             "Unusable price quote — ignoring this exchange",
-            extra={"exchange": exchange, "quote": price},
+            extra={"exchange": exchange, "quote": repr(raw)},
         )
         return None
 
