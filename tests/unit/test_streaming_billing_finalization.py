@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import BackgroundTasks
 from sqlalchemy.exc import SQLAlchemyError
@@ -341,6 +342,153 @@ async def test_responses_streaming_releases_and_raises_on_billing_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("finalization_fails", [False, True])
+async def test_partial_remote_protocol_error_finalizes_and_closes_once(
+    api: str,
+    finalization_fails: bool,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield b'data: {"model":"test","choices":[{"delta":{"content":"hi"}}]}\n\n'
+        raise httpx.RemoteProtocolError("incomplete chunked read")
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    upstream_response.aclose = AsyncMock()
+    client = MagicMock()
+    client.aclose = AsyncMock()
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"{api}-partial"
+    key.balance = 10_000
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session.rollback = AsyncMock()
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    adjust = (
+        AsyncMock(side_effect=SQLAlchemyError("database unavailable"))
+        if finalization_fails
+        else AsyncMock(return_value={"input_tokens": 0, "output_tokens": 0})
+    )
+    snapshot = ReservationSnapshot(
+        release_id=f"{api}-partial-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    release = AsyncMock(return_value=True)
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.release_reservation", release),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        if api == "chat":
+            response = await provider.handle_streaming_chat_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                background_tasks=BackgroundTasks(),
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        else:
+            response = await provider.handle_streaming_responses_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        emitted = bytearray()
+        with pytest.raises(httpx.RemoteProtocolError):
+            async for chunk in response.body_iterator:
+                emitted.extend(
+                    chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+                )
+
+    adjust.assert_awaited_once()
+    if finalization_fails:
+        session.rollback.assert_awaited_once()
+        release.assert_awaited_once_with(snapshot, session, 500)
+    else:
+        release.assert_not_awaited()
+    upstream_response.aclose.assert_awaited_once()
+    client.aclose.assert_awaited_once()
+    assert b"[DONE]" not in emitted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses"])
+async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
+    api: str,
+) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        yield b'data: {"model":"test","choices":[]}\n\n'
+        raise httpx.RemoteProtocolError("incomplete chunked read")
+
+    upstream_response = MagicMock(
+        status_code=200, headers={"content-type": "text/event-stream"}
+    )
+    upstream_response.aiter_bytes = aiter_bytes
+    upstream_response.aclose = AsyncMock()
+    client = MagicMock()
+    client.aclose = AsyncMock()
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"{api}-database-down"
+    key.balance = 10_000
+    snapshot = ReservationSnapshot(
+        release_id=f"{api}-database-down-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    unavailable_session = MagicMock()
+    unavailable_session.__aenter__ = AsyncMock(
+        side_effect=SQLAlchemyError("database unavailable")
+    )
+    unavailable_session.__aexit__ = AsyncMock(return_value=None)
+
+    with patch(
+        "routstr.upstream.base.create_session", return_value=unavailable_session
+    ):
+        if api == "chat":
+            response = await provider.handle_streaming_chat_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                background_tasks=BackgroundTasks(),
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        else:
+            response = await provider.handle_streaming_responses_completion(
+                response=upstream_response,
+                key=key,
+                max_cost_for_model=500,
+                reservation_snapshot=snapshot,
+                client=client,
+            )
+        with pytest.raises(httpx.RemoteProtocolError, match="incomplete chunked read"):
+            async for _ in response.body_iterator:
+                pass
+
+    upstream_response.aclose.assert_awaited_once()
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_responses_streaming_duplicate_publishes_zero_settled_cost() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"
@@ -578,9 +726,7 @@ async def test_client_disconnect_midstream_finalizes_and_stops_heartbeat() -> No
                 background_tasks=background_tasks,
                 reservation_snapshot=snapshot,
             )
-            iterator = cast(
-                AsyncGenerator[bytes, None], response.body_iterator
-            )
+            iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
             await iterator.__anext__()  # first chunk reaches the client
             await iterator.aclose()  # client aborts the socket here
 

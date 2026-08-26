@@ -148,6 +148,9 @@ class Settings(BaseSettings):
     database_pool_hold_warn_seconds: float = Field(
         default=10.0, gt=0, env="DATABASE_POOL_HOLD_WARN_SECONDS"
     )
+    database_busy_timeout: float = Field(
+        default=30.0, gt=0, env="DATABASE_BUSY_TIMEOUT"
+    )
 
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
@@ -209,6 +212,7 @@ ENV_ONLY_FIELDS = frozenset(
         "database_pool_recycle",
         "database_pool_pre_ping",
         "database_pool_hold_warn_seconds",
+        "database_busy_timeout",
     }
 )
 

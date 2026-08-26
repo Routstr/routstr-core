@@ -510,11 +510,25 @@ async def _validate_bearer_key_locked(
                     "AUTH: credit_balance returned successfully", extra={"msats": msats}
                 )
             except Exception as credit_error:
-                logger.error(
+                classification = classify_redemption_error(credit_error)
+                expected_codes = {
+                    "cashu_token_already_spent",
+                    "cashu_source_mint_unreachable",
+                    "cashu_mint_unreachable",
+                    "cashu_mint_rate_limited",
+                }
+                log = (
+                    logger.info
+                    if classification is not None
+                    and classification[3] in expected_codes
+                    else logger.error
+                )
+                log(
                     "AUTH: credit_balance failed",
                     extra={
                         "error": str(credit_error),
                         "error_type": type(credit_error).__name__,
+                        "error_code": classification[3] if classification else None,
                     },
                 )
                 await session.rollback()
@@ -756,13 +770,19 @@ async def pay_for_request(
     result = await session.exec(stmt)  # type: ignore[call-overload]
 
     if result.rowcount == 0:
-        logger.error(
-            "Concurrent request depleted balance",
+        await session.refresh(billing_key)
+        total_balance = billing_key.balance
+        reserved_balance = billing_key.reserved_balance
+        available_balance = max(0, total_balance - reserved_balance)
+        logger.warning(
+            "Concurrent request depleted available balance",
             extra={
                 "key_hash": key.hashed_key[:8] + "...",
                 "billing_key_hash": billing_key.hashed_key[:8] + "...",
                 "required_cost": cost_per_request,
-                "current_balance": billing_key.balance,
+                "total_balance": total_balance,
+                "reserved_balance": reserved_balance,
+                "available_balance": available_balance,
             },
         )
 
@@ -770,9 +790,10 @@ async def pay_for_request(
             status_code=402,
             detail={
                 "error": {
-                    "message": f"Insufficient balance: {cost_per_request} mSats required. {billing_key.balance} available.",
+                    "message": f"Insufficient balance: {cost_per_request} mSats required. {available_balance} available.",
                     "type": "insufficient_quota",
                     "code": "insufficient_balance",
+                    "available_balance": available_balance,
                 }
             },
         )

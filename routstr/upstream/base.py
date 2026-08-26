@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import traceback
 import typing
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from typing import Any, Mapping, Self, cast
 
 import httpx
@@ -68,6 +69,32 @@ if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
+
+
+async def _aclose_if_needed(resource: object | None) -> None:
+    if resource is None:
+        return
+    close = getattr(resource, "aclose", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _finalize_and_close_stream(
+    finalize: Callable[[], Awaitable[None]] | None,
+    response: object | None,
+    client: httpx.AsyncClient | None,
+) -> None:
+    try:
+        if finalize is not None:
+            await finalize()
+    finally:
+        try:
+            await _aclose_if_needed(response)
+        finally:
+            await _aclose_if_needed(client)
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -993,6 +1020,7 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1034,23 +1062,37 @@ class BaseUpstreamProvider:
                 nonlocal usage_finalized
                 if usage_finalized:
                     return
-                async with create_session() as new_session:
-                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                    if not fresh_key:
-                        return
-                    try:
-                        await adjust_payment_for_tokens(
-                            fresh_key,
-                            {"model": last_model_seen or "unknown", "usage": None},
-                            new_session,
-                            max_cost_for_model,
-                            model_obj,
-                            self.provider_fee,
-                            reservation_snapshot,
-                        )
-                        usage_finalized = True
-                    except Exception:
-                        pass
+                try:
+                    async with create_session() as new_session:
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                        if not fresh_key:
+                            return
+                        try:
+                            await adjust_payment_for_tokens(
+                                fresh_key,
+                                {"model": last_model_seen or "unknown", "usage": None},
+                                new_session,
+                                max_cost_for_model,
+                                model_obj,
+                                self.provider_fee,
+                                reservation_snapshot,
+                            )
+                            usage_finalized = True
+                        except Exception:
+                            logger.exception(
+                                "Fallback stream billing finalization failed; releasing reservation",
+                                extra={"key_hash": key.hashed_key[:8] + "..."},
+                            )
+                            usage_finalized = (
+                                await self._release_failed_streaming_reservation(
+                                    fresh_key, new_session, reservation_snapshot
+                                )
+                            )
+                except Exception:
+                    logger.exception(
+                        "Fallback stream billing recovery could not access the database",
+                        extra={"key_hash": key.hashed_key[:8] + "..."},
+                    )
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1280,18 +1322,24 @@ class BaseUpstreamProvider:
 
             except Exception as stream_error:
                 logger.warning(
-                    "Streaming interrupted; finalizing in background",
+                    "Streaming interrupted; finalizing before closing upstream",
                     extra={
                         "error": str(stream_error),
+                        "error_type": type(stream_error).__name__,
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
                 raise
             finally:
-                if not usage_finalized:
-                    # Create a background task to ensure finalization happens
-                    # even if the generator is closed early
-                    background_tasks.add_task(finalize_db_only)
+                # Shielded so a client disconnect cannot cancel billing
+                # finalization or leak the upstream connection.
+                await asyncio.shield(
+                    _finalize_and_close_stream(
+                        None if usage_finalized else finalize_db_only,
+                        response,
+                        client,
+                    )
+                )
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -1451,6 +1499,7 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
 
@@ -1484,23 +1533,37 @@ class BaseUpstreamProvider:
                 nonlocal usage_finalized
                 if usage_finalized:
                     return
-                async with create_session() as new_session:
-                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                    if not fresh_key:
-                        return
-                    try:
-                        await adjust_payment_for_tokens(
-                            fresh_key,
-                            {"model": last_model_seen or "unknown", "usage": None},
-                            new_session,
-                            max_cost_for_model,
-                            model_obj,
-                            self.provider_fee,
-                            reservation_snapshot,
-                        )
-                        usage_finalized = True
-                    except Exception:
-                        pass
+                try:
+                    async with create_session() as new_session:
+                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                        if not fresh_key:
+                            return
+                        try:
+                            await adjust_payment_for_tokens(
+                                fresh_key,
+                                {"model": last_model_seen or "unknown", "usage": None},
+                                new_session,
+                                max_cost_for_model,
+                                model_obj,
+                                self.provider_fee,
+                                reservation_snapshot,
+                            )
+                            usage_finalized = True
+                        except Exception:
+                            logger.exception(
+                                "Fallback Responses billing finalization failed; releasing reservation",
+                                extra={"key_hash": key.hashed_key[:8] + "..."},
+                            )
+                            usage_finalized = (
+                                await self._release_failed_streaming_reservation(
+                                    fresh_key, new_session, reservation_snapshot
+                                )
+                            )
+                except Exception:
+                    logger.exception(
+                        "Fallback Responses billing recovery could not access the database",
+                        extra={"key_hash": key.hashed_key[:8] + "..."},
+                    )
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1690,16 +1753,24 @@ class BaseUpstreamProvider:
 
             except Exception as stream_error:
                 logger.warning(
-                    "Responses API streaming interrupted; finalizing in background",
+                    "Responses API streaming interrupted; finalizing before closing upstream",
                     extra={
                         "error": str(stream_error),
+                        "error_type": type(stream_error).__name__,
                         "key_hash": key.hashed_key[:8] + "...",
                     },
                 )
                 raise
             finally:
-                if not usage_finalized:
-                    await finalize_db_only()
+                # Shielded so a client disconnect cannot cancel billing
+                # finalization or leak the upstream connection.
+                await asyncio.shield(
+                    _finalize_and_close_stream(
+                        None if usage_finalized else finalize_db_only,
+                        response,
+                        client,
+                    )
+                )
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
@@ -3051,9 +3122,7 @@ class BaseUpstreamProvider:
 
                     if is_streaming and response.status_code == 200:
                         background_tasks = BackgroundTasks()
-                        background_tasks.add_task(response.aclose)
-                        background_tasks.add_task(client.aclose)
-                        result = await self.handle_streaming_chat_completion(
+                        return await self.handle_streaming_chat_completion(
                             response,
                             key,
                             max_cost_for_model,
@@ -3061,9 +3130,8 @@ class BaseUpstreamProvider:
                             requested_model=original_model_id,
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
+                            client=client,
                         )
-                        result.background = background_tasks
-                        return result
 
                 # Handle both non-streaming chat completions and embeddings
                 if response.status_code == 200:
@@ -3332,19 +3400,15 @@ class BaseUpstreamProvider:
                 )
 
                 if is_streaming and response.status_code == 200:
-                    result = await self.handle_streaming_responses_completion(
+                    return await self.handle_streaming_responses_completion(
                         response,
                         key,
                         max_cost_for_model,
                         requested_model=original_model_id,
                         model_obj=model_obj,
                         reservation_snapshot=reservation_snapshot,
+                        client=client,
                     )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    background_tasks.add_task(client.aclose)
-                    result.background = background_tasks
-                    return result
 
                 if response.status_code == 200:
                     try:
@@ -3628,54 +3692,30 @@ class BaseUpstreamProvider:
             extra={"amount": amount, "unit": unit, "mint": mint},
         )
 
-        max_retries = 3
-        last_exception = None
-        refund_token = None
-
-        for attempt in range(max_retries):
-            try:
-                refund_token = await send_token(amount, unit=unit, mint_url=mint)
-                break
-            except Exception as e:
-                last_exception = e
-                if attempt < max_retries - 1:
-                    logger.warning(
-                        "Refund token creation failed, retrying",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "amount": amount,
-                            "unit": unit,
-                            "mint": mint,
-                        },
-                    )
-                else:
-                    logger.error(
-                        "Failed to create refund token after all retries",
-                        extra={
-                            "error": str(e),
-                            "error_type": type(e).__name__,
-                            "attempt": attempt + 1,
-                            "max_retries": max_retries,
-                            "amount": amount,
-                            "unit": unit,
-                            "mint": mint,
-                        },
-                    )
-
-        if refund_token is None:
+        try:
+            # Token creation may swap proofs, so it is unsafe to retry.
+            refund_token = await send_token(amount, unit=unit, mint_url=mint)
+        except Exception as error:
+            logger.error(
+                "Failed to create refund token",
+                extra={
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                    "amount": amount,
+                    "unit": unit,
+                    "mint": mint,
+                },
+            )
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": {
-                        "message": f"failed to create refund after {max_retries} attempts: {str(last_exception)}",
+                        "message": f"failed to create refund: {error}",
                         "type": "invalid_request_error",
                         "code": "send_token_failed",
                     }
                 },
-            )
+            ) from error
 
         logger.info(
             "Refund token created successfully",
@@ -3683,7 +3723,6 @@ class BaseUpstreamProvider:
                 "amount": amount,
                 "unit": unit,
                 "mint": mint,
-                "attempt": attempt + 1,
                 "token_preview": refund_token[:20] + "..."
                 if len(refund_token) > 20
                 else refund_token,
@@ -5362,7 +5401,7 @@ class BaseUpstreamProvider:
         except Exception as e:
             logger.error(
                 f"Failed to refresh models cache for {self.provider_type or self.base_url}",
-                extra={"error": str(e), "error_type": type(e).__name__},
+                extra={"error": repr(e), "error_type": type(e).__name__},
             )
 
     def get_cached_models(self) -> list[Model]:

@@ -136,19 +136,20 @@ async def test_supported_mint_units_come_from_active_keysets() -> None:
     msat = MagicMock(active=False, unit="msat")
     usd = MagicMock(active=True)
     usd.unit.name = "usd"
-    wallet = MagicMock()
-    wallet._get_keysets = AsyncMock(return_value=[usd, msat, sat])
+    wallet = MagicMock(url="http://mint:3338", db=MagicMock())
+    get_keysets = AsyncMock(return_value=[usd, msat, sat])
 
     with (
         patch.object(settings, "primary_mint_unit", "sat"),
         patch("routstr.wallet.get_wallet", AsyncMock(return_value=wallet)),
+        patch("routstr.wallet.get_cashu_keysets", get_keysets),
     ):
         units = await _get_supported_mint_units("http://mint:3338")
         cached_units = await _get_supported_mint_units("http://mint:3338")
 
     assert units == ["sat", "usd"]
     assert cached_units == units
-    wallet._get_keysets.assert_awaited_once()
+    get_keysets.assert_awaited_once_with(mint_url=wallet.url, db=wallet.db)
 
 
 @pytest.mark.asyncio

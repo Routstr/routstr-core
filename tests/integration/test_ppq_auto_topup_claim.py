@@ -23,6 +23,7 @@ from routstr.upstream.auto_topup import (
     _ppq_request_id,
     _ppq_spent_last_24h_usd,
     _ppq_state_id_for_provider,
+    _reconcile_ppq_state,
     _record_ppq_invoice,
     _set_ppq_state_terminal,
     get_ppq_auto_topup_state,
@@ -35,6 +36,8 @@ pytestmark = pytest.mark.asyncio
 def _row(provider_id: int = 1) -> MagicMock:
     row = MagicMock()
     row.id = provider_id
+    row.api_key = "secret"
+    row.provider_settings = None
     return row
 
 
@@ -111,10 +114,33 @@ async def test_claim_is_reusable_once_the_previous_attempt_finished(
     await _seed_provider()
     first = await _claim_ppq_topup(_row())
     assert first is not None
-    assert await _set_ppq_state_terminal(_row(), first, collected=True, swept=False)
+    assert await _set_ppq_state_terminal(_row(), first, collected=False, swept=True)
 
     second = await _claim_ppq_topup(_row())
     assert second is not None and second != first
+
+
+async def test_settled_claim_suppresses_immediate_duplicate(
+    patched_db_engine: Any,
+) -> None:
+    await _seed_provider()
+    row = _row()
+    operation_id = await _claim_ppq_topup(row)
+    assert operation_id is not None
+    assert await _set_ppq_state_terminal(row, operation_id, collected=True, swept=False)
+
+    assert await _reconcile_ppq_state(row, provider=None) is True
+    assert await _claim_ppq_topup(row) is None
+
+
+async def test_claim_rejects_stale_provider_configuration(
+    patched_db_engine: Any,
+) -> None:
+    await _seed_provider()
+    stale = _row()
+    stale.provider_settings = '{"auto_topup":true}'
+
+    assert await _claim_ppq_topup(stale) is None
 
 
 async def test_recording_the_invoice_moves_the_claim_in_flight(
@@ -287,7 +313,13 @@ async def test_ppq_payment_audit_row_is_visible_and_survives_next_claim(
     assert audit["collected"] is True
     assert "lnbc-secret-invoice" not in audit["token"]
 
-    # Reusing the deterministic claim lock must not overwrite history.
+    assert await _claim_ppq_topup(_row()) is None
+    async with create_session() as session:
+        state = await session.get(CashuTransaction, _ppq_state_id_for_provider(1))
+        assert state is not None
+        state.created_at = int(time.time()) - 301
+        session.add(state)
+        await session.commit()
     assert await _claim_ppq_topup(_row()) is not None
     async with create_session() as session:
         assert await session.get(CashuTransaction, audit["id"]) is not None

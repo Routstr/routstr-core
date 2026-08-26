@@ -44,15 +44,25 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     path = request.url.path
 
     # 4xx is client behaviour; the uvicorn access log already records it.
-    # Only 5xx warrants a server-side warning/error log here.
     if status_code >= 500:
-        logger.error(
+        error_type = None
+        if isinstance(detail, dict):
+            error = detail.get("error")
+            if isinstance(error, dict):
+                error_type = error.get("type")
+        log = (
+            logger.warning
+            if error_type in {"mint_unreachable", "mint_rate_limited"}
+            else logger.error
+        )
+        log(
             f"HTTP {status_code} on {path}: {detail}",
             extra={
                 "request_id": request_id,
                 "status_code": status_code,
                 "detail": detail,
                 "path": path,
+                "error_type": error_type,
             },
         )
 

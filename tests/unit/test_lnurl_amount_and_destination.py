@@ -5,6 +5,7 @@ hand an LNURL a set of unreserved proofs, and reserving only after that check
 is what stops a pre-dispatch failure from stranding proofs.
 """
 
+import math
 from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,19 +28,28 @@ LNURL_DATA = {
     "max_sendable": 100_000_000,
 }
 
-# 1000 sat minus the 11 sat estimated fee reserve.
-EXPECTED_QUOTE_SAT = 989
+EXPECTED_QUOTE_SAT = 999
 
 
 def _wallet(
-    quote_amount: int = EXPECTED_QUOTE_SAT,
+    quote_amount: int | None = None,
 ) -> tuple[MagicMock, list[MagicMock]]:
-    proofs = [MagicMock(amount=1000)]
+    proofs = [MagicMock(amount=1000, reserved=False)]
     wallet = MagicMock(url="https://mint.test")
-    wallet.melt_quote = AsyncMock(
-        return_value=MagicMock(fee_reserve=1, quote="q", amount=quote_amount)
-    )
+    wallet.get_fees_for_proofs.return_value = 0
+    if quote_amount is None:
+        wallet.melt_quote = AsyncMock(
+            side_effect=[
+                MagicMock(fee_reserve=1, quote="q", amount=1000),
+                MagicMock(fee_reserve=1, quote="q", amount=EXPECTED_QUOTE_SAT),
+            ]
+        )
+    else:
+        wallet.melt_quote = AsyncMock(
+            return_value=MagicMock(fee_reserve=1, quote="q", amount=quote_amount)
+        )
     wallet.select_to_send = AsyncMock(return_value=(proofs, None))
+    wallet.get_fees_for_proofs = MagicMock(return_value=0)
     wallet.melt = AsyncMock(return_value=MagicMock(state=MeltQuoteState.paid))
     wallet.set_reserved_for_send = AsyncMock()
     return wallet, proofs
@@ -124,16 +134,21 @@ async def test_raw_send_to_lnurl_accepts_exact_invoice() -> None:
         )
 
     assert paid == EXPECTED_QUOTE_SAT * 1000
-    wallet.select_to_send.assert_awaited_once()
+    wallet.select_to_send.assert_not_awaited()
+    wallet.set_reserved_for_send.assert_awaited_once_with(proofs, reserved=True)
     wallet.melt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_raw_send_to_lnurl_msat_unit_compares_in_wallet_unit() -> None:
-    # 1_000_000 msat minus an 11 sat fee reserve leaves 989_000 msat.
-    wallet, proofs = _wallet(989_000)
+    wallet, proofs = _wallet()
     proofs[0].amount = 1_000_000
-    wallet.select_to_send = AsyncMock(return_value=(proofs, None))
+    wallet.melt_quote = AsyncMock(
+        side_effect=[
+            MagicMock(fee_reserve=1, quote="q", amount=1_000_000),
+            MagicMock(fee_reserve=1, quote="q", amount=999_999),
+        ]
+    )
     data_patch, invoice_patch = _lnurl_patches()
 
     with data_patch, invoice_patch:
@@ -141,7 +156,46 @@ async def test_raw_send_to_lnurl_msat_unit_compares_in_wallet_unit() -> None:
             wallet, proofs, "owner@ln.tld", "msat", amount=1_000_000
         )
 
-    assert paid == 989_000
+    assert paid == 999_999
+
+
+@pytest.mark.asyncio
+async def test_raw_send_to_lnurl_requotes_for_exact_input_fees_without_recursion() -> (
+    None
+):
+    proofs = [MagicMock(amount=1, reserved=False) for _ in range(1500)]
+    wallet = MagicMock(url="https://mint.test")
+    wallet.get_fees_for_proofs = MagicMock(
+        side_effect=lambda selected: math.ceil(len(selected) / 100)
+    )
+    wallet.melt_quote = AsyncMock(
+        side_effect=[
+            MagicMock(fee_reserve=10, quote="q1", amount=1500),
+            MagicMock(fee_reserve=10, quote="q2", amount=1475),
+        ]
+    )
+    wallet.melt = AsyncMock(return_value=MagicMock(state=MeltQuoteState.paid))
+    wallet.set_reserved_for_send = AsyncMock()
+    checkpoint = AsyncMock()
+    data_patch, invoice_patch = _lnurl_patches()
+
+    with data_patch, invoice_patch:
+        paid = await raw_send_to_lnurl(
+            wallet,
+            proofs,
+            "owner@ln.tld",
+            "sat",
+            amount=1500,
+            on_melt_quote=checkpoint,
+        )
+
+    assert paid == 1_475_000
+    assert wallet.melt_quote.await_count == 2
+    checkpoint.assert_awaited_once_with("q2")
+    wallet.select_to_send.assert_not_called()
+    selected = wallet.melt.await_args.kwargs["proofs"]
+    assert sum(proof.amount for proof in selected) == 1500
+    assert 1475 + 10 + wallet.get_fees_for_proofs(selected) == 1500
 
 
 @pytest.mark.asyncio
@@ -291,3 +345,23 @@ async def test_send_to_lnurl_does_not_reserve_before_lnurl_validation() -> None:
     assert raw_send.await_args is not None
     assert raw_send.await_args.args[1] is proofs
     assert raw_send.await_args.kwargs["amount"] == 1000
+
+
+def test_select_melt_proofs_stops_at_minimal_cover_when_over_budget() -> None:
+    from routstr.payment.lnurl import _select_melt_proofs
+
+    wallet = MagicMock()
+    wallet.get_fees_for_proofs = MagicMock(side_effect=lambda selected: len(selected))
+    proofs = [MagicMock(amount=600, reserved=False) for _ in range(3)]
+
+    selected, shortfall = _select_melt_proofs(
+        wallet,
+        proofs,
+        quote_amount=1000,
+        fee_reserve=0,
+        gross_budget=1000,
+    )
+
+    assert selected is None
+    assert shortfall == 2
+    assert wallet.get_fees_for_proofs.call_count == 2

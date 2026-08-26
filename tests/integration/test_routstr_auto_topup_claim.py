@@ -25,6 +25,7 @@ from routstr.upstream.auto_topup import (
     _check_and_topup,
     _claim_routstr_topup,
     _parse_routstr_request_id,
+    _persist_routstr_token_and_mark_sent,
     _routstr_spent_last_24h_sats,
     _routstr_state_id_for_provider,
     get_routstr_auto_topup_state,
@@ -75,7 +76,9 @@ def _patch_wallet(module: Any, peer: MagicMock, token: str) -> ExitStack:
         patch.object(module.RoutstrUpstreamProvider, "from_db_row", return_value=peer)
     )
     stack.enter_context(
-        patch.object(module, "send_token", AsyncMock(return_value=token))
+        patch.object(
+            module, "send_token_from_owner_locked", AsyncMock(return_value=token)
+        )
     )
     stack.enter_context(
         patch.object(module, "token_mint_url", return_value="https://mint.test")
@@ -111,6 +114,32 @@ async def test_second_worker_cannot_claim_while_the_first_holds_one(
     assert await _claim_routstr_topup(row, expected_sats=TOPUP_SATS) is None
 
 
+async def test_token_and_sent_claim_roll_back_together_on_commit_failure(
+    patched_db_engine: Any,
+) -> None:
+    row = await _seed_provider()
+    operation_id = await _claim_routstr_topup(row, expected_sats=TOPUP_SATS)
+    assert operation_id is not None
+
+    with patch(
+        "sqlmodel.ext.asyncio.session.AsyncSession.commit",
+        new=AsyncMock(side_effect=RuntimeError("commit failed")),
+    ):
+        with pytest.raises(RuntimeError, match="commit failed"):
+            await _persist_routstr_token_and_mark_sent(
+                row,
+                operation_id,
+                expected_sats=TOPUP_SATS,
+                token="cashu-token-atomic",
+                amount=TOPUP_SATS,
+                mint_url="https://mint.test",
+            )
+
+    claim = _parse_routstr_request_id((await _claim_state()).request_id)  # type: ignore[union-attr]
+    assert claim is not None and claim.phase != ROUTSTR_PHASE_SENT
+    assert await _sent_tokens() == []
+
+
 async def test_token_is_persisted_before_it_reaches_the_peer(
     patched_db_engine: Any,
 ) -> None:
@@ -142,7 +171,7 @@ async def test_untracked_token_is_returned_and_never_sent(
         _patch_wallet(auto_topup_module, peer, "cashu-token-1"),
         patch.object(
             auto_topup_module,
-            "store_cashu_transaction",
+            "_persist_routstr_token_and_mark_sent",
             AsyncMock(side_effect=RuntimeError("database unavailable")),
         ),
         patch.object(

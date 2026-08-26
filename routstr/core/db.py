@@ -37,6 +37,9 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
     is_memory_sqlite = is_sqlite and url.database in {None, "", ":memory:"}
     pool_pre_ping = settings.database_pool_pre_ping or not is_sqlite
     options: dict[str, int | float | bool] = {"pool_pre_ping": pool_pre_ping}
+    connect_args: dict[str, object] = {}
+    if is_sqlite and not is_memory_sqlite:
+        connect_args["timeout"] = settings.database_busy_timeout
     if not is_memory_sqlite:
         options.update(
             pool_size=settings.database_pool_size,
@@ -51,9 +54,12 @@ def create_db_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
             "database_url_backend": backend,
             "in_memory_sqlite": is_memory_sqlite,
             **options,
+            "connect_args": connect_args,
         },
     )
-    created_engine = create_async_engine(database_url, echo=False, **options)
+    created_engine = create_async_engine(
+        database_url, echo=False, connect_args=connect_args, **options
+    )
     hold_warn_seconds = settings.database_pool_hold_warn_seconds
 
     def record_pool_checkout(

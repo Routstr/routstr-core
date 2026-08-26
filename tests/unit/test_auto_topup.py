@@ -1,4 +1,6 @@
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -65,12 +67,71 @@ async def test_auto_topup_refuses_invalid_settings_before_touching_the_wallet() 
             "routstr.upstream.auto_topup.RoutstrUpstreamProvider.from_db_row",
             return_value=provider,
         ),
-        patch("routstr.upstream.auto_topup.send_token", AsyncMock()) as send,
+        patch(
+            "routstr.upstream.auto_topup.send_token_from_owner_locked", AsyncMock()
+        ) as send,
     ):
         await _check_and_topup(row)
 
     provider.get_balance.assert_not_awaited()
     send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_routstr_outgoing_audit_is_persisted_under_wallet_guard() -> None:
+    provider = MagicMock()
+    provider.get_balance = AsyncMock(return_value=0.0)
+    provider.topup = AsyncMock(return_value={"error": "stop after send"})
+    inside_guard = False
+
+    @asynccontextmanager
+    async def guard() -> AsyncIterator[None]:
+        nonlocal inside_guard
+        inside_guard = True
+        try:
+            yield
+        finally:
+            inside_guard = False
+
+    async def send(*_args: object) -> str:
+        assert inside_guard
+        return "cashu-token"
+
+    async def persist(*_args: object, **_kwargs: object) -> None:
+        assert inside_guard
+
+    with (
+        patch(
+            "routstr.upstream.auto_topup.RoutstrUpstreamProvider.from_db_row",
+            return_value=provider,
+        ),
+        patch(
+            "routstr.upstream.auto_topup._reconcile_routstr_state",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "routstr.upstream.auto_topup._routstr_spent_last_24h_sats",
+            AsyncMock(return_value=0),
+        ),
+        patch(
+            "routstr.upstream.auto_topup._claim_routstr_topup",
+            AsyncMock(return_value="operation-1"),
+        ),
+        patch("routstr.upstream.auto_topup.wallet_operation_guard", side_effect=guard),
+        patch(
+            "routstr.upstream.auto_topup.send_token_from_owner_locked",
+            side_effect=send,
+        ),
+        patch(
+            "routstr.upstream.auto_topup._persist_routstr_token_and_mark_sent",
+            side_effect=persist,
+        ),
+        patch(
+            "routstr.upstream.auto_topup.token_mint_url",
+            return_value="https://mint.test",
+        ),
+    ):
+        await _check_and_topup(_row())
 
 
 def _ppq_row() -> MagicMock:
@@ -440,6 +501,30 @@ async def test_ppq_auto_topup_skips_when_balance_meets_threshold() -> None:
     ):
         await _check_and_topup(_ppq_row())
 
+    provider.initiate_topup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ppq_auto_topup_requires_two_below_threshold_reads() -> None:
+    provider = MagicMock()
+    provider.get_balance = AsyncMock(side_effect=[2.5, 5.0])
+    provider.initiate_topup = AsyncMock()
+
+    with (
+        patch(
+            "routstr.upstream.auto_topup.PPQAIUpstreamProvider.from_db_row",
+            return_value=provider,
+        ),
+        patch(
+            "routstr.upstream.auto_topup._reconcile_ppq_state",
+            AsyncMock(return_value=False),
+        ),
+        patch("routstr.upstream.auto_topup._claim_ppq_topup", AsyncMock()) as claim,
+    ):
+        await _check_and_topup(_ppq_row())
+
+    assert provider.get_balance.await_count == 2
+    claim.assert_not_awaited()
     provider.initiate_topup.assert_not_awaited()
 
 

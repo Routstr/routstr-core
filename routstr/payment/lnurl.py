@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ipaddress
-import math
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
@@ -10,8 +9,8 @@ from cashu.core.base import MeltQuoteState
 from cashu.wallet.wallet import Proof, Wallet
 
 from ..mint import (
-    MINT_TRANSPORT_EXCEPTIONS,
     is_mint_rate_limited,
+    is_mint_transport_error,
     run_mint_operation,
 )
 
@@ -226,6 +225,38 @@ async def get_lnurl_invoice(
     return invoice_data["pr"], invoice_data
 
 
+def _select_melt_proofs(
+    wallet: Wallet,
+    proofs: list[Proof],
+    *,
+    quote_amount: int,
+    fee_reserve: int,
+    gross_budget: int,
+) -> tuple[list[Proof] | None, int]:
+    """Select proofs that cover the quote and exact NUT-02 input fees.
+
+    Cashu 0.20's ``select_to_send`` may recursively swap when asked to spend a
+    wallet's full balance. Melts accept overpayment and return change, so a
+    bounded, largest-first selection is both safer and minimizes input fees.
+    """
+    selected: list[Proof] = []
+    selected_amount = 0
+    required = quote_amount + fee_reserve
+    for proof in sorted(proofs, key=lambda item: item.amount, reverse=True):
+        if getattr(proof, "reserved", False) is True:
+            continue
+        selected.append(proof)
+        selected_amount += proof.amount
+        input_fees = int(wallet.get_fees_for_proofs(selected))
+        required = quote_amount + fee_reserve + input_fees
+        if selected_amount >= required:
+            if required <= gross_budget:
+                return selected, 0
+            # Covered but over budget; more proofs only raise input fees.
+            break
+    return None, max(1, required - min(selected_amount, gross_budget))
+
+
 async def raw_send_to_lnurl(
     wallet: Wallet,
     proofs: list[Proof],
@@ -281,36 +312,51 @@ async def raw_send_to_lnurl(
             f"({min_sendable_sat} - {max_sendable_sat} {unit})"
         )
 
-    estimated_fees_sat = int(max(math.ceil((amount_msat / 1000) * 0.01), 2)) + 1
-    estimated_fees_msat = estimated_fees_sat * 1000
-    final_amount = amount_msat - estimated_fees_msat
+    final_amount = amount_msat
 
-    bolt11_invoice, _ = await get_lnurl_invoice(
-        lnurl_data["callback_url"], final_amount
-    )
-
-    melt_quote_resp = await run_mint_operation(
-        lambda: wallet.melt_quote(invoice=bolt11_invoice),
-        op_name="lnurl_melt_quote",
-        mint_url=str(wallet.url),
-    )
-
-    # The invoice comes from the LNURL service, so its amount is untrusted. The
-    # melt quote is the mint's own reading of it, and it must match what we
-    # asked to send. Checked before the checkpoint and before reserving, so a
-    # mismatch leaves no durable state and no locked proofs behind.
-    quoted_amount = int(melt_quote_resp.amount)
-    expected_amount = final_amount // 1000 if unit == "sat" else final_amount
-    if quoted_amount != expected_amount:
-        raise LNURLError(
-            f"LNURL invoice amount does not match the requested amount "
-            f"(quoted {quoted_amount} {unit}, expected {expected_amount} {unit})"
+    selected_proofs: list[Proof] | None = None
+    # Find the largest amount covered by the budget after reserve and input fees.
+    for _ in range(8):
+        if final_amount < lnurl_data["min_sendable"]:
+            raise LNURLError("Cashu melt fees leave no payable LNURL amount")
+        bolt11_invoice, _ = await get_lnurl_invoice(
+            lnurl_data["callback_url"], final_amount
         )
+        melt_quote_resp = await run_mint_operation(
+            lambda: wallet.melt_quote(invoice=bolt11_invoice),
+            op_name="lnurl_melt_quote",
+            mint_url=str(wallet.url),
+            # Quote creation is unsafe to retry without idempotency.
+            retry_timeouts=False,
+        )
+
+        quoted_amount = int(melt_quote_resp.amount)
+        expected_amount = final_amount // 1000 if unit == "sat" else final_amount
+        if quoted_amount != expected_amount:
+            raise LNURLError(
+                f"LNURL invoice amount does not match the requested amount "
+                f"(quoted {quoted_amount} {unit}, expected {expected_amount} {unit})"
+            )
+
+        selected_proofs, shortfall = _select_melt_proofs(
+            wallet,
+            proofs,
+            quote_amount=quoted_amount,
+            fee_reserve=int(melt_quote_resp.fee_reserve),
+            gross_budget=amount,
+        )
+        if selected_proofs is not None:
+            break
+        final_amount -= shortfall * (1000 if unit == "sat" else 1)
+    else:
+        raise LNURLError("Cashu melt fees exceed the requested gross amount")
 
     if on_melt_quote is not None:
         await on_melt_quote(melt_quote_resp.quote)
 
-    proofs, _ = await wallet.select_to_send(proofs, amount, set_reserved=True)
+    assert selected_proofs is not None
+    proofs = selected_proofs
+    await wallet.set_reserved_for_send(proofs, reserved=True)
 
     try:
         melt_response = await run_mint_operation(
@@ -331,15 +377,29 @@ async def raw_send_to_lnurl(
             # reserved as though a Lightning payment could still settle.
             await wallet.set_reserved_for_send(proofs, reserved=False)
             raise
-        if not isinstance(error, MINT_TRANSPORT_EXCEPTIONS):
+        if not is_mint_transport_error(error):
             raise
+        # Cashu clears reservations on transport errors despite an unknown outcome.
+        try:
+            await wallet.set_reserved_for_melt(
+                proofs, reserved=True, quote_id=melt_quote_resp.quote
+            )
+        except Exception as reservation_error:
+            raise MeltOutcomeAmbiguousError(
+                "Melt outcome is ambiguous and its proof reservation could not "
+                "be restored; proofs must not be retried"
+            ) from reservation_error
         melt_response = None
         melt_error: BaseException | None = error
     else:
         melt_error = None
 
-    if getattr(melt_response, "state", None) == MeltQuoteState.paid:
+    melt_state = getattr(melt_response, "state", None)
+    if melt_state == MeltQuoteState.paid:
         return final_amount
+    if melt_state == MeltQuoteState.unpaid:
+        await wallet.set_reserved_for_send(proofs, reserved=False)
+        raise LNURLError("Cashu mint confirmed that the melt was unpaid")
 
     try:
         quote = await run_mint_operation(
@@ -347,6 +407,8 @@ async def raw_send_to_lnurl(
             op_name="reconcile_lnurl_melt_quote",
             mint_url=str(wallet.url),
             retry_timeouts=False,
+            # Reconciliation must bypass the cooldown opened by this failure.
+            allow_during_cooldown=True,
         )
     except Exception as reconciliation_error:
         raise MeltOutcomeAmbiguousError(
@@ -356,6 +418,20 @@ async def raw_send_to_lnurl(
 
     if quote is not None and quote.state == MeltQuoteState.paid:
         return final_amount
+    if quote is not None and quote.state == MeltQuoteState.unpaid:
+        # A just-dispatched quote can briefly report unpaid before transitioning.
+        try:
+            await wallet.set_reserved_for_melt(
+                proofs, reserved=True, quote_id=melt_quote_resp.quote
+            )
+        except Exception as reservation_error:
+            raise MeltOutcomeAmbiguousError(
+                "Melt outcome is ambiguous and its proof reservation could not "
+                "be restored; proofs must not be retried"
+            ) from reservation_error
+        raise MeltOutcomeAmbiguousError(
+            "Melt outcome is ambiguous; an immediate unpaid state is not final"
+        ) from melt_error
 
     state = getattr(getattr(quote, "state", None), "value", "unknown")
     raise MeltOutcomeAmbiguousError(
