@@ -59,6 +59,13 @@ class Pricing(BaseModel):
     max_cost: float = 0.0  # in sats not msats
 
 
+# The rates ``Pricing`` declares without a default, derived from the model so the
+# two cannot drift. A payload that omits one writes a row that will not parse.
+REQUIRED_PRICING_FIELDS = tuple(
+    name for name, field in Pricing.__fields__.items() if field.required
+)
+
+
 def has_usable_pricing(pricing: Pricing) -> bool:
     """True if every billable rate is a number a request could be billed on.
 

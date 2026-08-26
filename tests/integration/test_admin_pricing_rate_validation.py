@@ -172,6 +172,67 @@ async def test_boolean_price_is_rejected(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_id", "pricing"),
+    [
+        ("null-prompt", _pricing(prompt=None)),
+        ("null-aux-rate", _pricing(image=None)),
+        ("no-prompt", {k: v for k, v in _pricing().items() if k != "prompt"}),
+    ],
+    ids=["null-required", "null-auxiliary", "absent-required"],
+)
+async def test_a_rate_that_is_not_there_is_rejected(
+    model_id: str,
+    pricing: dict[str, object],
+    integration_client: AsyncClient,
+    integration_session: AsyncSession,
+) -> None:
+    """A rate given as ``null``, or a required rate left out, is not a price.
+
+    The validator read both through ``dict.get``, which cannot tell an absent
+    key from an explicit ``null``, and skipped both. ``Pricing`` declares
+    ``prompt`` and ``completion`` without a default and every rate as a float,
+    so such a row is written with a 200 and then fails to parse on read — and
+    a row that will not parse is withheld from the catalog, leaving the operator
+    a model that was accepted and is nowhere to be seen.
+    """
+    provider_id = await _make_provider(integration_session)
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(provider_id, model_id=model_id, pricing=pricing),
+    )
+
+    assert resp.status_code == 422
+    assert await integration_session.get(ModelRow, (model_id, provider_id)) is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_absent_auxiliary_rate_is_still_accepted(
+    integration_client: AsyncClient, integration_session: AsyncSession
+) -> None:
+    """Only ``prompt`` and ``completion`` are required; the rest carry defaults,
+    and a payload that omits them must still be accepted."""
+    provider_id = await _make_provider(integration_session)
+
+    resp = await integration_client.post(
+        f"/admin/api/upstream-providers/{provider_id}/models",
+        headers=_admin_headers(),
+        json=_payload(
+            provider_id,
+            model_id="lean-price",
+            pricing={"prompt": 1.4e-7, "completion": 2.8e-7},
+        ),
+    )
+
+    assert resp.status_code == 200
+    assert await integration_session.get(ModelRow, ("lean-price", provider_id))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_numeric_string_price_is_still_accepted(
     integration_client: AsyncClient, integration_session: AsyncSession
 ) -> None:

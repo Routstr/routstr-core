@@ -12,6 +12,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import (
+    REQUIRED_PRICING_FIELDS,
     _row_to_model,
     list_models,
 )
@@ -528,26 +529,32 @@ class ModelCreate(BaseModel):
     @field_validator("pricing")
     @classmethod
     def _validate_pricing(cls, value: dict[str, object]) -> dict[str, object]:
-        """Reject a malformed, non-finite or negative billable rate at the edge.
+        """Reject a rate that is malformed, non-finite, negative or not there.
 
         A present-but-invalid rate would otherwise slip through: a non-numeric
         string coerces to $0 on the read path (an unpriced-looking row), while a
         negative or ``NaN``/``inf`` value is truthy and reads back as a real
         price, so the model could be enabled and bill a nonsensical amount.
         Surfacing a 422 reports the client bug as a client bug instead of
-        persisting it. Absent rates and numeric strings (``"0.000005"``) stay
-        valid — the stored JSON accepts both.
+        persisting it. Numeric strings (``"0.000005"``) stay valid, and so does
+        an omitted auxiliary rate — the stored JSON accepts both.
         """
         for field in BILLABLE_PRICING_FIELDS:
-            raw = value.get(field)
-            if raw is None:
+            if field not in value:
+                # ``dict.get`` cannot tell this from an explicit ``null``, so
+                # both were skipped and a row that ``Pricing`` cannot parse was
+                # written — and then raised out of the response that reads it
+                # back, after the row had been committed.
+                if field in REQUIRED_PRICING_FIELDS:
+                    raise ValueError(f"{field} is required")
                 continue
             # The shared coercion also absorbs the OverflowError an oversized
             # integer raises, which pydantic does not convert into a validation
             # error — unhandled it escaped as a 500 for a bad client value.
-            if coerce_rate(raw) is None:
+            if coerce_rate(value[field]) is None:
                 raise ValueError(
-                    f"{field} must be a finite, non-negative number, got {raw!r}"
+                    f"{field} must be a finite, non-negative number, "
+                    f"got {value[field]!r}"
                 )
         return value
 
