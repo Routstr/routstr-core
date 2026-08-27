@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr import wallet
 from routstr.core import db
+from routstr.payment.lnurl import LNURLError
 
 
 class _SessionContext:
@@ -523,6 +524,47 @@ async def test_fee_payout_keeps_legacy_checkpoint_without_quote_locked() -> None
 
     restore.assert_not_awaited()
     critical.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_fee_payout_failure_before_quote_is_not_reported_as_unknown() -> None:
+    session = Mock()
+    fee = SimpleNamespace(
+        accumulated_msats=1_061_000,
+        payout_in_progress_msats=0,
+        payout_started_at=None,
+    )
+    reset = AsyncMock()
+
+    with (
+        patch("routstr.auth.ROUTSTR_FEE_DEFAULT_PAYOUT", 1),
+        patch("routstr.auth.ROUTSTR_FEE_PAYOUT_INTERVAL_SECONDS", 1),
+        patch("routstr.auth.ROUTSTR_LN_ADDRESS", "fees@example.com"),
+        patch(
+            "routstr.wallet.asyncio.sleep",
+            AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+        ),
+        patch(
+            "routstr.wallet.db.create_session", return_value=_session_context(session)
+        ),
+        patch("routstr.wallet.db.get_routstr_fee", AsyncMock(return_value=fee)),
+        patch("routstr.wallet.db.reset_routstr_fee", reset),
+        patch("routstr.wallet.get_wallet", AsyncMock(return_value=Mock())),
+        patch("routstr.wallet.get_proofs_per_mint_and_unit", return_value=[]),
+        patch(
+            "routstr.wallet.raw_send_to_lnurl",
+            side_effect=LNURLError("Cashu melt fees leave no payable LNURL amount"),
+        ),
+        patch("routstr.wallet.logger.error") as error,
+        patch("routstr.wallet.logger.critical") as critical,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await wallet.periodic_routstr_fee_payout()
+
+    reset.assert_not_awaited()
+    critical.assert_not_called()
+    error.assert_called_once()
+    assert error.call_args.args[0] == "Routstr fee payout failed before melt dispatch"
 
 
 @pytest.mark.asyncio
