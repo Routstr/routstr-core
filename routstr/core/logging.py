@@ -130,16 +130,9 @@ class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
 
 
 class QueuedDailyRotatingFileHandler(logging.Handler):
-    """Queue records so request handlers never perform rotating-file I/O.
+    """Queue records so request handlers never perform rotating-file I/O."""
 
-    The handler reopens itself on the next record after being closed, the
-    way a plain ``FileHandler`` reopens its stream. That matters because
-    ``logging.config.dictConfig`` closes every live handler before applying a
-    new config, and uvicorn runs its own ``dictConfig`` *after* importing the
-    app module — so ``setup_logging``'s handlers are always closed once during
-    startup. Without the reopen the file log goes silent for the whole run.
-    """
-
+    _queue: queue.Queue[logging.LogRecord]
     _target: DailyRotatingFileHandler
     _listener: logging.handlers.QueueListener
 
@@ -147,16 +140,18 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
         super().__init__()
         self._filename = filename
         self._kwargs = kwargs
-        self._queue: queue.Queue[logging.LogRecord] = queue.Queue()
         self._open()
 
     def _open(self) -> None:
-        """Attach a fresh rotating file handler and start draining the queue."""
+        """Attach a fresh rotating file handler and start draining it."""
+        # A new queue per listener: QueueListener's stop sentinel is a shared
+        # singleton, so two listeners on one queue would steal each other's.
+        self._queue = queue.Queue()
         self._target = DailyRotatingFileHandler(self._filename, **self._kwargs)
         self._target.setFormatter(self.formatter)
         self._listener = logging.handlers.QueueListener(self._queue, self._target)
         self._listener.start()
-        self._closed = False
+        self._stopped = False
 
     def setFormatter(self, fmt: logging.Formatter | None) -> None:
         super().setFormatter(fmt)
@@ -165,33 +160,32 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         self.acquire()
         try:
-            if self._closed:
+            # uvicorn's dictConfig closes us mid-startup; reopen like FileHandler does.
+            if self._stopped:
                 self._open()
             self._queue.put_nowait(copy.copy(record))
         finally:
             self.release()
 
     def flush(self) -> None:
-        if self._closed:
+        if self._stopped:
             return
         self._queue.join()
         self._target.flush()
 
     def close(self) -> None:
+        # Held across the teardown so a concurrent emit cannot reopen us
+        # halfway through it. The listener thread never takes this lock.
         self.acquire()
         try:
-            if self._closed:
+            if self._stopped:
                 return
-            self._closed = True
-            listener, target = self._listener, self._target
+            self._stopped = True
+            self._listener.stop()
+            self._target.flush()
+            self._target.close()
         finally:
             self.release()
-
-        # Outside the lock: stop() waits for the listener thread, which needs
-        # to take the same lock on its way through the target handler.
-        listener.stop()
-        target.flush()
-        target.close()
 
 
 def get_package_version() -> str:

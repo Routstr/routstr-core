@@ -1,4 +1,5 @@
 import logging
+import threading
 from pathlib import Path
 
 from routstr.core.logging import QueuedDailyRotatingFileHandler
@@ -38,5 +39,46 @@ def test_queued_file_handler_keeps_logging_after_close(tmp_path: Path) -> None:
 
     log_path = next(tmp_path.glob("app_*.log"))
     assert "after close" in log_path.read_text()
+
+    handler.close()
+
+
+def test_queued_file_handler_survives_close_racing_with_emit(tmp_path: Path) -> None:
+    """Closing while another thread logs must not hang or orphan the queue."""
+    handler = QueuedDailyRotatingFileHandler(
+        str(tmp_path / "app.log"), when="midnight", backupCount=1
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    logger = logging.Logger("queued-file-race-test")
+    logger.addHandler(handler)
+
+    done = threading.Event()
+
+    def spam() -> None:
+        while not done.is_set():
+            logger.info("racing record")
+
+    def churn() -> None:
+        for _ in range(50):
+            handler.close()
+
+    emitter = threading.Thread(target=spam)
+    closer = threading.Thread(target=churn)
+    emitter.start()
+    closer.start()
+
+    closer.join(timeout=10)
+    done.set()
+    emitter.join(timeout=10)
+
+    assert not closer.is_alive(), "close() deadlocked against a concurrent emit()"
+    assert not emitter.is_alive(), "emit() deadlocked against a concurrent close()"
+
+    logger.info("final record")
+    handler.flush()
+
+    log_path = next(tmp_path.glob("app_*.log"))
+    assert "final record" in log_path.read_text()
 
     handler.close()
