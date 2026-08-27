@@ -3928,10 +3928,9 @@ class BaseUpstreamProvider:
                     data_json = json.loads(line[6:])
                     if not isinstance(data_json, dict):
                         continue
-                    changed = False
-                    if "provider" not in data_json:
-                        self._apply_provider_field(data_json)
-                        changed = True
+                    provider_before = data_json.get("provider")
+                    self._apply_provider_field(data_json)
+                    changed = data_json.get("provider") != provider_before
                     if cost_data and "usage" in data_json and data_json["usage"]:
                         _inject_cost_into_usage(data_json, cost_data)
                         changed = True
@@ -4937,10 +4936,9 @@ class BaseUpstreamProvider:
                 continue
             if not isinstance(data_json, dict):
                 continue
-            changed = False
-            if "provider" not in data_json:
-                self._apply_provider_field(data_json)
-                changed = True
+            provider_before = data_json.get("provider")
+            self._apply_provider_field(data_json)
+            changed = data_json.get("provider") != provider_before
             payload = _responses_usage_payload(data_json)
             if cost_data and isinstance(payload.get("usage"), dict):
                 _inject_cost_into_usage(payload, cost_data)
