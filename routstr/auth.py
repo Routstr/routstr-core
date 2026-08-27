@@ -1311,7 +1311,7 @@ async def _charge_reservation_rows(
     return True
 
 
-async def adjust_payment_for_tokens(
+async def _adjust_payment_for_tokens(
     key: ApiKey,
     response_data: dict,
     session: AsyncSession,
@@ -1765,6 +1765,44 @@ async def adjust_payment_for_tokens(
             )
     # All calculate_cost variants are handled above.
     raise AssertionError("Unreachable: unhandled calculate_cost result")
+
+
+async def adjust_payment_for_tokens(
+    key: ApiKey,
+    response_data: dict,
+    session: AsyncSession,
+    deducted_max_cost: int,
+    model_obj: "Model | None" = None,
+    provider_fee: float | None = None,
+    reservation_snapshot: ReservationSnapshot | None = None,
+) -> dict:
+    """Settle payment while exposing latency for every import path."""
+    started = time.perf_counter()
+    succeeded = False
+    try:
+        result = await _adjust_payment_for_tokens(
+            key,
+            response_data,
+            session,
+            deducted_max_cost,
+            model_obj,
+            provider_fee,
+            reservation_snapshot,
+        )
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key.hashed_key[:8] + "...",
+                "model": response_data.get("model", "unknown"),
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
 
 
 async def periodic_key_reset() -> None:

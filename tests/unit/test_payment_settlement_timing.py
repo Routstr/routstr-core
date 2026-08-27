@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-import routstr.upstream.base as base_module
+import routstr.auth as auth_module
 from routstr.core.db import ApiKey
 
 
@@ -16,12 +16,12 @@ async def test_payment_settlement_logs_its_duration(
         return {"total_cost": 1}
 
     log_info = Mock()
-    monkeypatch.setattr(base_module, "_adjust_payment_for_tokens", settle)
-    monkeypatch.setattr(base_module.logger, "info", log_info)
+    monkeypatch.setattr(auth_module, "_adjust_payment_for_tokens", settle)
+    monkeypatch.setattr(auth_module.logger, "info", log_info)
     key = ApiKey(hashed_key="abcdefgh1234", balance=0)
     session = AsyncSession()
 
-    result = await base_module.adjust_payment_for_tokens(key, {}, session, 10)
+    result = await auth_module.adjust_payment_for_tokens(key, {}, session, 10)
     await session.close()
 
     assert result == {"total_cost": 1}
@@ -41,13 +41,13 @@ async def test_payment_settlement_logs_failure_without_swallowing_it(
         raise RuntimeError("database locked")
 
     log_info = Mock()
-    monkeypatch.setattr(base_module, "_adjust_payment_for_tokens", fail)
-    monkeypatch.setattr(base_module.logger, "info", log_info)
+    monkeypatch.setattr(auth_module, "_adjust_payment_for_tokens", fail)
+    monkeypatch.setattr(auth_module.logger, "info", log_info)
     key = ApiKey(hashed_key="abcdefgh1234", balance=0)
     session = AsyncSession()
 
     with pytest.raises(RuntimeError, match="database locked"):
-        await base_module.adjust_payment_for_tokens(key, {}, session, 10)
+        await auth_module.adjust_payment_for_tokens(key, {}, session, 10)
     await session.close()
 
     extra = log_info.call_args.kwargs["extra"]

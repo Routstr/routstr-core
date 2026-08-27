@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import math
-import time
 import traceback
 import typing
 import uuid
@@ -18,11 +17,9 @@ from pydantic.v1 import BaseModel
 
 from ..auth import (
     ReservationSnapshot,
+    adjust_payment_for_tokens,
     get_reservation_snapshot,
     release_reservation,
-)
-from ..auth import (
-    adjust_payment_for_tokens as _adjust_payment_for_tokens,
 )
 from ..core import get_logger
 from ..core.db import (
@@ -99,44 +96,6 @@ async def _finalize_and_close_stream(
             await _aclose_if_needed(response)
         finally:
             await _aclose_if_needed(client)
-
-
-async def adjust_payment_for_tokens(
-    key: ApiKey,
-    response_data: dict,
-    session: AsyncSession,
-    deducted_max_cost: int,
-    model_obj: Model | None = None,
-    provider_fee: float | None = None,
-    reservation_snapshot: ReservationSnapshot | None = None,
-) -> dict:
-    """Settle payment while exposing the latency that delays final responses."""
-    started = time.perf_counter()
-    succeeded = False
-    try:
-        result = await _adjust_payment_for_tokens(
-            key,
-            response_data,
-            session,
-            deducted_max_cost,
-            model_obj,
-            provider_fee,
-            reservation_snapshot,
-        )
-        succeeded = True
-        return result
-    finally:
-        logger.info(
-            "Payment settlement finished",
-            extra={
-                "key_hash": key.hashed_key[:8] + "...",
-                "model": response_data.get("model", "unknown"),
-                "settlement_duration_ms": round(
-                    (time.perf_counter() - started) * 1000, 2
-                ),
-                "settlement_succeeded": succeeded,
-            },
-        )
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -3191,16 +3150,20 @@ class BaseUpstreamProvider:
 
                     if is_streaming and response.status_code == 200:
                         background_tasks = BackgroundTasks()
-                        return await self.handle_streaming_chat_completion(
-                            response,
-                            key,
-                            max_cost_for_model,
-                            background_tasks,
-                            requested_model=original_model_id,
-                            model_obj=model_obj,
-                            reservation_snapshot=reservation_snapshot,
-                            request_body=request_body,
-                        )
+                        try:
+                            return await self.handle_streaming_chat_completion(
+                                response,
+                                key,
+                                max_cost_for_model,
+                                background_tasks,
+                                requested_model=original_model_id,
+                                model_obj=model_obj,
+                                reservation_snapshot=reservation_snapshot,
+                                request_body=request_body,
+                            )
+                        except BaseException:
+                            await response.aclose()
+                            raise
 
                 # Handle both non-streaming chat completions and embeddings
                 if response.status_code == 200:
@@ -3270,16 +3233,23 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            if isinstance(exc, httpx.ConnectError):
+            if isinstance(exc, httpx.PoolTimeout):
+                error_message = "Upstream connection pool is busy"
+                status_code = 503
+            elif isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
+                status_code = 502
             elif isinstance(exc, httpx.TimeoutException):
                 error_message = "Upstream service request timed out"
+                status_code = 502
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
+                status_code = 502
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
+                status_code = 502
 
-            raise UpstreamError(error_message, status_code=502)
+            raise UpstreamError(error_message, status_code=status_code)
 
         except Exception as exc:
             tb = traceback.format_exc()
@@ -3461,15 +3431,19 @@ class BaseUpstreamProvider:
                 )
 
                 if is_streaming and response.status_code == 200:
-                    return await self.handle_streaming_responses_completion(
-                        response,
-                        key,
-                        max_cost_for_model,
-                        requested_model=original_model_id,
-                        model_obj=model_obj,
-                        reservation_snapshot=reservation_snapshot,
-                        request_body=transformed_body,
-                    )
+                    try:
+                        return await self.handle_streaming_responses_completion(
+                            response,
+                            key,
+                            max_cost_for_model,
+                            requested_model=original_model_id,
+                            model_obj=model_obj,
+                            reservation_snapshot=reservation_snapshot,
+                            request_body=transformed_body,
+                        )
+                    except BaseException:
+                        await response.aclose()
+                        raise
 
                 if response.status_code == 200:
                     try:
@@ -3538,16 +3512,23 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            if isinstance(exc, httpx.ConnectError):
+            if isinstance(exc, httpx.PoolTimeout):
+                error_message = "Upstream connection pool is busy"
+                status_code = 503
+            elif isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
+                status_code = 502
             elif isinstance(exc, httpx.TimeoutException):
                 error_message = "Upstream service request timed out"
+                status_code = 502
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
+                status_code = 502
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
+                status_code = 502
 
-            raise UpstreamError(error_message, status_code=502)
+            raise UpstreamError(error_message, status_code=status_code)
 
         except Exception as exc:
             tb = traceback.format_exc()
@@ -3640,9 +3621,19 @@ class BaseUpstreamProvider:
                 headers=response_headers,
                 background=background_tasks,
             )
-        except Exception as exc:
+        except BaseException as exc:
             if response is not None:
                 await response.aclose()
+            if isinstance(exc, httpx.PoolTimeout):
+                return create_error_response(
+                    "service_unavailable",
+                    "Upstream connection pool is busy",
+                    503,
+                    request=request,
+                )
+            if not isinstance(exc, Exception):
+                raise
+
             tb = traceback.format_exc()
             logger.error(
                 "Error forwarding GET request",

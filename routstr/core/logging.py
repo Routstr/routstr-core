@@ -44,6 +44,7 @@ import os
 import queue
 import re
 import sys
+import time
 import tomllib
 from datetime import datetime
 from pathlib import Path
@@ -135,23 +136,35 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
     _queue: queue.Queue[logging.LogRecord]
     _target: DailyRotatingFileHandler
     _listener: logging.handlers.QueueListener
+    _drain_timeout_seconds = 5.0
 
     def __init__(self, filename: str, **kwargs: Any) -> None:
         super().__init__()
         self._filename = filename
         self._kwargs = kwargs
+        self._stopped = True
         self._open()
 
     def _open(self) -> None:
         """Attach a fresh rotating file handler and start draining it."""
         # A new queue per listener: QueueListener's stop sentinel is a shared
         # singleton, so two listeners on one queue would steal each other's.
-        self._queue = queue.Queue()
-        self._target = DailyRotatingFileHandler(self._filename, **self._kwargs)
-        self._target.setFormatter(self.formatter)
-        self._listener = logging.handlers.QueueListener(self._queue, self._target)
-        self._listener.start()
+        record_queue: queue.Queue[logging.LogRecord] = queue.Queue()
+        target = DailyRotatingFileHandler(self._filename, **self._kwargs)
+        target.setFormatter(self.formatter)
+        listener = logging.handlers.QueueListener(record_queue, target)
+        try:
+            listener.start()
+        except Exception:
+            target.close()
+            raise
+
+        self._queue = record_queue
+        self._target = target
+        self._listener = listener
         self._stopped = False
+        if not any(reference() is self for reference in logging._handlerList):
+            logging._addHandlerRef(self)
 
     def setFormatter(self, fmt: logging.Formatter | None) -> None:
         super().setFormatter(fmt)
@@ -160,32 +173,57 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         self.acquire()
         try:
-            # uvicorn's dictConfig closes us mid-startup; reopen like FileHandler does.
-            if self._stopped:
-                self._open()
-            self._queue.put_nowait(copy.copy(record))
+            try:
+                # uvicorn's dictConfig closes us mid-startup; reopen like FileHandler does.
+                if self._stopped:
+                    self._open()
+                self._queue.put_nowait(copy.copy(record))
+            except Exception:
+                self.handleError(record)
         finally:
             self.release()
 
     def flush(self) -> None:
-        if self._stopped:
-            return
-        self._queue.join()
-        self._target.flush()
+        self.acquire()
+        try:
+            if self._stopped:
+                return
+
+            deadline = time.monotonic() + self._drain_timeout_seconds
+            with self._queue.all_tasks_done:
+                while self._queue.unfinished_tasks:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    self._queue.all_tasks_done.wait(remaining)
+            self._target.flush()
+        finally:
+            self.release()
+
+    def _stop_listener(self) -> bool:
+        thread = self._listener._thread
+        if thread is None:
+            return True
+        self._listener.enqueue_sentinel()
+        thread.join(timeout=self._drain_timeout_seconds)
+        if thread.is_alive():
+            return False
+        self._listener._thread = None
+        return True
 
     def close(self) -> None:
         # Held across the teardown so a concurrent emit cannot reopen us
         # halfway through it. The listener thread never takes this lock.
         self.acquire()
         try:
-            if self._stopped:
-                return
-            self._stopped = True
-            self._listener.stop()
-            self._target.flush()
-            self._target.close()
+            if not self._stopped:
+                self._stopped = True
+                if self._stop_listener():
+                    self._target.flush()
+                    self._target.close()
         finally:
             self.release()
+            super().close()
 
 
 def get_package_version() -> str:

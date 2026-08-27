@@ -2,6 +2,7 @@ import logging
 import threading
 from pathlib import Path
 
+import routstr.core.logging as routstr_logging
 from routstr.core.logging import QueuedDailyRotatingFileHandler
 
 
@@ -33,14 +34,43 @@ def test_queued_file_handler_keeps_logging_after_close(tmp_path: Path) -> None:
     logger.addHandler(handler)
     logger.info("before close")
     handler.close()
+    assert handler._closed
 
+    logging._handlerList[:] = [
+        reference for reference in logging._handlerList if reference() is not handler
+    ]
     logger.info("after close")
     handler.flush()
+
+    assert any(reference() is handler for reference in logging._handlerList)
 
     log_path = next(tmp_path.glob("app_*.log"))
     assert "after close" in log_path.read_text()
 
     handler.close()
+
+
+def test_queued_file_handler_contains_reopen_failures(
+    tmp_path: Path, monkeypatch
+) -> None:
+    handler = QueuedDailyRotatingFileHandler(
+        str(tmp_path / "app.log"), when="midnight", backupCount=1
+    )
+    logger = logging.Logger("queued-file-failure-test")
+    logger.addHandler(handler)
+    handler.close()
+
+    def fail_to_open(*args, **kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(routstr_logging, "DailyRotatingFileHandler", fail_to_open)
+    previous = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        logger.info("must not reach billing")
+    finally:
+        logging.raiseExceptions = previous
+        handler.close()
 
 
 def test_queued_file_handler_survives_close_racing_with_emit(tmp_path: Path) -> None:
