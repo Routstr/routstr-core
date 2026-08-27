@@ -130,15 +130,33 @@ class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
 
 
 class QueuedDailyRotatingFileHandler(logging.Handler):
-    """Queue records so request handlers never perform rotating-file I/O."""
+    """Queue records so request handlers never perform rotating-file I/O.
+
+    The handler reopens itself on the next record after being closed, the
+    way a plain ``FileHandler`` reopens its stream. That matters because
+    ``logging.config.dictConfig`` closes every live handler before applying a
+    new config, and uvicorn runs its own ``dictConfig`` *after* importing the
+    app module — so ``setup_logging``'s handlers are always closed once during
+    startup. Without the reopen the file log goes silent for the whole run.
+    """
+
+    _target: DailyRotatingFileHandler
+    _listener: logging.handlers.QueueListener
 
     def __init__(self, filename: str, **kwargs: Any) -> None:
         super().__init__()
-        self._target = DailyRotatingFileHandler(filename, **kwargs)
+        self._filename = filename
+        self._kwargs = kwargs
         self._queue: queue.Queue[logging.LogRecord] = queue.Queue()
+        self._open()
+
+    def _open(self) -> None:
+        """Attach a fresh rotating file handler and start draining the queue."""
+        self._target = DailyRotatingFileHandler(self._filename, **self._kwargs)
+        self._target.setFormatter(self.formatter)
         self._listener = logging.handlers.QueueListener(self._queue, self._target)
-        self._closed = False
         self._listener.start()
+        self._closed = False
 
     def setFormatter(self, fmt: logging.Formatter | None) -> None:
         super().setFormatter(fmt)
@@ -147,8 +165,9 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         self.acquire()
         try:
-            if not self._closed:
-                self._queue.put_nowait(copy.copy(record))
+            if self._closed:
+                self._open()
+            self._queue.put_nowait(copy.copy(record))
         finally:
             self.release()
 
@@ -164,15 +183,15 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
             if self._closed:
                 return
             self._closed = True
+            listener, target = self._listener, self._target
         finally:
             self.release()
 
-        try:
-            self._listener.stop()
-            self._target.flush()
-            self._target.close()
-        finally:
-            super().close()
+        # Outside the lock: stop() waits for the listener thread, which needs
+        # to take the same lock on its way through the target handler.
+        listener.stop()
+        target.flush()
+        target.close()
 
 
 def get_package_version() -> str:
