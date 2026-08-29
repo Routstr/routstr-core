@@ -2647,11 +2647,18 @@ async def periodic_routstr_fee_payout() -> None:
                     logger.warning("Routstr fee payout was already claimed")
                     continue
                 except BaseException as e:
-                    logger.critical(
-                        "Routstr fee payout outcome is unknown; awaiting quote reconciliation",
-                        extra={"payout_in_progress_msats": paid_msats},
-                        exc_info=isinstance(e, Exception),
-                    )
+                    if attempt_quote_id is None:
+                        logger.error(
+                            "Routstr fee payout failed before melt dispatch",
+                            extra={"payout_msats": paid_msats},
+                            exc_info=isinstance(e, Exception),
+                        )
+                    else:
+                        logger.critical(
+                            "Routstr fee payout outcome is unknown; awaiting quote reconciliation",
+                            extra={"payout_in_progress_msats": paid_msats},
+                            exc_info=isinstance(e, Exception),
+                        )
                     if not isinstance(e, Exception):
                         raise
                     continue
