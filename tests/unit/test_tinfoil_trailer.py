@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from routstr.core.exceptions import EhbpTimeoutError, UpstreamError
 from routstr.upstream.tinfoil_trailer import forward_with_trailer
 
 
@@ -26,6 +28,14 @@ class FakeWriter:
 
     def write(self, data: bytes) -> None:
         self.written += data
+
+
+class HangingReader:
+    """A reader that never returns data, used to trigger a read timeout."""
+
+    async def read(self, _size: int) -> bytes:
+        await asyncio.sleep(3600)
+        return b""
 
 
 @pytest.mark.asyncio
@@ -136,3 +146,53 @@ async def test_forward_with_trailer_enforces_response_size_limit(
         )
 
     writer.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_forward_with_trailer_connect_timeout_raises_ehbp_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _hang_connect(*_args: object, **_kwargs: object) -> object:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection", _hang_connect
+    )
+
+    with pytest.raises(EhbpTimeoutError, match="connecting"):
+        await forward_with_trailer(
+            method="POST",
+            url="https://enclave.tinfoil.sh/v1/chat/completions",
+            headers={},
+            body=b"opaque",
+        )
+
+
+@pytest.mark.asyncio
+async def test_forward_with_trailer_read_timeout_raises_ehbp_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = HangingReader()
+    writer = FakeWriter()
+    monkeypatch.setattr(
+        "routstr.upstream.tinfoil_trailer.asyncio.open_connection",
+        AsyncMock(return_value=(reader, writer)),
+    )
+
+    with pytest.raises(EhbpTimeoutError, match="waiting for response data"):
+        await forward_with_trailer(
+            method="POST",
+            url="https://enclave.tinfoil.sh/v1/chat/completions",
+            headers={},
+            body=b"opaque",
+            timeout_seconds=0.01,
+        )
+
+    writer.close.assert_called_once()
+
+
+def test_ehbp_timeout_error_metadata() -> None:
+    exc = EhbpTimeoutError("boom")
+    assert exc.status_code == 504
+    assert exc.code == "UPSTREAM_TIMEOUT"
+    assert isinstance(exc, UpstreamError)
