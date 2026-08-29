@@ -163,8 +163,9 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
         self._target = target
         self._listener = listener
         self._stopped = False
-        if not any(reference() is self for reference in logging._handlerList):
-            logging._addHandlerRef(self)
+        handler_list = getattr(logging, "_handlerList")
+        if not any(reference() is self for reference in handler_list):
+            getattr(logging, "_addHandlerRef")(self)
 
     def setFormatter(self, fmt: logging.Formatter | None) -> None:
         super().setFormatter(fmt)

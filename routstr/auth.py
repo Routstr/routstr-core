@@ -1778,6 +1778,7 @@ async def adjust_payment_for_tokens(
 ) -> dict:
     """Settle payment while exposing latency for every import path."""
     started = time.perf_counter()
+    key_log_hash = key.hashed_key[:8] + "..."
     succeeded = False
     try:
         result = await _adjust_payment_for_tokens(
@@ -1795,7 +1796,7 @@ async def adjust_payment_for_tokens(
         logger.info(
             "Payment settlement finished",
             extra={
-                "key_hash": key.hashed_key[:8] + "...",
+                "key_hash": key_log_hash,
                 "model": response_data.get("model", "unknown"),
                 "settlement_duration_ms": round(
                     (time.perf_counter() - started) * 1000, 2

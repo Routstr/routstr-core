@@ -2,6 +2,8 @@ import logging
 import threading
 from pathlib import Path
 
+import pytest
+
 import routstr.core.logging as routstr_logging
 from routstr.core.logging import QueuedDailyRotatingFileHandler
 
@@ -34,15 +36,16 @@ def test_queued_file_handler_keeps_logging_after_close(tmp_path: Path) -> None:
     logger.addHandler(handler)
     logger.info("before close")
     handler.close()
-    assert handler._closed
+    assert getattr(handler, "_closed")
 
-    logging._handlerList[:] = [
-        reference for reference in logging._handlerList if reference() is not handler
+    handler_list = getattr(logging, "_handlerList")
+    handler_list[:] = [
+        reference for reference in handler_list if reference() is not handler
     ]
     logger.info("after close")
     handler.flush()
 
-    assert any(reference() is handler for reference in logging._handlerList)
+    assert any(reference() is handler for reference in handler_list)
 
     log_path = next(tmp_path.glob("app_*.log"))
     assert "after close" in log_path.read_text()
@@ -51,7 +54,7 @@ def test_queued_file_handler_keeps_logging_after_close(tmp_path: Path) -> None:
 
 
 def test_queued_file_handler_contains_reopen_failures(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     handler = QueuedDailyRotatingFileHandler(
         str(tmp_path / "app.log"), when="midnight", backupCount=1
@@ -60,7 +63,7 @@ def test_queued_file_handler_contains_reopen_failures(
     logger.addHandler(handler)
     handler.close()
 
-    def fail_to_open(*args, **kwargs):
+    def fail_to_open(*args: object, **kwargs: object) -> None:
         raise OSError("disk unavailable")
 
     monkeypatch.setattr(routstr_logging, "DailyRotatingFileHandler", fail_to_open)

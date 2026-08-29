@@ -34,7 +34,7 @@ async def test_upstream_http_client_has_bounded_pool_wait_and_read_timeout() -> 
     try:
         assert client.timeout.pool == 5.0
         assert client.timeout.read == 300.0
-        assert client._transport._pool._max_connections == 100
+        assert getattr(client._transport, "_pool")._max_connections == 100
     finally:
         await close_upstream_http_client()
 
@@ -63,7 +63,9 @@ async def test_upstream_http_client_does_not_share_cookies() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upstream_http_client_cannot_reopen_during_shutdown(monkeypatch) -> None:
+async def test_upstream_http_client_cannot_reopen_during_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = get_upstream_http_client()
     close_started = asyncio.Event()
     allow_close = asyncio.Event()
