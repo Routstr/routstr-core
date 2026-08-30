@@ -244,6 +244,12 @@ def _path_entry(
             or ("anthropic" if provider_id == 1 else "openrouter"),
         },
         "endpoint": endpoint,
+        "model": {
+            "id": model_id,
+            "forwarded_model_id": None,
+            "canonical_slug": None,
+            "enabled": True,
+        },
     }
 
 
@@ -365,6 +371,37 @@ async def test_direct_provider_single_path_uses_provider_type(
         {"id": "claude-opus-4.6", "paths": [_path_entry(1, "claude-opus-4.6")]}
     ]
     assert payload["updated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_all_model_paths_includes_details_for_each_path(
+    patched_session: AsyncEngine,
+) -> None:
+    model = _model("claude-opus-4.6")
+    model.name = "Claude Opus 4.6"
+    model.description = "Anthropic's most capable model"
+    model.pricing = {"prompt": 0.000001, "completion": 0.000002}
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        models=[model],
+        db_id=1,
+    )
+    await mp.refresh_model_paths([provider])
+
+    payload = await mp.get_all_model_paths()
+
+    expected_path = _path_entry(1, "claude-opus-4.6")
+    expected_path["model"] = {
+        "id": "claude-opus-4.6",
+        "forwarded_model_id": None,
+        "canonical_slug": None,
+        "enabled": True,
+        "name": "Claude Opus 4.6",
+        "description": "Anthropic's most capable model",
+        "pricing": {"prompt": 0.000001, "completion": 0.000002},
+    }
+    assert payload["data"] == [{"id": "claude-opus-4.6", "paths": [expected_path]}]
 
 
 @pytest.mark.asyncio
@@ -564,9 +601,12 @@ async def test_refresh_model_paths_uses_db_forwarded_alias(
 
     await mp.refresh_model_paths([provider])
 
-    assert (await mp.get_all_model_paths())["data"] == [
-        {"id": "public-alias", "paths": [_path_entry(1, "public-alias")]}
-    ]
+    payload = await mp.get_all_model_paths()
+    assert _paths_of(payload, "public-alias") == {_expected_path(1, "public-alias")}
+    model = payload["data"][0]["paths"][0]["model"]
+    assert model["id"] == "public-alias"
+    assert model["description"] == "test model"
+    assert model["pricing"] == {"prompt": 0.000001, "completion": 0.000002}
 
 
 @pytest.mark.asyncio
@@ -586,12 +626,14 @@ async def test_refresh_model_paths_includes_enabled_db_override_missing_from_cac
 
     await mp.refresh_model_paths([provider])
 
-    assert (await mp.get_all_model_paths())["data"] == [
-        {
-            "id": "public-deployment",
-            "paths": [_path_entry(1, "public-deployment")],
-        }
-    ]
+    payload = await mp.get_all_model_paths()
+    assert _paths_of(payload, "public-deployment") == {
+        _expected_path(1, "public-deployment")
+    }
+    model = payload["data"][0]["paths"][0]["model"]
+    assert model["id"] == "public-deployment"
+    assert model["description"] == "test model"
+    assert model["context_length"] == 8192
 
 
 @pytest.mark.asyncio
@@ -763,6 +805,78 @@ async def test_openrouter_provider_adds_endpoint_paths(
         item["endpoint"]["name"] for item in payload["data"] if item["endpoint"]
     } == {"Google"}
     assert {item["provider"]["id"] for item in payload["data"]} == {2}
+
+
+@pytest.mark.asyncio
+async def test_openrouter_paths_include_endpoint_specific_model_prices(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _FakeOpenRouterProvider(
+        models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
+        db_id=2,
+    )
+    endpoint_response = httpx.Response(
+        200,
+        json={
+            "data": {
+                "id": "anthropic/claude-opus-4.6",
+                "name": "Claude Opus 4.6",
+                "description": "Anthropic's most capable model",
+                "architecture": {
+                    "input_modalities": ["text", "image"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "Claude",
+                    "instruct_type": None,
+                },
+                "endpoints": [
+                    {
+                        "provider_name": "Anthropic",
+                        "tag": "anthropic",
+                        "context_length": 200_000,
+                        "pricing": {
+                            "prompt": "0.000005",
+                            "completion": "0.000025",
+                        },
+                    },
+                    {
+                        "provider_name": "Google",
+                        "tag": "google-vertex/us",
+                        "context_length": 128_000,
+                        "pricing": {
+                            "prompt": "0.000003",
+                            "completion": "0.000015",
+                        },
+                    },
+                ],
+            }
+        },
+    )
+    _mock_transport(monkeypatch, lambda request: endpoint_response)
+
+    await mp.refresh_model_paths([provider])
+
+    payload = await mp.get_all_model_paths()
+    assert payload["data"][0]["id"] == "claude-opus-4.6"
+    paths_by_endpoint = {
+        item["endpoint"]["tag"]: item
+        for item in payload["data"][0]["paths"]
+        if item["endpoint"] is not None
+    }
+
+    anthropic = paths_by_endpoint["anthropic"]["model"]
+    google = paths_by_endpoint["google-vertex/us"]["model"]
+    assert anthropic["description"] == "Anthropic's most capable model"
+    assert google["description"] == "Anthropic's most capable model"
+    assert anthropic["pricing"] == {
+        "prompt": "0.000005",
+        "completion": "0.000025",
+    }
+    assert google["pricing"] == {
+        "prompt": "0.000003",
+        "completion": "0.000015",
+    }
+    assert anthropic["context_length"] == 200_000
+    assert google["context_length"] == 128_000
 
 
 @pytest.mark.asyncio

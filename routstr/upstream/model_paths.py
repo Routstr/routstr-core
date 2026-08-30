@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import random
 import time
 from dataclasses import dataclass
@@ -60,10 +61,11 @@ ModelKey = tuple[str, int]
 
 @dataclass(frozen=True)
 class EndpointIdentity:
-    """Exact OpenRouter endpoint identity returned by ``/endpoints``."""
+    """Exact OpenRouter endpoint and its provider-specific model metadata."""
 
     tag: str
     provider_name: str | None
+    model_metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ class DiscoveredPath:
     model_id: str
     path: str
     provider: ConfiguredProviderIdentity
+    model_metadata: dict[str, Any]
     endpoint_tag: str | None = None
     endpoint_name: str | None = None
 
@@ -263,9 +266,14 @@ async def _fetch_openrouter_endpoint_subproviders(
     try:
         payload = resp.json()
         data = payload.get("data") if isinstance(payload, dict) else None
-        endpoints = data.get("endpoints") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("data must be an object")
+        endpoints = data.get("endpoints")
         if not isinstance(endpoints, list):
             raise ValueError("endpoints must be a list")
+        common_metadata = {
+            key: value for key, value in data.items() if key != "endpoints"
+        }
         identities: dict[str, EndpointIdentity] = {}
         for endpoint in endpoints:
             if not isinstance(endpoint, dict):
@@ -281,6 +289,7 @@ async def _fetch_openrouter_endpoint_subproviders(
                     provider_name=provider_name
                     if isinstance(provider_name, str) and provider_name
                     else None,
+                    model_metadata={**common_metadata, **endpoint},
                 ),
             )
         if endpoints and not identities:
@@ -341,6 +350,34 @@ async def _load_model_visibility() -> tuple[
     return overrides_by_key, disabled_model_keys, provider_identities
 
 
+def _serialize_model_metadata(model: object, model_id: str) -> dict[str, Any]:
+    """Serialize provider-specific model details into the public API shape."""
+    model_dict = getattr(model, "dict", None)
+    if callable(model_dict):
+        metadata = dict(model_dict())
+    else:
+        metadata = {
+            key: value for key, value in vars(model).items() if not key.startswith("_")
+        }
+
+    for field in (
+        "architecture",
+        "pricing",
+        "sats_pricing",
+        "per_request_limits",
+        "top_provider",
+        "alias_ids",
+    ):
+        value = metadata.get(field)
+        if isinstance(value, str):
+            try:
+                metadata[field] = json.loads(value)
+            except (TypeError, ValueError):
+                pass
+    metadata["id"] = model_id
+    return metadata
+
+
 def _apply_model_visibility(
     upstream: BaseUpstreamProvider,
     overrides_by_key: dict[ModelKey, ModelRow] | None,
@@ -348,11 +385,10 @@ def _apply_model_visibility(
 ) -> list[object]:
     """Return provider models after DB disabled/override state is applied.
 
-    Only the identity fields (``id``, ``forwarded_model_id``,
-    ``canonical_slug``) matter for path discovery, so DB override rows are used
-    directly rather than rebuilt into fully priced ``Model`` objects — the
-    pricing pipeline costs ~0.7ms of event-loop CPU per row for data this
-    module immediately discards.
+    DB override rows are used directly rather than rebuilt into priced
+    ``Model`` objects. Their JSON metadata fields are decoded when each path is
+    collected, preserving the provider-specific stored values without running
+    the routing price-selection pipeline.
     """
     overrides_by_key = overrides_by_key or {}
     disabled_model_keys = disabled_model_keys or set()
@@ -414,6 +450,7 @@ async def _collect_provider_paths(
                 provider_identity.base_url, provider_identity.id, model_id
             ),
             provider=provider_identity,
+            model_metadata=_serialize_model_metadata(model, model_id),
         )
 
     if not is_openrouter_base_url(upstream.base_url):
@@ -453,6 +490,7 @@ async def _collect_provider_paths(
                         endpoint.tag,
                     ),
                     provider=provider_identity,
+                    model_metadata={**endpoint.model_metadata, "id": model_id},
                     endpoint_tag=endpoint.tag,
                     endpoint_name=endpoint.provider_name,
                 )
@@ -512,6 +550,7 @@ async def _persist_provider_paths(
                     "provider_type": discovered.provider.provider_type,
                     "endpoint_tag": discovered.endpoint_tag,
                     "endpoint_name": discovered.endpoint_name,
+                    "model_metadata": json.dumps(discovered.model_metadata),
                     "upstream_provider_id": upstream_provider_id,
                     "updated_at": now,
                 }
@@ -526,6 +565,7 @@ async def _persist_provider_paths(
                         "provider_type": insert_stmt.excluded.provider_type,
                         "endpoint_tag": insert_stmt.excluded.endpoint_tag,
                         "endpoint_name": insert_stmt.excluded.endpoint_name,
+                        "model_metadata": insert_stmt.excluded.model_metadata,
                         "updated_at": insert_stmt.excluded.updated_at,
                     },
                 )
@@ -740,6 +780,13 @@ def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
     endpoint = None
     if row.endpoint_tag or row.endpoint_name:
         endpoint = {"tag": row.endpoint_tag, "name": row.endpoint_name}
+    try:
+        model = json.loads(row.model_metadata)
+    except (TypeError, ValueError):
+        model = {}
+    if not isinstance(model, dict):
+        model = {}
+    model.setdefault("id", row.model_id)
     return {
         "path": row.path,
         "provider": {
@@ -748,11 +795,12 @@ def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
             "type": row.provider_type,
         },
         "endpoint": endpoint,
+        "model": model,
     }
 
 
 async def get_all_model_paths() -> dict:
-    """All models with their exact selectable routes."""
+    """All models with exact routes and provider-specific model metadata."""
     async with create_session() as session:
         rows = (
             await session.exec(
