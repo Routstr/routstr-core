@@ -241,9 +241,10 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
         return []
 
 
-def _row_to_model(
+def _build_model_from_row(
     row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
 ) -> Model:
+    """The deterministic USD view of a stored model row, before the sats conversion."""
     architecture = json.loads(row.architecture)
     pricing = json.loads(row.pricing)
     per_request_limits = (
@@ -300,6 +301,14 @@ def _row_to_model(
             parsed_pricing.max_completion_cost,
             parsed_pricing.max_cost,
         ) = _calculate_usd_max_costs(model)
+
+    return model
+
+
+def _row_to_model(
+    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+) -> Model:
+    model = _build_model_from_row(row, apply_provider_fee, provider_fee)
 
     try:
         sats_to_usd = sats_usd_price()
