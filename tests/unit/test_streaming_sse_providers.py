@@ -42,7 +42,9 @@ def _make_response(chunks: list[bytes]) -> MagicMock:
     return mock_response
 
 
-async def _drive(chunks: list[bytes], requested_model: str | None = None) -> list[bytes]:
+async def _drive(
+    chunks: list[bytes], requested_model: str | None = None
+) -> list[bytes]:
     """Run the real streaming generator over ``chunks`` and collect output bytes."""
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test_key"
@@ -66,7 +68,6 @@ async def _drive(chunks: list[bytes], requested_model: str | None = None) -> lis
         response=_make_response(chunks),
         key=key,
         max_cost_for_model=100,
-        background_tasks=MagicMock(),
         requested_model=requested_model,
         reservation_snapshot=ReservationSnapshot(
             release_id="test-release",

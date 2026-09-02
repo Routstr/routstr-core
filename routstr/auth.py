@@ -905,6 +905,47 @@ async def pay_for_request(
             extra={"reservation_id": reservation.release_id},
         )
 
+    try:
+        await _validate_reservation_snapshot(key, reservation, session)
+    except BaseException:
+        released = False
+        try:
+            released = await _transition_reservation_to_released(
+                reservation,
+                session,
+                decrement_requests=True,
+                idempotent_success=True,
+            )
+        except BaseException:
+            try:
+                await session.rollback()
+            except BaseException:
+                pass
+
+        if not released:
+            try:
+                async with create_session() as cleanup_session:
+                    released = await _transition_reservation_to_released(
+                        reservation,
+                        cleanup_session,
+                        decrement_requests=True,
+                        idempotent_success=True,
+                    )
+            except BaseException:
+                logger.exception(
+                    "Failed to release invalid billing reservation",
+                    extra={"reservation_id": reservation.release_id},
+                )
+
+        if not released:
+            logger.error(
+                "Invalid billing reservation could not be released",
+                extra={"reservation_id": reservation.release_id},
+            )
+            await _stop_reservation_heartbeat(reservation.release_id)
+            _clear_current_reservation(reservation)
+        raise
+
     logger.info(
         "Payment processed successfully",
         extra={

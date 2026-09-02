@@ -14,15 +14,18 @@ These tests cover the two pure helpers that drive the dispatcher:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import httpx
 import pytest
 
 from routstr.upstream.gemini_messages import (
     DUMMY_THOUGHT_SIGNATURE,
     _openai_chunks_to_anthropic_events,
+    _ResponseOwnedIterator,
     inject_thought_signatures,
 )
 
@@ -81,9 +84,7 @@ def test_inject_thought_signatures_preserves_existing_signature() -> None:
     inject_thought_signatures(messages)
 
     assert (
-        messages[0]["tool_calls"][0]["extra_content"]["google"][
-            "thought_signature"
-        ]
+        messages[0]["tool_calls"][0]["extra_content"]["google"]["thought_signature"]
         == "real-signature"
     )
 
@@ -138,6 +139,46 @@ async def _lines(*chunks: dict | str) -> AsyncGenerator[str, None]:
             yield c
 
 
+class _TrackingStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        *chunks: bytes,
+        error: Exception | None = None,
+        started: asyncio.Event | None = None,
+    ) -> None:
+        self._chunks = chunks
+        self._error = error
+        self._started = started
+        self.close_count = 0
+
+    async def __aiter__(self) -> AsyncGenerator[bytes, None]:
+        if self._started is not None:
+            self._started.set()
+            await asyncio.Event().wait()
+        for chunk in self._chunks:
+            yield chunk
+        if self._error is not None:
+            raise self._error
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
+def _owned_events(
+    response: httpx.Response,
+) -> _ResponseOwnedIterator:
+    async def line_iter() -> AsyncGenerator[str, None]:
+        try:
+            async for line in response.aiter_lines():
+                yield line
+        finally:
+            await response.aclose()
+
+    return _ResponseOwnedIterator(
+        _openai_chunks_to_anthropic_events(line_iter(), "gemini-test"), response
+    )
+
+
 def _parse_anthropic_sse(blocks: list[bytes]) -> list[dict]:
     """Flatten a list of Anthropic SSE byte chunks into event dicts."""
     events: list[dict] = []
@@ -148,6 +189,58 @@ def _parse_anthropic_sse(blocks: list[bytes]) -> list[dict]:
                 if line.startswith("data:"):
                     events.append(json.loads(line[5:].lstrip()))
     return events
+
+
+@pytest.mark.asyncio
+async def test_response_owner_closes_once_after_normal_completion() -> None:
+    stream = _TrackingStream(
+        b'data: {"model":"gemini-test","choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+    )
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://gemini.example/chat/completions"),
+        stream=stream,
+    )
+
+    assert [event async for event in _owned_events(response)]
+    assert response.is_closed
+    assert stream.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_response_owner_closes_once_after_body_failure() -> None:
+    stream = _TrackingStream(error=RuntimeError("upstream body failed"))
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://gemini.example/chat/completions"),
+        stream=stream,
+    )
+
+    with pytest.raises(RuntimeError, match="upstream body failed"):
+        await _owned_events(response).__anext__()
+
+    assert response.is_closed
+    assert stream.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_response_owner_closes_once_after_cancellation() -> None:
+    started = asyncio.Event()
+    stream = _TrackingStream(started=started)
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://gemini.example/chat/completions"),
+        stream=stream,
+    )
+    task = asyncio.create_task(_owned_events(response).__anext__())
+    await started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert response.is_closed
+    assert stream.close_count == 1
 
 
 @pytest.mark.asyncio
@@ -187,9 +280,7 @@ async def test_translator_emits_text_only_response() -> None:
     ]
     # Text deltas concatenate to "Hello, world".
     text_deltas = [
-        e["delta"]["text"]
-        for e in events
-        if e["type"] == "content_block_delta"
+        e["delta"]["text"] for e in events if e["type"] == "content_block_delta"
     ]
     assert "".join(text_deltas) == "Hello, world"
     # Stop reason was mapped from openai's "stop".
@@ -270,9 +361,7 @@ async def test_translator_emits_tool_use_block() -> None:
     # Argument deltas were forwarded as input_json_delta partials.
     deltas = [e for e in events if e["type"] == "content_block_delta"]
     assert all(d["delta"]["type"] == "input_json_delta" for d in deltas)
-    assert "".join(d["delta"]["partial_json"] for d in deltas) == (
-        '{"cmd": "ls"}'
-    )
+    assert "".join(d["delta"]["partial_json"] for d in deltas) == ('{"cmd": "ls"}')
     # tool_calls finish_reason → tool_use stop_reason.
     msg_delta = next(e for e in events if e["type"] == "message_delta")
     assert msg_delta["delta"]["stop_reason"] == "tool_use"
@@ -306,8 +395,6 @@ async def test_translator_handles_done_sentinel_and_blank_lines() -> None:
     assert events[0]["type"] == "message_start"
     assert events[-1]["type"] == "message_stop"
     text = "".join(
-        e["delta"]["text"]
-        for e in events
-        if e["type"] == "content_block_delta"
+        e["delta"]["text"] for e in events if e["type"] == "content_block_delta"
     )
     assert text == "ok"

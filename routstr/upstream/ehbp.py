@@ -522,6 +522,8 @@ async def _record_ehbp_settlement(
 ) -> int:
     """Expose EHBP settlement latency alongside normal request settlement."""
     started = time.perf_counter()
+    # A rollback can expire the ORM instance, so capture this before the operation.
+    key_log_hash = key.hashed_key[:8] + "..."
     succeeded = False
     try:
         result = await operation
@@ -531,7 +533,7 @@ async def _record_ehbp_settlement(
         logger.info(
             "Payment settlement finished",
             extra={
-                "key_hash": key.hashed_key[:8] + "...",
+                "key_hash": key_log_hash,
                 "model": model_id,
                 "settlement_type": settlement_type,
                 "settlement_duration_ms": round(
