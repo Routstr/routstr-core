@@ -1134,18 +1134,30 @@ async def test_forward_x_cashu_request_handles_count_tokens_locally() -> None:
             "prepare_request_body",
             side_effect=AssertionError("upstream should not be called"),
         ):
-            response = await provider.forward_x_cashu_request(
-                request=request,
-                path="v1/messages/count_tokens",
-                headers={},
-                amount=5_000,
-                unit="sat",
-                max_cost_for_model=10_000,
-                model_obj=model,
-                mint="https://mint",
-            )
+            with patch.object(
+                provider,
+                "send_refund",
+                new=AsyncMock(return_value="refund-token"),
+            ) as send_refund:
+                response = await provider.forward_x_cashu_request(
+                    request=request,
+                    path="v1/messages/count_tokens",
+                    headers={},
+                    amount=5_000,
+                    unit="sat",
+                    max_cost_for_model=10_000,
+                    model_obj=model,
+                    mint="https://mint",
+                )
 
+    send_refund.assert_awaited_once_with(
+        5_000,
+        "sat",
+        "https://mint",
+        request_id="req-test",
+    )
     assert response.status_code == 200
+    assert response.headers["X-Cashu"] == "refund-token"
     body = response.body if isinstance(response.body, bytes) else bytes(response.body)
     payload = json.loads(body.decode())
     assert "input_tokens" in payload
