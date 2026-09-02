@@ -54,12 +54,19 @@ class PricingRates(NamedTuple):
     The four arrived as a bare tuple, unpacked positionally at two call sites.
     Two of them are cache rates that routinely fall back to the prompt rate,
     which makes a transposition read as a plausible bill rather than a crash.
+
+    ``cache_read_inferred`` and ``cache_write_inferred`` are ``True`` when the
+    cache rate fell back to the full prompt rate because neither the catalogue
+    nor the operator supplied one. That distinguishes a rate the node was told
+    from one it invented, which the rate alone cannot: both arrive as a float.
     """
 
     input_1k: float
     output_1k: float
     cache_read_1k: float
     cache_write_1k: float
+    cache_read_inferred: bool
+    cache_write_inferred: bool
 
 
 def _empty_cost(cls: type[CostData] = CostData) -> CostData:
@@ -222,6 +229,8 @@ async def calculate_cost(
                         output_1k=float(settings.fixed_per_1k_output_tokens) * 1000.0,
                         cache_read_1k=fixed_input_rate,
                         cache_write_1k=fixed_input_rate,
+                        cache_read_inferred=False,
+                        cache_write_inferred=False,
                     )
             return _calculate_from_usd_cost(
                 usd_cost,
@@ -419,6 +428,8 @@ def _get_pricing_rates(
             mspc_1k = mspc * 1_000_000.0
             mscr_1k = mscr * 1_000_000.0 if mscr > 0 else mspp_1k
             mscw_1k = mscw * 1_000_000.0 if mscw > 0 else mspp_1k
+            cache_read_inferred = mscr <= 0
+            cache_write_inferred = mscw <= 0
             source = "configured"
         except Exception as e:
             logger.error("Invalid pricing data", extra={"error": str(e)})
@@ -460,6 +471,8 @@ def _get_pricing_rates(
             if cache_write_usd > 0
             else mspp_1k
         )
+        cache_read_inferred = cache_read_usd <= 0
+        cache_write_inferred = cache_write_usd <= 0
         source = "litellm"
 
     logger.info(
@@ -471,6 +484,11 @@ def _get_pricing_rates(
             "output_price_msats_per_1k": mspc_1k,
             "cache_read_price_msats_per_1k": mscr_1k,
             "cache_write_price_msats_per_1k": mscw_1k,
+            # `pricing_source` covers the prompt and completion rates only. A
+            # cache rate the catalogue never supplied is the full prompt rate
+            # wearing the same label, so it gets its own source.
+            "cache_read_source": "inferred" if cache_read_inferred else source,
+            "cache_write_source": "inferred" if cache_write_inferred else source,
         },
     )
     return PricingRates(
@@ -478,6 +496,8 @@ def _get_pricing_rates(
         output_1k=mspc_1k,
         cache_read_1k=mscr_1k,
         cache_write_1k=mscw_1k,
+        cache_read_inferred=cache_read_inferred,
+        cache_write_inferred=cache_write_inferred,
     )
 
 
