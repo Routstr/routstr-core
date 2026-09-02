@@ -34,8 +34,9 @@ async def test_x_cashu_timeout_refunds_and_returns_504(
     monkeypatch.setattr(
         ehbp_module, "store_cashu_transaction", AsyncMock(return_value=None)
     )
+    send_cashu_refund_mock = AsyncMock(return_value="refund-token")
     monkeypatch.setattr(
-        ehbp_module, "send_cashu_refund", AsyncMock(return_value="refund-token")
+        ehbp_module, "send_cashu_refund", send_cashu_refund_mock
     )
     monkeypatch.setattr(
         ehbp_module,
@@ -75,6 +76,6 @@ async def test_x_cashu_timeout_refunds_and_returns_504(
 
     assert response.status_code == 504
     assert response.headers["X-Cashu"] == "refund-token"
-    ehbp_module.send_cashu_refund.assert_awaited_once_with(
+    send_cashu_refund_mock.assert_awaited_once_with(
         1000, "msat", None, "req-123"
     )
