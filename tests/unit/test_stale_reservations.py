@@ -19,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+import routstr.auth as auth_module
 from routstr.auth import pay_for_request
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import (
@@ -56,10 +57,16 @@ async def session() -> "AsyncGenerator[AsyncSession, None]":
 
 
 @pytest.mark.asyncio
-async def test_pay_for_request_sets_reserved_at(session: AsyncSession) -> None:
+async def test_pay_for_request_sets_reserved_at(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
     key = ApiKey(hashed_key="paykey", balance=10_000)
     session.add(key)
     await session.commit()
+    logger_info = MagicMock()
+    payments_info = MagicMock()
+    monkeypatch.setattr(auth_module.logger, "info", logger_info)
+    monkeypatch.setattr(auth_module.payments_logger, "info", payments_info)
 
     before = int(time.time())
     await pay_for_request(key, 1_000, session)
@@ -68,6 +75,14 @@ async def test_pay_for_request_sets_reserved_at(session: AsyncSession) -> None:
     assert key.reserved_balance == 1_000
     assert key.reserved_at is not None
     assert key.reserved_at >= before
+    success_logs = [
+        call
+        for call in logger_info.call_args_list
+        if call.args == ("Payment processed successfully",)
+    ]
+    assert len(success_logs) == 1
+    payments_info.assert_called_once()
+    assert payments_info.call_args.args == ("RESERVE",)
 
 
 @pytest.mark.asyncio
@@ -88,6 +103,48 @@ async def test_pay_for_request_sets_reserved_at_on_child_key(
     assert parent.reserved_at is not None
     assert child.reserved_balance == 1_000
     assert child.reserved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_pay_for_request_releases_reservation_when_validation_fails(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = ApiKey(hashed_key="invalid-reservation", balance=10_000)
+    session.add(key)
+    await session.commit()
+
+    async def reject_reservation(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("reservation identity changed")
+
+    logger_info = MagicMock()
+    payments_info = MagicMock()
+    monkeypatch.setattr(
+        auth_module, "_validate_reservation_snapshot", reject_reservation
+    )
+    monkeypatch.setattr(auth_module.logger, "info", logger_info)
+    monkeypatch.setattr(auth_module.payments_logger, "info", payments_info)
+
+    with pytest.raises(RuntimeError, match="identity changed"):
+        await pay_for_request(key, 1_000, session)
+
+    assert not any(
+        call.args == ("Payment processed successfully",)
+        for call in logger_info.call_args_list
+    )
+    payments_info.assert_not_called()
+
+    await session.refresh(key)
+    release = (
+        await session.exec(
+            select(ReservationRelease).where(
+                ReservationRelease.key_hash == key.hashed_key
+            )
+        )
+    ).one()
+    assert key.reserved_balance == 0
+    assert key.total_requests == 0
+    assert release.status == "released"
+    assert release.id not in auth_module._reservation_heartbeats
 
 
 @pytest.mark.asyncio
@@ -411,10 +468,9 @@ async def test_proxy_reverts_reservation_on_client_disconnect() -> None:
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
             proxy_module,
-            "get_reservation_snapshot",
+            "pay_for_request",
             AsyncMock(return_value=reservation_snapshot),
         ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),

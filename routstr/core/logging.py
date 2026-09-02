@@ -28,7 +28,12 @@ DO NOT modify or remove these messages without updating the usage tracking logic
    - The 'max_cost_for_model' field is extracted for refund calculation
    - Must include 'max_cost_for_model' in extra dict
 
-6. Any ERROR level logs with "upstream" in the message
+6. "Payment settlement finished" (INFO) - routstr/auth.py and routstr/upstream/ehbp.py
+   - Emitted once per settlement attempt, including EHBP settlements
+   - Carries 'settlement_duration_ms' and 'settlement_succeeded'; the EHBP
+     emitter adds 'settlement_type'
+
+7. Any ERROR level logs with "upstream" in the message
    - Used to count upstream provider errors
    - Helps identify service reliability issues
 
@@ -37,11 +42,15 @@ If you need to modify these messages, ensure you also update the parsing logic i
 - routstr/core/log_manager.py
 """
 
+import copy
 import logging.config
 import logging.handlers
 import os
+import queue
 import re
 import sys
+import threading
+import time
 import tomllib
 from datetime import datetime
 from pathlib import Path
@@ -125,6 +134,184 @@ class DailyRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
                     os.remove(file_path)
                 except OSError:
                     pass
+
+
+class QueuedDailyRotatingFileHandler(logging.Handler):
+    """Move rotating-file I/O off request threads.
+
+    When both locks are needed, acquire the logging module lock before the
+    handler lock to match ``dictConfig``.
+    """
+
+    _queue: queue.Queue[logging.LogRecord]
+    _target: DailyRotatingFileHandler
+    _listener: logging.handlers.QueueListener
+    _drain_timeout_seconds = 5.0
+    _reopen_backoff_seconds = 5.0
+
+    def __init__(self, filename: str, **kwargs: Any) -> None:
+        super().__init__()
+        self._filename = filename
+        self._kwargs = kwargs
+        self._stopped = True
+        self._next_open_attempt = 0.0
+        self._open()
+
+    def _open(self) -> None:
+        """Attach a fresh rotating file handler and start draining it."""
+        # A new queue per listener: QueueListener's stop sentinel is a shared
+        # singleton, so two listeners on one queue would steal each other's.
+        record_queue: queue.Queue[logging.LogRecord] = queue.Queue()
+        target = DailyRotatingFileHandler(self._filename, **self._kwargs)
+        target.setFormatter(self.formatter)
+        listener = logging.handlers.QueueListener(record_queue, target)
+        try:
+            listener.start()
+        except Exception:
+            target.close()
+            raise
+
+        self._queue = record_queue
+        self._target = target
+        self._listener = listener
+        self._stopped = False
+        self._closed = False
+        with getattr(logging, "_lock"):
+            handler_list = getattr(logging, "_handlerList")
+            # This wrapper owns the target's shutdown and lock ordering.
+            handler_list[:] = [
+                reference for reference in handler_list if reference() is not target
+            ]
+            if not any(reference() is self for reference in handler_list):
+                getattr(logging, "_addHandlerRef")(self)
+
+    def _reopen_locked(self) -> bool:
+        """Reopen using the lock order required by ``dictConfig``."""
+        with getattr(logging, "_lock"):
+            self.acquire()
+            try:
+                if not self._stopped:
+                    return True
+                if time.monotonic() < self._next_open_attempt:
+                    return False
+                try:
+                    self._open()
+                except Exception:
+                    self._next_open_attempt = (
+                        time.monotonic() + self._reopen_backoff_seconds
+                    )
+                    raise
+                return True
+            finally:
+                self.release()
+
+    def setFormatter(self, fmt: logging.Formatter | None) -> None:
+        super().setFormatter(fmt)
+        self._target.setFormatter(fmt)
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        if not self.filter(record):
+            return False
+
+        while True:
+            self.acquire()
+            try:
+                if not self._stopped:
+                    self.emit(record)
+                    return True
+            finally:
+                self.release()
+
+            try:
+                # Do not acquire the module lock while holding the handler lock.
+                if not self._reopen_locked():
+                    return False
+            except Exception:
+                self.handleError(record)
+                return False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if not self._stopped:
+                self._queue.put_nowait(copy.copy(record))
+        except Exception:
+            # Handler.handle() does not catch exceptions raised by emit().
+            self.handleError(record)
+
+    def flush(self) -> None:
+        self.acquire()
+        try:
+            if self._stopped:
+                return
+
+            deadline = time.monotonic() + self._drain_timeout_seconds
+            with self._queue.all_tasks_done:
+                while self._queue.unfinished_tasks:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._queue.all_tasks_done.wait(remaining)
+            self._target.flush()
+        finally:
+            self.release()
+
+    def _stop_listener(self) -> bool:
+        thread = self._listener._thread
+        if thread is None:
+            return True
+        self._listener.enqueue_sentinel()
+        thread.join(timeout=self._drain_timeout_seconds)
+        if thread.is_alive():
+            return False
+        self._listener._thread = None
+        return True
+
+    def _close_retired_listener(
+        self,
+        listener: logging.handlers.QueueListener,
+        target: DailyRotatingFileHandler,
+    ) -> None:
+        def finish() -> None:
+            thread = listener._thread
+            if thread is not None:
+                thread.join()
+                listener._thread = None
+            try:
+                target.flush()
+            finally:
+                target.close()
+
+        threading.Thread(target=finish, daemon=True).start()
+
+    def close(self) -> None:
+        # Stop the listener under the handler lock, then close the target outside
+        # it because FileHandler.close() also takes the logging module lock.
+        self.acquire()
+        try:
+            target = None
+            retired = None
+            if not self._stopped:
+                listener = self._listener
+                current_target = self._target
+                stopped = self._stop_listener()
+                self._stopped = True
+                if stopped:
+                    target = current_target
+                else:
+                    retired = (listener, current_target)
+                    sys.stderr.write(
+                        f"Logging listener for {self._filename} did not stop "
+                        f"within {self._drain_timeout_seconds}s; reopening on next record\n"
+                    )
+        finally:
+            self.release()
+
+        if retired is not None:
+            self._close_retired_listener(*retired)
+        if target is not None:
+            target.flush()
+            target.close()
+        super().close()
 
 
 def get_package_version() -> str:
@@ -356,7 +543,7 @@ def setup_logging() -> None:
         "handlers": {
             "console": console_handler,
             "file": {
-                "()": DailyRotatingFileHandler,
+                "()": QueuedDailyRotatingFileHandler,
                 "level": log_level,
                 "formatter": "json",
                 "filename": "logs/app.log",

@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from fastapi import BackgroundTasks
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.auth as auth_module
+import routstr.upstream.gemini_messages as gemini_messages
 from routstr.auth import (
     ReservationSnapshot,
     adjust_payment_for_tokens,
@@ -165,7 +165,7 @@ async def test_post_commit_failure_cannot_release_charged_reservation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generic_background_settlement_uses_explicit_reservation() -> None:
+async def test_generic_stream_settlement_uses_explicit_reservation() -> None:
     engine = await _engine()
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key", provider_fee=1.0
@@ -217,8 +217,285 @@ async def test_generic_background_settlement_uses_explicit_reservation() -> None
     await engine.dispose()
 
 
+def _opaque_stream_response(*chunks: bytes) -> MagicMock:
+    async def aiter_bytes() -> AsyncGenerator[bytes, None]:
+        for chunk in chunks:
+            yield chunk
+
+    response = MagicMock(spec=httpx.Response)
+    response.aiter_bytes = aiter_bytes
+    response.aclose = AsyncMock()
+    return response
+
+
+class _CountingAsyncByteStream(httpx.AsyncByteStream):
+    def __init__(self, *chunks: bytes) -> None:
+        self._chunks = chunks
+        self.close_count = 0
+
+    async def __aiter__(self) -> AsyncGenerator[bytes, None]:
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
 @pytest.mark.asyncio
-async def test_streaming_release_is_terminal_and_suppresses_background_charge() -> None:
+async def test_generic_stream_completion_settles_and_closes_once() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    finalize = AsyncMock()
+    provider._finalize_generic_streaming_payment = finalize  # type: ignore[method-assign]
+    response = _opaque_stream_response(b"first", b"second")
+    reservation = MagicMock(spec=ReservationSnapshot)
+
+    stream = provider._stream_generic_with_settlement(
+        response,
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    assert [chunk async for chunk in stream] == [b"first", b"second"]
+    await stream.aclose()
+
+    finalize.assert_awaited_once_with(
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    response.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_generic_stream_abort_settles_and_closes_once() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    finalize = AsyncMock()
+    provider._finalize_generic_streaming_payment = finalize  # type: ignore[method-assign]
+    response = _opaque_stream_response(b"first", b"second")
+    reservation = MagicMock(spec=ReservationSnapshot)
+
+    stream = provider._stream_generic_with_settlement(
+        response,
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    assert await anext(stream) == b"first"
+    await stream.aclose()
+    await stream.aclose()
+
+    finalize.assert_awaited_once_with(
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    response.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_closes_iterator_when_downstream_send_is_cancelled() -> (
+    None
+):
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    finalize = AsyncMock()
+    provider._finalize_generic_streaming_payment = finalize  # type: ignore[method-assign]
+    upstream_response = _opaque_stream_response(b"first", b"second")
+    reservation = MagicMock(spec=ReservationSnapshot)
+    upstream_response.status_code = 201
+    upstream_response.headers = {"x-upstream": "preserved"}
+    response = provider._generic_streaming_response(
+        upstream_response,
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            raise asyncio.CancelledError
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "method": "GET",
+        "path": "/v1/audio/speech",
+        "raw_path": b"/v1/audio/speech",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+
+    with pytest.raises(asyncio.CancelledError):
+        await response(scope, receive, send)  # type: ignore[arg-type]
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 201
+    headers = cast(list[tuple[bytes, bytes]], sent[0]["headers"])
+    assert (b"x-upstream", b"preserved") in headers
+    finalize.assert_awaited_once_with(
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    upstream_response.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_generic_stream_settles_when_response_start_fails() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    finalize = AsyncMock()
+    provider._finalize_generic_streaming_payment = finalize  # type: ignore[method-assign]
+    upstream_response = _opaque_stream_response(b"never-read")
+    upstream_response.status_code = 201
+    upstream_response.headers = {"x-upstream": "preserved"}
+    reservation = MagicMock(spec=ReservationSnapshot)
+    response = provider._generic_streaming_response(
+        upstream_response,
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        assert message["type"] == "http.response.start"
+        raise RuntimeError("response start failed")
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "method": "GET",
+        "path": "/v1/audio/speech",
+        "raw_path": b"/v1/audio/speech",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1),
+        "server": ("testserver", 80),
+        "scheme": "http",
+    }
+
+    with pytest.raises(RuntimeError, match="response start failed"):
+        await response(scope, receive, send)  # type: ignore[arg-type]
+
+    finalize.assert_awaited_once_with(
+        "key-hash",
+        500,
+        "audio/speech",
+        None,
+        provider.provider_fee,
+        reservation,
+    )
+    upstream_response.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat", "responses", "messages"])
+async def test_parsed_stream_finalizes_when_response_start_fails(api: str) -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    upstream_response = _opaque_stream_response(b"never-read")
+    upstream_response.status_code = 200
+    upstream_response.headers = {"content-type": "text/event-stream"}
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = f"{api}-start-failure"
+    key.balance = 10_000
+    snapshot = ReservationSnapshot(
+        release_id=f"{api}-start-failure-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    adjust = AsyncMock(return_value={"input_tokens": 0, "output_tokens": 0})
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+    ):
+        if api == "chat":
+            response = await provider.handle_streaming_chat_completion(
+                upstream_response, key, 500, reservation_snapshot=snapshot
+            )
+        elif api == "responses":
+            response = await provider.handle_streaming_responses_completion(
+                upstream_response, key, 500, reservation_snapshot=snapshot
+            )
+        else:
+            response = await provider.handle_streaming_messages_completion(
+                upstream_response, key, 500, reservation_snapshot=snapshot
+            )
+
+        async def receive() -> dict[str, str]:
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, object]) -> None:
+            assert message["type"] == "http.response.start"
+            raise RuntimeError("response start failed")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "method": "GET",
+            "path": f"/v1/{api}",
+            "raw_path": f"/v1/{api}".encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+        with pytest.raises(RuntimeError, match="response start failed"):
+            await response(scope, receive, send)  # type: ignore[arg-type]
+
+    adjust.assert_awaited_once()
+    upstream_response.aclose.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_streaming_release_is_terminal_before_error_propagates() -> None:
     provider = BaseUpstreamProvider(
         base_url="https://api.example.com", api_key="test-key"
     )
@@ -242,7 +519,6 @@ async def test_streaming_release_is_terminal_and_suppresses_background_charge() 
     release = AsyncMock(return_value=True)
     reservation_snapshot = MagicMock()
     reservation_snapshot.reserved_msats = 500
-    background_tasks = MagicMock()
 
     with (
         patch(
@@ -260,7 +536,6 @@ async def test_streaming_release_is_terminal_and_suppresses_background_charge() 
             response=upstream_response,
             key=key,
             max_cost_for_model=500,
-            background_tasks=background_tasks,
         )
 
         with pytest.raises(SQLAlchemyError, match="database unavailable"):
@@ -269,7 +544,6 @@ async def test_streaming_release_is_terminal_and_suppresses_background_charge() 
 
     session.rollback.assert_awaited_once()
     release.assert_awaited_once_with(reservation_snapshot, session, 500)
-    background_tasks.add_task.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -362,8 +636,6 @@ async def test_partial_remote_protocol_error_finalizes_and_closes_once(
     )
     upstream_response.aiter_bytes = aiter_bytes
     upstream_response.aclose = AsyncMock()
-    client = MagicMock()
-    client.aclose = AsyncMock()
     key = MagicMock(spec=ApiKey)
     key.hashed_key = f"{api}-partial"
     key.balance = 10_000
@@ -396,9 +668,7 @@ async def test_partial_remote_protocol_error_finalizes_and_closes_once(
                 response=upstream_response,
                 key=key,
                 max_cost_for_model=500,
-                background_tasks=BackgroundTasks(),
                 reservation_snapshot=snapshot,
-                client=client,
             )
         else:
             response = await provider.handle_streaming_responses_completion(
@@ -406,7 +676,6 @@ async def test_partial_remote_protocol_error_finalizes_and_closes_once(
                 key=key,
                 max_cost_for_model=500,
                 reservation_snapshot=snapshot,
-                client=client,
             )
         emitted = bytearray()
         with pytest.raises(httpx.RemoteProtocolError):
@@ -422,7 +691,6 @@ async def test_partial_remote_protocol_error_finalizes_and_closes_once(
     else:
         release.assert_not_awaited()
     upstream_response.aclose.assert_awaited_once()
-    client.aclose.assert_awaited_once()
     assert b"[DONE]" not in emitted
 
 
@@ -444,8 +712,6 @@ async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
     )
     upstream_response.aiter_bytes = aiter_bytes
     upstream_response.aclose = AsyncMock()
-    client = MagicMock()
-    client.aclose = AsyncMock()
     key = MagicMock(spec=ApiKey)
     key.hashed_key = f"{api}-database-down"
     key.balance = 10_000
@@ -469,9 +735,7 @@ async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
                 response=upstream_response,
                 key=key,
                 max_cost_for_model=500,
-                background_tasks=BackgroundTasks(),
                 reservation_snapshot=snapshot,
-                client=client,
             )
         else:
             response = await provider.handle_streaming_responses_completion(
@@ -479,14 +743,12 @@ async def test_partial_stream_preserves_transport_error_when_billing_db_is_down(
                 key=key,
                 max_cost_for_model=500,
                 reservation_snapshot=snapshot,
-                client=client,
             )
         with pytest.raises(httpx.RemoteProtocolError, match="incomplete chunked read"):
             async for _ in response.body_iterator:
                 pass
 
     upstream_response.aclose.assert_awaited_once()
-    client.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -643,6 +905,100 @@ async def test_messages_streaming_releases_and_raises_on_billing_failure(
 
 
 @pytest.mark.asyncio
+async def test_gemini_messages_finalizes_when_response_start_fails() -> None:
+    provider = BaseUpstreamProvider(
+        base_url="https://api.example.com", api_key="test-key"
+    )
+    key = MagicMock(spec=ApiKey)
+    key.hashed_key = "gemini-start-failure"
+    key.balance = 10_000
+    snapshot = ReservationSnapshot(
+        release_id="gemini-start-failure-release",
+        key_hash=key.hashed_key,
+        billing_key_hash=key.hashed_key,
+        reserved_msats=500,
+    )
+    model = MagicMock(spec=Model)
+    model.id = "gemini-test"
+    model.forwarded_model_id = None
+    upstream_stream = _CountingAsyncByteStream(
+        b'data: {"choices":[{"delta":{"content":"unused"}}]}\n\n'
+    )
+    upstream_response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://gemini.example/chat/completions"),
+        stream=upstream_stream,
+    )
+    session = MagicMock()
+    session.get = AsyncMock(return_value=key)
+    session_context = MagicMock()
+    session_context.__aenter__ = AsyncMock(return_value=session)
+    session_context.__aexit__ = AsyncMock(return_value=None)
+    adjust = AsyncMock(return_value={"input_tokens": 0, "output_tokens": 0})
+    post_and_stream = AsyncMock(return_value=upstream_response)
+
+    with (
+        patch("routstr.upstream.base.adjust_payment_for_tokens", adjust),
+        patch("routstr.upstream.base.create_session", return_value=session_context),
+        patch.object(
+            gemini_messages,
+            "_translate_anthropic_to_openai",
+            return_value={"messages": []},
+        ),
+        patch.object(gemini_messages, "_post_and_stream", post_and_stream),
+    ):
+        (
+            client_stream,
+            iterator,
+            requested_model,
+        ) = await gemini_messages.dispatch_gemini_messages(
+            request_body=json.dumps(
+                {"model": model.id, "messages": [], "stream": True}
+            ).encode(),
+            model_obj=model,
+            base_url="https://gemini.example",
+            api_key="test-key",
+            transform_model_name=lambda name: name,
+        )
+        assert client_stream is True
+        assert requested_model == model.id
+        response = provider._stream_litellm_messages(
+            iterator=iterator,
+            key=key,
+            max_cost_for_model=500,
+            requested_model=requested_model,
+            reservation_snapshot=snapshot,
+        )
+
+        async def receive() -> dict[str, str]:
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, object]) -> None:
+            assert message["type"] == "http.response.start"
+            raise RuntimeError("response start failed")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "method": "GET",
+            "path": "/v1/messages",
+            "raw_path": b"/v1/messages",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+        with pytest.raises(RuntimeError, match="response start failed"):
+            await response(scope, receive, send)  # type: ignore[arg-type]
+
+    post_and_stream.assert_awaited_once()
+    adjust.assert_awaited_once()
+    assert upstream_response.is_closed
+    assert upstream_stream.close_count == 1
+
+
+@pytest.mark.asyncio
 async def test_cross_key_reservation_snapshot_is_rejected_without_mutation() -> None:
     engine = await _engine()
     first = ApiKey(hashed_key="first", balance=1_000)
@@ -726,7 +1082,6 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
         {"model": model.id, "messages": [{"role": "user", "content": "hi"}]}
     ).encode()
 
-    background_tasks = BackgroundTasks()
     try:
         with (
             patch(
@@ -751,7 +1106,6 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
                 response=upstream_response,
                 key=key,
                 max_cost_for_model=500,
-                background_tasks=background_tasks,
                 model_obj=model,
                 reservation_snapshot=snapshot,
                 request_body=request_body,
@@ -759,10 +1113,6 @@ async def test_client_disconnect_midstream_estimates_usage_and_stops_heartbeat()
             iterator = cast(AsyncGenerator[bytes, None], response.body_iterator)
             await iterator.__anext__()  # first chunk reaches the client
             await iterator.aclose()  # client aborts the socket here
-
-            # Starlette runs the response's background tasks after the abort.
-            for task in background_tasks.tasks:
-                await task()
     finally:
         await auth_module._stop_reservation_heartbeat(snapshot.release_id)
 

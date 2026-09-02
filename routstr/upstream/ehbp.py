@@ -5,7 +5,7 @@ import math
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Mapping
+from typing import AsyncIterator, Awaitable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Request
@@ -513,6 +513,37 @@ async def _release_failed_ehbp_charge(
     )
 
 
+async def _record_ehbp_settlement(
+    operation: Awaitable[int],
+    *,
+    key: ApiKey,
+    model_id: str,
+    settlement_type: str,
+) -> int:
+    """Expose EHBP settlement latency alongside normal request settlement."""
+    started = time.perf_counter()
+    # A rollback can expire the ORM instance, so capture this before the operation.
+    key_log_hash = key.hashed_key[:8] + "..."
+    succeeded = False
+    try:
+        result = await operation
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key_log_hash,
+                "model": model_id,
+                "settlement_type": settlement_type,
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
+
+
 async def finalize_ehbp_actual_cost_payment(
     key: ApiKey,
     session: AsyncSession,
@@ -775,13 +806,18 @@ async def forward_ehbp_request(
             )
             billing_model = cost_info.pop("actual_model", None) or model_obj.id
             computed_msats = int(cost_info["total_msats"])
-            charged_msats = await finalize_ehbp_actual_cost_payment(
-                key,
-                session,
-                max_cost_for_model,
-                billing_model,
-                cost_info,
-                reservation_snapshot,
+            charged_msats = await _record_ehbp_settlement(
+                finalize_ehbp_actual_cost_payment(
+                    key,
+                    session,
+                    max_cost_for_model,
+                    billing_model,
+                    cost_info,
+                    reservation_snapshot,
+                ),
+                key=key,
+                model_id=billing_model,
+                settlement_type="ehbp_usage",
             )
             cost_data = {
                 **cost_info,
@@ -801,12 +837,17 @@ async def forward_ehbp_request(
                     "key_hash": key.hashed_key[:8] + "...",
                 },
             )
-            charged_msats = await finalize_ehbp_max_cost_payment(
-                key,
-                session,
-                max_cost_for_model,
-                model_obj.id,
-                reservation_snapshot,
+            charged_msats = await _record_ehbp_settlement(
+                finalize_ehbp_max_cost_payment(
+                    key,
+                    session,
+                    max_cost_for_model,
+                    model_obj.id,
+                    reservation_snapshot,
+                ),
+                key=key,
+                model_id=model_obj.id,
+                settlement_type="ehbp_unmeasured_release",
             )
             cost_data = {
                 "total_msats": charged_msats,

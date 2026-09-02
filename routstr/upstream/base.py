@@ -11,9 +11,10 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from typing import Any, Mapping, Self, cast
 
 import httpx
-from fastapi import BackgroundTasks, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic.v1 import BaseModel
+from starlette.types import Receive, Scope, Send
 
 from ..auth import (
     ReservationSnapshot,
@@ -33,6 +34,7 @@ from ..core.db import (
 )
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
+from ..core.settings import settings
 from ..payment.cost_calculation import (
     CostData,
     CostDataError,
@@ -62,6 +64,7 @@ from .cache_breakpoints import (
     is_explicit_cache_model,
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
+from .http_client import get_upstream_http_client
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 
@@ -69,6 +72,14 @@ if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
+
+
+def _acquire_upstream_client(url: str) -> httpx.AsyncClient:
+    """Return the pooled client for ``url``, mapping shutdown to a 503."""
+    try:
+        return get_upstream_http_client(url)
+    except RuntimeError as exc:
+        raise UpstreamError(str(exc), status_code=503) from exc
 
 
 async def _aclose_if_needed(resource: object | None) -> None:
@@ -82,19 +93,200 @@ async def _aclose_if_needed(resource: object | None) -> None:
         await result
 
 
+async def _shielded_aclose(resource: object | None) -> None:
+    await asyncio.shield(_aclose_if_needed(resource))
+
+
+class _ResponseHandoff:
+    """Close a response unless ownership is transferred to a stream."""
+
+    def __init__(self) -> None:
+        self._response: object | None = None
+
+    def acquire(self, response: object) -> None:
+        self._response = response
+
+    def handoff(self) -> None:
+        self._response = None
+
+    async def close(self, *, suppress_errors: bool = False) -> None:
+        response = self._response
+        self._response = None
+        if response is None:
+            return
+        try:
+            await _shielded_aclose(response)
+        except BaseException:
+            if not suppress_errors:
+                raise
+            logger.exception("Failed to close upstream response before handoff")
+
+
 async def _finalize_and_close_stream(
     finalize: Callable[[], Awaitable[None]] | None,
     response: object | None,
-    client: httpx.AsyncClient | None,
 ) -> None:
+    """Settle billing, then return the response connection to its pool."""
     try:
         if finalize is not None:
             await finalize()
     finally:
+        await _aclose_if_needed(response)
+
+
+class _PersistentStreamFinalizer:
+    """Run one stream finalizer to completion across cancellation boundaries."""
+
+    def __init__(self, finalize: Callable[[], Awaitable[None]]) -> None:
+        self._finalize = finalize
+        self._task: asyncio.Future[None] | None = None
+        self._lock = asyncio.Lock()
+
+    async def run(self) -> None:
+        async with self._lock:
+            if self._task is None:
+                self._task = asyncio.ensure_future(self._finalize())
+            task = self._task
+        await asyncio.shield(task)
+
+
+class _FinalizingAsyncIterator:
+    """Tie iterator shutdown to a finalizer created before streaming starts."""
+
+    def __init__(
+        self,
+        iterator: AsyncIterator[bytes],
+        finalizer: _PersistentStreamFinalizer,
+    ) -> None:
+        self._iterator = iterator
+        self._finalizer = finalizer
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> bytes:
         try:
-            await _aclose_if_needed(response)
+            return await self._iterator.__anext__()
+        except BaseException:
+            await self._finalizer.run()
+            raise
+
+    async def aclose(self) -> None:
+        try:
+            await _aclose_if_needed(self._iterator)
         finally:
-            await _aclose_if_needed(client)
+            await self._finalizer.run()
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """Close the body iterator even when downstream ASGI sends fail."""
+
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        finalizer: _PersistentStreamFinalizer | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if finalizer is not None:
+            content = _FinalizingAsyncIterator(content, finalizer)
+        super().__init__(content, **kwargs)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await asyncio.shield(_aclose_if_needed(self.body_iterator))
+
+
+class _OwnedUpstreamStream:
+    """Keep a one-shot HTTP client alive for the lifetime of its response."""
+
+    def __init__(
+        self,
+        iterator: AsyncIterator[bytes],
+        response: httpx.Response,
+        client: httpx.AsyncClient,
+    ) -> None:
+        self._iterator = iterator
+        self._response = response
+        self._client = client
+        self._cleanup_complete = False
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._close_lock = asyncio.Lock()
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await self._iterator.__anext__()
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+
+    async def _cleanup(self) -> None:
+        try:
+            await _aclose_if_needed(self._iterator)
+        finally:
+            try:
+                await self._response.aclose()
+            finally:
+                await self._client.aclose()
+        self._cleanup_complete = True
+
+    async def aclose(self) -> None:
+        async with self._close_lock:
+            if self._cleanup_complete:
+                return
+            if self._cleanup_task is None or self._cleanup_task.done():
+                self._cleanup_task = asyncio.create_task(self._cleanup())
+            cleanup_task = self._cleanup_task
+        await asyncio.shield(cleanup_task)
+
+
+def _attach_upstream_stream_owner(
+    result: StreamingResponse,
+    response: httpx.Response,
+    client: httpx.AsyncClient,
+) -> StreamingResponse:
+    result.body_iterator = _OwnedUpstreamStream(
+        cast(AsyncIterator[bytes], result.body_iterator), response, client
+    )
+    return result
+
+
+async def _close_upstream_exchange(
+    response: httpx.Response | None, client: httpx.AsyncClient
+) -> None:
+    try:
+        if response is not None:
+            await response.aclose()
+    finally:
+        await client.aclose()
+
+
+def _build_x_cashu_client() -> httpx.AsyncClient:
+    """Build a per-request client for x-cashu forwarding.
+
+    This path intentionally bypasses the shared per-origin pools from
+    ``http_client.py``: the response and client are handed off to
+    ``_OwnedUpstreamStream``/``_close_upstream_exchange``, which close the
+    client once the exchange finishes. Closing a pooled client would tear
+    down the shared pool for every caller, so ownership stays per-request
+    here at the cost of a fresh connection per call.
+    """
+    return httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(
+            retries=settings.upstream_connect_retries,
+        ),
+        timeout=httpx.Timeout(
+            connect=settings.upstream_connect_timeout,
+            read=settings.upstream_read_timeout,
+            write=settings.upstream_write_timeout,
+            pool=settings.upstream_pool_timeout,
+        ),
+    )
 
 
 CostMetadata = CostData | MaxCostData | dict[str, Any]
@@ -1016,11 +1208,9 @@ class BaseUpstreamProvider:
         response: httpx.Response,
         key: ApiKey,
         max_cost_for_model: int,
-        background_tasks: BackgroundTasks,
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
-        client: httpx.AsyncClient | None = None,
         request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
@@ -1053,49 +1243,58 @@ class BaseUpstreamProvider:
             },
         )
 
+        usage_finalized = False
+        last_model_seen: str | None = None
+
+        async def finalize_db_only() -> None:
+            nonlocal usage_finalized
+            if usage_finalized:
+                return
+            try:
+                async with create_session() as new_session:
+                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                    if not fresh_key:
+                        return
+                    try:
+                        await adjust_payment_for_tokens(
+                            fresh_key,
+                            usage_estimator.response_data(last_model_seen),
+                            new_session,
+                            max_cost_for_model,
+                            model_obj,
+                            self.provider_fee,
+                            reservation_snapshot,
+                        )
+                        usage_finalized = True
+                    except Exception:
+                        logger.exception(
+                            "Fallback stream billing finalization failed; releasing reservation",
+                            extra={"key_hash": key.hashed_key[:8] + "..."},
+                        )
+                        usage_finalized = (
+                            await self._release_failed_streaming_reservation(
+                                fresh_key, new_session, reservation_snapshot
+                            )
+                        )
+            except Exception:
+                logger.exception(
+                    "Fallback stream billing recovery could not access the database",
+                    extra={"key_hash": key.hashed_key[:8] + "..."},
+                )
+
+        stream_finalizer = _PersistentStreamFinalizer(
+            lambda: _finalize_and_close_stream(
+                None if usage_finalized else finalize_db_only,
+                response,
+            )
+        )
+
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            usage_finalized: bool = False
-            last_model_seen: str | None = None
+            nonlocal usage_finalized, last_model_seen
             usage_chunk_data: dict | None = None
             done_seen: bool = False
-
-            async def finalize_db_only() -> None:
-                nonlocal usage_finalized
-                if usage_finalized:
-                    return
-                try:
-                    async with create_session() as new_session:
-                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                        if not fresh_key:
-                            return
-                        try:
-                            await adjust_payment_for_tokens(
-                                fresh_key,
-                                usage_estimator.response_data(last_model_seen),
-                                new_session,
-                                max_cost_for_model,
-                                model_obj,
-                                self.provider_fee,
-                                reservation_snapshot,
-                            )
-                            usage_finalized = True
-                        except Exception:
-                            logger.exception(
-                                "Fallback stream billing finalization failed; releasing reservation",
-                                extra={"key_hash": key.hashed_key[:8] + "..."},
-                            )
-                            usage_finalized = (
-                                await self._release_failed_streaming_reservation(
-                                    fresh_key, new_session, reservation_snapshot
-                                )
-                            )
-                except Exception:
-                    logger.exception(
-                        "Fallback stream billing recovery could not access the database",
-                        extra={"key_hash": key.hashed_key[:8] + "..."},
-                    )
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1330,23 +1529,16 @@ class BaseUpstreamProvider:
                 )
                 raise
             finally:
-                # Shielded so a client disconnect cannot cancel billing
-                # finalization or leak the upstream connection.
-                await asyncio.shield(
-                    _finalize_and_close_stream(
-                        None if usage_finalized else finalize_db_only,
-                        response,
-                        client,
-                    )
-                )
+                await stream_finalizer.run()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             stream_with_cost(max_cost_for_model),
+            finalizer=stream_finalizer,
             status_code=response.status_code,
             headers=response_headers,
         )
@@ -1506,7 +1698,6 @@ class BaseUpstreamProvider:
         requested_model: str | None = None,
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
-        client: httpx.AsyncClient | None = None,
         request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API responses with token usage tracking and cost adjustment.
@@ -1530,50 +1721,59 @@ class BaseUpstreamProvider:
             },
         )
 
+        usage_finalized = False
+        last_model_seen: str | None = None
+
+        async def finalize_db_only() -> None:
+            nonlocal usage_finalized
+            if usage_finalized:
+                return
+            try:
+                async with create_session() as new_session:
+                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                    if not fresh_key:
+                        return
+                    try:
+                        await adjust_payment_for_tokens(
+                            fresh_key,
+                            usage_estimator.response_data(last_model_seen),
+                            new_session,
+                            max_cost_for_model,
+                            model_obj,
+                            self.provider_fee,
+                            reservation_snapshot,
+                        )
+                        usage_finalized = True
+                    except Exception:
+                        logger.exception(
+                            "Fallback Responses billing finalization failed; releasing reservation",
+                            extra={"key_hash": key.hashed_key[:8] + "..."},
+                        )
+                        usage_finalized = (
+                            await self._release_failed_streaming_reservation(
+                                fresh_key, new_session, reservation_snapshot
+                            )
+                        )
+            except Exception:
+                logger.exception(
+                    "Fallback Responses billing recovery could not access the database",
+                    extra={"key_hash": key.hashed_key[:8] + "..."},
+                )
+
+        stream_finalizer = _PersistentStreamFinalizer(
+            lambda: _finalize_and_close_stream(
+                None if usage_finalized else finalize_db_only,
+                response,
+            )
+        )
+
         async def stream_with_responses_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
-            usage_finalized: bool = False
-            last_model_seen: str | None = None
+            nonlocal usage_finalized, last_model_seen
             reasoning_tokens: int = 0
             usage_chunk_data: dict | None = None
             done_seen: bool = False
-
-            async def finalize_db_only() -> None:
-                nonlocal usage_finalized
-                if usage_finalized:
-                    return
-                try:
-                    async with create_session() as new_session:
-                        fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                        if not fresh_key:
-                            return
-                        try:
-                            await adjust_payment_for_tokens(
-                                fresh_key,
-                                usage_estimator.response_data(last_model_seen),
-                                new_session,
-                                max_cost_for_model,
-                                model_obj,
-                                self.provider_fee,
-                                reservation_snapshot,
-                            )
-                            usage_finalized = True
-                        except Exception:
-                            logger.exception(
-                                "Fallback Responses billing finalization failed; releasing reservation",
-                                extra={"key_hash": key.hashed_key[:8] + "..."},
-                            )
-                            usage_finalized = (
-                                await self._release_failed_streaming_reservation(
-                                    fresh_key, new_session, reservation_snapshot
-                                )
-                            )
-                except Exception:
-                    logger.exception(
-                        "Fallback Responses billing recovery could not access the database",
-                        extra={"key_hash": key.hashed_key[:8] + "..."},
-                    )
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1770,23 +1970,16 @@ class BaseUpstreamProvider:
                 )
                 raise
             finally:
-                # Shielded so a client disconnect cannot cancel billing
-                # finalization or leak the upstream connection.
-                await asyncio.shield(
-                    _finalize_and_close_stream(
-                        None if usage_finalized else finalize_db_only,
-                        response,
-                        client,
-                    )
-                )
+                await stream_finalizer.run()
 
         # Remove inaccurate encoding headers from upstream response
         response_headers = dict(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             stream_with_responses_cost(max_cost_for_model),
+            finalizer=stream_finalizer,
             status_code=response.status_code,
             headers=response_headers,
         )
@@ -1950,12 +2143,12 @@ class BaseUpstreamProvider:
         provider_fee: float | None,
         reservation_snapshot: ReservationSnapshot,
     ) -> None:
-        """Background task to finalize payment for generic streaming requests."""
+        """Finalize payment for a generic streaming request."""
         async with create_session() as session:
             key = await session.get(ApiKey, key_hash)
             if not key:
                 logger.warning(
-                    "Key not found during background payment finalization",
+                    "Key not found during generic streaming payment finalization",
                     extra={"key_hash": key_hash[:8] + "..."},
                 )
                 return
@@ -1974,7 +2167,7 @@ class BaseUpstreamProvider:
                     reservation_snapshot=reservation_snapshot,
                 )
                 logger.debug(
-                    "Finalized generic streaming payment in background",
+                    "Finalized generic streaming payment",
                     extra={
                         "path": path,
                         "key_hash": key_hash[:8] + "...",
@@ -1982,13 +2175,85 @@ class BaseUpstreamProvider:
                 )
             except Exception as e:
                 logger.error(
-                    "Error finalizing generic streaming payment in background",
+                    "Error finalizing generic streaming payment",
                     extra={
                         "error": str(e),
                         "key_hash": key_hash[:8] + "...",
                         "path": path,
                     },
                 )
+
+    async def _stream_generic_with_settlement(
+        self,
+        response: httpx.Response,
+        key_hash: str,
+        max_cost: int,
+        path: str,
+        model_obj: Model | None,
+        provider_fee: float | None,
+        reservation_snapshot: ReservationSnapshot,
+        finalizer: _PersistentStreamFinalizer | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """Relay an opaque stream and settle it even if the caller disconnects."""
+        if finalizer is None:
+            finalizer = _PersistentStreamFinalizer(
+                lambda: _finalize_and_close_stream(
+                    lambda: self._finalize_generic_streaming_payment(
+                        key_hash,
+                        max_cost,
+                        path,
+                        model_obj,
+                        provider_fee,
+                        reservation_snapshot,
+                    ),
+                    response,
+                )
+            )
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        finally:
+            await finalizer.run()
+
+    def _generic_streaming_response(
+        self,
+        response: httpx.Response,
+        key_hash: str,
+        max_cost: int,
+        path: str,
+        model_obj: Model | None,
+        provider_fee: float | None,
+        reservation_snapshot: ReservationSnapshot,
+    ) -> _ClosingStreamingResponse:
+        finalizer = _PersistentStreamFinalizer(
+            lambda: _finalize_and_close_stream(
+                lambda: self._finalize_generic_streaming_payment(
+                    key_hash,
+                    max_cost,
+                    path,
+                    model_obj,
+                    provider_fee,
+                    reservation_snapshot,
+                ),
+                response,
+            )
+        )
+        stream = self._stream_generic_with_settlement(
+            response,
+            key_hash,
+            max_cost,
+            path,
+            model_obj,
+            provider_fee,
+            reservation_snapshot,
+            finalizer,
+        )
+        return _ClosingStreamingResponse(
+            stream,
+            finalizer=finalizer,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+        )
 
     async def handle_streaming_messages_completion(
         self,
@@ -2001,13 +2266,59 @@ class BaseUpstreamProvider:
         request_body: bytes | None = None,
     ) -> StreamingResponse:
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
+        usage_finalized = False
+        last_model_seen: str | None = None
+
+        async def finalize_without_usage() -> bytes | None:
+            nonlocal usage_finalized
+            if usage_finalized:
+                return None
+            async with create_session() as new_session:
+                fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                if not fresh_key:
+                    usage_finalized = True
+                    return None
+                try:
+                    cost_data = await adjust_payment_for_tokens(
+                        fresh_key,
+                        usage_estimator.response_data(last_model_seen),
+                        new_session,
+                        max_cost_for_model,
+                        model_obj,
+                        self.provider_fee,
+                        reservation_snapshot,
+                    )
+                    usage_finalized = True
+                    return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
+                except BaseException as e:
+                    logger.critical(
+                        "Error during Messages API usage finalization — CRITICAL",
+                        extra={
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "error": str(e),
+                        },
+                        exc_info=True,
+                    )
+                    usage_finalized = await self._release_failed_streaming_reservation(
+                        fresh_key,
+                        new_session,
+                        reservation_snapshot,
+                    )
+                    raise
+
+        async def finalize_db_only() -> None:
+            if not usage_finalized:
+                await finalize_without_usage()
+
+        stream_finalizer = _PersistentStreamFinalizer(
+            lambda: _finalize_and_close_stream(finalize_db_only, response)
+        )
 
         async def stream_with_cost(
             max_cost_for_model: int,
         ) -> AsyncGenerator[bytes, None]:
+            nonlocal usage_finalized, last_model_seen
             stored_chunks: list[bytes] = []
-            usage_finalized: bool = False
-            last_model_seen: str | None = None
             input_tokens: int = 0
             output_tokens: int = 0
             cache_read_input_tokens: int = 0
@@ -2044,45 +2355,6 @@ class BaseUpstreamProvider:
                     )
                 for field in ("total_cost", "cost"):
                     total_cost = max(total_cost, _coerce_usd(usage_or_root.get(field)))
-
-            async def finalize_without_usage() -> bytes | None:
-                nonlocal usage_finalized
-                if usage_finalized:
-                    return None
-                async with create_session() as new_session:
-                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                    if not fresh_key:
-                        usage_finalized = True
-                        return None
-                    try:
-                        cost_data = await adjust_payment_for_tokens(
-                            fresh_key,
-                            usage_estimator.response_data(last_model_seen),
-                            new_session,
-                            max_cost_for_model,
-                            model_obj,
-                            self.provider_fee,
-                            reservation_snapshot,
-                        )
-                        usage_finalized = True
-                        return f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n".encode()
-                    except BaseException as e:
-                        logger.critical(
-                            "Error during Messages API usage finalization — CRITICAL",
-                            extra={
-                                "key_hash": key.hashed_key[:8] + "...",
-                                "error": str(e),
-                            },
-                            exc_info=True,
-                        )
-                        usage_finalized = (
-                            await self._release_failed_streaming_reservation(
-                                fresh_key,
-                                new_session,
-                                reservation_snapshot,
-                            )
-                        )
-                        raise
 
             try:
                 async for chunk in response.aiter_bytes():
@@ -2271,15 +2543,15 @@ class BaseUpstreamProvider:
                     await finalize_without_usage()
                 raise
             finally:
-                if not usage_finalized:
-                    await finalize_without_usage()
+                await stream_finalizer.run()
 
         response_headers = dict(response.headers)
         response_headers.pop("content-encoding", None)
         response_headers.pop("content-length", None)
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             stream_with_cost(max_cost_for_model),
+            finalizer=stream_finalizer,
             status_code=response.status_code,
             headers=response_headers,
         )
@@ -2557,10 +2829,71 @@ class BaseUpstreamProvider:
         with cost reconciliation appended at end of stream."""
 
         usage_estimator = MissingUsageEstimator(request_body, model_obj)
+        usage_finalized = False
+        last_model_seen: str | None = None
+
+        async def finalize_without_usage() -> bytes | None:
+            nonlocal usage_finalized
+            if usage_finalized:
+                return None
+            logger.warning(
+                "Finalizing /v1/messages stream with locally estimated "
+                "usage because the upstream omitted `usage` from SSE. "
+                "Check that the upstream emits a final usage chunk; the "
+                "reservation ceiling will not be used as the charge.",
+                extra={
+                    "key_hash": key.hashed_key[:8] + "...",
+                    "model": last_model_seen or "unknown",
+                    "provider": self.provider_type or self.base_url,
+                    "max_cost_msats": max_cost_for_model,
+                },
+            )
+            async with create_session() as new_session:
+                fresh_key = await new_session.get(key.__class__, key.hashed_key)
+                if not fresh_key:
+                    usage_finalized = True
+                    return None
+                try:
+                    cost_data = await adjust_payment_for_tokens(
+                        fresh_key,
+                        usage_estimator.response_data(last_model_seen),
+                        new_session,
+                        max_cost_for_model,
+                        model_obj,
+                        self.provider_fee,
+                        reservation_snapshot,
+                    )
+                    usage_finalized = True
+                    return (
+                        f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n"
+                    ).encode()
+                except BaseException as e:
+                    logger.critical(
+                        "Error during LiteLLM Messages usage finalization — CRITICAL",
+                        extra={
+                            "key_hash": key.hashed_key[:8] + "...",
+                            "error": str(e),
+                        },
+                        exc_info=True,
+                    )
+                    usage_finalized = await self._release_failed_streaming_reservation(
+                        fresh_key,
+                        new_session,
+                        reservation_snapshot,
+                    )
+                    raise
+
+        async def finalize_stream() -> None:
+            try:
+                if not usage_finalized:
+                    await finalize_without_usage()
+            finally:
+                await _aclose_if_needed(iterator)
+
+        stream_finalizer = _PersistentStreamFinalizer(finalize_stream)
 
         async def stream_with_cost() -> AsyncGenerator[bytes, None]:
-            usage_finalized = False
-            last_model_seen: str | None = None
+            nonlocal usage_finalized, last_model_seen
             input_tokens = 0
             output_tokens = 0
             cache_read_input_tokens = 0
@@ -2568,59 +2901,6 @@ class BaseUpstreamProvider:
             total_cost = 0.0
             input_cost = 0.0
             output_cost = 0.0
-
-            async def finalize_without_usage() -> bytes | None:
-                nonlocal usage_finalized
-                if usage_finalized:
-                    return None
-                logger.warning(
-                    "Finalizing /v1/messages stream with locally estimated "
-                    "usage because the upstream omitted `usage` from SSE. "
-                    "Check that the upstream emits a final usage chunk; the "
-                    "reservation ceiling will not be used as the charge.",
-                    extra={
-                        "key_hash": key.hashed_key[:8] + "...",
-                        "model": last_model_seen or "unknown",
-                        "provider": self.provider_type or self.base_url,
-                        "max_cost_msats": max_cost_for_model,
-                    },
-                )
-                async with create_session() as new_session:
-                    fresh_key = await new_session.get(key.__class__, key.hashed_key)
-                    if not fresh_key:
-                        usage_finalized = True
-                        return None
-                    try:
-                        cost_data = await adjust_payment_for_tokens(
-                            fresh_key,
-                            usage_estimator.response_data(last_model_seen),
-                            new_session,
-                            max_cost_for_model,
-                            model_obj,
-                            self.provider_fee,
-                            reservation_snapshot,
-                        )
-                        usage_finalized = True
-                        return (
-                            f"event: cost\ndata: {json.dumps({'cost': cost_data})}\n\n"
-                        ).encode()
-                    except BaseException as e:
-                        logger.critical(
-                            "Error during LiteLLM Messages usage finalization — CRITICAL",
-                            extra={
-                                "key_hash": key.hashed_key[:8] + "...",
-                                "error": str(e),
-                            },
-                            exc_info=True,
-                        )
-                        usage_finalized = (
-                            await self._release_failed_streaming_reservation(
-                                fresh_key,
-                                new_session,
-                                reservation_snapshot,
-                            )
-                        )
-                        raise
 
             try:
                 async for annotated in messages_dispatch.stream_annotated_events(
@@ -2724,11 +3004,11 @@ class BaseUpstreamProvider:
                     await finalize_without_usage()
                 raise
             finally:
-                if not usage_finalized:
-                    await finalize_without_usage()
+                await stream_finalizer.run()
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             stream_with_cost(),
+            finalizer=stream_finalizer,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -2891,7 +3171,7 @@ class BaseUpstreamProvider:
             for annotated in buffered:
                 yield annotated.sse_bytes
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             replay(),
             media_type="text/event-stream",
             headers=response_headers,
@@ -2965,12 +3245,11 @@ class BaseUpstreamProvider:
             },
         )
 
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
+        response: httpx.Response | None = None
+        response_handoff = _ResponseHandoff()
 
         try:
+            client = _acquire_upstream_client(url)
             if transformed_body is not None:
                 response = await client.send(
                     client.build_request(
@@ -2993,6 +3272,7 @@ class BaseUpstreamProvider:
                     ),
                     stream=True,
                 )
+            response_handoff.acquire(response)
 
             if response.status_code != 200:
                 if response.status_code >= 500:
@@ -3027,8 +3307,7 @@ class BaseUpstreamProvider:
                             "body_preview": body_preview,
                         },
                     )
-                    await response.aclose()
-                    await client.aclose()
+                    await response_handoff.close()
                     raise UpstreamError(
                         f"Upstream {self.provider_type} returned {response.status_code} "
                         f"for model {original_model_id or 'unknown'}: "
@@ -3043,8 +3322,7 @@ class BaseUpstreamProvider:
                         request, path, response, model_id=original_model_id
                     )
                 finally:
-                    await response.aclose()
-                    await client.aclose()
+                    await response_handoff.close()
                 return mapped_error
 
             if (
@@ -3076,10 +3354,7 @@ class BaseUpstreamProvider:
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
                         )
-                        background_tasks = BackgroundTasks()
-                        background_tasks.add_task(response.aclose)
-                        background_tasks.add_task(client.aclose)
-                        result.background = background_tasks
+                        response_handoff.handoff()
                         return result
 
                     if response.status_code == 200:
@@ -3096,8 +3371,7 @@ class BaseUpstreamProvider:
                                 request_body=request_body,
                             )
                         finally:
-                            await response.aclose()
-                            await client.aclose()
+                            await response_handoff.close()
 
                 if path.endswith("messages/count_tokens"):
                     if response.status_code == 200:
@@ -3114,8 +3388,7 @@ class BaseUpstreamProvider:
                                 request_body=request_body,
                             )
                         finally:
-                            await response.aclose()
-                            await client.aclose()
+                            await response_handoff.close()
 
                 if path.endswith("chat/completions"):
                     client_wants_streaming = False
@@ -3152,18 +3425,17 @@ class BaseUpstreamProvider:
                     )
 
                     if is_streaming and response.status_code == 200:
-                        background_tasks = BackgroundTasks()
-                        return await self.handle_streaming_chat_completion(
+                        result = await self.handle_streaming_chat_completion(
                             response,
                             key,
                             max_cost_for_model,
-                            background_tasks,
                             requested_model=original_model_id,
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
-                            client=client,
                             request_body=request_body,
                         )
+                        response_handoff.handoff()
+                        return result
 
                 # Handle both non-streaming chat completions and embeddings
                 if response.status_code == 200:
@@ -3179,24 +3451,10 @@ class BaseUpstreamProvider:
                             request_body=request_body,
                         )
                     finally:
-                        await response.aclose()
-                        await client.aclose()
+                        await response_handoff.close()
 
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
-
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
-            background_tasks.add_task(
-                self._finalize_generic_streaming_payment,
-                key.hashed_key,
-                max_cost_for_model,
-                path,
-                model_obj,
-                self.provider_fee,
-                reservation_snapshot,
-            )
 
             logger.debug(
                 "Streaming non-chat response",
@@ -3207,18 +3465,24 @@ class BaseUpstreamProvider:
                 },
             )
 
-            return StreamingResponse(
-                response.aiter_bytes(),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                background=background_tasks,
+            result = self._generic_streaming_response(
+                response,
+                key.hashed_key,
+                max_cost_for_model,
+                path,
+                model_obj,
+                self.provider_fee,
+                reservation_snapshot,
             )
+            response_handoff.handoff()
+            return result
 
         except UpstreamError:
+            await response_handoff.close()
             raise
 
         except httpx.RequestError as exc:
-            await client.aclose()
+            await response_handoff.close()
             error_type = type(exc).__name__
             error_details = str(exc)
 
@@ -3236,19 +3500,26 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            if isinstance(exc, httpx.ConnectError):
+            if isinstance(exc, httpx.PoolTimeout):
+                error_message = "Upstream connection pool is busy"
+                status_code = 503
+            elif isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
+                status_code = 502
             elif isinstance(exc, httpx.TimeoutException):
                 error_message = "Upstream service request timed out"
+                status_code = 502
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
+                status_code = 502
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
+                status_code = 502
 
-            raise UpstreamError(error_message, status_code=502)
+            raise UpstreamError(error_message, status_code=status_code)
 
         except Exception as exc:
-            await client.aclose()
+            await response_handoff.close()
             tb = traceback.format_exc()
 
             logger.error(
@@ -3267,6 +3538,10 @@ class BaseUpstreamProvider:
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
             raise UpstreamError("An unexpected server error occurred", status_code=500)
+
+        except BaseException:
+            await response_handoff.close(suppress_errors=True)
+            raise
 
     supports_ehbp: bool = False
 
@@ -3338,12 +3613,11 @@ class BaseUpstreamProvider:
             },
         )
 
-        client = httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        )
+        response: httpx.Response | None = None
+        response_handoff = _ResponseHandoff()
 
         try:
+            client = _acquire_upstream_client(url)
             if transformed_body is not None:
                 response = await client.send(
                     client.build_request(
@@ -3366,6 +3640,7 @@ class BaseUpstreamProvider:
                     ),
                     stream=True,
                 )
+            response_handoff.acquire(response)
 
             if response.status_code != 200:
                 if response.status_code >= 500:
@@ -3399,8 +3674,7 @@ class BaseUpstreamProvider:
                             "body_preview": body_preview,
                         },
                     )
-                    await response.aclose()
-                    await client.aclose()
+                    await response_handoff.close()
                     raise UpstreamError(
                         f"Upstream {self.provider_type} returned {response.status_code} "
                         f"for model {original_model_id or 'unknown'}: "
@@ -3415,8 +3689,7 @@ class BaseUpstreamProvider:
                         request, path, response, model_id=original_model_id
                     )
                 finally:
-                    await response.aclose()
-                    await client.aclose()
+                    await response_handoff.close()
                 return mapped_error
 
             if path.startswith("responses"):
@@ -3433,16 +3706,17 @@ class BaseUpstreamProvider:
                 )
 
                 if is_streaming and response.status_code == 200:
-                    return await self.handle_streaming_responses_completion(
+                    result = await self.handle_streaming_responses_completion(
                         response,
                         key,
                         max_cost_for_model,
                         requested_model=original_model_id,
                         model_obj=model_obj,
                         reservation_snapshot=reservation_snapshot,
-                        client=client,
                         request_body=transformed_body,
                     )
+                    response_handoff.handoff()
+                    return result
 
                 if response.status_code == 200:
                     try:
@@ -3457,24 +3731,10 @@ class BaseUpstreamProvider:
                             request_body=transformed_body,
                         )
                     finally:
-                        await response.aclose()
-                        await client.aclose()
+                        await response_handoff.close()
 
             if reservation_snapshot is None:
                 reservation_snapshot = await get_reservation_snapshot(key, session)
-
-            background_tasks = BackgroundTasks()
-            background_tasks.add_task(response.aclose)
-            background_tasks.add_task(client.aclose)
-            background_tasks.add_task(
-                self._finalize_generic_streaming_payment,
-                key.hashed_key,
-                max_cost_for_model,
-                path,
-                model_obj,
-                self.provider_fee,
-                reservation_snapshot,
-            )
 
             logger.debug(
                 "Streaming non-Responses API response",
@@ -3485,18 +3745,24 @@ class BaseUpstreamProvider:
                 },
             )
 
-            return StreamingResponse(
-                response.aiter_bytes(),
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                background=background_tasks,
+            result = self._generic_streaming_response(
+                response,
+                key.hashed_key,
+                max_cost_for_model,
+                path,
+                model_obj,
+                self.provider_fee,
+                reservation_snapshot,
             )
+            response_handoff.handoff()
+            return result
 
         except UpstreamError:
+            await response_handoff.close()
             raise
 
         except httpx.RequestError as exc:
-            await client.aclose()
+            await response_handoff.close()
             error_type = type(exc).__name__
             error_details = str(exc)
 
@@ -3514,19 +3780,26 @@ class BaseUpstreamProvider:
             )
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
-            if isinstance(exc, httpx.ConnectError):
+            if isinstance(exc, httpx.PoolTimeout):
+                error_message = "Upstream connection pool is busy"
+                status_code = 503
+            elif isinstance(exc, httpx.ConnectError):
                 error_message = "Unable to connect to upstream service"
+                status_code = 502
             elif isinstance(exc, httpx.TimeoutException):
                 error_message = "Upstream service request timed out"
+                status_code = 502
             elif isinstance(exc, httpx.NetworkError):
                 error_message = "Network error while connecting to upstream service"
+                status_code = 502
             else:
                 error_message = f"Error connecting to upstream service: {error_type}"
+                status_code = 502
 
-            raise UpstreamError(error_message, status_code=502)
+            raise UpstreamError(error_message, status_code=status_code)
 
         except Exception as exc:
-            await client.aclose()
+            await response_handoff.close()
             tb = traceback.format_exc()
 
             logger.error(
@@ -3545,6 +3818,10 @@ class BaseUpstreamProvider:
 
             # Don't revert here — proxy.py owns payment revert to avoid double-revert
             raise UpstreamError("An unexpected server error occurred", status_code=500)
+
+        except BaseException:
+            await response_handoff.close(suppress_errors=True)
+            raise
 
     async def forward_get_request(
         self,
@@ -3575,66 +3852,91 @@ class BaseUpstreamProvider:
             },
         )
 
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=request.stream(),
-                        params=self.prepare_params(path, request.query_params),
-                    ),
+        response: httpx.Response | None = None
+        try:
+            client = _acquire_upstream_client(url)
+            response = await client.send(
+                client.build_request(
+                    request.method,
+                    url,
+                    headers=headers,
+                    content=request.stream(),
+                    params=self.prepare_params(path, request.query_params),
+                ),
+            )
+
+            logger.debug(
+                "GET request forwarded",
+                extra={
+                    "path": path,
+                    "status_code": response.status_code,
+                    "provider": self.provider_type,
+                },
+            )
+            if response.status_code != 200:
+                return await self.forward_upstream_error_response(
+                    request, path, response
                 )
 
-                logger.debug(
-                    "GET request forwarded",
-                    extra={
-                        "path": path,
-                        "status_code": response.status_code,
-                        "provider": self.provider_type,
-                    },
-                )
-                if response.status_code != 200:
-                    try:
-                        mapped = await self.forward_upstream_error_response(
-                            request, path, response
-                        )
-                    finally:
-                        await response.aclose()
-                    return mapped
-
-                response_headers = dict(response.headers)
-                response_headers.pop("content-encoding", None)
-                response_headers.pop("content-length", None)
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=response_headers,
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Error forwarding GET request",
-                    extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
-                    },
-                )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
-                )
+            response_headers = dict(response.headers)
+            response_headers.pop("content-encoding", None)
+            response_headers.pop("content-length", None)
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=response_headers,
+            )
+        except UpstreamError:
+            raise
+        except httpx.PoolTimeout:
+            logger.warning(
+                "Upstream connection pool exhausted on GET",
+                extra={"path": path, "url": url, "provider": self.provider_type},
+            )
+            return create_error_response(
+                "service_unavailable",
+                "Upstream connection pool is busy",
+                503,
+                request=request,
+            )
+        except httpx.RequestError as exc:
+            logger.warning(
+                "Upstream request error on GET",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "path": path,
+                    "url": url,
+                    "provider": self.provider_type,
+                },
+            )
+            return create_error_response(
+                "upstream_error",
+                "Unable to reach upstream service",
+                502,
+                request=request,
+            )
+        except Exception as exc:
+            logger.error(
+                "Error forwarding GET request",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "method": request.method,
+                    "url": url,
+                    "path": path,
+                    "query_params": dict(request.query_params),
+                    "traceback": traceback.format_exc(),
+                },
+            )
+            return create_error_response(
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
+            )
+        finally:
+            await _aclose_if_needed(response)
 
     async def get_x_cashu_cost(
         self,
@@ -3943,7 +4245,7 @@ class BaseUpstreamProvider:
             for line in lines:
                 yield (line + "\n").encode("utf-8")
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             generate(),
             status_code=response.status_code,
             headers=response_headers,
@@ -4182,7 +4484,7 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
-            return StreamingResponse(
+            return _ClosingStreamingResponse(
                 response.aiter_bytes(),
                 status_code=response.status_code,
                 headers=dict(response.headers),
@@ -4254,149 +4556,147 @@ class BaseUpstreamProvider:
             },
         )
 
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body if transformed_body else request_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
+        client = _build_x_cashu_client()
+        response: httpx.Response | None = None
+        try:
+            response = await client.send(
+                client.build_request(
+                    request.method,
+                    url,
+                    headers=headers,
+                    content=transformed_body if transformed_body else request_body,
+                    params=self.prepare_params(path, request.query_params),
+                ),
+                stream=True,
+            )
 
-                if response.status_code != 200:
-                    logger.error(
-                        "Received upstream response",
-                        extra={
-                            "reason_phrase": response.reason_phrase,
-                            "status_code": response.status_code,
-                            "path": path,
-                            "response_headers": dict(response.headers),
-                        },
-                    )
-                else:
-                    logger.debug(
-                        "Received upstream response",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "response_headers": dict(response.headers),
-                        },
-                    )
-
-                if response.status_code != 200:
-                    logger.warning(
-                        "Upstream request failed, processing refund",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "amount": amount,
-                            "unit": unit,
-                        },
-                    )
-
-                    refund_token = await self.send_refund(
-                        amount,
-                        unit,
-                        mint,
-                        request_id=getattr(request.state, "request_id", None),
-                    )
-
-                    logger.info(
-                        "Refund processed for failed upstream request",
-                        extra={
-                            "status_code": response.status_code,
-                            "refund_amount": amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-
-                    error_response = Response(
-                        content=json.dumps(
-                            {
-                                "error": {
-                                    "message": "Error forwarding request to upstream",
-                                    "type": "upstream_error",
-                                    "code": response.status_code,
-                                    "refund_token": refund_token,
-                                }
-                            }
-                        ),
-                        status_code=response.status_code,
-                        media_type="application/json",
-                    )
-                    error_response.headers["X-Cashu"] = refund_token
-                    return error_response
-
-                if (
-                    path.endswith("chat/completions")
-                    or path.endswith("embeddings")
-                    or path.endswith("messages")
-                    or path.endswith("messages/count_tokens")
-                ):
-                    logger.debug(
-                        "Processing completion/embeddings/messages response",
-                        extra={"path": path, "amount": amount, "unit": unit},
-                    )
-
-                    result = await self.handle_x_cashu_chat_completion(
-                        response,
-                        amount,
-                        unit,
-                        max_cost_for_model,
-                        mint,
-                        request_id=getattr(request.state, "request_id", None),
-                        model_obj=model_obj,
-                    )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    result.background = background_tasks
-                    return result
-
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(response.aclose)
-                background_tasks.add_task(client.aclose)
-
-                logger.debug(
-                    "Streaming non-chat response",
-                    extra={"path": path, "status_code": response.status_code},
-                )
-
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    background=background_tasks,
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
+            if response.status_code != 200:
                 logger.error(
-                    "Unexpected error in upstream forwarding",
+                    "Received upstream response",
                     extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
+                        "reason_phrase": response.reason_phrase,
+                        "status_code": response.status_code,
                         "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
+                        "response_headers": dict(response.headers),
                     },
                 )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
+            else:
+                logger.debug(
+                    "Received upstream response",
+                    extra={
+                        "status_code": response.status_code,
+                        "path": path,
+                        "response_headers": dict(response.headers),
+                    },
                 )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Upstream request failed, processing refund",
+                    extra={
+                        "status_code": response.status_code,
+                        "path": path,
+                        "amount": amount,
+                        "unit": unit,
+                    },
+                )
+
+                refund_token = await self.send_refund(
+                    amount,
+                    unit,
+                    mint,
+                    request_id=getattr(request.state, "request_id", None),
+                )
+
+                logger.info(
+                    "Refund processed for failed upstream request",
+                    extra={
+                        "status_code": response.status_code,
+                        "refund_amount": amount,
+                        "unit": unit,
+                        "refund_token_preview": refund_token[:20] + "..."
+                        if len(refund_token) > 20
+                        else refund_token,
+                    },
+                )
+
+                error_response = Response(
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "message": "Error forwarding request to upstream",
+                                "type": "upstream_error",
+                                "code": response.status_code,
+                                "refund_token": refund_token,
+                            }
+                        }
+                    ),
+                    status_code=response.status_code,
+                    media_type="application/json",
+                )
+                error_response.headers["X-Cashu"] = refund_token
+                await _close_upstream_exchange(response, client)
+                return error_response
+
+            if (
+                path.endswith("chat/completions")
+                or path.endswith("embeddings")
+                or path.endswith("messages")
+                or path.endswith("messages/count_tokens")
+            ):
+                logger.debug(
+                    "Processing completion/embeddings/messages response",
+                    extra={"path": path, "amount": amount, "unit": unit},
+                )
+
+                result = await self.handle_x_cashu_chat_completion(
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    request_id=getattr(request.state, "request_id", None),
+                    model_obj=model_obj,
+                )
+                if isinstance(result, StreamingResponse) and not response.is_closed:
+                    return _attach_upstream_stream_owner(result, response, client)
+                await _close_upstream_exchange(response, client)
+                return result
+
+            logger.debug(
+                "Streaming non-chat response",
+                extra={"path": path, "status_code": response.status_code},
+            )
+
+            return _ClosingStreamingResponse(
+                _OwnedUpstreamStream(response.aiter_bytes(), response, client),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
+        except asyncio.CancelledError:
+            await _close_upstream_exchange(response, client)
+            raise
+        except Exception as exc:
+            await _close_upstream_exchange(response, client)
+            tb = traceback.format_exc()
+            logger.error(
+                "Unexpected error in upstream forwarding",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "method": request.method,
+                    "url": url,
+                    "path": path,
+                    "query_params": dict(request.query_params),
+                    "traceback": tb,
+                },
+            )
+            return create_error_response(
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
+            )
 
     async def handle_x_cashu_responses(
         self,
@@ -4560,133 +4860,131 @@ class BaseUpstreamProvider:
             },
         )
 
-        async with httpx.AsyncClient(
-            transport=httpx.AsyncHTTPTransport(retries=1),
-            timeout=None,
-        ) as client:
-            try:
-                response = await client.send(
-                    client.build_request(
-                        request.method,
-                        url,
-                        headers=headers,
-                        content=transformed_body if transformed_body else request_body,
-                        params=self.prepare_params(path, request.query_params),
-                    ),
-                    stream=True,
-                )
+        client = _build_x_cashu_client()
+        response: httpx.Response | None = None
+        try:
+            response = await client.send(
+                client.build_request(
+                    request.method,
+                    url,
+                    headers=headers,
+                    content=transformed_body if transformed_body else request_body,
+                    params=self.prepare_params(path, request.query_params),
+                ),
+                stream=True,
+            )
 
-                logger.debug(
-                    "Received upstream Responses API response",
+            logger.debug(
+                "Received upstream Responses API response",
+                extra={
+                    "status_code": response.status_code,
+                    "path": path,
+                    "response_headers": dict(response.headers),
+                },
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Upstream Responses API request failed, processing refund",
                     extra={
                         "status_code": response.status_code,
                         "path": path,
-                        "response_headers": dict(response.headers),
+                        "amount": amount,
+                        "unit": unit,
                     },
                 )
 
-                if response.status_code != 200:
-                    logger.warning(
-                        "Upstream Responses API request failed, processing refund",
-                        extra={
-                            "status_code": response.status_code,
-                            "path": path,
-                            "amount": amount,
-                            "unit": unit,
-                        },
-                    )
-
-                    refund_token = await self.send_refund(
-                        amount,
-                        unit,
-                        mint,
-                        request_id=getattr(request.state, "request_id", None),
-                    )
-
-                    logger.info(
-                        "Refund processed for failed upstream Responses API request",
-                        extra={
-                            "status_code": response.status_code,
-                            "refund_amount": amount,
-                            "unit": unit,
-                            "refund_token_preview": refund_token[:20] + "..."
-                            if len(refund_token) > 20
-                            else refund_token,
-                        },
-                    )
-
-                    error_response = Response(
-                        content=json.dumps(
-                            {
-                                "error": {
-                                    "message": "Error forwarding Responses API request to upstream",
-                                    "type": "upstream_error",
-                                    "code": response.status_code,
-                                    "refund_token": refund_token,
-                                }
-                            }
-                        ),
-                        status_code=response.status_code,
-                        media_type="application/json",
-                    )
-                    error_response.headers["X-Cashu"] = refund_token
-                    return error_response
-
-                if path.startswith("responses"):
-                    logger.debug(
-                        "Processing Responses API response",
-                        extra={"path": path, "amount": amount, "unit": unit},
-                    )
-
-                    result = await self.handle_x_cashu_responses_completion(
-                        response,
-                        amount,
-                        unit,
-                        max_cost_for_model,
-                        mint,
-                        request_id=getattr(request.state, "request_id", None),
-                        model_obj=model_obj,
-                    )
-                    background_tasks = BackgroundTasks()
-                    background_tasks.add_task(response.aclose)
-                    result.background = background_tasks
-                    return result
-
-                background_tasks = BackgroundTasks()
-                background_tasks.add_task(response.aclose)
-                background_tasks.add_task(client.aclose)
-
-                logger.debug(
-                    "Streaming non-responses response",
-                    extra={"path": path, "status_code": response.status_code},
+                refund_token = await self.send_refund(
+                    amount,
+                    unit,
+                    mint,
+                    request_id=getattr(request.state, "request_id", None),
                 )
 
-                return StreamingResponse(
-                    response.aiter_bytes(),
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    background=background_tasks,
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                logger.error(
-                    "Unexpected error in upstream Responses API forwarding",
+                logger.info(
+                    "Refund processed for failed upstream Responses API request",
                     extra={
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "method": request.method,
-                        "url": url,
-                        "path": path,
-                        "query_params": dict(request.query_params),
-                        "traceback": tb,
+                        "status_code": response.status_code,
+                        "refund_amount": amount,
+                        "unit": unit,
+                        "refund_token_preview": refund_token[:20] + "..."
+                        if len(refund_token) > 20
+                        else refund_token,
                     },
                 )
-                return create_error_response(
-                    "internal_error",
-                    "An unexpected server error occurred",
-                    500,
-                    request=request,
+
+                error_response = Response(
+                    content=json.dumps(
+                        {
+                            "error": {
+                                "message": "Error forwarding Responses API request to upstream",
+                                "type": "upstream_error",
+                                "code": response.status_code,
+                                "refund_token": refund_token,
+                            }
+                        }
+                    ),
+                    status_code=response.status_code,
+                    media_type="application/json",
                 )
+                error_response.headers["X-Cashu"] = refund_token
+                await _close_upstream_exchange(response, client)
+                return error_response
+
+            if path.startswith("responses"):
+                logger.debug(
+                    "Processing Responses API response",
+                    extra={"path": path, "amount": amount, "unit": unit},
+                )
+
+                result = await self.handle_x_cashu_responses_completion(
+                    response,
+                    amount,
+                    unit,
+                    max_cost_for_model,
+                    mint,
+                    request_id=getattr(request.state, "request_id", None),
+                    model_obj=model_obj,
+                )
+                if isinstance(result, StreamingResponse) and not response.is_closed:
+                    return _attach_upstream_stream_owner(result, response, client)
+                await _close_upstream_exchange(response, client)
+                return result
+
+            logger.debug(
+                "Streaming non-responses response",
+                extra={"path": path, "status_code": response.status_code},
+            )
+
+            return _ClosingStreamingResponse(
+                _OwnedUpstreamStream(response.aiter_bytes(), response, client),
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
+        except asyncio.CancelledError:
+            await _close_upstream_exchange(response, client)
+            raise
+        except Exception as exc:
+            await _close_upstream_exchange(response, client)
+            tb = traceback.format_exc()
+            logger.error(
+                "Unexpected error in upstream Responses API forwarding",
+                extra={
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "method": request.method,
+                    "url": url,
+                    "path": path,
+                    "query_params": dict(request.query_params),
+                    "traceback": tb,
+                },
+            )
+            return create_error_response(
+                "internal_error",
+                "An unexpected server error occurred",
+                500,
+                request=request,
+            )
 
     async def handle_x_cashu_responses_completion(
         self,
@@ -4765,7 +5063,7 @@ class BaseUpstreamProvider:
                     "unit": unit,
                 },
             )
-            return StreamingResponse(
+            return _ClosingStreamingResponse(
                 response.aiter_bytes(),
                 status_code=response.status_code,
                 headers=dict(response.headers),
@@ -4950,7 +5248,7 @@ class BaseUpstreamProvider:
             for fields, data in events:
                 yield _render_sse_event(fields, data).encode("utf-8")
 
-        return StreamingResponse(
+        return _ClosingStreamingResponse(
             generate(),
             status_code=response.status_code,
             headers=response_headers,

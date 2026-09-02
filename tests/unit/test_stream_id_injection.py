@@ -42,8 +42,6 @@ async def test_stream_with_id_injection() -> None:
     key.hashed_key = "test_hash"
     key.balance = 1000
 
-    background_tasks = MagicMock()
-
     # We need to mock adjust_payment_for_tokens since it's called at the end
     with MagicMock():
         from routstr.upstream import base
@@ -66,7 +64,6 @@ async def test_stream_with_id_injection() -> None:
             response=mock_response,
             key=key,
             max_cost_for_model=100,
-            background_tasks=background_tasks,
             requested_model="test-model",
             reservation_snapshot=ReservationSnapshot(
                 release_id="test-release",
