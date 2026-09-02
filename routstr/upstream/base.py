@@ -255,6 +255,13 @@ def _openai_completion_path(path: str) -> str | None:
     return "completions" if canonical.endswith("/completions") else None
 
 
+def _x_cashu_path_has_settlement_handler(path: str) -> bool:
+    canonical = path.rstrip("/")
+    return _openai_completion_path(canonical) is not None or canonical.endswith(
+        ("embeddings", "messages", "messages/count_tokens")
+    )
+
+
 class TopupData(BaseModel):
     """Universal top-up data schema for Lightning Network invoices."""
 
@@ -4245,7 +4252,15 @@ class BaseUpstreamProvider:
             path.endswith("messages/count_tokens")
             and not self.supports_anthropic_messages
         ):
-            return count_tokens_locally(request_body, model_obj)
+            result = count_tokens_locally(request_body, model_obj)
+            refund_token = await self.send_refund(
+                amount,
+                unit,
+                mint,
+                request_id=getattr(request.state, "request_id", None),
+            )
+            result.headers["X-Cashu"] = refund_token
+            return result
 
         if (
             path.endswith("messages")
@@ -4364,12 +4379,7 @@ class BaseUpstreamProvider:
                     error_response.headers["X-Cashu"] = refund_token
                     return error_response
 
-                if (
-                    completion_path is not None
-                    or path.endswith("embeddings")
-                    or path.endswith("messages")
-                    or path.endswith("messages/count_tokens")
-                ):
+                if _x_cashu_path_has_settlement_handler(path):
                     logger.debug(
                         "Processing completion/embeddings/messages response",
                         extra={"path": path, "amount": amount, "unit": unit},
@@ -5156,6 +5166,21 @@ class BaseUpstreamProvider:
                 else x_cashu_token,
             },
         )
+
+        # Reject before redemption so the client keeps its token.
+        if not _x_cashu_path_has_settlement_handler(path):
+            logger.warning(
+                "Rejecting X-Cashu request for unsupported endpoint",
+                extra={"path": path, "method": request.method},
+            )
+            return create_error_response(
+                "invalid_request_error",
+                "X-Cashu payment is not supported on this endpoint; use bearer "
+                "(deposit) authentication instead. The token was not redeemed.",
+                400,
+                request=request,
+                code="x_cashu_unsupported_endpoint",
+            )
 
         redeemed = False
         try:
