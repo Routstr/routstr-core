@@ -23,7 +23,11 @@ import litellm
 from fastapi.responses import Response
 
 from ..core import get_logger
-from ..payment.helpers import estimate_prompt_tokens, estimate_tokens
+from ..payment.helpers import (
+    _count_prompt_token_ids,
+    estimate_prompt_tokens,
+    estimate_tokens,
+)
 from ..payment.models import Model
 
 logger = get_logger(__name__)
@@ -46,10 +50,27 @@ def _model_name(model_obj: Model | None, body: dict[str, Any]) -> str:
     return body_model if isinstance(body_model, str) else ""
 
 
-def _count_with_litellm(model: str, body: dict[str, Any]) -> int:
+def _count_with_litellm(
+    model: str, body: dict[str, Any], include_legacy_prompt: bool = False
+) -> int:
     messages = body.get("messages")
     if not isinstance(messages, list):
         messages = []
+
+    prompt_token_ids = 0
+    if include_legacy_prompt:
+        prompt = body.get("prompt")
+        if isinstance(prompt, str):
+            prompt_texts = [prompt]
+        elif isinstance(prompt, list):
+            prompt_texts = [item for item in prompt if isinstance(item, str)]
+        else:
+            prompt_texts = []
+        prompt_token_ids = _count_prompt_token_ids(prompt)
+        messages = [
+            *({"role": "user", "content": text} for text in prompt_texts if text),
+            *messages,
+        ]
 
     system = body.get("system")
     if isinstance(system, str) and system:
@@ -65,7 +86,7 @@ def _count_with_litellm(model: str, body: dict[str, Any]) -> int:
 
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
 
-    return int(
+    return prompt_token_ids + int(
         litellm.token_counter(
             model=model,
             messages=messages,
@@ -133,7 +154,9 @@ class MissingUsageEstimator:
         if self._input_tokens is not None:
             return self._input_tokens
         try:
-            self._input_tokens = _count_with_litellm(self.model_name, self.body)
+            self._input_tokens = _count_with_litellm(
+                self.model_name, self.body, include_legacy_prompt=True
+            )
         except Exception as exc:
             self._input_tokens = estimate_prompt_tokens(self.body)
             logger.debug(

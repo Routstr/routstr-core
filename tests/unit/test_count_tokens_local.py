@@ -229,6 +229,15 @@ def test_missing_usage_estimator_openai_dialect() -> None:
     }
 
 
+def test_missing_usage_estimator_counts_legacy_token_prompt() -> None:
+    model = _make_model()
+    request_body = _body({"model": model.id, "prompt": [[1, 2], [3, 4, 5]]})
+
+    usage = MissingUsageEstimator(request_body, model).openai_response_data()["usage"]
+
+    assert usage["prompt_tokens"] >= 5
+
+
 def test_missing_usage_estimator_does_not_count_response_metadata() -> None:
     estimator = MissingUsageEstimator(b"{}", None)
     estimator.observe(
