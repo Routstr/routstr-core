@@ -248,6 +248,13 @@ def _is_json_content_type(content_type: str | None) -> bool:
     return main.startswith("application/") and main.endswith("+json")
 
 
+def _openai_completion_path(path: str) -> str | None:
+    canonical = "/" + path.rstrip("/")
+    if canonical.endswith("/chat/completions"):
+        return "chat/completions"
+    return "completions" if canonical.endswith("/completions") else None
+
+
 class TopupData(BaseModel):
     """Universal top-up data schema for Lightning Network invoices."""
 
@@ -653,17 +660,20 @@ class BaseUpstreamProvider:
         return "openrouter.ai" in (self.base_url or "")
 
     def prepare_request_body(
-        self, body: bytes | None, model_obj: Model
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
     ) -> bytes | None:
         """Transform request body for provider-specific requirements.
 
-        Automatically transforms model names and, for streaming chat
-        completions, opts the upstream into emitting per-chunk ``usage``
-        so cost tracking can read real token counts instead of falling
-        back to ``MaxCostData``.
+        Automatically transforms model names and opts streaming OpenAI
+        completion endpoints into emitting per-chunk ``usage`` so cost
+        tracking can read real token counts.
 
         Args:
             body: Original request body bytes
+            include_stream_usage: Opt a streaming completion into usage chunks
 
         Returns:
             Transformed request body bytes
@@ -706,14 +716,8 @@ class BaseUpstreamProvider:
         # OpenAI-compatible streaming responses omit ``usage`` unless the
         # request sets ``stream_options.include_usage = true``. Without it
         # we can't reconcile token counts at end of stream and must use
-        # the local request/response estimator. Discriminate
-        # chat-completions-shaped requests by the ``messages`` field so we
-        # don't poke unrelated endpoints.
-        if (
-            data.get("stream") is True
-            and "messages" in data
-            and isinstance(data.get("messages"), list)
-        ):
+        # the local request/response estimator.
+        if data.get("stream") is True and include_stream_usage:
             existing = data.get("stream_options")
             merged = dict(existing) if isinstance(existing, dict) else {}
             if merged.get("include_usage") is not True:
@@ -1022,6 +1026,7 @@ class BaseUpstreamProvider:
         reservation_snapshot: ReservationSnapshot | None = None,
         client: httpx.AsyncClient | None = None,
         request_body: bytes | None = None,
+        legacy_completion: bool = False,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1060,6 +1065,7 @@ class BaseUpstreamProvider:
             last_model_seen: str | None = None
             usage_chunk_data: dict | None = None
             done_seen: bool = False
+            stream_id: str | None = None
 
             async def finalize_db_only() -> None:
                 nonlocal usage_finalized
@@ -1118,7 +1124,7 @@ class BaseUpstreamProvider:
                 * ``[DONE]`` is swallowed so it can be re-emitted exactly once at
                   end of stream.
                 """
-                nonlocal last_model_seen, usage_chunk_data, done_seen
+                nonlocal last_model_seen, usage_chunk_data, done_seen, stream_id
 
                 event = raw_event.strip(b"\r\n")
                 if not event:
@@ -1171,9 +1177,12 @@ class BaseUpstreamProvider:
                         or not isinstance(obj["id"], str)
                         or obj["id"] == "existing-id"
                     ):
-                        if not hasattr(self, "_current_stream_id"):
-                            self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
-                        obj["id"] = self._current_stream_id
+                        if stream_id is None:
+                            id_prefix = "cmpl" if legacy_completion else "chatcmpl"
+                            stream_id = f"{id_prefix}-{uuid.uuid4()}"
+                        obj["id"] = stream_id
+                    else:
+                        stream_id = obj["id"]
                     if isinstance(obj.get("usage"), dict):
                         # Capture usage for end-of-stream cost reconciliation.
                         # Some models (e.g. Gemini thinking models over the
@@ -1285,11 +1294,14 @@ class BaseUpstreamProvider:
                             raise
 
                         if usage_chunk_data is None:
-                            if not hasattr(self, "_current_stream_id"):
-                                self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
+                            if stream_id is None:
+                                id_prefix = "cmpl" if legacy_completion else "chatcmpl"
+                                stream_id = f"{id_prefix}-{uuid.uuid4()}"
                             usage_chunk_data = {
-                                "id": self._current_stream_id,
-                                "object": "chat.completion.chunk",
+                                "id": stream_id,
+                                "object": "text_completion"
+                                if legacy_completion
+                                else "chat.completion.chunk",
                                 "model": last_model_seen or "unknown",
                                 "choices": [],
                                 "usage": {
@@ -1361,6 +1373,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        legacy_completion: bool = False,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1400,9 +1413,11 @@ class BaseUpstreamProvider:
             if requested_model:
                 response_json["model"] = requested_model
             if "id" not in response_json or not isinstance(response_json["id"], str):
-                response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
+                prefix = "cmpl" if legacy_completion else "chatcmpl"
+                response_json["id"] = f"{prefix}-{uuid.uuid4()}"
 
-            if not isinstance(response_json.get("usage"), dict):
+            usage = response_json.get("usage")
+            if not isinstance(usage, dict) or not usage:
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
                 response_json["usage"] = usage_estimator.openai_response_data(
@@ -2923,6 +2938,7 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
+        completion_path = _openai_completion_path(path)
         path = self.normalize_request_path(path, model_obj)
 
         if (
@@ -2951,7 +2967,11 @@ class BaseUpstreamProvider:
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
 
-        transformed_body = self.prepare_request_body(request_body, model_obj)
+        transformed_body = self.prepare_request_body(
+            request_body,
+            model_obj,
+            include_stream_usage=completion_path is not None,
+        )
 
         logger.debug(
             "Forwarding request to upstream",
@@ -3048,7 +3068,7 @@ class BaseUpstreamProvider:
                 return mapped_error
 
             if (
-                path.endswith("chat/completions")
+                completion_path is not None
                 or path.endswith("embeddings")
                 or path.endswith("messages")
                 or path.endswith("messages/count_tokens")
@@ -3117,7 +3137,7 @@ class BaseUpstreamProvider:
                             await response.aclose()
                             await client.aclose()
 
-                if path.endswith("chat/completions"):
+                if completion_path is not None:
                     client_wants_streaming = False
                     if request_body:
                         try:
@@ -3163,6 +3183,7 @@ class BaseUpstreamProvider:
                             reservation_snapshot=reservation_snapshot,
                             client=client,
                             request_body=request_body,
+                            legacy_completion=completion_path == "completions",
                         )
 
                 # Handle both non-streaming chat completions and embeddings
@@ -3177,6 +3198,7 @@ class BaseUpstreamProvider:
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
+                            legacy_completion=completion_path == "completions",
                         )
                     finally:
                         await response.aclose()
@@ -4213,6 +4235,7 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse with refund if applicable
         """
+        completion_path = _openai_completion_path(path)
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -4241,7 +4264,11 @@ class BaseUpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
-        transformed_body = self.prepare_request_body(request_body, model_obj)
+        transformed_body = self.prepare_request_body(
+            request_body,
+            model_obj,
+            include_stream_usage=completion_path is not None,
+        )
 
         logger.debug(
             "Forwarding request to upstream",
@@ -4338,7 +4365,7 @@ class BaseUpstreamProvider:
                     return error_response
 
                 if (
-                    path.endswith("chat/completions")
+                    completion_path is not None
                     or path.endswith("embeddings")
                     or path.endswith("messages")
                     or path.endswith("messages/count_tokens")

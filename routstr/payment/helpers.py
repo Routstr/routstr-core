@@ -287,16 +287,21 @@ def _sum_string_chars(node: Any) -> int:
     return 0
 
 
+def _count_prompt_token_ids(node: Any) -> int:
+    if isinstance(node, int) and not isinstance(node, bool):
+        return 1
+    if isinstance(node, list):
+        return sum(_count_prompt_token_ids(item) for item in node)
+    return 0
+
+
 def estimate_prompt_tokens(body: dict) -> int:
     """Conservatively estimate prompt tokens for the whole provider-bound body.
 
-    Unlike ``estimate_tokens`` (message text only), this walks every field, so
-    prompt weight hidden in tool schemas, tool-call arguments, ``system``, or
-    any field forwarded in future cannot escape the reservation estimate. It
-    over-estimates rather than under-estimates: the result only shrinks a
-    discount against a reservation that settlement later refunds.
+    Every string counts, as do token IDs in legacy ``prompt`` arrays, so no
+    forwarded field can hide prompt weight and shrink its reservation.
     """
-    return _sum_string_chars(body) // 3
+    return _sum_string_chars(body) // 3 + _count_prompt_token_ids(body.get("prompt"))
 
 
 def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
