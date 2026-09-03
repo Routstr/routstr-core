@@ -258,3 +258,49 @@ async def test_a_max_cost_settlement_without_pricing_charges_the_child_nothing()
         assert child.reserved_balance == 0
 
     await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_a_midflight_limit_drop_does_not_free_the_settlement() -> None:
+    engine = await _engine()
+    parent = ApiKey(hashed_key="parent", balance=1_000_000)
+    child = ApiKey(
+        hashed_key="child",
+        parent_key_hash="parent",
+        balance=0,
+        balance_limit=100_000,
+        total_spent=80_000,
+    )
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        session.add_all([parent, child])
+        await session.commit()
+        parent_before = parent.balance
+
+        await pay_for_request(child, 10_000, session)
+        snapshot = await get_reservation_snapshot(child, session)
+
+        # An admin lowers the limit below total_spent + the incoming charge while
+        # the reservation is still in flight.
+        child.balance_limit = 83_000
+        session.add(child)
+        await session.commit()
+
+        with patch(
+            "routstr.auth.calculate_cost",
+            AsyncMock(return_value=_cost(4_000)),
+        ):
+            await adjust_payment_for_tokens(
+                child,
+                {"model": "test", "usage": {}},
+                session,
+                10_000,
+                reservation_snapshot=snapshot,
+            )
+
+        await session.refresh(parent)
+        await session.refresh(child)
+        assert parent_before - parent.balance == 4_000
+        assert child.total_spent == 84_000
+        assert child.reserved_balance == 0
+
+    await engine.dispose()
+

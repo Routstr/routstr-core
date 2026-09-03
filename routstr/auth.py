@@ -1255,6 +1255,7 @@ async def _charge_reservation_rows(
     reserved_msats: int,
     charge_msats: int,
     extra_billing_guards: tuple = (),
+    extra_child_guards: tuple = (),
 ) -> bool:
     """Release the reserved amount and record the charge on the billing row
     (and the child row when different) inside the caller's transaction.
@@ -1289,11 +1290,15 @@ async def _charge_reservation_rows(
         return False
 
     if key_hash != billing_key_hash:
-        child_result = await session.exec(  # type: ignore[call-overload]
+        child_stmt = (
             update(ApiKey)
             .where(col(ApiKey.hashed_key) == key_hash)
             .where(col(ApiKey.reserved_balance) >= reserved_msats)
-            .values(
+        )
+        for guard in extra_child_guards:
+            child_stmt = child_stmt.where(guard)
+        child_result = await session.exec(  # type: ignore[call-overload]
+            child_stmt.values(
                 reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
                 reserved_at=case(
                     (
@@ -1597,6 +1602,35 @@ async def adjust_payment_for_tokens(
                     sibling_reserved = observed_reserved - deducted_max_cost
                     chargeable_msats = max(0, observed_balance - sibling_reserved)
                     actual_charge_msats = min(chargeable_msats, total_cost_msats)
+                    # A delegated child's balance_limit is enforced at reservation
+                    # time, so an overrun charge must not push its total_spent past
+                    # the limit. Re-read the child so the clamp uses its current
+                    # total_spent; the SQL guard plus the retry loop provide the
+                    # correctness, not a row lock (with_for_update is a no-op on
+                    # SQLite).
+                    child_guard = None
+                    if key.hashed_key != billing_key.hashed_key:
+                        locked_child_key = (
+                            await session.exec(
+                                select(ApiKey)
+                                .where(col(ApiKey.hashed_key) == key.hashed_key)
+                                .with_for_update()
+                                .execution_options(populate_existing=True)
+                            )
+                        ).one()
+                        if locked_child_key.balance_limit is not None:
+                            child_remaining = max(
+                                0,
+                                locked_child_key.balance_limit
+                                - locked_child_key.total_spent,
+                            )
+                            actual_charge_msats = min(
+                                actual_charge_msats, child_remaining
+                            )
+                            child_guard = (
+                                col(ApiKey.total_spent) + actual_charge_msats
+                                <= col(ApiKey.balance_limit)
+                            )
                     if await _charge_reservation_rows(
                         session,
                         billing_key_hash=billing_key.hashed_key,
@@ -1606,6 +1640,9 @@ async def adjust_payment_for_tokens(
                         extra_billing_guards=(
                             col(ApiKey.balance) == observed_balance,
                             col(ApiKey.reserved_balance) == observed_reserved,
+                        ),
+                        extra_child_guards=(
+                            (child_guard,) if child_guard is not None else ()
                         ),
                     ):
                         break
