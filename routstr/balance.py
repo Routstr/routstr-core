@@ -531,13 +531,30 @@ async def refund_wallet_endpoint(
     try:
         refund_currency = key.refund_currency or "sat"
         if key.refund_address:
-            await send_to_lnurl(
+            net_spent = await send_to_lnurl(
                 remaining_balance,
                 key.refund_currency or "sat",
                 effective_refund_mint,
                 key.refund_address,
             )
             result = {"recipient": key.refund_address}
+            # The payout spends only the invoice amount while the debit
+            # zeroed the full balance; credit the unused melt fee reserve
+            # back as a separate write once the melt has confirmed.
+            unused = remaining_balance - net_spent
+            if unused > 0:
+                credit_msat = (
+                    unused * 1000
+                    if (key.refund_currency or "sat") == "sat"
+                    else unused
+                )
+                credit_stmt = (
+                    update(ApiKey)
+                    .where(col(ApiKey.hashed_key) == key.hashed_key)
+                    .values(balance=col(ApiKey.balance) + credit_msat)
+                )
+                await session.exec(credit_stmt)  # type: ignore[call-overload]
+                await session.commit()
         else:
             token = await send_token(
                 remaining_balance, refund_currency, effective_refund_mint

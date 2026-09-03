@@ -270,11 +270,16 @@ async def raw_send_to_lnurl(
 
     Args:
         wallet: Wallet instance
+        proofs: Unreserved proofs available to fund the melt
         lnurl: LNURL string (can be lightning:, user@host, bech32, or direct URL)
+        unit: Currency unit of the proofs ("sat" or "msat")
         amount: Amount to send in the specified currency unit
+        on_melt_quote: Optional callback invoked with the melt quote id before dispatch
 
     Returns:
-        Amount actually paid in the specified currency unit
+        The net amount the wallet spent — the selected proofs minus the melt
+        change, in the wallet's unit — not the invoice amount paid to the
+        recipient.
 
     Raises:
         WalletError: If amount is outside LNURL limits or insufficient balance
@@ -396,7 +401,14 @@ async def raw_send_to_lnurl(
 
     melt_state = getattr(melt_response, "state", None)
     if melt_state == MeltQuoteState.paid:
-        return final_amount
+        # The melt's change is the unused fee reserve (plus any over-
+        # provision), so the wallet's net debit is the selected proofs
+        # minus the change - the amount actually spent, not the shrunk
+        # invoice amount.
+        change = getattr(melt_response, "change", None) or []
+        return sum(int(p.amount) for p in proofs) - sum(
+            int(c.amount) for c in change
+        )
     if melt_state == MeltQuoteState.unpaid:
         await wallet.set_reserved_for_send(proofs, reserved=False)
         raise LNURLError("Cashu mint confirmed that the melt was unpaid")
@@ -417,7 +429,9 @@ async def raw_send_to_lnurl(
         ) from reconciliation_error
 
     if quote is not None and quote.state == MeltQuoteState.paid:
-        return final_amount
+        # No melt response survived to read change from, so the conservative
+        # net spend is the full selection; no unused reserve is credited.
+        return sum(int(p.amount) for p in proofs)
     if quote is not None and quote.state == MeltQuoteState.unpaid:
         # A just-dispatched quote can briefly report unpaid before transitioning.
         try:

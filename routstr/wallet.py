@@ -2298,7 +2298,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
             else _sats_to_msats(settings.min_payout_sat)
         )
         if available_balance > min_amount:
-            amount_received = await raw_send_to_lnurl(
+            net_spent = await raw_send_to_lnurl(
                 wallet,
                 proofs,
                 settings.receive_ln_address,
@@ -2311,7 +2311,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
                     "mint_url": mint_url,
                     "unit": unit,
                     "balance": available_balance,
-                    "amount_received": amount_received,
+                    "net_spent": net_spent,
                 },
             )
     except Exception as e:
@@ -2635,7 +2635,7 @@ async def periodic_routstr_fee_payout() -> None:
                     attempt_quote_id = quote_id
 
                 try:
-                    amount_received = await raw_send_to_lnurl(
+                    net_spent = await raw_send_to_lnurl(
                         wallet,
                         proofs,
                         ROUTSTR_LN_ADDRESS,
@@ -2693,7 +2693,7 @@ async def periodic_routstr_fee_payout() -> None:
                     "Routstr fee payout sent",
                     extra={
                         "accumulated_sats": accumulated_sats,
-                        "amount_received": amount_received,
+                        "net_spent": net_spent,
                     },
                 )
         except Exception as e:
