@@ -248,6 +248,21 @@ def _is_json_content_type(content_type: str | None) -> bool:
     return main.startswith("application/") and main.endswith("+json")
 
 
+def _is_sse_body(content_type: str | None, content_str: str) -> bool:
+    if content_type:
+        main = content_type.split(";", 1)[0].strip().lower()
+        if main == "text/event-stream":
+            return True
+        if _is_json_content_type(content_type):
+            return False
+
+    for line in content_str.lstrip("\ufeff").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.startswith(("data:", "event:", "id:", "retry:", ":"))
+    return False
+
+
 def _openai_completion_path(path: str) -> str | None:
     canonical = "/" + path.rstrip("/")
     if canonical.endswith("/chat/completions"):
@@ -4166,7 +4181,9 @@ class BaseUpstreamProvider:
             content_str = (
                 content.decode("utf-8") if isinstance(content, bytes) else content
             )
-            is_streaming = content_str.startswith("data:") or "data:" in content_str
+            is_streaming = _is_sse_body(
+                response.headers.get("content-type"), content_str
+            )
 
             logger.debug(
                 "Chat completion response analysis",
@@ -4757,7 +4774,9 @@ class BaseUpstreamProvider:
             content_str = (
                 content.decode("utf-8") if isinstance(content, bytes) else content
             )
-            is_streaming = content_str.startswith("data:") or "data:" in content_str
+            is_streaming = _is_sse_body(
+                response.headers.get("content-type"), content_str
+            )
 
             logger.debug(
                 "Responses API completion response analysis",
