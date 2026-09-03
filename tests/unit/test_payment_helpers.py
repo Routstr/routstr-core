@@ -288,3 +288,118 @@ async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
             # Same prompt weight → at least the same reservation, never the floor.
             assert cost >= cost_messages, where
             assert cost > 1000, where
+
+
+async def test_estimate_image_tokens_from_input_detail_and_file_id() -> None:
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    from routstr.payment.helpers import estimate_image_tokens_from_input
+
+    # file_id: dimensions can't be fetched, so use a conservative max-size
+    # estimate (4 tiles for auto/high) and honor the detail sibling for low.
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "file_id": "file-1"}]
+    ) == 85 + (170 * 4)
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "file_id": "file-1", "detail": "low"}]
+    ) == 85
+
+    # image_url honors the sibling detail instead of always defaulting to auto.
+    image = Image.new("RGB", (512, 512), "red")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "image_url": data_url, "detail": "low"}]
+    ) == 85
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "image_url": data_url, "detail": "high"}]
+    ) == 85 + 170  # 512x512 = 1 tile
+
+
+def test_calculate_image_tokens_original_detail() -> None:
+    from routstr.payment.helpers import _calculate_image_tokens
+
+    # Patch-based pricing: ceil(patches * 1.2) tokens at 32x32px patches.
+    assert _calculate_image_tokens(640, 640, "original") == 480  # 400 patches
+    assert _calculate_image_tokens(2048, 2048, "original") == 4_916  # 4,096 patches
+    # The same image on the tiled high-detail path caps at 765 tokens.
+    assert _calculate_image_tokens(2048, 2048, "high") == 765
+    # Above the 30,000-patch rejection limit the estimate is capped at
+    # 36,000 tokens (30,000 patches * 1.2).
+    assert _calculate_image_tokens(10_000, 10_000, "original") == 36_000
+
+
+async def test_estimate_image_tokens_from_input_original_detail() -> None:
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    from routstr.payment.helpers import estimate_image_tokens_from_input
+
+    image = Image.new("RGB", (2048, 2048), "red")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+    # image_url: billed at the decoded original resolution (4,096 patches),
+    # not the 765-token tile cap.
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "image_url": data_url, "detail": "original"}]
+    ) == 4_916
+
+    # file_id: dimensions unknown, so use the 30,000-patch worst case.
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "file_id": "file-1", "detail": "original"}]
+    ) == 36_000
+
+    # Explicit null detail behaves like the auto default (tiled math).
+    assert await estimate_image_tokens_from_input(
+        [{"type": "input_image", "file_id": "file-1", "detail": None}]
+    ) == 85 + (170 * 4)
+
+
+async def test_estimate_image_tokens_in_messages_original_detail() -> None:
+    """Chat Completions also accepts original detail via the nested dict."""
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    from routstr.payment.helpers import estimate_image_tokens_in_messages
+
+    image = Image.new("RGB", (640, 640), "blue")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url, "detail": "original"},
+                }
+            ],
+        }
+    ]
+    # 640x640 -> 20x20 = 400 patches -> ceil(400 * 1.2) = 480 tokens.
+    assert await estimate_image_tokens_in_messages(messages) == 480
+
+    # input_image parts inside messages honor their sibling detail and
+    # file_id through the Responses estimator as well.
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "file_id": "file-1", "detail": "original"}
+            ],
+        }
+    ]
+    assert await estimate_image_tokens_in_messages(messages) == 36_000
