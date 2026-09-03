@@ -1,10 +1,10 @@
 """Integration tests for Lightning invoice key constraint fields.
 
 Covers two things:
-- The three constraint fields (balance_limit, balance_limit_reset, validity_date)
-  are persisted on LightningInvoice and survive a DB round-trip.
-- The production-path API-key record helper propagates those fields to the
-  created ApiKey, so the constraints are actually enforced when the key is used.
+- The validity_date constraint field is persisted on LightningInvoice and
+  survives a DB round-trip.
+- The production-path API-key record helper propagates it to the created
+  ApiKey, so the constraint is actually enforced when the key is used.
 """
 
 from __future__ import annotations
@@ -68,32 +68,6 @@ def mock_wallet_mint() -> object:
 
 
 @pytest.mark.asyncio
-async def test_invoice_persists_balance_limit(
-    integration_session: AsyncSession,
-) -> None:
-    invoice = _make_invoice(balance_limit=5000)
-    integration_session.add(invoice)
-    await integration_session.commit()
-
-    stored = await integration_session.get(LightningInvoice, invoice.id)
-    assert stored is not None
-    assert stored.balance_limit == 5000
-
-
-@pytest.mark.asyncio
-async def test_invoice_persists_balance_limit_reset(
-    integration_session: AsyncSession,
-) -> None:
-    invoice = _make_invoice(balance_limit=5000, balance_limit_reset="daily")
-    integration_session.add(invoice)
-    await integration_session.commit()
-
-    stored = await integration_session.get(LightningInvoice, invoice.id)
-    assert stored is not None
-    assert stored.balance_limit_reset == "daily"
-
-
-@pytest.mark.asyncio
 async def test_invoice_persists_validity_date(
     integration_session: AsyncSession,
 ) -> None:
@@ -110,38 +84,6 @@ async def test_invoice_persists_validity_date(
 # ---------------------------------------------------------------------------
 # Propagation to ApiKey
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_created_key_receives_balance_limit(
-    integration_session: AsyncSession,
-) -> None:
-    invoice = _make_invoice(balance_limit=8000)
-    integration_session.add(invoice)
-    await integration_session.flush()
-
-    api_key = await _create_api_key_record(invoice, integration_session)
-    await integration_session.commit()
-
-    stored_key = await integration_session.get(ApiKey, api_key.hashed_key)
-    assert stored_key is not None
-    assert stored_key.balance_limit == 8000
-
-
-@pytest.mark.asyncio
-async def test_created_key_receives_balance_limit_reset(
-    integration_session: AsyncSession,
-) -> None:
-    invoice = _make_invoice(balance_limit=8000, balance_limit_reset="monthly")
-    integration_session.add(invoice)
-    await integration_session.flush()
-
-    api_key = await _create_api_key_record(invoice, integration_session)
-    await integration_session.commit()
-
-    stored_key = await integration_session.get(ApiKey, api_key.hashed_key)
-    assert stored_key is not None
-    assert stored_key.balance_limit_reset == "monthly"
 
 
 @pytest.mark.asyncio
@@ -422,8 +364,6 @@ async def test_created_key_without_constraints_has_none_fields(
 
     stored_key = await integration_session.get(ApiKey, api_key.hashed_key)
     assert stored_key is not None
-    assert stored_key.balance_limit is None
-    assert stored_key.balance_limit_reset is None
     assert stored_key.validity_date is None
 
 

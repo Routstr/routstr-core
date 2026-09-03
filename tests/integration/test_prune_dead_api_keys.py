@@ -99,34 +99,6 @@ async def test_used_key_never_pruned(patched_db_engine: None) -> None:
 
 
 @pytest.mark.asyncio
-async def test_parent_and_child_keys_are_not_pruned(
-    patched_db_engine: None,
-) -> None:
-    """Pruning must not orphan child keys or delete valid children."""
-    parent = _dead_key(LONG_AGO)
-    child = ApiKey(
-        hashed_key=f"child_{uuid.uuid4().hex}",
-        balance=0,
-        reserved_balance=0,
-        total_spent=0,
-        total_requests=0,
-        created_at=LONG_AGO,
-        parent_key_hash=parent.hashed_key,
-    )
-    async with create_session() as session:
-        session.add(parent)
-        session.add(child)
-        await session.commit()
-
-    async with create_session() as session:
-        pruned = await prune_dead_api_keys(session, OLD)
-
-    assert pruned == 0
-    assert await _exists(parent.hashed_key)
-    assert await _exists(child.hashed_key)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "expires_at"),
     [

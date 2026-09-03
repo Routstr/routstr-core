@@ -112,42 +112,12 @@ async def get_temporary_balances_api(
         total = count_result.one()
 
         # Aggregate totals across the whole (search-filtered) set, not just the
-        # current page. Balance counts only parent (non-child) keys to avoid
-        # double-counting, since child keys draw from their parent's balance.
         balance_totals_result = await session.exec(
             select(
+                func.coalesce(func.sum(ApiKey.balance), 0),
+                func.coalesce(func.sum(ApiKey.reserved_balance), 0),
                 func.coalesce(
-                    func.sum(
-                        case(
-                            (col(ApiKey.parent_key_hash).is_(None), ApiKey.balance),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (
-                                col(ApiKey.parent_key_hash).is_(None),
-                                ApiKey.reserved_balance,
-                            ),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (
-                                col(ApiKey.parent_key_hash).is_(None),
-                                col(ApiKey.balance) - col(ApiKey.reserved_balance),
-                            ),
-                            else_=0,
-                        )
-                    ),
-                    0,
+                    func.sum(col(ApiKey.balance) - col(ApiKey.reserved_balance)), 0
                 ),
             ).where(*filters)
         )
@@ -184,16 +154,11 @@ async def get_temporary_balances_api(
                 "hashed_key": key.hashed_key,
                 "balance": key.balance,
                 "reserved_balance": key.reserved_balance,
-                "available_balance": (
-                    key.total_balance if key.parent_key_hash is None else None
-                ),
+                "available_balance": key.total_balance,
                 "total_spent": key.total_spent,
                 "total_requests": key.total_requests,
                 "refund_address": key.refund_address,
                 "key_expiry_time": key.key_expiry_time,
-                "parent_key_hash": key.parent_key_hash,
-                "balance_limit": key.balance_limit,
-                "balance_limit_reset": key.balance_limit_reset,
                 "validity_date": key.validity_date,
                 "created_at": key.created_at,
             }
@@ -211,8 +176,6 @@ async def get_temporary_balances_api(
 
 
 class ApiKeyUpdate(BaseModel):
-    balance_limit: int | None = None
-    balance_limit_reset: str | None = None
     validity_date: int | None = None
 
 
@@ -227,10 +190,6 @@ async def update_apikey(
         if not key:
             raise HTTPException(status_code=404, detail="API key not found")
 
-        if update.balance_limit is not None:
-            key.balance_limit = update.balance_limit
-        if update.balance_limit_reset is not None:
-            key.balance_limit_reset = update.balance_limit_reset
         if update.validity_date is not None:
             key.validity_date = update.validity_date
 
@@ -240,8 +199,6 @@ async def update_apikey(
 
     return {
         "hashed_key": key.hashed_key,
-        "balance_limit": key.balance_limit,
-        "balance_limit_reset": key.balance_limit_reset,
         "validity_date": key.validity_date,
     }
 

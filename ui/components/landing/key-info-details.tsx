@@ -14,32 +14,16 @@ import {
   CardDescription,
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { WalletService } from '@/lib/api/services/wallet';
 import React, { useState, useCallback, useEffect } from 'react';
-import { Copy, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
-
-export type ChildKeyInfo = {
-  api_key: string;
-  total_requests: number;
-  total_spent: number;
-  balance_limit: number | null;
-  balance_limit_reset: string | null;
-  validity_date: number | null;
-};
+import { Copy, RefreshCcw, Trash2 } from 'lucide-react';
 
 export type WalletSnapshot = {
   apiKey: string;
   balanceMsats: number;
   reservedMsats: number;
-  isChild: boolean;
-  parentKey: string | null;
   totalRequests: number;
   totalSpent: number;
-  balanceLimit: number | null;
-  balanceLimitReset: string | null;
   validityDate: number | null;
-  childKeys?: ChildKeyInfo[];
 };
 
 interface KeyInfoDetailsProps {
@@ -61,7 +45,6 @@ export function KeyInfoDetails({
 }: KeyInfoDetailsProps): React.ReactNode {
   const { copy } = useCopyToClipboard();
   const [apiKeyInput, setApiKeyInput] = useState(apiKey);
-  const [isResetting, setIsResetting] = useState<string | null>(null);
   const [isRefunding, setIsRefunding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -97,23 +80,6 @@ export function KeyInfoDetails({
   const handleCopy = async (value: string) => {
     if (await copy(value)) {
       toast.success('Copied to clipboard');
-    }
-  };
-
-  const handleResetSpent = async (childKey: string) => {
-    if (!walletInfo || walletInfo.isChild) return;
-
-    setIsResetting(childKey);
-    try {
-      await WalletService.resetChildKeySpent(baseUrl, apiKeyInput, childKey);
-      toast.success('Child key spent reset');
-      await refetch();
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to reset child key'
-      );
-    } finally {
-      setIsResetting(null);
     }
   };
 
@@ -160,7 +126,7 @@ export function KeyInfoDetails({
         <CardHeader className='space-y-1'>
           <CardTitle className='text-xl'>Key Information</CardTitle>
           <CardDescription>
-            Enter an API key to view its balance, consumption, and child keys.
+            Enter an API key to view its balance and consumption.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -208,32 +174,6 @@ export function KeyInfoDetails({
               </CardHeader>
               <CardContent className='space-y-4'>
                 <div className='flex items-center justify-between'>
-                  <span className='text-muted-foreground text-sm'>Type</span>
-                  <Badge variant={walletInfo.isChild ? 'secondary' : 'default'}>
-                    {walletInfo.isChild ? 'Child Key' : 'Parent Key'}
-                  </Badge>
-                </div>
-                {walletInfo.parentKey && (
-                  <div className='space-y-1'>
-                    <span className='text-muted-foreground text-xs tracking-wider'>
-                      Parent Key
-                    </span>
-                    <div className='flex items-center gap-2'>
-                      <code className='bg-muted flex-1 rounded px-2 py-1 font-mono text-xs break-all'>
-                        {walletInfo.parentKey}
-                      </code>
-                      <Button
-                        variant='ghost'
-                        size='icon'
-                        className='h-8 w-8'
-                        onClick={() => handleCopy(walletInfo.parentKey!)}
-                      >
-                        <Copy className='h-4 w-4' />
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                <div className='flex items-center justify-between'>
                   <span className='text-muted-foreground text-sm'>
                     Validity
                   </span>
@@ -278,130 +218,10 @@ export function KeyInfoDetails({
                     </p>
                   </div>
                 </div>
-                {walletInfo.balanceLimit !== null && (
-                  <div className='space-y-2'>
-                    <div className='flex items-center justify-between'>
-                      <span className='text-muted-foreground text-sm'>
-                        Spend Limit
-                      </span>
-                      <span className='font-mono text-sm font-medium'>
-                        {formatSats(walletInfo.balanceLimit)} sats
-                      </span>
-                    </div>
-                    {walletInfo.balanceLimitReset && (
-                      <div className='flex items-center justify-between'>
-                        <span className='text-muted-foreground text-sm'>
-                          Reset Policy
-                        </span>
-                        <Badge variant='outline' className='capitalize'>
-                          {walletInfo.balanceLimitReset}
-                        </Badge>
-                      </div>
-                    )}
-                  </div>
-                )}
               </CardContent>
             </Card>
           </div>
 
-          {!walletInfo.isChild &&
-            walletInfo.childKeys &&
-            walletInfo.childKeys.length > 0 && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className='text-lg'>
-                    Child Keys ({walletInfo.childKeys.length})
-                  </CardTitle>
-                  <CardDescription>
-                    Secondary keys using this account&apos;s balance
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className='space-y-4'>
-                    {walletInfo.childKeys.map((ck) => (
-                      <div
-                        key={ck.api_key}
-                        className='space-y-3 rounded-lg border p-4'
-                      >
-                        <div className='flex items-center justify-between gap-4'>
-                          <code className='bg-muted flex-1 rounded px-2 py-1 font-mono text-xs break-all'>
-                            {ck.api_key}
-                          </code>
-                          <div className='flex gap-1'>
-                            <Button
-                              variant='ghost'
-                              size='icon'
-                              className='h-8 w-8'
-                              onClick={() => handleCopy(ck.api_key)}
-                            >
-                              <Copy className='h-4 w-4' />
-                            </Button>
-                            <Button
-                              variant='ghost'
-                              size='icon'
-                              className='text-destructive h-8 w-8'
-                              title='Reset consumption'
-                              disabled={isResetting === ck.api_key}
-                              onClick={() => handleResetSpent(ck.api_key)}
-                            >
-                              {isResetting === ck.api_key ? (
-                                <RefreshCcw className='h-4 w-4 animate-spin' />
-                              ) : (
-                                <RotateCcw className='h-4 w-4' />
-                              )}
-                            </Button>
-                          </div>
-                        </div>
-                        <div className='grid grid-cols-2 gap-4 text-xs sm:grid-cols-5'>
-                          <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
-                              Requests
-                            </p>
-                            <p className='font-mono font-medium'>
-                              {ck.total_requests}
-                            </p>
-                          </div>
-                          <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
-                              Spent
-                            </p>
-                            <p className='font-mono font-medium'>
-                              {formatSats(ck.total_spent)} sats
-                            </p>
-                          </div>
-                          <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
-                              Limit
-                            </p>
-                            <p className='font-mono font-medium'>
-                              {ck.balance_limit
-                                ? `${formatSats(ck.balance_limit)} sats`
-                                : 'None'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
-                              Policy
-                            </p>
-                            <p className='font-medium capitalize'>
-                              {ck.balance_limit_reset || 'None'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className='text-muted-foreground text-[0.6rem] tracking-wider'>
-                              Expires
-                            </p>
-                            <p className='font-medium'>
-                              {formatDate(ck.validity_date)}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
 
           <div className='flex justify-center gap-4'>
             <Button

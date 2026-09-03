@@ -45,15 +45,6 @@ export interface WithdrawResponse {
   mint_url: string;
 }
 
-export interface CreateChildKeyResponse {
-  api_keys: string[];
-  count: number;
-  cost_msats: number;
-  cost_sats: number;
-  parent_balance: number;
-  parent_balance_sats: number;
-}
-
 export class WalletService {
   static async redeemToken(token: string): Promise<RedeemTokenResponse> {
     try {
@@ -134,83 +125,4 @@ export class WalletService {
     }
   }
 
-  static async createChildKey(
-    baseUrl?: string,
-    apiKey?: string,
-    count: number = 1,
-    balanceLimit?: number,
-    balanceLimitReset?: string,
-    validityDate?: number
-  ): Promise<CreateChildKeyResponse> {
-    try {
-      if (baseUrl && apiKey) {
-        const response = await fetch(`${baseUrl}/v1/balance/child-key`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            count,
-            balance_limit: balanceLimit,
-            balance_limit_reset: balanceLimitReset,
-            validity_date: validityDate,
-          }),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(errorText || 'Failed to create child key');
-        }
-
-        return (await response.json()) as CreateChildKeyResponse;
-      }
-
-      return await apiClient.post<CreateChildKeyResponse>(
-        '/v1/balance/child-key',
-        {
-          count,
-          balance_limit: balanceLimit,
-          balance_limit_reset: balanceLimitReset,
-          validity_date: validityDate,
-        }
-      );
-    } catch (error) {
-      console.error('Error creating child key:', error);
-      throw error;
-    }
-  }
-
-  static async resetChildKeySpent(
-    baseUrl: string | undefined,
-    parentKey: string,
-    childKey: string
-  ): Promise<{ success: boolean; message: string }> {
-    try {
-      const url = baseUrl
-        ? `${baseUrl}/v1/balance/child-key/reset`
-        : '/v1/balance/child-key/reset';
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${parentKey}`,
-      };
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ child_key: childKey }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Failed to reset child key');
-      }
-
-      return await response.json();
-    } catch (error) {
-      console.error('Error resetting child key:', error);
-      throw error;
-    }
-  }
 }

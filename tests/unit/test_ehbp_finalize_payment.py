@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, col, select, update
+from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 import routstr.auth as auth_module
@@ -107,19 +107,17 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
 
 
 @pytest.mark.asyncio
-async def test_unmeasured_ehbp_releases_parent_and_child_reservation(
+async def test_unmeasured_ehbp_releases_reservation(
     session: AsyncSession,
 ) -> None:
-    parent = ApiKey(hashed_key="ehbp-parent", balance=10_000)
-    child = ApiKey(hashed_key="ehbp-child", balance=0, parent_key_hash="ehbp-parent")
-    session.add(parent)
-    session.add(child)
+    key = ApiKey(hashed_key="ehbp-key", balance=10_000)
+    session.add(key)
     await session.commit()
-    await pay_for_request(child, 3_000, session)
-    reservation = await get_reservation_snapshot(child, session)
+    await pay_for_request(key, 3_000, session)
+    reservation = await get_reservation_snapshot(key, session)
 
     charged = await finalize_ehbp_max_cost_payment(
-        child,
+        key,
         session,
         max_cost_for_model=3_000,
         model_id="tinfoil/model",
@@ -127,18 +125,12 @@ async def test_unmeasured_ehbp_releases_parent_and_child_reservation(
     )
 
     assert charged == 0
-    updated_parent = await _api_key(session, "ehbp-parent")
-    updated_child = await _api_key(session, "ehbp-child")
-    assert updated_parent is not None
-    assert updated_child is not None
-    assert updated_parent.balance == 10_000
-    assert updated_parent.reserved_balance == 0
-    assert updated_parent.reserved_at is None
-    assert updated_parent.total_spent == 0
-    assert updated_child.balance == 0
-    assert updated_child.reserved_balance == 0
-    assert updated_child.reserved_at is None
-    assert updated_child.total_spent == 0
+    updated = await _api_key(session, "ehbp-key")
+    assert updated is not None
+    assert updated.balance == 10_000
+    assert updated.reserved_balance == 0
+    assert updated.reserved_at is None
+    assert updated.total_spent == 0
 
 
 @pytest.mark.asyncio
@@ -182,21 +174,15 @@ async def test_unmeasured_ehbp_release_is_safe_when_charge_update_would_fail(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    parent = ApiKey(hashed_key="ehbp-rollback-parent", balance=10_000)
-    child = ApiKey(
-        hashed_key="ehbp-missing-child",
-        balance=0,
-        parent_key_hash="ehbp-rollback-parent",
-    )
-    session.add(parent)
-    session.add(child)
+    key = ApiKey(hashed_key="ehbp-rollback-key", balance=10_000)
+    session.add(key)
     await session.commit()
-    await pay_for_request(child, 3_000, session)
-    reservation = await get_reservation_snapshot(child, session)
-    _fail_nth_api_key_update(session, monkeypatch, target_update=2)
+    await pay_for_request(key, 3_000, session)
+    reservation = await get_reservation_snapshot(key, session)
+    _fail_nth_api_key_update(session, monkeypatch, target_update=1)
 
     charged = await finalize_ehbp_max_cost_payment(
-        child,
+        key,
         session,
         max_cost_for_model=3_000,
         model_id="tinfoil/model",
@@ -204,68 +190,13 @@ async def test_unmeasured_ehbp_release_is_safe_when_charge_update_would_fail(
     )
 
     assert charged == 0
-    updated_parent = await _api_key(session, "ehbp-rollback-parent")
-    assert updated_parent is not None
-    assert updated_parent.balance == 10_000
+    updated = await _api_key(session, "ehbp-rollback-key")
+    assert updated is not None
+    assert updated.balance == 10_000
     # The injected partial-update failure rolls aggregate subtraction back;
     # terminal fencing prevents a charge or retry from consuming those funds.
-    assert updated_parent.reserved_balance == 3_000
-    assert updated_parent.total_spent == 0
-    updated_child = await _api_key(session, "ehbp-missing-child")
-    assert updated_child is not None
-    assert updated_child.reserved_balance == 3_000
-    assert updated_child.total_spent == 0
-    release = await session.get(ReservationRelease, reservation.release_id)
-    assert release is not None and release.status == "released"
-    assert reservation.release_id not in auth_module._reservation_heartbeats
-
-
-@pytest.mark.asyncio
-async def test_corrupt_child_aggregate_does_not_erase_parent_sibling_reserve(
-    session: AsyncSession,
-) -> None:
-    parent = ApiKey(hashed_key="ehbp-corrupt-parent", balance=10_000)
-    child = ApiKey(
-        hashed_key="ehbp-corrupt-child",
-        balance=0,
-        parent_key_hash=parent.hashed_key,
-    )
-    session.add(parent)
-    session.add(child)
-    await session.commit()
-    await pay_for_request(child, 3_000, session)
-    reservation = await get_reservation_snapshot(child, session)
-
-    await session.exec(  # type: ignore[call-overload]
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == "ehbp-corrupt-parent")
-        .values(reserved_balance=5_000)
-    )
-    await session.exec(  # type: ignore[call-overload]
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == "ehbp-corrupt-child")
-        .values(reserved_balance=1_000)
-    )
-    await session.commit()
-
-    charged = await finalize_ehbp_actual_cost_payment(
-        child,
-        session,
-        reserved_cost_for_model=3_000,
-        model_id="tinfoil/model",
-        cost_info={"total_msats": 1_200},
-        reservation_snapshot=reservation,
-    )
-
-    assert charged == 0
-    updated_parent = await _api_key(session, "ehbp-corrupt-parent")
-    updated_child = await _api_key(session, "ehbp-corrupt-child")
-    assert updated_parent is not None and updated_child is not None
-    assert updated_parent.balance == 10_000
-    assert updated_parent.reserved_balance == 5_000
-    assert updated_parent.total_spent == 0
-    assert updated_child.reserved_balance == 1_000
-    assert updated_child.total_spent == 0
+    assert updated.reserved_balance == 3_000
+    assert updated.total_spent == 0
     release = await session.get(ReservationRelease, reservation.release_id)
     assert release is not None and release.status == "released"
     assert reservation.release_id not in auth_module._reservation_heartbeats

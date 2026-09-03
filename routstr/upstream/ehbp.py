@@ -18,7 +18,6 @@ from ..auth import (
     _claim_reservation_for_charge,
     _stop_reservation_heartbeat,
     _validate_reservation_snapshot,
-    get_billing_key,
     get_reservation_snapshot,
     payments_logger,
     release_reservation,
@@ -527,9 +526,8 @@ async def finalize_ehbp_actual_cost_payment(
     if not await _claim_reservation_for_charge(reservation, session):
         return 0
     reserved_cost_for_model = reservation.reserved_msats
-    billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
-    billing_key_hash = billing_key.hashed_key
+    billing_key_hash = key_hash
     total_cost_msats = max(
         0, int(cost_info.get("total_msats", reserved_cost_for_model))
     )
@@ -538,7 +536,6 @@ async def finalize_ehbp_actual_cost_payment(
     charged = await _charge_reservation_rows(
         session,
         billing_key_hash=billing_key_hash,
-        key_hash=key_hash,
         reserved_msats=reserved_cost_for_model,
         charge_msats=total_cost_msats,
     )
@@ -558,9 +555,7 @@ async def finalize_ehbp_actual_cost_payment(
 
     await session.commit()
     await _stop_reservation_heartbeat(reservation.release_id)
-    await session.refresh(billing_key)
-    if billing_key.hashed_key != key.hashed_key:
-        await session.refresh(key)
+    await session.refresh(key)
 
     if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
         fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
@@ -577,15 +572,15 @@ async def finalize_ehbp_actual_cost_payment(
         extra={
             "event": "finalize",
             "key_hash": key.hashed_key[:8] + "...",
-            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "billing_key_hash": key.hashed_key[:8] + "...",
             "model": model_id,
             "cost_reserved": reserved_cost_for_model,
             "cost_charged": total_cost_msats,
             "input_tokens": cost_info.get("input_tokens", 0),
             "output_tokens": cost_info.get("output_tokens", 0),
-            "balance": billing_key.balance,
-            "reserved_balance": billing_key.reserved_balance,
-            "total_spent": billing_key.total_spent,
+            "balance": key.balance,
+            "reserved_balance": key.reserved_balance,
+            "total_spent": key.total_spent,
             "finalize_type": "ehbp_usage",
             "finalized_at": now,
         },

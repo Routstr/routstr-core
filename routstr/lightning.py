@@ -76,8 +76,6 @@ class _InvoiceSettlement:
     purpose: str
     api_key_hash: str | None
     mint_url: str | None
-    balance_limit: int | None
-    balance_limit_reset: str | None
     validity_date: int | None
 
     @classmethod
@@ -89,8 +87,6 @@ class _InvoiceSettlement:
             purpose=invoice.purpose,
             api_key_hash=invoice.api_key_hash,
             mint_url=invoice.mint_url,
-            balance_limit=invoice.balance_limit,
-            balance_limit_reset=invoice.balance_limit_reset,
             validity_date=invoice.validity_date,
         )
 
@@ -114,8 +110,6 @@ class InvoiceCreateRequest(BaseModel):
         default=None,
         description="Deprecated: legacy field for topup. Prefer Authorization header.",
     )
-    balance_limit: int | None = Field(default=None)
-    balance_limit_reset: str | None = Field(default=None)
     validity_date: int | None = Field(default=None)
 
 
@@ -312,8 +306,6 @@ async def create_invoice(
             api_key_hash=api_key_token[3:] if api_key_token else None,
             purpose=request.purpose,
             mint_url=mint_url,
-            balance_limit=request.balance_limit,
-            balance_limit_reset=request.balance_limit_reset,
             validity_date=request.validity_date,
             expires_at=expires_at,
         )
@@ -697,8 +689,6 @@ async def _create_api_key_record(
         balance=invoice.amount_sats * 1000,
         refund_currency="sat",
         refund_mint_url=mint_url,
-        balance_limit=invoice.balance_limit,
-        balance_limit_reset=invoice.balance_limit_reset,
         validity_date=invoice.validity_date,
     )
     session.add(api_key)
