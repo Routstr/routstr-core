@@ -40,7 +40,12 @@ from ..payment.cost_calculation import (
 )
 from ..payment.helpers import create_error_response
 from ..payment.models import Model
-from ..wallet import recieve_token, send_token
+from ..wallet import (
+    SPENT_TOKEN_CODES,
+    classify_redemption_error,
+    recieve_token,
+    send_token,
+)
 from .tinfoil_trailer import forward_with_trailer
 
 logger = get_logger(__name__)
@@ -1069,6 +1074,30 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": error_message,
                     },
                 )
+
+        if not redeemed:
+            classified = classify_redemption_error(e)
+            if classified is not None:
+                error_type, status_code, message, error_code = classified
+                # Never re-offer a spent/consumed token.
+                echo_token = None if error_code in SPENT_TOKEN_CODES else x_cashu_token
+                return create_error_response(
+                    error_type,
+                    message,
+                    status_code,
+                    request=request,
+                    token=echo_token,
+                    code=error_code,
+                )
+            # Raw exception text may contain the attacker-supplied mint URL.
+            return create_error_response(
+                "api_error",
+                "Internal error during token redemption",
+                500,
+                request=request,
+                token=x_cashu_token,
+                code="internal_error",
+            )
 
         if "already spent" in error_message.lower():
             return create_error_response(

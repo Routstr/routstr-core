@@ -8,6 +8,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from routstr.core.settings import settings
+
 # ---------------------------------------------------------------------------
 # check_token_balance
 # ---------------------------------------------------------------------------
@@ -22,6 +24,7 @@ async def test_check_token_balance_x_cashu_present() -> None:
 
     with patch("routstr.payment.helpers.deserialize_token_from_string") as mock_deser:
         mock_token = Mock()
+        mock_token.mint = settings.primary_mint
         mock_token.amount = 50000
         mock_token.unit = "sat"
         mock_deser.return_value = mock_token
@@ -62,6 +65,7 @@ async def test_check_token_balance_insufficient_raises() -> None:
 
     with patch("routstr.payment.helpers.deserialize_token_from_string") as mock_deser:
         mock_token = Mock()
+        mock_token.mint = settings.primary_mint
         mock_token.amount = 100  # 100 sat
         mock_token.unit = "sat"
         mock_deser.return_value = mock_token
