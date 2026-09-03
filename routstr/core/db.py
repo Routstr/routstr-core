@@ -592,6 +592,46 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
     )
 
 
+class PendingSwap(SQLModel, table=True):  # type: ignore
+    """Durable checkpoint for an in-flight cross-mint swap.
+
+    Written just before the source-mint melt is dispatched — the point after
+    which a failure becomes ambiguous (the Lightning payment may still settle).
+    A background reconciler polls these rows: a PAID melt is completed (mint on
+    destination + credit the API key) and an UNPAID/expired one is dropped so
+    the token can be retried. Rows for swaps that finish in-line are deleted
+    immediately, so the table only holds unresolved ambiguity.
+    """
+
+    __tablename__ = "pending_swaps"
+
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
+    source_mint: str = Field(description="Mint holding the melted proofs")
+    source_unit: str = Field(description="Unit of the source token")
+    melt_quote_id: str = Field(description="Melt quote id on the source mint")
+    dest_mint: str = Field(description="Destination mint for the swap")
+    dest_unit: str = Field(description="Unit minted on the destination")
+    mint_quote_id: str = Field(description="Mint quote id on the destination mint")
+    minted_amount: int = Field(description="Amount to mint, in dest_unit")
+    key_hashed_key: str | None = Field(
+        default=None,
+        index=True,
+        description="API key to credit once the swap completes",
+    )
+    token: str | None = Field(
+        default=None, description="Original serialized Cashu token, for history"
+    )
+    state: str = Field(
+        default="pending",
+        index=True,
+        description="pending | melt_confirmed | stale",
+    )
+    attempts: int = Field(default=0)
+    last_error: str | None = Field(default=None)
+
+
 async def store_cashu_transaction(
     token: str,
     amount: int,

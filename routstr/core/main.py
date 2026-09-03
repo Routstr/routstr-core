@@ -31,7 +31,12 @@ from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_perio
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
 from ..upstream.litellm_routing import configure_litellm
-from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
+from ..wallet import (
+    periodic_payout,
+    periodic_refund_sweep,
+    periodic_routstr_fee_payout,
+    periodic_swap_reconciliation,
+)
 from .admin import admin_router
 from .db import create_session, init_db, run_migrations
 from .exceptions import (
@@ -71,6 +76,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     refund_sweep_task = None
     routstr_fee_task = None
     invoice_watcher_task = None
+    swap_reconciliation_task = None
 
     try:
         # Apply litellm-wide settings (drop_params, chat-completions URL,
@@ -156,6 +162,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         refund_sweep_task = asyncio.create_task(periodic_refund_sweep())
         routstr_fee_task = asyncio.create_task(periodic_routstr_fee_payout())
         invoice_watcher_task = asyncio.create_task(periodic_invoice_watcher())
+        swap_reconciliation_task = asyncio.create_task(periodic_swap_reconciliation())
 
         yield
 
@@ -203,6 +210,8 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             routstr_fee_task.cancel()
         if invoice_watcher_task is not None:
             invoice_watcher_task.cancel()
+        if swap_reconciliation_task is not None:
+            swap_reconciliation_task.cancel()
 
         try:
             tasks_to_wait = []
