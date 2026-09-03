@@ -171,48 +171,6 @@ async def test_revert_with_zero_reserved_balance_repairs_terminally(
 
 
 @pytest.mark.asyncio
-async def test_child_corrupt_revert_clamps_zero_request_counts(
-    integration_session: AsyncSession,
-) -> None:
-    from routstr.auth import (
-        get_reservation_snapshot,
-        pay_for_request,
-        revert_pay_for_request,
-    )
-    from routstr.core.db import ReservationRelease
-
-    suffix = uuid.uuid4().hex[:8]
-    parent = ApiKey(hashed_key=f"repair-parent-{suffix}", balance=5_000)
-    child = ApiKey(
-        hashed_key=f"repair-child-{suffix}",
-        parent_key_hash=parent.hashed_key,
-    )
-    integration_session.add(parent)
-    integration_session.add(child)
-    await integration_session.commit()
-    await pay_for_request(child, 500, integration_session)
-    snapshot = await get_reservation_snapshot(child, integration_session)
-
-    parent.total_requests = 0
-    child.total_requests = 0
-    child.reserved_balance = 0
-    integration_session.add(parent)
-    integration_session.add(child)
-    await integration_session.commit()
-
-    assert await revert_pay_for_request(child, integration_session, 500, snapshot)
-
-    integration_session.expunge_all()
-    parent_row = await integration_session.get(ApiKey, snapshot.billing_key_hash)
-    child_row = await integration_session.get(ApiKey, snapshot.key_hash)
-    release = await integration_session.get(ReservationRelease, snapshot.release_id)
-    assert parent_row is not None and child_row is not None
-    assert (parent_row.total_requests, child_row.total_requests) == (0, 0)
-    assert (parent_row.reserved_balance, child_row.reserved_balance) == (500, 0)
-    assert release is not None and release.status == "released"
-
-
-@pytest.mark.asyncio
 async def test_revert_with_sufficient_reserved_balance_succeeds(
     integration_session: AsyncSession,
 ) -> None:
@@ -374,64 +332,4 @@ async def test_sequential_reverts_never_go_negative(
     )
     assert test_key.reserved_balance >= 0, (
         f"Reserved balance went negative: {test_key.reserved_balance}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_child_key_revert_floor_guard(
-    integration_session: AsyncSession,
-) -> None:
-    """Test that child key reserved_balance also has floor guard on revert."""
-    from routstr.auth import (
-        get_reservation_snapshot,
-        pay_for_request,
-        revert_pay_for_request,
-    )
-
-    parent_key_hash = f"test_parent_{uuid.uuid4().hex[:8]}"
-    child_key_hash = f"test_child_{uuid.uuid4().hex[:8]}"
-
-    parent_key = ApiKey(
-        hashed_key=parent_key_hash,
-        balance=10000,
-        reserved_balance=0,
-        total_requests=2,
-    )
-    child_key = ApiKey(
-        hashed_key=child_key_hash,
-        balance=0,
-        reserved_balance=0,
-        total_requests=2,
-        parent_key_hash=parent_key_hash,
-    )
-    integration_session.add(parent_key)
-    integration_session.add(child_key)
-    await integration_session.commit()
-    await pay_for_request(child_key, 500, integration_session)
-    snapshot = await get_reservation_snapshot(child_key, integration_session)
-
-    # First revert succeeds
-    result1 = await revert_pay_for_request(
-        child_key, integration_session, 500, snapshot
-    )
-    await integration_session.refresh(parent_key)
-    await integration_session.refresh(child_key)
-
-    assert result1 is True
-    assert parent_key.reserved_balance == 0
-    assert child_key.reserved_balance == 0
-
-    # Second revert is a no-op for both parent and child
-    result2 = await revert_pay_for_request(
-        child_key, integration_session, 500, snapshot
-    )
-    await integration_session.refresh(parent_key)
-    await integration_session.refresh(child_key)
-
-    assert result2 is False
-    assert parent_key.reserved_balance == 0, (
-        f"Parent reserved_balance should stay 0, got: {parent_key.reserved_balance}"
-    )
-    assert child_key.reserved_balance == 0, (
-        f"Child reserved_balance should stay 0, got: {child_key.reserved_balance}"
     )

@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import time
 from time import monotonic
 from typing import Annotated, NoReturn
 
@@ -10,7 +9,6 @@ from pydantic import BaseModel
 from sqlmodel import col, select, update
 
 from .auth import (
-    get_billing_key,
     redemption_error_to_http_exception,
     validate_bearer_key,
 )
@@ -58,38 +56,14 @@ async def get_key_from_header(
 
 
 async def get_balance_info(key: ApiKey, session: AsyncSession) -> dict:
-    billing_key = await get_billing_key(key, session)
     info = {
         "api_key": "sk-" + key.hashed_key,
-        "balance": billing_key.total_balance,
-        "reserved": billing_key.reserved_balance,
-        "is_child": key.parent_key_hash is not None,
+        "balance": key.total_balance,
+        "reserved": key.reserved_balance,
         "total_requests": key.total_requests,
         "total_spent": key.total_spent,
-        "balance_limit": key.balance_limit,
-        "balance_limit_reset": key.balance_limit_reset,
         "validity_date": key.validity_date,
     }
-
-    if key.parent_key_hash:
-        info["parent_key_preview"] = key.parent_key_hash[:8] + "..."
-    else:
-        # Fetch child keys if this is a parent key
-        statement = select(ApiKey).where(ApiKey.parent_key_hash == key.hashed_key)
-        results = await session.exec(statement)
-        child_keys = results.all()
-        if child_keys:
-            info["child_keys"] = [
-                {
-                    "api_key": "sk-" + ck.hashed_key,
-                    "total_requests": ck.total_requests,
-                    "total_spent": ck.total_spent,
-                    "balance_limit": ck.balance_limit,
-                    "balance_limit_reset": ck.balance_limit_reset,
-                    "validity_date": ck.validity_date,
-                }
-                for ck in child_keys
-            ]
 
     return info
 
@@ -117,26 +91,18 @@ async def account_info(
 
 class BalanceCreateRequest(BaseModel):
     initial_balance_token: str
-    balance_limit: int | None = None
-    balance_limit_reset: str | None = None
     validity_date: int | None = None
 
 
 async def _create_balance(
     initial_balance_token: str,
-    balance_limit: int | None,
-    balance_limit_reset: str | None,
     validity_date: int | None,
     session: AsyncSession,
 ) -> dict:
     key = await validate_bearer_key(initial_balance_token, session)
 
-    if balance_limit is not None or balance_limit_reset or validity_date:
-        key.balance_limit = balance_limit
-        key.balance_limit_reset = balance_limit_reset
+    if validity_date is not None:
         key.validity_date = validity_date
-        if balance_limit_reset:
-            key.balance_limit_reset_date = int(time.time())
         session.add(key)
         await session.commit()
         await session.refresh(key)
@@ -154,8 +120,6 @@ async def create_balance_from_body(
 ) -> dict:
     return await _create_balance(
         payload.initial_balance_token,
-        payload.balance_limit,
-        payload.balance_limit_reset,
         payload.validity_date,
         session,
     )
@@ -164,15 +128,11 @@ async def create_balance_from_body(
 @router.get("/create")
 async def create_balance(
     initial_balance_token: str,
-    balance_limit: int | None = None,
-    balance_limit_reset: str | None = None,
     validity_date: int | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     return await _create_balance(
         initial_balance_token,
-        balance_limit,
-        balance_limit_reset,
         validity_date,
         session,
     )
@@ -208,7 +168,7 @@ async def topup_wallet_endpoint(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
-    billing_key = await get_billing_key(key, session)
+    billing_key = key
 
     if topup_request is not None:
         cashu_token = topup_request.cashu_token
@@ -458,12 +418,6 @@ async def refund_wallet_endpoint(
         if persisted := await _get_persisted_api_key_refund(key, session):
             return persisted
 
-    if key.parent_key_hash:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot refund child key. Please refund the parent key instead.",
-        )
-
     if key.reserved_balance > 0:
         # Release only durable reservations old enough to be stale. A newer
         # request on the same aggregate balance must remain reserved.
@@ -650,12 +604,6 @@ async def wallet_history(
     key: ApiKey = Depends(get_key_from_header),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, list[dict[str, str | int | bool | None]]]:
-    if key.parent_key_hash:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot view child key history. Please use the parent key instead.",
-        )
-
     result = await session.exec(
         select(CashuTransaction)
         .where(CashuTransaction.api_key_hashed_key == key.hashed_key)
@@ -691,133 +639,6 @@ async def donate(token: str, ref: str | None = None) -> str:
         return "Thanks!"
     except Exception:
         return "Invalid token."
-
-
-class ChildKeyRequest(BaseModel):
-    count: int
-    balance_limit: int | None = None
-    balance_limit_reset: str | None = None
-    validity_date: int | None = None
-
-
-@router.post("/child-key")
-async def create_child_key(
-    payload: ChildKeyRequest,
-    key: ApiKey = Depends(get_key_from_header),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    """Creates one or more child API keys that use the parent's balance."""
-    # Log incoming request for debugging
-    logger.debug(f"Child key creation request: count={payload.count}")
-
-    count = payload.count
-    if count < 1 or count > 50:
-        raise HTTPException(status_code=400, detail="Count must be between 1 and 50.")
-
-    # Check if this is already a child key
-    if key.parent_key_hash:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot create a child key for another child key.",
-        )
-
-    cost_per_key = settings.child_key_cost
-    total_cost = cost_per_key * count
-
-    if key.total_balance < total_cost:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
-        )
-
-    # Deduct cost from parent atomically — guards against concurrent requests
-    # that both pass the balance check above on stale in-memory state.
-    deduct_stmt = (
-        update(ApiKey)
-        .where(col(ApiKey.hashed_key) == key.hashed_key)
-        .where(col(ApiKey.balance) - col(ApiKey.reserved_balance) >= total_cost)
-        .values(
-            balance=col(ApiKey.balance) - total_cost,
-            total_spent=col(ApiKey.total_spent) + total_cost,
-        )
-    )
-    result = await session.exec(deduct_stmt)  # type: ignore[call-overload]
-
-    if result.rowcount == 0:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Insufficient balance to create {count} child keys. {total_cost} mSats required.",
-        )
-
-    # Generate new keys
-    import secrets
-
-    new_keys = []
-    for _ in range(count):
-        new_key_raw = secrets.token_hex(32)
-        new_key_hash = new_key_raw  # We use the raw key as the hash for sk- keys
-
-        child_key = ApiKey(
-            hashed_key=new_key_hash,
-            balance=0,
-            parent_key_hash=key.hashed_key,
-            balance_limit=payload.balance_limit,
-            balance_limit_reset=payload.balance_limit_reset,
-            balance_limit_reset_date=int(time.time())
-            if payload.balance_limit_reset
-            else None,
-            validity_date=payload.validity_date,
-        )
-        session.add(child_key)
-        new_keys.append("sk-" + new_key_hash)
-
-    await session.commit()
-    await session.refresh(key)
-
-    response_data = {
-        "api_keys": new_keys,
-        "count": count,
-        "cost_msats": total_cost,
-        "cost_sats": total_cost // 1000,
-        "parent_balance": key.balance,
-        "parent_balance_sats": key.balance // 1000,
-    }
-    logger.debug(f"Child key creation response: {response_data}")
-    return response_data
-
-
-class ChildKeyResetRequest(BaseModel):
-    child_key: str
-
-
-@router.post("/child-key/reset")
-async def reset_child_key_spent(
-    payload: ChildKeyResetRequest,
-    key: ApiKey = Depends(get_key_from_header),
-    session: AsyncSession = Depends(get_session),
-) -> dict:
-    """Resets the total_spent of a child key. Must be called by the parent."""
-    child_key_raw = payload.child_key
-    if child_key_raw.startswith("sk-"):
-        child_key_raw = child_key_raw[3:]
-
-    child_key = await session.get(ApiKey, child_key_raw)
-    if not child_key:
-        raise HTTPException(status_code=404, detail="Child key not found.")
-
-    if child_key.parent_key_hash != key.hashed_key:
-        raise HTTPException(
-            status_code=403, detail="Unauthorized. You are not the parent of this key."
-        )
-
-    child_key.total_spent = 0
-    if child_key.balance_limit_reset:
-        child_key.balance_limit_reset_date = int(time.time())
-    session.add(child_key)
-    await session.commit()
-
-    return {"success": True, "message": "Child key balance reset successfully."}
-
 
 @router.api_route(
     "/{path:path}",

@@ -1,13 +1,11 @@
 import asyncio
 import hashlib
 import math
-import random
 import time
 import uuid
 from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from fastapi import HTTPException
@@ -97,48 +95,6 @@ def _clear_current_reservation(snapshot: ReservationSnapshot) -> None:
 # TODO: implement prepaid api key (not like it was before)
 # PREPAID_API_KEY = os.environ.get("PREPAID_API_KEY", None)
 # PREPAID_BALANCE = int(os.environ.get("PREPAID_BALANCE", "0")) * 1000  # Convert to msats
-
-
-async def check_and_reset_limit(key: ApiKey, session: AsyncSession) -> bool:
-    """Checks if a key's balance limit should be reset based on its policy."""
-    if key.balance_limit is not None and key.balance_limit_reset:
-        now = int(time.time())
-        reset_date = key.balance_limit_reset_date or 0
-        should_reset = False
-
-        if key.balance_limit_reset == "daily":
-            if (
-                datetime.fromtimestamp(now).date()
-                > datetime.fromtimestamp(reset_date).date()
-            ):
-                should_reset = True
-        elif key.balance_limit_reset == "weekly":
-            if (
-                datetime.fromtimestamp(now).isocalendar()[:2]
-                > datetime.fromtimestamp(reset_date).isocalendar()[:2]
-            ):
-                should_reset = True
-        elif key.balance_limit_reset == "monthly":
-            dt_now = datetime.fromtimestamp(now)
-            dt_reset = datetime.fromtimestamp(reset_date)
-            if dt_now.year > dt_reset.year or dt_now.month > dt_reset.month:
-                should_reset = True
-
-        if should_reset:
-            logger.info(
-                "Resetting balance limit for key",
-                extra={
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "policy": key.balance_limit_reset,
-                    "old_spent": key.total_spent,
-                },
-            )
-            key.total_spent = 0
-            key.balance_limit_reset_date = now
-            session.add(key)
-            await session.flush()
-            return True
-    return False
 
 
 def redemption_error_to_http_exception(error: Exception) -> HTTPException:
@@ -250,7 +206,7 @@ async def _validate_bearer_key_locked(
     Validates the provided API key using SQLModel.
     If it's a cashu key, it redeems it and stores its hash and balance.
     Otherwise checks if the hash of the key exists.
-    Includes a balance check against min_cost for limited keys.
+    Checks the key's available balance against min_cost when required.
     """
     logger.debug(
         "Starting bearer key validation",
@@ -315,42 +271,19 @@ async def _validate_bearer_key_locked(
                     },
                 )
 
-            # Check and reset limit if needed
-            await check_and_reset_limit(existing_key, session)
-
-            # Early check: Billing balance check (Parent balance)
-            billing_key = await get_billing_key(existing_key, session)
-            if min_cost > 0 and billing_key.total_balance < min_cost:
+            # Early check: Billing balance check
+            if min_cost > 0 and existing_key.total_balance < min_cost:
                 logger.warning(
                     "Insufficient billing balance during validation",
                     extra={
                         "key_hash": existing_key.hashed_key[:8] + "...",
-                        "billing_key_hash": billing_key.hashed_key[:8] + "...",
-                        "balance": billing_key.total_balance,
+                        "balance": existing_key.total_balance,
                         "required": min_cost,
                     },
                 )
                 raise HTTPException(
                     status_code=402,
-                    detail=_model_balance_error(min_cost, billing_key.total_balance),
-                )
-
-            # Early check: Spending limit check (Child key limit)
-            if (
-                min_cost > 0
-                and existing_key.balance_limit is not None
-                and existing_key.total_spent + existing_key.reserved_balance + min_cost
-                > existing_key.balance_limit
-            ):
-                raise HTTPException(
-                    status_code=402,
-                    detail={
-                        "error": {
-                            "message": f"Balance limit exceeded: {existing_key.balance_limit} mSats limit. {existing_key.total_spent} already spent ({existing_key.reserved_balance} reserved), {min_cost} minimum required for this model.",
-                            "type": "insufficient_quota",
-                            "code": "balance_limit_exceeded",
-                        }
-                    },
+                    detail=_model_balance_error(min_cost, existing_key.total_balance),
                 )
 
             return existing_key
@@ -619,27 +552,6 @@ async def _validate_bearer_key_locked(
     )
 
 
-async def get_billing_key(key: ApiKey, session: AsyncSession) -> ApiKey:
-    """Returns the key that should be charged for the request."""
-    if key.parent_key_hash:
-        parent = await session.get(ApiKey, key.parent_key_hash)
-        if parent:
-            # We want to keep the total_requests and total_spent on the child key
-            # but use the balance and reserved_balance of the parent.
-            # However, pay_for_request updates reserved_balance and total_requests.
-            # To stay simple, we charge the parent's balance and update parent's total_requests.
-            return parent
-        else:
-            logger.error(
-                "Parent key not found for child key",
-                extra={
-                    "child_key_hash": key.hashed_key[:8] + "...",
-                    "parent_key_hash": key.parent_key_hash[:8] + "...",
-                },
-            )
-    return key
-
-
 async def pay_for_request(
     key: ApiKey, cost_per_request: int, session: AsyncSession
 ) -> int:
@@ -647,7 +559,7 @@ async def pay_for_request(
     # Ensure cost_per_request is at least the minimum allowed request cost
     cost_per_request = max(cost_per_request, settings.min_request_msat)
 
-    billing_key = await get_billing_key(key, session)
+    billing_key = key
 
     logger.info(
         "Processing payment for request",
@@ -702,35 +614,6 @@ async def pay_for_request(
                         "message": "API key has expired (validity date reached).",
                         "type": "invalid_request_error",
                         "code": "key_expired",
-                    }
-                },
-            )
-
-    # Check balance limit for child keys (or any key with a limit)
-    if key.balance_limit is not None:
-        await check_and_reset_limit(key, session)
-
-        if (
-            key.total_spent + key.reserved_balance + cost_per_request
-            > key.balance_limit
-        ):
-            logger.warning(
-                "Balance limit exceeded",
-                extra={
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "total_spent": key.total_spent,
-                    "reserved": key.reserved_balance,
-                    "balance_limit": key.balance_limit,
-                    "required": cost_per_request,
-                },
-            )
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": {
-                        "message": f"Balance limit exceeded: {key.balance_limit} mSats limit. {key.total_spent} already spent ({key.reserved_balance} reserved), {cost_per_request} required for this request.",
-                        "type": "insufficient_quota",
-                        "code": "balance_limit_exceeded",
                     }
                 },
             )
@@ -798,52 +681,6 @@ async def pay_for_request(
             },
         )
 
-    # Also increment total_requests and reserved_balance on the child key if it's different.
-    # The balance_limit guard is enforced atomically here — the Python pre-check above
-    # is a fast-path rejection only and provides no concurrency guarantee.
-    if billing_key.hashed_key != key.hashed_key:
-        child_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key.hashed_key)
-            .where(
-                (col(ApiKey.balance_limit).is_(None))
-                | (
-                    col(ApiKey.total_spent)
-                    + col(ApiKey.reserved_balance)
-                    + cost_per_request
-                    <= col(ApiKey.balance_limit)
-                )
-            )
-            .values(
-                total_requests=col(ApiKey.total_requests) + 1,
-                reserved_balance=col(ApiKey.reserved_balance) + cost_per_request,
-                reserved_at=reserved_at_now,
-            )
-        )
-        child_result = await session.exec(child_stmt)  # type: ignore[call-overload]
-
-        if child_result.rowcount == 0:
-            # Build the error before rollback expires ORM attributes.
-            limit_message = (
-                f"Balance limit exceeded: {key.balance_limit} mSats limit. "
-                f"{key.total_spent} already spent ({key.reserved_balance} reserved), "
-                f"{cost_per_request} required for this request."
-            )
-            # The parent reservation update already ran in this transaction.
-            # Roll it back before failover code attempts to restore the previous
-            # reservation; otherwise that later commit can persist both updates.
-            await session.rollback()
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": {
-                        "message": limit_message,
-                        "type": "insufficient_quota",
-                        "code": "balance_limit_exceeded",
-                    }
-                },
-            )
-
     session.add(
         ReservationRelease(
             id=reservation.release_id,
@@ -895,8 +732,6 @@ async def pay_for_request(
 
     try:
         await session.refresh(billing_key)
-        if billing_key.hashed_key != key.hashed_key:
-            await session.refresh(key)
     except Exception:
         # The reservation transaction is already committed and durable. Logging
         # refresh failures must not make the caller treat it as unreserved.
@@ -968,9 +803,6 @@ async def _validate_reservation_snapshot(
     persisted_key = await session.get(ApiKey, snapshot.key_hash)
     if persisted_key is None:
         raise RuntimeError("Billing reservation key no longer exists")
-    expected_billing_hash = persisted_key.parent_key_hash or persisted_key.hashed_key
-    if snapshot.billing_key_hash != expected_billing_hash:
-        raise RuntimeError("Billing reservation does not belong to this billing key")
 
     record = await session.get(ReservationRelease, snapshot.release_id)
     if (
@@ -1184,22 +1016,6 @@ async def _transition_reservation_to_released(
             snapshot, session, decrement_requests=decrement_requests
         )
 
-    if snapshot.billing_key_hash != snapshot.key_hash:
-        child_release_stmt = (
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == snapshot.key_hash)
-            .where(col(ApiKey.reserved_balance) >= snapshot.reserved_msats)
-            .values(**values)
-        )
-        child_result = await session.exec(  # type: ignore[call-overload]
-            child_release_stmt
-        )
-        if child_result.rowcount != 1:
-            await session.rollback()
-            return await _repair_corrupt_reservation(
-                snapshot, session, decrement_requests=decrement_requests
-            )
-
     await session.commit()
     await _stop_reservation_heartbeat(snapshot.release_id)
     _clear_current_reservation(snapshot)
@@ -1251,15 +1067,14 @@ async def _charge_reservation_rows(
     session: AsyncSession,
     *,
     billing_key_hash: str,
-    key_hash: str,
     reserved_msats: int,
     charge_msats: int,
     extra_billing_guards: tuple = (),
 ) -> bool:
-    """Release the reserved amount and record the charge on the billing row
-    (and the child row when different) inside the caller's transaction.
+    """Release the reserved amount and record the charge on the key
+    inside the caller's transaction.
 
-    Guarded subtraction replaces defensive clamping: every row must still hold
+    Guarded subtraction replaces defensive clamping: the row must still hold
     the full reserved amount, otherwise the whole transaction rolls back and
     nothing is charged. A violated invariant must never silently erase the
     aggregate reservations of sibling requests. Returns False after rollback.
@@ -1288,26 +1103,6 @@ async def _charge_reservation_rows(
         await session.rollback()
         return False
 
-    if key_hash != billing_key_hash:
-        child_result = await session.exec(  # type: ignore[call-overload]
-            update(ApiKey)
-            .where(col(ApiKey.hashed_key) == key_hash)
-            .where(col(ApiKey.reserved_balance) >= reserved_msats)
-            .values(
-                reserved_balance=col(ApiKey.reserved_balance) - reserved_msats,
-                reserved_at=case(
-                    (
-                        col(ApiKey.reserved_balance) - reserved_msats > 0,
-                        col(ApiKey.reserved_at),
-                    ),
-                    else_=None,
-                ),
-                total_spent=col(ApiKey.total_spent) + charge_msats,
-            )
-        )
-        if child_result.rowcount != 1:
-            await session.rollback()
-            return False
     return True
 
 
@@ -1332,7 +1127,7 @@ async def adjust_payment_for_tokens(
     The response's usage object is normalized with the default union parser in
     ``calculate_cost``.
     """
-    billing_key = await get_billing_key(key, session)
+    billing_key = key
     reservation = reservation_snapshot or await get_reservation_snapshot(key, session)
     await _validate_reservation_snapshot(
         key, reservation, session, require_active=False
@@ -1421,7 +1216,6 @@ async def adjust_payment_for_tokens(
             charged = await _charge_reservation_rows(
                 session,
                 billing_key_hash=billing_key.hashed_key,
-                key_hash=key.hashed_key,
                 reserved_msats=deducted_max_cost,
                 charge_msats=cost.total_msats,
             )
@@ -1444,8 +1238,6 @@ async def adjust_payment_for_tokens(
             else:
                 cost.charged_msats = cost.total_msats
                 await session.refresh(billing_key)
-                if billing_key.hashed_key != key.hashed_key:
-                    await session.refresh(key)
                 logger.info(
                     "Max cost payment finalized",
                     extra={
@@ -1512,7 +1304,6 @@ async def adjust_payment_for_tokens(
                 if not await _charge_reservation_rows(
                     session,
                     billing_key_hash=billing_key.hashed_key,
-                    key_hash=key.hashed_key,
                     reserved_msats=deducted_max_cost,
                     charge_msats=total_cost_msats,
                 ):
@@ -1534,8 +1325,6 @@ async def adjust_payment_for_tokens(
                 await _stop_reservation_heartbeat(reservation.release_id)
                 cost.charged_msats = total_cost_msats
                 await session.refresh(billing_key)
-                if billing_key.hashed_key != key.hashed_key:
-                    await session.refresh(key)
                 await _accumulate_fee(total_cost_msats)
                 payments_logger.info(
                     "FINALIZE",
@@ -1558,8 +1347,8 @@ async def adjust_payment_for_tokens(
 
             # actual cost exceeded discounted reservation (due to tolerance_percentage)
             if cost_difference > 0:
-                # Lock the billing row so the parent and child record the same
-                # database-determined charge under concurrent finalizations.
+                # Lock the key row so concurrent finalizations use the same
+                # database-determined charge.
                 actual_charge_msats = 0
                 for attempt in range(5):
                     locked_billing_key = (
@@ -1600,7 +1389,6 @@ async def adjust_payment_for_tokens(
                     if await _charge_reservation_rows(
                         session,
                         billing_key_hash=billing_key.hashed_key,
-                        key_hash=key.hashed_key,
                         reserved_msats=deducted_max_cost,
                         charge_msats=actual_charge_msats,
                         extra_billing_guards=(
@@ -1620,8 +1408,6 @@ async def adjust_payment_for_tokens(
                 await _stop_reservation_heartbeat(reservation.release_id)
 
                 await session.refresh(billing_key)
-                if billing_key.hashed_key != key.hashed_key:
-                    await session.refresh(key)
                 cost.charged_msats = actual_charge_msats
                 if actual_charge_msats < total_cost_msats:
                     logger.warning(
@@ -1680,7 +1466,6 @@ async def adjust_payment_for_tokens(
                 charged = await _charge_reservation_rows(
                     session,
                     billing_key_hash=billing_key.hashed_key,
-                    key_hash=key.hashed_key,
                     reserved_msats=deducted_max_cost,
                     charge_msats=total_cost_msats,
                 )
@@ -1705,8 +1490,6 @@ async def adjust_payment_for_tokens(
                     cost.total_msats = total_cost_msats
                     cost.charged_msats = total_cost_msats
                     await session.refresh(billing_key)
-                    if billing_key.hashed_key != key.hashed_key:
-                        await session.refresh(key)
 
                     logger.info(
                         "Refund processed successfully",
@@ -1765,68 +1548,6 @@ async def adjust_payment_for_tokens(
             )
     # All calculate_cost variants are handled above.
     raise AssertionError("Unreachable: unhandled calculate_cost result")
-
-
-async def periodic_key_reset() -> None:
-    """Background task to reset key limits based on their policy."""
-    from .core.db import create_session
-
-    while True:
-        try:
-            interval = 3600  # Run every hour
-            jitter = 300
-            await asyncio.sleep(interval + random.uniform(0, jitter))
-        except asyncio.CancelledError:
-            break
-
-        try:
-            async with create_session() as session:
-                # Find all keys that have a reset policy
-                stmt = select(ApiKey).where(ApiKey.balance_limit_reset.is_not(None))  # type: ignore
-                keys = (await session.exec(stmt)).all()
-
-                now = int(time.time())
-                updated_count = 0
-
-                for key in keys:
-                    reset_date = key.balance_limit_reset_date or 0
-                    should_reset = False
-
-                    if key.balance_limit_reset == "daily":
-                        if (
-                            datetime.fromtimestamp(now).date()
-                            > datetime.fromtimestamp(reset_date).date()
-                        ):
-                            should_reset = True
-                    elif key.balance_limit_reset == "weekly":
-                        if (
-                            datetime.fromtimestamp(now).isocalendar()[:2]
-                            > datetime.fromtimestamp(reset_date).isocalendar()[:2]
-                        ):
-                            should_reset = True
-                    elif key.balance_limit_reset == "monthly":
-                        dt_now = datetime.fromtimestamp(now)
-                        dt_reset = datetime.fromtimestamp(reset_date)
-                        if dt_now.year > dt_reset.year or dt_now.month > dt_reset.month:
-                            should_reset = True
-
-                    if should_reset:
-                        key.total_spent = 0
-                        key.balance_limit_reset_date = now
-                        session.add(key)
-                        updated_count += 1
-
-                if updated_count > 0:
-                    await session.commit()
-                    logger.info(
-                        "Periodic key reset complete",
-                        extra={"keys_reset": updated_count},
-                    )
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in periodic_key_reset: {e}")
 
 
 async def periodic_dead_key_prune() -> None:

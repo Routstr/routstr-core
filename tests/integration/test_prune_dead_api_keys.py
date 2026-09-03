@@ -45,7 +45,7 @@ def _dead_key(created_at: int | None) -> ApiKey:
 
 @pytest.mark.asyncio
 async def test_prunes_old_refunded_zero_key(patched_db_engine: None) -> None:
-    """A funded-then-refunded key (0/0/0, NULL parent, old) is pruned."""
+    """A funded-then-refunded zero-balance key with an old timestamp is pruned."""
     key = _dead_key(LONG_AGO)
     async with create_session() as session:
         session.add(key)
@@ -96,34 +96,6 @@ async def test_used_key_never_pruned(patched_db_engine: None) -> None:
     assert pruned == 0
     for k in (spent, requested, funded, reserved):
         assert await _exists(k.hashed_key)
-
-
-@pytest.mark.asyncio
-async def test_parent_and_child_keys_are_not_pruned(
-    patched_db_engine: None,
-) -> None:
-    """Pruning must not orphan child keys or delete valid children."""
-    parent = _dead_key(LONG_AGO)
-    child = ApiKey(
-        hashed_key=f"child_{uuid.uuid4().hex}",
-        balance=0,
-        reserved_balance=0,
-        total_spent=0,
-        total_requests=0,
-        created_at=LONG_AGO,
-        parent_key_hash=parent.hashed_key,
-    )
-    async with create_session() as session:
-        session.add(parent)
-        session.add(child)
-        await session.commit()
-
-    async with create_session() as session:
-        pruned = await prune_dead_api_keys(session, OLD)
-
-    assert pruned == 0
-    assert await _exists(parent.hashed_key)
-    assert await _exists(child.hashed_key)
 
 
 @pytest.mark.asyncio

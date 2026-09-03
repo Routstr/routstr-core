@@ -208,7 +208,6 @@ def _make_api_key(
     refund_currency: str | None = "sat",
     refund_mint_url: str | None = "https://mint.example.com",
     refund_address: str | None = None,
-    parent_key_hash: str | None = None,
 ) -> ApiKey:
     key = ApiKey(hashed_key="testhash")
     key.balance = balance
@@ -216,7 +215,6 @@ def _make_api_key(
     key.refund_currency = refund_currency
     key.refund_mint_url = refund_mint_url
     key.refund_address = refund_address
-    key.parent_key_hash = parent_key_hash
     key.total_spent = 0
     key.total_requests = 0
     return key
@@ -306,7 +304,6 @@ async def test_apikey_refund_stores_cashu_transaction_with_apikey_source() -> No
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()) as mock_store,
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
@@ -341,7 +338,6 @@ async def test_apikey_refund_logs_token() -> None:
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
@@ -370,7 +366,6 @@ async def test_apikey_refund_log_includes_path() -> None:
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
@@ -409,7 +404,6 @@ async def test_apikey_refund_rejects_on_concurrent_balance_change() -> None:
     mock_send_token = AsyncMock(return_value="cashuAshould_not_be_minted")
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", mock_send_token),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
@@ -470,7 +464,6 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch(
             "routstr.balance.send_token",
             AsyncMock(side_effect=MintConnectionError("raw mint outage detail")),
@@ -508,7 +501,6 @@ async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
     session.commit = AsyncMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.send_token", AsyncMock(side_effect=RuntimeError(raw_error))),
         patch("routstr.balance.store_cashu_transaction", AsyncMock()),
         patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
@@ -609,7 +601,6 @@ async def test_topup_mint_unreachable_returns_503(error: Exception) -> None:
     session = MagicMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.credit_balance", AsyncMock(side_effect=error)),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -635,7 +626,6 @@ async def test_topup_unreachable_source_mint_explains_why_fallback_is_impossible
     error = SourceMintConnectionError("Issuing Cashu mint is unreachable")
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.credit_balance", AsyncMock(side_effect=error)),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -660,7 +650,6 @@ async def test_topup_already_spent_still_returns_400() -> None:
     session = MagicMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch(
             "routstr.balance.credit_balance",
             AsyncMock(side_effect=ValueError("Token already spent")),
@@ -688,7 +677,6 @@ async def test_topup_zero_value_returns_400_zero_value_message() -> None:
     session = MagicMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch(
             "routstr.balance.credit_balance",
             AsyncMock(
@@ -720,7 +708,6 @@ async def test_topup_token_consumed_returns_500() -> None:
     session = MagicMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch(
             "routstr.balance.credit_balance",
             AsyncMock(side_effect=TokenConsumedError("credit failed")),
@@ -786,7 +773,6 @@ async def test_topup_fee_and_swap_failures_return_422(
     session = MagicMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch("routstr.balance.credit_balance", AsyncMock(side_effect=error)),
     ):
         with pytest.raises(HTTPException) as exc_info:
@@ -811,7 +797,6 @@ async def test_topup_unexpected_non_valueerror_returns_500() -> None:
     session = MagicMock()
 
     with (
-        patch("routstr.balance.get_billing_key", AsyncMock(return_value=key)),
         patch(
             "routstr.balance.credit_balance",
             AsyncMock(side_effect=RuntimeError("db exploded")),

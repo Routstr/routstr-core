@@ -41,8 +41,6 @@ def _invoice(**overrides: object) -> SimpleNamespace:
         "paid_at": None,
         "api_key_hash": None,
         "mint_url": "http://mint:3338",
-        "balance_limit": None,
-        "balance_limit_reset": None,
         "validity_date": None,
         "created_at": 1,
         "expires_at": 2,

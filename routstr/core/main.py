@@ -14,7 +14,6 @@ from starlette.types import Scope
 
 from ..auth import (
     periodic_dead_key_prune,
-    periodic_key_reset,
     periodic_stale_reservation_sweep,
 )
 from ..balance import balance_router, deprecated_wallet_router
@@ -64,7 +63,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     models_refresh_task = None
     model_maps_refresh_task = None
     model_paths_refresh_task = None
-    key_reset_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
     auto_topup_task = None
@@ -149,7 +147,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         analytics_task = asyncio.create_task(publish_usage_analytics())
         if global_settings.providers_refresh_interval_seconds > 0:
             providers_task = asyncio.create_task(providers_cache_refresher())
-        key_reset_task = asyncio.create_task(periodic_key_reset())
         stale_reservation_task = asyncio.create_task(periodic_stale_reservation_sweep())
         dead_key_prune_task = asyncio.create_task(periodic_dead_key_prune())
         auto_topup_task = asyncio.create_task(periodic_auto_topup())
@@ -189,8 +186,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             model_maps_refresh_task.cancel()
         if model_paths_refresh_task is not None:
             model_paths_refresh_task.cancel()
-        if key_reset_task is not None:
-            key_reset_task.cancel()
         if stale_reservation_task is not None:
             stale_reservation_task.cancel()
         if dead_key_prune_task is not None:
@@ -224,8 +219,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(model_maps_refresh_task)
             if model_paths_refresh_task is not None:
                 tasks_to_wait.append(model_paths_refresh_task)
-            if key_reset_task is not None:
-                tasks_to_wait.append(key_reset_task)
             if stale_reservation_task is not None:
                 tasks_to_wait.append(stale_reservation_task)
             if dead_key_prune_task is not None:
@@ -308,7 +301,6 @@ async def info() -> dict:
         "mints": global_settings.cashu_mints,
         "http_url": global_settings.http_url,
         "onion_url": global_settings.onion_url,
-        "child_key_cost_msats": global_settings.child_key_cost,
     }
 
 

@@ -1,7 +1,7 @@
 """Tests for stale reserved_balance handling (issue #551).
 
 Covers:
-- pay_for_request stamping reserved_at on billing and child keys
+- pay_for_request stamping reserved_at on charged keys
 - release_stale_reservations sweeper semantics
 - reset_all_reserved_balances clearing reserved_at
 - refund endpoint self-healing stale/legacy reservations
@@ -16,14 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.auth import pay_for_request
 from routstr.balance import refund_wallet_endpoint
 from routstr.core.db import (
     ApiKey,
-    ReservationRelease,
     release_stale_reservations,
     reset_all_reserved_balances,
 )
@@ -68,26 +67,6 @@ async def test_pay_for_request_sets_reserved_at(session: AsyncSession) -> None:
     assert key.reserved_balance == 1_000
     assert key.reserved_at is not None
     assert key.reserved_at >= before
-
-
-@pytest.mark.asyncio
-async def test_pay_for_request_sets_reserved_at_on_child_key(
-    session: AsyncSession,
-) -> None:
-    parent = ApiKey(hashed_key="parentkey", balance=10_000)
-    child = ApiKey(hashed_key="childkey", balance=0, parent_key_hash="parentkey")
-    session.add(parent)
-    session.add(child)
-    await session.commit()
-
-    await pay_for_request(child, 1_000, session)
-
-    await session.refresh(parent)
-    await session.refresh(child)
-    assert parent.reserved_balance == 1_000
-    assert parent.reserved_at is not None
-    assert child.reserved_balance == 1_000
-    assert child.reserved_at is not None
 
 
 @pytest.mark.asyncio
@@ -151,39 +130,6 @@ async def test_release_stale_reservations_releases_old(session: AsyncSession) ->
     await session.refresh(key)
     assert key.reserved_balance == 0
     assert key.reserved_at is None
-
-
-@pytest.mark.asyncio
-async def test_targeted_parent_cleanup_releases_child_owned_reservation(
-    session: AsyncSession,
-) -> None:
-    parent = ApiKey(hashed_key="stale-parent", balance=5_000)
-    child = ApiKey(
-        hashed_key="stale-child", parent_key_hash=parent.hashed_key, balance=0
-    )
-    session.add_all([parent, child])
-    await session.commit()
-    await pay_for_request(child, 1_000, session)
-    reservation = (
-        await session.exec(
-            select(ReservationRelease).where(
-                ReservationRelease.key_hash == child.hashed_key
-            )
-        )
-    ).one()
-    reservation.created_at = int(time.time()) - 1_000
-    session.add(reservation)
-    await session.commit()
-
-    released = await release_stale_reservations(
-        session, max_age_seconds=300, key_hash=parent.hashed_key
-    )
-
-    assert released == 1
-    await session.refresh(parent)
-    await session.refresh(child)
-    assert parent.reserved_balance == 0
-    assert child.reserved_balance == 0
 
 
 @pytest.mark.asyncio

@@ -3,8 +3,8 @@
 Every finalization branch of ``adjust_payment_for_tokens`` must respect the
 same accounting rules: a completed request is charged exactly once, its
 reported ``charged_msats`` matches the actual debit, it never spends more than
-its own reservation leaves available, and child keys spend their parent's
-balance without raiding sibling reservations.
+its own reservation leaves available, and concurrent requests cannot raid each
+other's reservations.
 """
 
 import asyncio
@@ -45,13 +45,7 @@ def _response() -> dict:
     }
 
 
-async def _new_key(
-    session: AsyncSession,
-    balance: int,
-    *,
-    parent_key_hash: str | None = None,
-    balance_limit: int | None = None,
-) -> str:
+async def _new_key(session: AsyncSession, balance: int) -> str:
     key_hash = f"test_inv_{uuid.uuid4().hex}"
     session.add(
         ApiKey(
@@ -60,8 +54,6 @@ async def _new_key(
             reserved_balance=0,
             total_spent=0,
             total_requests=0,
-            parent_key_hash=parent_key_hash,
-            balance_limit=balance_limit,
         )
     )
     await session.commit()
@@ -458,92 +450,3 @@ async def test_release_after_charge_does_not_credit_the_user_back(
     assert key.balance == 10_000 - cost
     assert key.total_spent == cost
     assert key.reserved_balance == 0
-
-
-@pytest.mark.asyncio
-async def test_child_request_spends_parent_balance_and_records_child_ledger(
-    integration_session: AsyncSession,
-) -> None:
-    from routstr.auth import (
-        adjust_payment_for_tokens,
-        get_reservation_snapshot,
-        pay_for_request,
-    )
-
-    cost = 3_000
-    parent_hash = await _new_key(integration_session, balance=10_000)
-    child_hash = await _new_key(
-        integration_session, balance=0, parent_key_hash=parent_hash
-    )
-    child = await integration_session.get(ApiKey, child_hash)
-    assert child is not None
-
-    await pay_for_request(child, cost, integration_session)
-    reservation = await get_reservation_snapshot(child, integration_session)
-
-    with patch("routstr.auth.calculate_cost", return_value=_cost_data(cost)):
-        await adjust_payment_for_tokens(
-            child,
-            _response(),
-            integration_session,
-            cost,
-            reservation_snapshot=reservation,
-        )
-
-    parent = await integration_session.get(ApiKey, parent_hash)
-    child = await integration_session.get(ApiKey, child_hash)
-    assert parent is not None and child is not None
-    assert parent.balance == 10_000 - cost
-    assert parent.reserved_balance == 0
-    assert parent.total_balance >= 0
-    assert child.reserved_balance == 0, "child reservation must be released too"
-    assert child.total_balance >= 0
-    assert child.total_spent == cost, "child ledger must record the spend"
-    assert parent.total_spent == cost
-
-
-@pytest.mark.asyncio
-async def test_child_overrun_does_not_raid_a_sibling_reservation(
-    integration_session: AsyncSession,
-) -> None:
-    """Same overrun defect as the parent case, reached through a child key."""
-    from routstr.auth import (
-        adjust_payment_for_tokens,
-        get_reservation_snapshot,
-        pay_for_request,
-    )
-
-    reserved_each = 100
-    overrun = 150
-    parent_hash = await _new_key(integration_session, balance=2 * reserved_each)
-    child_a = await _new_key(
-        integration_session, balance=0, parent_key_hash=parent_hash
-    )
-    child_b = await _new_key(
-        integration_session, balance=0, parent_key_hash=parent_hash
-    )
-
-    key_a = await integration_session.get(ApiKey, child_a)
-    key_b = await integration_session.get(ApiKey, child_b)
-    assert key_a is not None and key_b is not None
-
-    await pay_for_request(key_a, reserved_each, integration_session)
-    reservation_a = await get_reservation_snapshot(key_a, integration_session)
-    await pay_for_request(key_b, reserved_each, integration_session)
-    await get_reservation_snapshot(key_b, integration_session)
-
-    with patch("routstr.auth.calculate_cost", return_value=_cost_data(overrun)):
-        await adjust_payment_for_tokens(
-            key_a,
-            _response(),
-            integration_session,
-            reserved_each,
-            reservation_snapshot=reservation_a,
-        )
-
-    parent = await integration_session.get(ApiKey, parent_hash)
-    assert parent is not None
-    assert parent.total_balance >= 0, (
-        f"child A's overrun ate child B's reservation: balance={parent.balance} "
-        f"reserved={parent.reserved_balance}"
-    )
