@@ -45,7 +45,7 @@ def _dead_key(created_at: int | None) -> ApiKey:
 
 @pytest.mark.asyncio
 async def test_prunes_old_refunded_zero_key(patched_db_engine: None) -> None:
-    """A funded-then-refunded key (0/0/0, NULL parent, old) is pruned."""
+    """A funded-then-refunded zero-balance key with an old timestamp is pruned."""
     key = _dead_key(LONG_AGO)
     async with create_session() as session:
         session.add(key)

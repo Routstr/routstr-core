@@ -371,22 +371,6 @@ Content-Type: application/json
 
 ## Monitoring
 
-### Usage Alerts
-
-Set up usage notifications:
-
-```bash
-POST /v1/wallet/alerts
-Authorization: Bearer sk-...
-Content-Type: application/json
-
-{
-  "low_balance_threshold": 1000,
-  "daily_spend_limit": 5000,
-  "webhook_url": "https://your-app.com/webhook"
-}
-```
-
 ### Audit Logging
 
 All API key usage is logged:

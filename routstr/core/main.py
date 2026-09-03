@@ -63,7 +63,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     models_refresh_task = None
     model_maps_refresh_task = None
     model_paths_refresh_task = None
-    key_reset_task = None
     stale_reservation_task = None
     dead_key_prune_task = None
     auto_topup_task = None
@@ -187,8 +186,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
             model_maps_refresh_task.cancel()
         if model_paths_refresh_task is not None:
             model_paths_refresh_task.cancel()
-        if key_reset_task is not None:
-            key_reset_task.cancel()
         if stale_reservation_task is not None:
             stale_reservation_task.cancel()
         if dead_key_prune_task is not None:
@@ -222,8 +219,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 tasks_to_wait.append(model_maps_refresh_task)
             if model_paths_refresh_task is not None:
                 tasks_to_wait.append(model_paths_refresh_task)
-            if key_reset_task is not None:
-                tasks_to_wait.append(key_reset_task)
             if stale_reservation_task is not None:
                 tasks_to_wait.append(stale_reservation_task)
             if dead_key_prune_task is not None:

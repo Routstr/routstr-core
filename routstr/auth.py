@@ -206,7 +206,7 @@ async def _validate_bearer_key_locked(
     Validates the provided API key using SQLModel.
     If it's a cashu key, it redeems it and stores its hash and balance.
     Otherwise checks if the hash of the key exists.
-    Includes a balance check against min_cost for limited keys.
+    Checks the key's available balance against min_cost when required.
     """
     logger.debug(
         "Starting bearer key validation",
@@ -1347,8 +1347,8 @@ async def adjust_payment_for_tokens(
 
             # actual cost exceeded discounted reservation (due to tolerance_percentage)
             if cost_difference > 0:
-                # Lock the billing row so the parent and child record the same
-                # database-determined charge under concurrent finalizations.
+                # Lock the key row so concurrent finalizations use the same
+                # database-determined charge.
                 actual_charge_msats = 0
                 for attempt in range(5):
                     locked_billing_key = (

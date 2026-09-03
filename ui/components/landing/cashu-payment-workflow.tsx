@@ -245,7 +245,8 @@ export function CashuPaymentWorkflow({
               <span className='text-muted-foreground text-[0.7rem] leading-relaxed'>
                 Redeems instantly and returns <code>sk-</code> key.
                 <br />
-                Optional limits can be set above for enhanced security.
+                Set an optional validity date above to expire the key
+                automatically.
               </span>
             </div>
           </div>

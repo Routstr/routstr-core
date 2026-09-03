@@ -111,7 +111,7 @@ async def get_temporary_balances_api(
         )
         total = count_result.one()
 
-        # Aggregate totals across the whole (search-filtered) set, not just the
+        # Aggregate totals across the whole search-filtered set, not just this page.
         balance_totals_result = await session.exec(
             select(
                 func.coalesce(func.sum(ApiKey.balance), 0),

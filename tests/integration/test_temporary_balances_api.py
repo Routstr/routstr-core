@@ -129,7 +129,7 @@ async def test_temporary_balances_totals(
 ) -> None:
     await _add_key(
         integration_session,
-        "parent",
+        "standalone_key",
         balance=5000,
         total_spent=100,
         total_requests=3,

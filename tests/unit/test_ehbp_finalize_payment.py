@@ -134,11 +134,11 @@ async def test_unmeasured_ehbp_releases_reservation(
 
 
 @pytest.mark.asyncio
-async def test_finalize_actual_cost_payment_rolls_back_when_parent_update_matches_no_rows(
+async def test_finalize_actual_cost_payment_rolls_back_when_billing_key_update_matches_no_rows(
     session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    key = ApiKey(hashed_key="ehbp-missing-parent", balance=10_000)
+    key = ApiKey(hashed_key="ehbp-failed-billing-update", balance=10_000)
     session.add(key)
     await session.commit()
     await pay_for_request(key, 3_000, session)
@@ -158,7 +158,7 @@ async def test_finalize_actual_cost_payment_rolls_back_when_parent_update_matche
 
     assert charged == 0
     rollback_spy.assert_awaited_once()
-    updated = await _api_key(session, "ehbp-missing-parent")
+    updated = await _api_key(session, "ehbp-failed-billing-update")
     assert updated is not None
     assert updated.balance == 10_000
     assert updated.reserved_balance == 0

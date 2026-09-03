@@ -1,7 +1,7 @@
 """Tests for stale reserved_balance handling (issue #551).
 
 Covers:
-- pay_for_request stamping reserved_at on billing and child keys
+- pay_for_request stamping reserved_at on charged keys
 - release_stale_reservations sweeper semantics
 - reset_all_reserved_balances clearing reserved_at
 - refund endpoint self-healing stale/legacy reservations

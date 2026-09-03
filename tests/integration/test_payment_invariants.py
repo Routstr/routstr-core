@@ -3,8 +3,8 @@
 Every finalization branch of ``adjust_payment_for_tokens`` must respect the
 same accounting rules: a completed request is charged exactly once, its
 reported ``charged_msats`` matches the actual debit, it never spends more than
-its own reservation leaves available, and child keys spend their parent's
-balance without raiding sibling reservations.
+its own reservation leaves available, and concurrent requests cannot raid each
+other's reservations.
 """
 
 import asyncio
