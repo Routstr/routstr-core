@@ -134,12 +134,7 @@ export function CashuPaymentWorkflow({
     } finally {
       setIsCreatingKey(false);
     }
-  }, [
-    initialToken,
-    baseUrl,
-    onApiKeyCreated,
-    validityDate,
-  ]);
+  }, [initialToken, baseUrl, onApiKeyCreated, validityDate]);
 
   const handleSyncBalance = useCallback(async (): Promise<void> => {
     if (!activeApiKey) {

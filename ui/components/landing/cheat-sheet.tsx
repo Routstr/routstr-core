@@ -445,7 +445,6 @@ export function CheatSheet(): JSX.Element {
               </Card>
             )}
           </TabsContent>
-
         </Tabs>
       </main>
     </div>
