@@ -2,7 +2,6 @@ import asyncio
 import fcntl
 import json
 import os
-import re
 import time
 import typing
 from contextlib import asynccontextmanager
@@ -10,9 +9,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator, TypedDict
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from cashu.core.base import MeltQuote, MeltQuoteState, MintQuote, Proof, Token
+from cashu.core.base import MeltQuote, Proof, Token
 from cashu.core.mint_info import MintInfo as _CashuMintInfo
 from cashu.wallet.crud import get_keysets as get_cashu_keysets
 from cashu.wallet.helpers import deserialize_token_from_string
@@ -24,7 +24,6 @@ from .core import db, get_logger
 from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
 from .mint import (
-    MINT_TRANSPORT_COOLDOWN_SECONDS,
     MINT_TRANSPORT_EXCEPTIONS,
     MintError,
     MintRateGuard,
@@ -189,6 +188,10 @@ class SourceMintConnectionError(MintConnectionError):
     """The mint that issued the incoming proofs cannot be reached."""
 
 
+class UntrustedSourceMintError(ValueError):
+    """The token names a mint outside primary_mint/cashu_mints."""
+
+
 class TokenConsumedError(Exception):
     """A failure that happened AFTER the token's proofs were spent (melt
     succeeded, or redemption already returned) — e.g. minting on the primary
@@ -198,6 +201,31 @@ class TokenConsumedError(Exception):
     a transport error underneath is never re-surfaced as a retryable
     mint_unreachable.
     """
+
+
+_MINT_TIMEOUT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    httpx.TimeoutException,
+    asyncio.TimeoutError,
+)
+
+
+def _exception_chain(error: BaseException) -> typing.Iterator[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def is_mint_timeout(error: BaseException) -> bool:
+    """True if the mint accepted the connection but did not answer in time."""
+    for current in _exception_chain(error):
+        if isinstance(current, TokenConsumedError):
+            return False
+        if isinstance(current, _MINT_TIMEOUT_EXCEPTIONS):
+            return True
+    return False
 
 
 def is_source_mint_connection_error(error: BaseException) -> bool:
@@ -263,25 +291,39 @@ def classify_redemption_error(
             "Token was redeemed but could not be credited; do not retry",
             "cashu_token_consumed",
         )
-    if is_source_mint_connection_error(error):
+    if isinstance(error, UntrustedSourceMintError):
         return (
-            "mint_unreachable",
-            503,
-            "The mint that issued this Cashu token is unreachable; the token cannot be redeemed at another mint",
-            "cashu_source_mint_unreachable",
+            "untrusted_mint",
+            400,
+            "Cashu token was issued by a mint this node does not accept",
+            "cashu_untrusted_source_mint",
         )
     if is_mint_rate_limited(error):
         return (
             "mint_rate_limited",
             503,
-            "Cashu mint rate-limited; retry after cooldown",
+            "Cashu mint is rate-limiting requests; retry later",
             "cashu_mint_rate_limited",
+        )
+    if is_mint_timeout(error):
+        return (
+            "mint_timeout",
+            503,
+            "Cashu mint did not respond in time; retry later",
+            "cashu_mint_timeout",
+        )
+    if is_source_mint_connection_error(error):
+        return (
+            "mint_unreachable",
+            503,
+            "The mint that issued this Cashu token is unreachable; retry later",
+            "cashu_source_mint_unreachable",
         )
     if is_mint_connection_error(error):
         return (
             "mint_unreachable",
             503,
-            "Cashu mint is unreachable",
+            "Cashu mint is unreachable; retry later",
             "cashu_mint_unreachable",
         )
     lowered = str(error).lower()
@@ -303,13 +345,6 @@ def classify_redemption_error(
             422,
             "Token value is too small to cover swap fees",
             "cashu_token_swap_fees_exceed_amount",
-        )
-    if "failed to melt" in lowered:
-        return (
-            "mint_error",
-            422,
-            "Failed to swap token from foreign mint",
-            "cashu_foreign_mint_swap_failed",
         )
     if ("invalid" in lowered or "decode" in lowered) and "token" in lowered:
         # Anchored to "token" so internal faults whose text merely contains
@@ -454,64 +489,83 @@ async def _redeem_same_mint(
 
 async def recieve_token(
     token: str,
-    destination_mint: str | None = None,
     destination_unit: str | None = None,
 ) -> tuple[int, str, str]:  # amount, unit, mint_url
-    """Redeem a token while serializing all wallet proof mutation."""
+    """Redeem a token on its own (trusted) mint while serializing proof mutation."""
     async with wallet_operation_guard():
-        return await _recieve_token_locked(token, destination_mint, destination_unit)
+        return await _recieve_token_locked(token, destination_unit)
+
+
+def _normalized_mint_url(mint_url: str) -> str:
+    """Fold cosmetic URL differences for trust comparison; keep path case,
+    userinfo, non-default port, query and fragment so hosts never alias."""
+    stripped = mint_url.strip()
+    if any(char in stripped for char in "\t\r\n"):
+        return stripped
+    try:
+        parts = urlsplit(stripped)
+        port = parts.port
+    except ValueError:
+        return stripped
+    scheme = parts.scheme.lower()
+    if (scheme == "https" and port == 443) or (scheme == "http" and port == 80):
+        port = None
+    netloc = (parts.hostname or "").lower()
+    if parts.username is not None or parts.password is not None:
+        netloc = f"{parts.username or ''}:{parts.password or ''}@{netloc}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit(
+        (scheme, netloc, parts.path.rstrip("/"), parts.query, parts.fragment)
+    )
+
+
+def resolve_trusted_source_mint(mint_url: str) -> str | None:
+    """Return the operator's spelling of ``mint_url`` if it is a trusted mint."""
+    normalized = _normalized_mint_url(mint_url)
+    if not normalized:
+        return None
+    for candidate in _trusted_destination_candidates():
+        if candidate and _normalized_mint_url(candidate) == normalized:
+            return candidate
+    return None
+
+
+def is_trusted_source_mint(mint_url: str) -> bool:
+    """True if ``mint_url`` is the primary mint or one of the configured mints."""
+    return resolve_trusted_source_mint(mint_url) is not None
 
 
 async def _recieve_token_locked(
     token: str,
-    destination_mint: str | None = None,
     destination_unit: str | None = None,
 ) -> tuple[int, str, str]:
+    """Redeem on the issuing mint; only trusted mints are accepted, never swapped."""
     token_obj = deserialize_token_from_string(token)
+    mint_url = resolve_trusted_source_mint(token_obj.mint)
+    if mint_url is None:
+        raise UntrustedSourceMintError(f"Untrusted source mint: {token_obj.mint}")
     if len(token_obj.keysets) > 1:
         raise ValueError("Multiple keysets per token currently not supported")
-
-    destinations = (
-        [destination_mint]
-        if destination_mint is not None
-        else list(dict.fromkeys([settings.primary_mint, *settings.cashu_mints]))
-    )
-    output_unit = (
-        token_obj.unit if token_obj.mint in destinations else settings.primary_mint_unit
-    )
-    if destination_unit is not None and output_unit != destination_unit:
+    if destination_unit is not None and token_obj.unit != destination_unit:
         raise ValueError(
             "Cashu token unit does not match the API key liability unit: "
-            f"expected {destination_unit}, got {output_unit}"
+            f"expected {destination_unit}, got {token_obj.unit}"
         )
 
-    wallet = await get_wallet(token_obj.mint, token_obj.unit, load=False)
-    if token_obj.mint not in destinations:
-        logger.info(
-            "Cashu cross-mint swap required",
-            extra={
-                "event": "cashu_swap_started",
-                "source_mint": token_obj.mint,
-                "source_unit": token_obj.unit,
-                "source_amount": token_obj.amount,
-                "destination_candidates": destinations,
-            },
-        )
-        return await swap_to_trusted_mint(
-            token_obj, wallet, destination_mints=destinations
-        )
-
+    wallet = await get_wallet(mint_url, token_obj.unit, load=False)
     logger.info(
         "Trying same-mint Cashu redemption",
         extra={
             "event": "cashu_same_mint_redemption",
-            "source_mint": token_obj.mint,
+            "source_mint": mint_url,
             "source_unit": token_obj.unit,
             "source_amount": token_obj.amount,
             "cross_mint_fallback_on_connection_failure": False,
         },
     )
-    return await _redeem_same_mint(wallet, token_obj)
+    amount, unit, _ = await _redeem_same_mint(wallet, token_obj)
+    return amount, unit, mint_url
 
 
 async def send(amount: int, unit: str, mint_url: str | None = None) -> tuple[int, str]:
@@ -938,83 +992,6 @@ async def find_trusted_mint_with_funds(
     )
 
 
-# A foreign mint's fee_reserve is a non-binding estimate (NUT-05): the mint may
-# demand more when re-quoting or at melt execution. Instead of padding the
-# estimate with a safety buffer (which strands the margin at the foreign mint
-# on every swap), the swap retries with the amount recomputed from the fees the
-# mint actually demands, up to this many attempts.
-_MAX_SWAP_ATTEMPTS = 3
-
-_MINT_ERROR_CODE_RE = re.compile(r"\(Code: (\d+)\)")
-_MELT_SHORTFALL_RE = re.compile(r"Provided: (\d+), needed: (\d+)")
-
-# Insufficient-melt-inputs failures differ across mint implementations. 11005 is
-# the registered "Transaction is not balanced" code (cdk), specific enough to
-# trust on the code alone. 11000 is nutshell's generic, unregistered
-# TransactionError covering many unrelated failures, so it only counts as a fee
-# shortfall alongside the "not enough inputs" detail text. With no code suffix at
-# all, that same text is the only signal.
-
-
-def _net_minted_amount(amount_msat: int, token_unit: str, fees: int) -> int:
-    """
-    Convert the token value minus fees (given in the token unit) into an
-    amount in the primary mint's unit.
-    """
-    fee_msat = _sats_to_msats(fees) if token_unit == "sat" else fees
-    remaining_msat = amount_msat - fee_msat
-    if settings.primary_mint_unit == "sat":
-        return _msats_to_sats(remaining_msat)
-    return int(remaining_msat)
-
-
-def _melt_definitively_failed(error: Exception) -> bool:
-    """Return whether the mint authoritatively rejected the Lightning payment.
-
-    Cashu releases the reserved proofs for these responses, so the token remains
-    reusable. Transport failures and unknown errors are deliberately excluded:
-    after dispatch their payment outcome may still be pending or paid.
-    """
-    message = str(error).strip()
-    return message.lower() == "could not pay invoice." or "(Code: 20004)" in message
-
-
-def _melt_insufficient_shortfall(error: Exception) -> int | None:
-    """
-    Classify a melt failure: return the observed shortfall (in the token unit)
-    when the mint rejected the inputs as insufficient, or None when the failure
-    is unrelated to fees and must not be retried (e.g. a Lightning payment
-    failure, where a smaller invoice would not help).
-
-    Cashu errors carry no structured amounts (NUT-00 defines only detail/code,
-    flattened to "Mint Error: <detail> (Code: <code>)" by cashu-py), so the
-    classification uses the code and the shortfall must be inferred: the
-    "Provided: X, needed: Y" amounts are nutshell-specific free text and only
-    refine the shortfall when present; otherwise shrink one unit at a time.
-    """
-    message = str(error)
-    code_match = _MINT_ERROR_CODE_RE.search(message)
-    code = code_match.group(1) if code_match is not None else None
-    has_shortfall_text = "not enough inputs" in message.lower()
-
-    match code:
-        case "11005":  # registered TransactionUnbalanced: trust the code
-            pass
-        case "11000" if has_shortfall_text:  # generic nutshell error: needs the text
-            pass
-        case None if has_shortfall_text:  # no code suffix: text is the only signal
-            pass
-        case _:  # other codes, a bare 11000, or no signal: must not retry
-            return None
-
-    amounts = _MELT_SHORTFALL_RE.search(message)
-    if amounts is not None:
-        provided, needed = int(amounts.group(1)), int(amounts.group(2))
-        if needed > provided:
-            return needed - provided
-    return 1
-
-
 def _trusted_destination_candidates(
     candidates: list[str] | None = None,
 ) -> list[str]:
@@ -1028,695 +1005,6 @@ def _trusted_destination_candidates(
     if not selected:
         raise ValueError("At least one trusted destination mint is required")
     return selected
-
-
-async def _request_mint_with_fallback(
-    amount: int,
-    *,
-    op_name: str,
-    primary_wallet: Wallet | None = None,
-    destination_mints: list[str] | None = None,
-) -> tuple[Wallet, str, MintQuote]:
-    """Try request_mint on the primary mint, fall back to other trusted mints
-    on transport or rate-limit failure. Returns the wallet, mint_url, and quote.
-
-    Guards against amount <= 0: the cashu library's PostMintQuoteRequest
-    enforces ``amount > 0`` (Pydantic Field(gt=0)), so passing 0 raises a
-    cryptic validation error deep in the stack.  Fail fast with context.
-    """
-    if amount <= 0:
-        raise ValueError(
-            f"_request_mint_with_fallback({op_name}): amount must be > 0, got {amount}. "
-            f"Token value is too small after fee deduction or unit conversion."
-        )
-    candidates = _trusted_destination_candidates(destination_mints)
-    logger.info(
-        "Trying trusted destination mints",
-        extra={
-            "event": "cashu_destination_candidates",
-            "op_name": op_name,
-            "amount": amount,
-            "unit": settings.primary_mint_unit,
-            "candidates": candidates,
-        },
-    )
-    tried: list[str] = []
-    for candidate_index, mint_url in enumerate(candidates, start=1):
-        cooldown = mint_cooldown_remaining(mint_url)
-        if cooldown > 0:
-            tried.append(f"{mint_url}: cooling down")
-            logger.warning(
-                "Skipping unavailable destination mint",
-                extra={
-                    "event": "cashu_destination_skipped",
-                    "mint_url": mint_url,
-                    "cooldown_seconds": round(cooldown, 2),
-                    "op_name": op_name,
-                    "candidate_index": candidate_index,
-                    "candidate_count": len(candidates),
-                },
-            )
-            continue
-        logger.info(
-            "Trying destination mint",
-            extra={
-                "event": "cashu_destination_attempt",
-                "mint_url": mint_url,
-                "op_name": op_name,
-                "candidate_index": candidate_index,
-                "candidate_count": len(candidates),
-            },
-        )
-        try:
-            if mint_url == settings.primary_mint and primary_wallet is not None:
-                wallet = primary_wallet
-            else:
-                wallet = await get_wallet(
-                    mint_url,
-                    settings.primary_mint_unit,
-                    retry_on_rate_limit=False,
-                    load_proofs=False,
-                )
-            quote = await run_mint_operation(
-                lambda: wallet.request_mint(amount),
-                op_name=op_name,
-                mint_url=mint_url,
-                retry_timeouts=False,
-                retry_on_rate_limit=False,
-            )
-            logger.info(
-                "Destination mint selected",
-                extra={
-                    "event": "cashu_destination_selected",
-                    "mint_url": mint_url,
-                    "op_name": op_name,
-                    "candidate_index": candidate_index,
-                    "fallback_used": candidate_index > 1,
-                },
-            )
-            return wallet, mint_url, quote
-        except Exception as error:
-            tried.append(f"{mint_url}: {type(error).__name__}")
-            connection_failure = is_mint_connection_error(error)
-            rate_limited = is_mint_rate_limited(error)
-            if not connection_failure and not rate_limited:
-                raise
-            if connection_failure:
-                MintRateGuard.get(mint_url).apply_cooldown(
-                    MINT_TRANSPORT_COOLDOWN_SECONDS, reason="unreachable"
-                )
-            logger.warning(
-                "Destination mint failed",
-                extra={
-                    "event": "cashu_destination_failed",
-                    "failed_mint": mint_url,
-                    "error": str(error),
-                    "error_type": type(error).__name__,
-                    "connection_failure": connection_failure,
-                    "rate_limited": rate_limited,
-                    "tried": tried,
-                    "op_name": op_name,
-                    "candidate_index": candidate_index,
-                    "candidate_count": len(candidates),
-                },
-            )
-            continue
-    logger.error(
-        "All trusted destination mints failed",
-        extra={
-            "event": "cashu_destination_exhausted",
-            "op_name": op_name,
-            "amount": amount,
-            "unit": settings.primary_mint_unit,
-            "candidates": candidates,
-            "tried": tried,
-        },
-    )
-    raise MintConnectionError(f"All mints failed for {op_name}: {tried}")
-
-
-async def _calculate_swap_amount(
-    amount_msat: int,
-    token_unit: str,
-    token_mint_url: str,
-    token_wallet: Wallet,
-    primary_wallet: Wallet | None,
-    proofs: list,
-    destination_mints: list[str] | None = None,
-) -> int:
-    """
-    Calculate the amount to mint on the primary mint after accounting for
-    melt fees and NUT-02 input fees on the foreign mint.
-    """
-    if settings.primary_mint_unit == "sat":
-        receive_amount = _msats_to_sats(amount_msat)
-    else:
-        receive_amount = amount_msat
-
-    if token_mint_url == settings.primary_mint:
-        logger.info(
-            "swap_to_trusted_mint: skipping fee estimation (same mint)",
-            extra={"minted_amount": receive_amount},
-        )
-        return int(receive_amount)
-
-    # The cashu library's PostMintQuoteRequest enforces amount > 0 (Pydantic
-    # Field(gt=0)).  When the token's face value in the primary mint's unit
-    # truncates to 0 (e.g. < 1000 msat with a "sat" primary unit), calling
-    # request_mint(0) raises a validation error that is cryptic in production
-    # logs.  Guard early with full diagnostic context instead.
-    if receive_amount <= 0:
-        logger.error(
-            "swap_to_trusted_mint: receive_amount is zero or negative, cannot estimate fees",
-            extra={
-                "amount_msat": amount_msat,
-                "token_unit": token_unit,
-                "token_mint_url": token_mint_url,
-                "primary_mint": settings.primary_mint,
-                "primary_mint_unit": settings.primary_mint_unit,
-                "receive_amount": receive_amount,
-            },
-        )
-        raise ValueError(
-            f"Token amount ({amount_msat} msat, unit={token_unit}) is too small to "
-            f"swap to primary mint ({settings.primary_mint}, unit={settings.primary_mint_unit}): "
-            f"receive_amount={receive_amount}. Minimum 1 {settings.primary_mint_unit} required."
-        )
-
-    logger.info(
-        "swap_to_trusted_mint: estimating fees",
-        extra={
-            "dummy_amount": receive_amount,
-            "unit": settings.primary_mint_unit,
-            "token_mint_url": token_mint_url,
-            "primary_mint": settings.primary_mint,
-            "amount_msat": amount_msat,
-        },
-    )
-
-    stage = "destination_fee_quote"
-    try:
-        _, _, dummy_mint_quote = await _request_mint_with_fallback(
-            receive_amount,
-            op_name="swap_fee_est_mint_quote",
-            primary_wallet=primary_wallet,
-            destination_mints=destination_mints,
-        )
-        stage = "source_fee_quote"
-        dummy_melt_quote = await run_mint_operation(
-            lambda: token_wallet.melt_quote(dummy_mint_quote.request),
-            op_name="swap_fee_est_melt_quote",
-            mint_url=token_mint_url,
-            retry_timeouts=False,
-        )
-
-        fee_reserve = dummy_melt_quote.fee_reserve
-        input_fees = token_wallet.get_fees_for_proofs(proofs)
-        total_fees = fee_reserve + input_fees
-        minted_amount = _net_minted_amount(amount_msat, token_unit, total_fees)
-
-        if minted_amount <= 0:
-            raise ValueError(f"Fees ({total_fees} {token_unit}) exceed token amount")
-
-        logger.info(
-            "swap_to_trusted_mint: fee estimation result",
-            extra={
-                "token_amount_sat": _msats_to_sats(amount_msat),
-                "estimated_fee": total_fees,
-                "estimated_fee_unit": token_unit,
-                "input_fees": input_fees,
-                "minted_amount": minted_amount,
-                "minted_unit": settings.primary_mint_unit,
-                "fee_reserve": fee_reserve,
-                "token_mint_url": token_mint_url,
-                "primary_mint": settings.primary_mint,
-            },
-        )
-        return minted_amount
-
-    except Exception as e:
-        logger.error(
-            "Cashu swap fee estimation failed",
-            extra={
-                "event": "cashu_swap_fee_estimation_failed",
-                "stage": stage,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "amount_msat": amount_msat,
-                "token_unit": token_unit,
-                "token_mint_url": token_mint_url,
-                "primary_mint": settings.primary_mint,
-                "primary_mint_unit": settings.primary_mint_unit,
-                "receive_amount": receive_amount,
-            },
-        )
-        if is_mint_connection_error(e):
-            if stage == "source_fee_quote":
-                logger.error(
-                    "Source mint is unreachable; destination fallback cannot spend its proofs",
-                    extra={
-                        "event": "cashu_source_mint_unreachable",
-                        "source_mint": token_mint_url,
-                        "stage": stage,
-                        "fallback_possible": False,
-                        "reason": "cashu_proofs_are_bound_to_the_issuing_mint",
-                    },
-                )
-                raise SourceMintConnectionError(
-                    "Issuing Cashu mint is unreachable"
-                ) from e
-            raise MintConnectionError("Cashu mint is unreachable") from e
-        raise ValueError(f"Failed to estimate fees: {e}") from e
-
-
-async def _reconcile_ambiguous_melt(
-    wallet: Wallet, quote_id: str, proofs: list[Proof]
-) -> bool:
-    """Confirm a dispatched melt is paid or conservatively mark it ambiguous.
-
-    A PAID quote is authoritative and does not require a proof-state lookup.
-    Every other immediate snapshot remains unsafe to retry: an in-flight
-    Lightning payment can still move UNPAID/UNSPENT to PENDING or PAID after the
-    cancelled HTTP request returns.
-    """
-    try:
-        quote = await run_mint_operation(
-            lambda: wallet.get_melt_quote(quote_id),
-            op_name="reconcile_swap_melt_quote",
-            mint_url=str(wallet.url),
-            retry_timeouts=False,
-        )
-    except Exception as error:
-        raise TokenConsumedError(
-            "Source melt outcome is unknown; reconciliation required"
-        ) from error
-
-    if quote is not None and quote.state == MeltQuoteState.paid:
-        return True
-
-    try:
-        proof_response = await run_mint_operation(
-            lambda: wallet.check_proof_state(proofs),
-            op_name="reconcile_swap_proofs",
-            mint_url=str(wallet.url),
-            retry_timeouts=False,
-        )
-        proof_states = [state.state.value for state in proof_response.states]
-    except Exception:
-        proof_states = []
-
-    quote_state = getattr(getattr(quote, "state", None), "value", "unknown")
-    raise TokenConsumedError(
-        "Source melt outcome is ambiguous; reconciliation required "
-        f"(quote_state={quote_state}, proof_states={proof_states})"
-    )
-
-
-async def _confirm_melt_paid(
-    wallet: Wallet, quote_id: str, proofs: list[Proof], response: object
-) -> bool:
-    """Accept a melt response only when PAID is explicit or reconciled."""
-    if getattr(response, "state", None) == MeltQuoteState.paid:
-        return True
-    return await _reconcile_ambiguous_melt(wallet, quote_id, proofs)
-
-
-async def swap_to_trusted_mint(
-    token_obj: Token,
-    token_wallet: Wallet,
-    *,
-    destination_mints: list[str] | None = None,
-) -> tuple[int, str, str]:
-    logger.info(
-        "Starting Cashu cross-mint swap",
-        extra={
-            "event": "cashu_swap_started",
-            "source_mint": token_obj.mint,
-            "token_amount": token_obj.amount,
-            "unit": token_obj.unit,
-            "primary_mint": settings.primary_mint,
-        },
-    )
-    # Ensure amount is an integer
-    if not isinstance(token_obj.amount, int):
-        token_amount = int(token_obj.amount)
-    else:
-        token_amount = token_obj.amount
-
-    if token_obj.unit == "sat":
-        amount_msat = _sats_to_msats(token_amount)
-    elif token_obj.unit == "msat":
-        amount_msat = token_amount
-    else:
-        raise ValueError("Invalid unit")
-    destination_candidates = _trusted_destination_candidates(destination_mints)
-    # If the token is already from an allowed destination, redeem it same-mint.
-    # There's no melt/Lightning fee, but the mint's NUT-02 input fee still
-    # applies; _redeem_same_mint accounts for it.
-    if token_obj.mint in destination_candidates:
-        logger.info(
-            "swap_to_trusted_mint: token already on primary mint, skipping swap",
-            extra={
-                "mint": token_obj.mint,
-                "amount": token_amount,
-                "unit": token_obj.unit,
-            },
-        )
-        return await _redeem_same_mint(token_wallet, token_obj)
-
-    try:
-        proofs = await _load_and_resolve_token_proofs(
-            token_wallet,
-            token_obj,
-            op_name="swap_load_source_mint",
-        )
-    except Exception as error:
-        if is_mint_connection_error(error):
-            raise SourceMintConnectionError(
-                "Issuing Cashu mint is unreachable"
-            ) from error
-        raise
-
-    primary_wallet: Wallet | None = None
-
-    minted_amount = await _calculate_swap_amount(
-        amount_msat,
-        token_obj.unit,
-        token_obj.mint,
-        token_wallet,
-        primary_wallet,
-        proofs,
-        destination_candidates,
-    )
-
-    # The estimate above is non-binding: the mint may demand a higher fee on the
-    # real quote or reject the melt outright. Retry the quote/melt cycle with the
-    # amount recomputed from the fees the mint actually demands.
-    observed_extra_fee = 0
-    attempt = 0
-    dest_wallet = primary_wallet
-    dest_mint_url = settings.primary_mint
-    while True:
-        attempt += 1
-        if minted_amount <= 0:
-            logger.error(
-                "swap_to_trusted_mint: minted_amount is zero or negative before requesting quote",
-                extra={
-                    "minted_amount": minted_amount,
-                    "attempt": attempt,
-                    "foreign_mint": token_obj.mint,
-                    "token_amount": token_amount,
-                    "token_unit": token_obj.unit,
-                    "amount_msat": amount_msat,
-                    "observed_extra_fee": observed_extra_fee,
-                    "primary_mint": settings.primary_mint,
-                },
-            )
-            raise ValueError(
-                f"Cannot swap token ({token_amount} {token_obj.unit}) from {token_obj.mint}: "
-                f"minted_amount={minted_amount} after fee deduction (attempt {attempt})"
-            )
-        dest_wallet, dest_mint_url, mint_quote = await _request_mint_with_fallback(
-            minted_amount,
-            op_name="swap_request_mint",
-            primary_wallet=primary_wallet,
-            destination_mints=destination_candidates,
-        )
-        logger.info(
-            "swap_to_trusted_mint: mint quote received",
-            extra={
-                "mint_quote_id": mint_quote.quote,
-                "attempt": attempt,
-                "dest_mint": dest_mint_url,
-            },
-        )
-
-        logger.info(
-            "Requesting melt quote from source mint",
-            extra={
-                "event": "cashu_source_melt_quote_attempt",
-                "source_mint": token_obj.mint,
-                "destination_mint": dest_mint_url,
-                "attempt": attempt,
-            },
-        )
-        try:
-            melt_quote = await run_mint_operation(
-                lambda: token_wallet.melt_quote(mint_quote.request),
-                op_name="swap_melt_quote",
-                mint_url=token_obj.mint,
-                retry_timeouts=False,
-            )
-        except Exception as error:
-            if is_mint_connection_error(error):
-                logger.error(
-                    "Source mint is unreachable; destination fallback cannot spend its proofs",
-                    extra={
-                        "event": "cashu_source_mint_unreachable",
-                        "source_mint": token_obj.mint,
-                        "destination_mint": dest_mint_url,
-                        "stage": "source_melt_quote",
-                        "error": str(error),
-                        "error_type": type(error).__name__,
-                        "attempt": attempt,
-                    },
-                )
-                raise SourceMintConnectionError(
-                    "Issuing Cashu mint is unreachable"
-                ) from error
-            raise
-        input_fees = token_wallet.get_fees_for_proofs(proofs)
-        total_needed = melt_quote.amount + melt_quote.fee_reserve + input_fees
-        logger.info(
-            "swap_to_trusted_mint: melt quote received",
-            extra={
-                "melt_quote_id": melt_quote.quote,
-                "melt_amount": melt_quote.amount,
-                "melt_fee_reserve": melt_quote.fee_reserve,
-                "input_fees": input_fees,
-                "total_needed": total_needed,
-                "token_amount": token_amount,
-                "attempt": attempt,
-            },
-        )
-
-        if total_needed > token_amount:
-            recomputed = _net_minted_amount(
-                amount_msat,
-                token_obj.unit,
-                melt_quote.fee_reserve + input_fees + observed_extra_fee,
-            )
-            if attempt >= _MAX_SWAP_ATTEMPTS or recomputed <= 0:
-                logger.warning(
-                    "swap_to_trusted_mint: insufficient token amount for melt fees",
-                    extra={
-                        "token_amount": token_amount,
-                        "melt_amount": melt_quote.amount,
-                        "melt_fee_reserve": melt_quote.fee_reserve,
-                        "input_fees": input_fees,
-                        "total_needed": total_needed,
-                        "shortfall": total_needed - token_amount,
-                        "attempts": attempt,
-                    },
-                )
-                raise ValueError(
-                    f"Token amount ({token_amount} {token_obj.unit}) is insufficient to cover "
-                    f"melt fees. Needed: {total_needed} {token_obj.unit} "
-                    f"(amount: {melt_quote.amount} + fee: {melt_quote.fee_reserve} + input_fees: {input_fees})"
-                )
-            logger.warning(
-                "swap_to_trusted_mint: melt quote exceeds token amount, retrying",
-                extra={
-                    "total_needed": total_needed,
-                    "token_amount": token_amount,
-                    "retry_minted_amount": recomputed,
-                    "attempt": attempt,
-                },
-            )
-            minted_amount = recomputed
-            continue
-
-        try:
-            melt_response = await run_mint_operation(
-                lambda: token_wallet.melt(
-                    proofs=proofs,
-                    invoice=mint_quote.request,
-                    fee_reserve_sat=melt_quote.fee_reserve,
-                    quote_id=melt_quote.quote,
-                ),
-                op_name="swap_melt",
-                mint_url=token_obj.mint,
-                retry_timeouts=False,
-            )
-            await _confirm_melt_paid(
-                token_wallet, melt_quote.quote, proofs, melt_response
-            )
-        except Exception as e:
-            shortfall = _melt_insufficient_shortfall(e)
-            if shortfall is None:
-                if isinstance(e, TokenConsumedError):
-                    raise
-                if _melt_definitively_failed(e):
-                    raise ValueError(
-                        f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
-                    ) from e
-                if is_mint_connection_error(e):
-                    await _reconcile_ambiguous_melt(
-                        token_wallet, melt_quote.quote, proofs
-                    )
-                    logger.info(
-                        "Source melt reconciled as paid; minting on destination",
-                        extra={
-                            "event": "cashu_source_melt_reconciled_paid",
-                            "source_mint": token_obj.mint,
-                            "destination_mint": dest_mint_url,
-                            "melt_quote_id": melt_quote.quote,
-                        },
-                    )
-                    break
-                raise TokenConsumedError(
-                    "Source melt failed after dispatch; outcome requires reconciliation"
-                ) from e
-
-            observed_extra_fee += shortfall
-            recomputed = _net_minted_amount(
-                amount_msat,
-                token_obj.unit,
-                melt_quote.fee_reserve + input_fees + observed_extra_fee,
-            )
-            if attempt >= _MAX_SWAP_ATTEMPTS or recomputed <= 0:
-                logger.error(
-                    "swap_to_trusted_mint: melt failed",
-                    extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "foreign_mint": token_obj.mint,
-                        "token_amount": token_amount,
-                        "melt_quote_id": melt_quote.quote,
-                        "total_needed": total_needed,
-                        "attempts": attempt,
-                    },
-                )
-                raise ValueError(
-                    f"Failed to melt token from foreign mint {token_obj.mint}: {e}"
-                ) from e
-            logger.warning(
-                "swap_to_trusted_mint: mint demanded more than quoted at melt, retrying",
-                extra={
-                    "shortfall": shortfall,
-                    "retry_minted_amount": recomputed,
-                    "attempt": attempt,
-                },
-            )
-            minted_amount = recomputed
-            continue
-
-        break
-
-    logger.info(
-        "Source melt succeeded; minting on destination",
-        extra={
-            "event": "cashu_destination_mint_attempt",
-            "minted_amount": minted_amount,
-            "mint_quote_id": mint_quote.quote,
-            "dest_mint": dest_mint_url,
-        },
-    )
-
-    await dest_wallet.load_proofs(reload=True)
-    pre_mint_balance = dest_wallet.available_balance.amount
-    try:
-        _ = await run_mint_operation(
-            lambda: dest_wallet.mint(minted_amount, quote_id=mint_quote.quote),
-            op_name="swap_mint_on_destination",
-            mint_url=dest_mint_url,
-            retry_timeouts=False,
-        )
-    except Exception as e:
-        if "11003" in str(e) or "outputs already signed" in str(e).lower():
-            # Previous mint call signed outputs at the mint but failed before
-            # bump_secret_derivation ran locally. Recover orphaned proofs and
-            # advance the counter so the next request derives fresh secrets.
-            logger.warning(
-                "swap_to_trusted_mint: outputs already signed — recovering orphaned proofs",
-                extra={
-                    "mint_quote_id": mint_quote.quote,
-                    "minted_amount": minted_amount,
-                },
-            )
-            try:
-                for keyset_id in dest_wallet.keysets:
-                    await dest_wallet.restore_tokens_for_keyset(
-                        keyset_id, to=1, batch=25
-                    )
-                await dest_wallet.load_proofs(reload=True)
-                post_recovery_balance = dest_wallet.available_balance.amount
-                balance_gained = post_recovery_balance - pre_mint_balance
-                logger.info(
-                    "swap_to_trusted_mint: recovery scan completed",
-                    extra={
-                        "pre_mint_balance": pre_mint_balance,
-                        "post_recovery_balance": post_recovery_balance,
-                        "balance_gained": balance_gained,
-                        "expected": minted_amount,
-                    },
-                )
-                if balance_gained < minted_amount:
-                    # Recovery scan ran but did NOT restore the orphaned proofs
-                    # (mint reports them as spent — they're stuck). Refuse to
-                    # credit the API key balance for proofs we don't actually hold.
-                    raise TokenConsumedError(
-                        f"Swap recovery failed: mint signed outputs but proofs are "
-                        f"unrecoverable (mint reports them spent). "
-                        f"Expected {minted_amount}, recovered {balance_gained}. "
-                        f"Local wallet DB ('.wallet/') state is corrupted — "
-                        f"the counter for keyset is stuck at a bad index range."
-                    )
-            except TokenConsumedError:
-                raise
-            except Exception as recovery_err:
-                logger.error(
-                    "swap_to_trusted_mint: recovery failed",
-                    extra={"error": str(recovery_err)},
-                )
-                raise TokenConsumedError(
-                    f"Mint on primary failed and recovery unsuccessful: {e}"
-                ) from e
-        else:
-            logger.error(
-                "swap_to_trusted_mint: mint on primary failed after successful melt",
-                extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "minted_amount": minted_amount,
-                    "mint_quote_id": mint_quote.quote,
-                },
-            )
-            # Foreign proofs already melted (spent) — non-retryable.
-            raise TokenConsumedError(
-                "Mint on primary failed after successful melt"
-            ) from e
-
-    logger.info(
-        "Cashu cross-mint swap completed",
-        extra={
-            "event": "cashu_swap_completed",
-            "source_mint": token_obj.mint,
-            "dest_mint": dest_mint_url,
-            "original_amount": token_amount,
-            "minted_amount": minted_amount,
-            "unit": settings.primary_mint_unit,
-        },
-    )
-
-    return int(minted_amount), settings.primary_mint_unit, dest_mint_url
-
-
-async def swap_to_primary_mint(
-    token_obj: Token, token_wallet: Wallet
-) -> tuple[int, str, str]:
-    """Backward-compatible alias for callers using the old function name."""
-    return await swap_to_trusted_mint(token_obj, token_wallet)
 
 
 async def credit_balance(
@@ -1738,10 +1026,8 @@ async def _credit_balance_locked(
     )
 
     try:
-        destination_mint = key.refund_mint_url or settings.primary_mint
         amount, unit, mint_url = await recieve_token(
             cashu_token,
-            destination_mint=destination_mint,
             destination_unit=key.refund_currency
             if isinstance(key.refund_currency, str)
             else None,
@@ -1844,6 +1130,7 @@ async def _credit_balance_locked(
             "cashu_source_mint_unreachable",
             "cashu_mint_unreachable",
             "cashu_mint_rate_limited",
+            "cashu_mint_timeout",
         }
         log = (
             logger.info

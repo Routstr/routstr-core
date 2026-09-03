@@ -585,14 +585,31 @@ def _envelope(exc: HTTPException) -> dict:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_type", "expected_code", "expected_message"),
     [
-        httpx.ConnectError("All connection attempts failed"),
-        MintConnectionError("connect to mint refused"),
-        TimeoutError("timed out connecting to mint"),
+        (
+            httpx.ConnectError("All connection attempts failed"),
+            "mint_unreachable",
+            "cashu_mint_unreachable",
+            "Cashu mint is unreachable; retry later",
+        ),
+        (
+            MintConnectionError("connect to mint refused"),
+            "mint_unreachable",
+            "cashu_mint_unreachable",
+            "Cashu mint is unreachable; retry later",
+        ),
+        (
+            TimeoutError("timed out connecting to mint"),
+            "mint_timeout",
+            "cashu_mint_timeout",
+            "Cashu mint did not respond in time; retry later",
+        ),
     ],
 )
-async def test_topup_mint_unreachable_returns_503(error: Exception) -> None:
+async def test_topup_mint_unreachable_returns_503(
+    error: Exception, expected_type: str, expected_code: str, expected_message: str
+) -> None:
     """A down mint must surface 503 (retryable), not 400 or 500 — the token is
     fine, so the client should retry once the mint recovers."""
     from fastapi import HTTPException
@@ -610,9 +627,9 @@ async def test_topup_mint_unreachable_returns_503(error: Exception) -> None:
 
     assert exc_info.value.status_code == 503
     err = _envelope(exc_info.value)
-    assert err["type"] == "mint_unreachable"
-    assert err["code"] == "cashu_mint_unreachable"
-    assert err["message"] == "Cashu mint is unreachable"
+    assert err["type"] == expected_type
+    assert err["code"] == expected_code
+    assert err["message"] == expected_message
 
 
 @pytest.mark.asyncio
@@ -637,7 +654,7 @@ async def test_topup_unreachable_source_mint_explains_why_fallback_is_impossible
     err = _envelope(exc_info.value)
     assert err["type"] == "mint_unreachable"
     assert err["code"] == "cashu_source_mint_unreachable"
-    assert "cannot be redeemed at another mint" in err["message"]
+    assert "retry later" in err["message"]
 
 
 @pytest.mark.asyncio
@@ -748,13 +765,6 @@ async def test_topup_token_consumed_returns_500() -> None:
             "mint_error",
             "cashu_token_swap_fees_exceed_amount",
             "Token value is too small to cover swap fees",
-        ),
-        (
-            ValueError("Failed to melt token from foreign mint http://m: boom"),
-            422,
-            "mint_error",
-            "cashu_foreign_mint_swap_failed",
-            "Failed to swap token from foreign mint",
         ),
     ],
 )

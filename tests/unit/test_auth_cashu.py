@@ -88,7 +88,7 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             httpx.ConnectError("All connection attempts failed"),
             503,
             "mint_unreachable",
-            "Cashu mint is unreachable",
+            "Cashu mint is unreachable; retry later",
             "cashu_mint_unreachable",
         ),
         (
@@ -96,7 +96,7 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             MintConnectionError("connect to http://mint:3338 refused"),
             503,
             "mint_unreachable",
-            "Cashu mint is unreachable",
+            "Cashu mint is unreachable; retry later",
             "cashu_mint_unreachable",
         ),
         (
@@ -104,16 +104,16 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             _value_error_wrapping_transport(),
             503,
             "mint_unreachable",
-            "Cashu mint is unreachable",
+            "Cashu mint is unreachable; retry later",
             "cashu_mint_unreachable",
         ),
         (
             # asyncio.TimeoutError is builtin TimeoutError on 3.11+.
             TimeoutError("Timed out connecting to Cashu mint http://mint:3338"),
             503,
-            "mint_unreachable",
-            "Cashu mint is unreachable",
-            "cashu_mint_unreachable",
+            "mint_timeout",
+            "Cashu mint did not respond in time; retry later",
+            "cashu_mint_timeout",
         ),
         (
             ValueError(
@@ -133,15 +133,6 @@ async def test_failed_first_cashu_redemption_rolls_back_empty_api_key(
             "mint_error",
             "Token value is too small to cover swap fees",
             "cashu_token_swap_fees_exceed_amount",
-        ),
-        (
-            ValueError(
-                "Failed to melt token from foreign mint http://foreign:3338: boom"
-            ),
-            422,
-            "mint_error",
-            "Failed to swap token from foreign mint",
-            "cashu_foreign_mint_swap_failed",
         ),
         (
             ValueError("could not decode token"),

@@ -14,9 +14,15 @@ from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
-from ..wallet import deserialize_token_from_string
+from ..wallet import (
+    UntrustedSourceMintError,
+    classify_redemption_error,
+    deserialize_token_from_string,
+    is_trusted_source_mint,
+)
 
 logger = get_logger(__name__)
+
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
     if x_cashu := headers.get("x-cashu", None):
@@ -66,6 +72,19 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         raise HTTPException(
             status_code=401,
             detail="Invalid authentication token format",
+        )
+
+    if not is_trusted_source_mint(token_obj.mint):
+        classified = classify_redemption_error(
+            UntrustedSourceMintError(f"Untrusted source mint: {token_obj.mint}")
+        )
+        assert classified is not None
+        error_type, status_code, message, error_code = classified
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": {"message": message, "type": error_type, "code": error_code}
+            },
         )
 
     amount_msat = (
