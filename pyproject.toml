@@ -87,3 +87,10 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 routstr = { workspace = true }
+
+[tool.uv]
+override-dependencies = [
+    "litellm>=1.84.0,<1.85",
+    "importlib-metadata>=8.0.0,<9.0",
+    "httpx[socks]>=0.28.0",
+]
