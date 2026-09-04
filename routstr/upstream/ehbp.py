@@ -31,7 +31,7 @@ from ..core.db import (
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
-from ..core.exceptions import UpstreamError
+from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
 from ..payment.cost_calculation import (
     CostData,
@@ -1041,6 +1041,46 @@ async def forward_ehbp_x_cashu_request(
             )
         except Exception:
             raise
+
+    except EhbpTimeoutError as e:
+        logger.warning(
+            "EHBP X-Cashu upstream timed out",
+            extra={
+                "error": str(e),
+                "path": path,
+                "method": request.method,
+                "redeemed": redeemed,
+            },
+        )
+
+        if redeemed and amount > 0:
+            try:
+                refund_token = await send_cashu_refund(amount, unit, mint, request_id)
+                error_response = create_error_response(
+                    "upstream_timeout",
+                    str(e),
+                    504,
+                    request=request,
+                    code="UPSTREAM_TIMEOUT",
+                )
+                error_response.headers["X-Cashu"] = refund_token
+                return error_response
+            except Exception as refund_error:
+                logger.error(
+                    "Failed to refund EHBP X-Cashu token after timeout",
+                    extra={
+                        "error": str(refund_error),
+                        "original_error": str(e),
+                    },
+                )
+
+        return create_error_response(
+            "upstream_timeout",
+            str(e),
+            504,
+            request=request,
+            code="UPSTREAM_TIMEOUT",
+        )
 
     except Exception as e:
         error_message = str(e)
