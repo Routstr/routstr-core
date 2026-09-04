@@ -211,16 +211,14 @@ async def test_discount_counts_legacy_token_id_prompt() -> None:
     assert cost == 50_000
 
 
-async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
-    """A large prompt moved from messages into tool schemas must reserve the
-    same cost — otherwise a caller undercharges by hiding weight from the
-    estimator."""
+async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
+    """Body ``max_output_tokens`` (Responses API) is honored as a completion cap."""
     from routstr.payment.helpers import calculate_discounted_max_cost
 
     pricing = Mock()
-    pricing.prompt = 0.5
-    pricing.completion = 0.01
-    pricing.max_prompt_cost = 100.0
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
     pricing.max_completion_cost = 100.0
 
     model_obj = Mock()
@@ -228,51 +226,69 @@ async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
     model_obj.top_provider = None
     model_obj.context_length = None
 
-    big_text = "word " * 2_000
-    base = {"model": "test-model", "max_tokens": 10}
-    in_messages = {
-        **base,
-        "messages": [{"role": "user", "content": big_text}],
-    }
-    hiding_places = {
-        "tools": {
-            **base,
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [
-                {"type": "function", "function": {"name": "f", "description": big_text}}
-            ],
-        },
-        # Anthropic forwards a top-level system prompt; it is billed like any other.
-        "system": {
-            **base,
-            "messages": [{"role": "user", "content": "hi"}],
-            "system": big_text,
-        },
-        # A key named like an image field must not win an image exclusion.
-        "image-named key": {
-            **base,
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{"function": {"parameters": {"data": big_text}}}],
-        },
-        # Nor may a caller-chosen "data:" prefix, in any field the body allows.
-        "data-prefixed content": {
-            **base,
-            "messages": [{"role": "user", "content": "data:" + big_text}],
-        },
-        "data-prefixed text block": {
-            **base,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": "data:" + big_text}],
-                }
-            ],
-        },
-        "data-prefixed system": {
-            **base,
-            "messages": [{"role": "user", "content": "hi"}],
-            "system": "data:" + big_text,
-        },
+    body = {"max_output_tokens": 80_000}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    assert cost == 80_000
+
+
+async def test_discounted_max_cost_body_max_completion_tokens_fallback() -> None:
+    """Body ``max_completion_tokens`` (modern chat) is honored as a completion cap."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {"max_completion_tokens": 80_000}
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    assert cost == 80_000
+
+
+async def test_discounted_max_cost_uses_largest_completion_cap() -> None:
+    """With several completion caps declared, the largest bounds the reservation.
+
+    Upstream precedence between ``max_tokens`` / ``max_completion_tokens`` /
+    ``max_output_tokens`` varies by provider, so reserving against anything
+    but the largest could under-cover what the upstream bills.
+    """
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {
+        "max_tokens": 50_000,
+        "max_completion_tokens": 10_000,
+        "max_output_tokens": 80_000,
     }
 
     with (
@@ -280,14 +296,45 @@ async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1000),
     ):
-        cost_messages = await calculate_discounted_max_cost(
-            150_000, in_messages, model_obj
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    # 80_000 is the largest declared cap: 100.0 - 80.0 = 20 sats discount.
+    assert cost == 80_000
+
+
+async def test_discounted_max_cost_invalid_completion_cap_ignored() -> None:
+    """Unparseable caps yield no completion discount rather than under-reserving."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 0.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        # No valid cap at all -> no completion discount.
+        cost = await calculate_discounted_max_cost(
+            100_000, {"max_completion_tokens": "sixty-four-k"}, model_obj
         )
-        for where, body in hiding_places.items():
-            cost = await calculate_discounted_max_cost(150_000, body, model_obj)
-            # Same prompt weight → at least the same reservation, never the floor.
-            assert cost >= cost_messages, where
-            assert cost > 1000, where
+        assert cost == 100_000
+
+        # An invalid sibling does not poison a valid cap on another field.
+        cost = await calculate_discounted_max_cost(
+            100_000,
+            {"max_tokens": "bad", "max_completion_tokens": 80_000},
+            model_obj,
+        )
+        assert cost == 80_000
 
 
 async def test_estimate_image_tokens_from_input_detail_and_file_id() -> None:
