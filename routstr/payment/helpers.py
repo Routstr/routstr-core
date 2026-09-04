@@ -179,7 +179,12 @@ async def calculate_discounted_max_cost(
     body: dict,
     model_obj: Any | None = None,
 ) -> int:
-    """Calculate the discounted max cost for a request using model pricing when available."""
+    """Calculate the discounted max cost for a request using model pricing when available.
+
+    Completion discounts are trimmed from the largest declared cap among
+    ``max_tokens`` and ``max_completion_tokens`` (chat/completions) or
+    ``max_output_tokens`` (responses).
+    """
     if settings.fixed_pricing:
         return max_cost_for_model
 
@@ -244,21 +249,39 @@ async def calculate_discounted_max_cost(
         if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
 
-    max_tokens_raw = body.get("max_tokens", None)
-    if max_tokens_raw is not None:
+    # Completion caps arrive under several names: ``max_tokens`` (legacy
+    # chat), ``max_completion_tokens`` (modern chat) and ``max_output_tokens``
+    # (Responses API). When a request declares more than one, reserve against
+    # the largest: upstream precedence between the fields varies by provider,
+    # so the smaller cap may not be honored and the reservation must never
+    # under-cover what the upstream could bill.
+    max_tokens_int: int | None = None
+    for cap_field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        cap_raw = body.get(cap_field)
+        if cap_raw is None:
+            continue
         try:
-            max_tokens_int = int(max_tokens_raw)
+            cap_int = int(cap_raw)
         except (TypeError, ValueError):
             logger.warning(
-                "Invalid max_tokens; ignoring in cost adjustment",
-                extra={"max_tokens": str(max_tokens_raw)[:64], "model": model},
+                "Invalid completion token cap; ignoring in cost adjustment",
+                extra={
+                    "field": cap_field,
+                    "value": str(cap_raw)[:64],
+                    "model": model,
+                },
             )
-        else:
-            estimated_completion_delta_sats = (
-                max_completion_allowed_sats - max_tokens_int * model_pricing.completion
-            )
-            if estimated_completion_delta_sats > 0:
-                adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
+            continue
+        max_tokens_int = (
+            cap_int if max_tokens_int is None else max(max_tokens_int, cap_int)
+        )
+
+    if max_tokens_int is not None:
+        estimated_completion_delta_sats = (
+            max_completion_allowed_sats - max_tokens_int * model_pricing.completion
+        )
+        if estimated_completion_delta_sats > 0:
+            adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
 
     logger.debug(
         "Discounted max cost computed",
