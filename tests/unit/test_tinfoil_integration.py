@@ -21,11 +21,11 @@ from routstr.upstream.ehbp import (
     _strip_proxy_headers,
     parse_tinfoil_usage_metrics,
 )
-from routstr.upstream.tinfoil_trailer import TrailerResponse
 from routstr.upstream.tinfoil import (
     TinfoilModel,
     TinfoilUpstreamProvider,
 )
+from routstr.upstream.tinfoil_trailer import TrailerResponse
 
 # ---------------------------------------------------------------------------
 # parse_tinfoil_usage_metrics
