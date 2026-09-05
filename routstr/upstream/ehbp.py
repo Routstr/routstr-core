@@ -46,7 +46,7 @@ from ..wallet import (
     recieve_token,
     send_token,
 )
-from .tinfoil_trailer import forward_with_trailer
+from .tinfoil_trailer import TrailerResponse, forward_with_trailer
 
 logger = get_logger(__name__)
 
@@ -60,6 +60,55 @@ _RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
 _TINFOIL_PROVIDER_TYPE = "tinfoil"
 _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
 _TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
+
+
+_KEY_CONFIG_PROBLEM_TYPE = "urn:ietf:params:ehbp:error:key-config"
+
+
+def _is_ehbp_key_config_response(resp: TrailerResponse) -> bool:
+    """Check whether an upstream EHBP response is a key-config mismatch.
+
+    The enclave returns ``422 application/problem+json`` with
+    ``type=urn:ietf:params:ehbp:error:key-config`` when it cannot decrypt the
+    request body — meaning the client's HPKE key is stale (the enclave rotated
+    keys).  The proxy must pass this response through with its original
+    content type so EHBP clients can detect it and trigger re-attestation.
+    """
+    if resp.status_code != 422:
+        return False
+    ct = ""
+    for k, v in resp.headers:
+        if k.lower() == "content-type":
+            ct = v.lower()
+            break
+    if "application/problem+json" not in ct:
+        return False
+    try:
+        body = json.loads(resp.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("type") == _KEY_CONFIG_PROBLEM_TYPE
+
+
+def _passthrough_key_config_response(resp: TrailerResponse) -> Response:
+    """Return the enclave's key-config 422 with its original body and content
+    type so the EHBP client's ``KeyConfigMismatchError`` detection fires.
+
+    Only EHBP protocol headers are forwarded; everything else (hop-by-hop,
+    upstream-internal) is filtered out.
+    """
+    passthrough_headers: dict[str, str] = {
+        "content-type": "application/problem+json",
+    }
+    for k, v in resp.headers:
+        if k.lower() in ("ehbp-response-nonce", "content-length"):
+            passthrough_headers[k] = v
+    return Response(
+        content=resp.body,
+        status_code=422,
+        headers=passthrough_headers,
+        media_type="application/problem+json",
+    )
 
 
 def _normalize_upstream_model_id(model_id: str | None) -> str:
@@ -722,6 +771,25 @@ async def forward_ehbp_request(
                     "body_preview": body_preview,
                 },
             )
+            # Key-config mismatch (stale client HPKE key): return the
+            # enclave's 422 problem+json directly so the SDK's
+            # KeyConfigMismatchError detection fires and triggers
+            # re-attestation.  Wrapping it as application/json would
+            # destroy the signal and cause permanent failure.
+            if _is_ehbp_key_config_response(resp):
+                logger.warning(
+                    "EHBP upstream %s returned key-config mismatch for model=%s, "
+                    "passing through for client re-attestation",
+                    provider_type,
+                    model_obj.id,
+                    extra={
+                        "provider": provider_type,
+                        "model": model_obj.id,
+                        "path": path,
+                    },
+                )
+                return _passthrough_key_config_response(resp)
+
             raise UpstreamError(
                 f"EHBP upstream {provider_type} returned {resp.status_code} "
                 f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
@@ -938,6 +1006,29 @@ async def forward_ehbp_x_cashu_request(
             )
 
             if resp.status_code != 200:
+                # Key-config mismatch (stale client HPKE key): refund the
+                # full token and pass the enclave's 422 problem+json through
+                # so the SDK's KeyConfigMismatchError detection fires.
+                if _is_ehbp_key_config_response(resp):
+                    logger.warning(
+                        "EHBP upstream %s returned key-config mismatch for "
+                        "model=%s, refunding and passing through",
+                        provider_type,
+                        model_obj.id,
+                        extra={
+                            "provider": provider_type,
+                            "model": model_obj.id,
+                            "path": path,
+                            "refunded_amount": amount,
+                        },
+                    )
+                    refund_token = await send_cashu_refund(
+                        amount, unit, mint, request_id
+                    )
+                    passthrough = _passthrough_key_config_response(resp)
+                    passthrough.headers["X-Cashu"] = refund_token
+                    return passthrough
+
                 refund_token = await send_cashu_refund(amount, unit, mint, request_id)
                 error_response = Response(
                     content=json.dumps(

@@ -14,6 +14,8 @@ import pytest
 from routstr.upstream.ehbp import (
     _PROXY_ONLY_HEADERS,
     _compute_ehbp_actual_cost,
+    _is_ehbp_key_config_response,
+    _passthrough_key_config_response,
     _prepare_ehbp_upstream_headers,
     _resolve_ehbp_target_url,
     _strip_proxy_headers,
@@ -23,6 +25,7 @@ from routstr.upstream.tinfoil import (
     TinfoilModel,
     TinfoilUpstreamProvider,
 )
+from routstr.upstream.tinfoil_trailer import TrailerResponse
 
 # ---------------------------------------------------------------------------
 # parse_tinfoil_usage_metrics
@@ -747,3 +750,102 @@ class TestTinfoilUpstreamProvider:
             models = await provider.fetch_models()
 
         assert models == []
+
+
+# ---------------------------------------------------------------------------
+# EHBP key-config mismatch passthrough
+# ---------------------------------------------------------------------------
+
+
+def _key_config_trailer_response(
+    status_code: int = 422,
+    content_type: str = "application/problem+json",
+    body: bytes = b'{"type":"urn:ietf:params:ehbp:error:key-config","title":"failed to read decrypted request body"}',
+) -> TrailerResponse:
+    return TrailerResponse(
+        status_code=status_code,
+        headers=[
+            ("content-type", content_type),
+            ("content-length", str(len(body))),
+        ],
+        body=body,
+        trailers=[],
+    )
+
+
+class TestIsEhbpKeyConfigResponse:
+    def test_genuine_key_config_422(self) -> None:
+        resp = _key_config_trailer_response()
+        assert _is_ehbp_key_config_response(resp) is True
+
+    def test_200_is_not_key_config(self) -> None:
+        resp = _key_config_trailer_response(status_code=200)
+        assert _is_ehbp_key_config_response(resp) is False
+
+    def test_400_is_not_key_config(self) -> None:
+        resp = _key_config_trailer_response(status_code=400)
+        assert _is_ehbp_key_config_response(resp) is False
+
+    def test_json_content_type_is_not_key_config(self) -> None:
+        """A 422 with application/json (e.g. proxy-wrapped error) must NOT be
+        treated as key-config — only the original problem+json counts."""
+        resp = _key_config_trailer_response(content_type="application/json")
+        assert _is_ehbp_key_config_response(resp) is False
+
+    def test_problem_json_with_different_type_is_not_key_config(self) -> None:
+        """A 422 problem+json with a different error type is not key-config."""
+        body = b'{"type":"urn:ietf:params:ehbp:error:other","title":"other"}'
+        resp = _key_config_trailer_response(body=body)
+        assert _is_ehbp_key_config_response(resp) is False
+
+    def test_empty_body_is_not_key_config(self) -> None:
+        resp = _key_config_trailer_response(body=b"")
+        assert _is_ehbp_key_config_response(resp) is False
+
+    def test_invalid_json_body_is_not_key_config(self) -> None:
+        resp = _key_config_trailer_response(body=b"not json")
+        assert _is_ehbp_key_config_response(resp) is False
+
+    def test_problem_json_with_charset(self) -> None:
+        resp = _key_config_trailer_response(
+            content_type="application/problem+json; charset=utf-8"
+        )
+        assert _is_ehbp_key_config_response(resp) is True
+
+    def test_missing_content_type_is_not_key_config(self) -> None:
+        resp = TrailerResponse(
+            status_code=422,
+            headers=[],
+            body=b'{"type":"urn:ietf:params:ehbp:error:key-config"}',
+        )
+        assert _is_ehbp_key_config_response(resp) is False
+
+
+class TestPassthroughKeyConfigResponse:
+    def test_status_and_content_type(self) -> None:
+        resp = _key_config_trailer_response()
+        result = _passthrough_key_config_response(resp)
+        assert result.status_code == 422
+        assert result.media_type == "application/problem+json"
+
+    def test_body_passed_through(self) -> None:
+        original_body = b'{"type":"urn:ietf:params:ehbp:error:key-config","title":"failed to read decrypted request body"}'
+        resp = _key_config_trailer_response(body=original_body)
+        result = _passthrough_key_config_response(resp)
+        assert result.body == original_body
+
+    def test_ehbp_nonce_header_forwarded(self) -> None:
+        resp = TrailerResponse(
+            status_code=422,
+            headers=[
+                ("content-type", "application/problem+json"),
+                ("ehbp-response-nonce", "abc123"),
+                ("server", "nginx"),
+                ("x-request-id", "some-id"),
+            ],
+            body=b'{"type":"urn:ietf:params:ehbp:error:key-config","title":"test"}',
+        )
+        result = _passthrough_key_config_response(resp)
+        assert result.headers["ehbp-response-nonce"] == "abc123"
+        assert "server" not in result.headers
+        assert "x-request-id" not in result.headers
