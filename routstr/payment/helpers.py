@@ -179,7 +179,12 @@ async def calculate_discounted_max_cost(
     body: dict,
     model_obj: Any | None = None,
 ) -> int:
-    """Calculate the discounted max cost for a request using model pricing when available."""
+    """Calculate the discounted max cost for a request using model pricing when available.
+
+    Completion discounts are trimmed from the largest declared cap among
+    ``max_tokens`` and ``max_completion_tokens`` (chat/completions) or
+    ``max_output_tokens`` (responses).
+    """
     if settings.fixed_pricing:
         return max_cost_for_model
 
@@ -244,21 +249,39 @@ async def calculate_discounted_max_cost(
         if estimated_prompt_delta_sats > 0:
             adjusted = adjusted - math.floor(estimated_prompt_delta_sats * 1000)
 
-    max_tokens_raw = body.get("max_tokens", None)
-    if max_tokens_raw is not None:
+    # Completion caps arrive under several names: ``max_tokens`` (legacy
+    # chat), ``max_completion_tokens`` (modern chat) and ``max_output_tokens``
+    # (Responses API). When a request declares more than one, reserve against
+    # the largest: upstream precedence between the fields varies by provider,
+    # so the smaller cap may not be honored and the reservation must never
+    # under-cover what the upstream could bill.
+    max_tokens_int: int | None = None
+    for cap_field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+        cap_raw = body.get(cap_field)
+        if cap_raw is None:
+            continue
         try:
-            max_tokens_int = int(max_tokens_raw)
+            cap_int = int(cap_raw)
         except (TypeError, ValueError):
             logger.warning(
-                "Invalid max_tokens; ignoring in cost adjustment",
-                extra={"max_tokens": str(max_tokens_raw)[:64], "model": model},
+                "Invalid completion token cap; ignoring in cost adjustment",
+                extra={
+                    "field": cap_field,
+                    "value": str(cap_raw)[:64],
+                    "model": model,
+                },
             )
-        else:
-            estimated_completion_delta_sats = (
-                max_completion_allowed_sats - max_tokens_int * model_pricing.completion
-            )
-            if estimated_completion_delta_sats > 0:
-                adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
+            continue
+        max_tokens_int = (
+            cap_int if max_tokens_int is None else max(max_tokens_int, cap_int)
+        )
+
+    if max_tokens_int is not None:
+        estimated_completion_delta_sats = (
+            max_completion_allowed_sats - max_tokens_int * model_pricing.completion
+        )
+        if estimated_completion_delta_sats > 0:
+            adjusted = adjusted - math.floor(estimated_completion_delta_sats * 1000)
 
     logger.debug(
         "Discounted max cost computed",
@@ -431,14 +454,45 @@ async def _fetch_image_from_url(url: str) -> bytes | None:
         return None
 
 
+# Patch-based image pricing (OpenAI ``detail: "original"``): the image is
+# covered with 32x32px patches and billed as ceil(patches * multiplier)
+# tokens, with no 512px-tile downscaling. The API rejects images above
+# 30,000 patches, so at the 1.2x multiplier documented for the
+# original-capable model families (gpt-5.4/5.5/5.6) the worst case a
+# single image can bill is 36,000 tokens.
+_IMAGE_PATCH_PX = 32
+_MAX_IMAGE_PATCHES = 30_000
+_MAX_ORIGINAL_IMAGE_TOKENS = (_MAX_IMAGE_PATCHES * 6 + 4) // 5  # 36,000
+
+
+def _calculate_original_image_tokens(width: int, height: int) -> int:
+    """Estimate tokens for an image billed at ``detail: "original"``.
+
+    Patch-based models cover the image with 32x32px patches and bill
+    ``ceil(patches * 1.2)`` tokens. The estimate is bounded by the
+    30,000-patch rejection limit, which is more conservative than the
+    per-model resizing patch budgets (e.g. 10,000 patches on gpt-5.4/5.5)
+    so it never under-reserves.
+    """
+    patches = ((width + _IMAGE_PATCH_PX - 1) // _IMAGE_PATCH_PX) * (
+        (height + _IMAGE_PATCH_PX - 1) // _IMAGE_PATCH_PX
+    )
+    bounded = min(patches, _MAX_IMAGE_PATCHES)
+    return (bounded * 6 + 4) // 5  # ceil(bounded * 1.2) in exact integer math
+
+
 def _calculate_image_tokens(width: int, height: int, detail: str = "auto") -> int:
     """Calculate image tokens based on OpenAI's vision pricing.
 
     For low detail: 85 tokens
     For high detail/auto: 85 base tokens + 170 tokens per 512px tile
+    For original detail: patch-based pricing at the original resolution
     """
     if detail == "low":
         return 85
+
+    if detail == "original":
+        return _calculate_original_image_tokens(width, height)
 
     if width > 2048 or height > 2048:
         aspect_ratio = width / height
@@ -493,6 +547,16 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
 
             content_type = content_item.get("type")
             if content_type not in ("image_url", "input_image"):
+                continue
+
+            # Responses-style ``input_image`` parts carry their detail and
+            # file_id as siblings of the image reference; route them through
+            # the input_image estimator so original detail / file_id are
+            # honored on the chat path too.
+            if content_type == "input_image":
+                total_image_tokens += await _estimate_input_image_tokens(
+                    content_item
+                )
                 continue
 
             image_url_data = content_item.get("image_url")
@@ -558,6 +622,69 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                     )
                 else:
                     total_image_tokens += 85
+
+    return total_image_tokens
+
+
+async def _estimate_input_image_tokens(item: dict) -> int:
+    """Estimate tokens for a Responses API ``input_image`` item.
+
+    Honors the item-level ``detail``. The dimensions of ``file_id``
+    references can't be fetched here, so they get conservative
+    estimates: the max-size tile math for high/auto and the 30,000-patch
+    worst case (36,000 tokens) for original, so we never under-reserve.
+    """
+    detail = item.get("detail") or "auto"
+    if image_url := item.get("image_url"):
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url", "")
+        if isinstance(image_url, str) and image_url.startswith("data:image/"):
+            try:
+                _, base64_data = image_url.split(",", 1)
+                image_bytes = base64.b64decode(base64_data)
+                width, height = _get_image_dimensions(image_bytes)
+                return _calculate_image_tokens(width, height, detail)
+            except Exception as e:
+                logger.warning(
+                    "Failed to process base64 image", extra={"error": str(e)}
+                )
+                return 85
+        # Remote URLs and file_id both have unfetchable dimensions here; fall
+        # through to the conservative estimates below.
+    if item.get("file_id") or item.get("image_url"):
+        if detail == "original":
+            return _MAX_ORIGINAL_IMAGE_TOKENS
+        # We can't fetch an uploaded file's dimensions here; assume the
+        # largest vision image so we don't under-reserve.
+        return _calculate_image_tokens(2048, 2048, detail)
+    return 0
+
+
+async def estimate_image_tokens_from_input(input_data: Any) -> int:
+    """Estimate total tokens for images embedded in a Responses API ``input``.
+
+    Recognizes ``input_image`` items at the top level of the input list and
+    inside ``message`` content parts.
+    """
+    if not isinstance(input_data, list):
+        return 0
+
+    total_image_tokens = 0
+    for item in input_data:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("type") == "input_image":
+            total_image_tokens += await _estimate_input_image_tokens(item)
+            continue
+
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "input_image":
+                total_image_tokens += await _estimate_input_image_tokens(part)
 
     return total_image_tokens
 
