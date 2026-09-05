@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic.v1 import BaseModel, Field
 
@@ -47,6 +47,27 @@ class MaxCostData(CostData):
 class CostDataError(BaseModel):
     message: str
     code: str
+
+
+class PricingRates(NamedTuple):
+    """Per-1k-token rates for the four billable token categories.
+
+    The four arrived as a bare tuple, unpacked positionally at two call sites.
+    Two of them are cache rates that routinely fall back to the prompt rate,
+    which makes a transposition read as a plausible bill rather than a crash.
+
+    ``cache_read_inferred`` and ``cache_write_inferred`` are ``True`` when the
+    cache rate fell back to the full prompt rate because neither the catalogue
+    nor the operator supplied one. That distinguishes a rate the node was told
+    from one it invented, which the rate alone cannot: both arrive as a float.
+    """
+
+    input_1k: float
+    output_1k: float
+    cache_read_1k: float
+    cache_write_1k: float
+    cache_read_inferred: bool
+    cache_write_inferred: bool
 
 
 def _empty_cost(cls: type[CostData] = CostData) -> CostData:
@@ -188,7 +209,7 @@ async def calculate_cost(
             output_usd = _coerce_usd(cost_details.get("output_cost")) or _coerce_usd(
                 cost_details.get("upstream_inference_completions_cost")
             )
-            cache_pricing_rates: tuple[float, float, float, float] | None = None
+            cache_pricing_rates: PricingRates | None = None
             if cache_read_tokens > 0 or cache_creation_tokens > 0:
                 try:
                     cache_pricing_rates = _get_pricing_rates(
@@ -204,11 +225,13 @@ async def calculate_cost(
                     fixed_input_rate = (
                         float(settings.fixed_per_1k_input_tokens) * 1000.0
                     )
-                    cache_pricing_rates = (
-                        fixed_input_rate,
-                        float(settings.fixed_per_1k_output_tokens) * 1000.0,
-                        fixed_input_rate,
-                        fixed_input_rate,
+                    cache_pricing_rates = PricingRates(
+                        input_1k=fixed_input_rate,
+                        output_1k=float(settings.fixed_per_1k_output_tokens) * 1000.0,
+                        cache_read_1k=fixed_input_rate,
+                        cache_write_1k=fixed_input_rate,
+                        cache_read_inferred=False,
+                        cache_write_inferred=False,
                     )
             return _calculate_from_usd_cost(
                 usd_cost,
@@ -244,7 +267,10 @@ async def calculate_cost(
         cache_read_rate = input_rate
         cache_creation_rate = input_rate
     else:
-        input_rate, output_rate, cache_read_rate, cache_creation_rate = pricing_rates
+        input_rate = pricing_rates.input_1k
+        output_rate = pricing_rates.output_1k
+        cache_read_rate = pricing_rates.cache_read_1k
+        cache_creation_rate = pricing_rates.cache_write_1k
 
     # Truthiness is not the question: `NaN` and a negative rate are both truthy
     # and sailed past this gate into the token math, while a rate of zero is a
@@ -366,14 +392,13 @@ def _get_pricing_rates(
     response_data: dict,
     model_obj: "Model | None",
     provider_fee: float | None,
-) -> tuple[float, float, float, float] | None:
+) -> PricingRates | None:
     """Get configured rates, falling back to LiteLLM's model cost map.
 
     The served ``model_obj`` (when the caller has it) is billed directly;
     otherwise the response's model string is resolved through the alias map,
     which yields the best-ranked candidate rather than the serving one.
 
-    Returns: (input_rate, output_rate, cache_read_rate, cache_write_rate).
     ``None`` means configured fixed pricing should be used by the caller.
     """
     if settings.fixed_pricing and (
@@ -404,6 +429,8 @@ def _get_pricing_rates(
             mspc_1k = mspc * 1_000_000.0
             mscr_1k = mscr * 1_000_000.0 if mscr > 0 else mspp_1k
             mscw_1k = mscw * 1_000_000.0 if mscw > 0 else mspp_1k
+            cache_read_inferred = mscr <= 0
+            cache_write_inferred = mscw <= 0
             source = "configured"
         except Exception as e:
             logger.error("Invalid pricing data", extra={"error": str(e)})
@@ -445,6 +472,8 @@ def _get_pricing_rates(
             if cache_write_usd > 0
             else mspp_1k
         )
+        cache_read_inferred = cache_read_usd <= 0
+        cache_write_inferred = cache_write_usd <= 0
         source = "litellm"
 
     logger.info(
@@ -456,9 +485,21 @@ def _get_pricing_rates(
             "output_price_msats_per_1k": mspc_1k,
             "cache_read_price_msats_per_1k": mscr_1k,
             "cache_write_price_msats_per_1k": mscw_1k,
+            # `pricing_source` covers the prompt and completion rates only. A
+            # cache rate the catalogue never supplied is the full prompt rate
+            # wearing the same label, so it gets its own source.
+            "cache_read_source": "inferred" if cache_read_inferred else source,
+            "cache_write_source": "inferred" if cache_write_inferred else source,
         },
     )
-    return mspp_1k, mspc_1k, mscr_1k, mscw_1k
+    return PricingRates(
+        input_1k=mspp_1k,
+        output_1k=mspc_1k,
+        cache_read_1k=mscr_1k,
+        cache_write_1k=mscw_1k,
+        cache_read_inferred=cache_read_inferred,
+        cache_write_inferred=cache_write_inferred,
+    )
 
 
 def _resolve_provider_fee(model_id: str) -> float:
@@ -487,7 +528,7 @@ def _calculate_from_usd_cost(
     output_tokens: int,
     response_data: dict,
     provider_fee: float | None,
-    pricing_rates: tuple[float, float, float, float] | None = None,
+    pricing_rates: PricingRates | None = None,
 ) -> CostData:
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     if provider_fee is None:
@@ -535,7 +576,9 @@ def _calculate_from_usd_cost(
     cache_read_msats = 0
     cache_creation_msats = 0
     if pricing_rates is not None:
-        input_rate, _, cache_read_rate, cache_creation_rate = pricing_rates
+        input_rate = pricing_rates.input_1k
+        cache_read_rate = pricing_rates.cache_read_1k
+        cache_creation_rate = pricing_rates.cache_write_1k
         regular_weight = input_tokens * input_rate
         cache_read_weight = cache_read_tokens * cache_read_rate
         cache_creation_weight = cache_creation_tokens * cache_creation_rate
