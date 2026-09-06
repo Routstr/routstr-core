@@ -77,13 +77,20 @@ def _usage_response() -> dict[str, Any]:
 async def test_unusable_token_rate_never_charges_the_reservation(
     bad_rate: float,
 ) -> None:
-    """An unusable configured rate must not turn authorization into usage."""
+    """An unusable configured rate must not turn authorization into usage.
+
+    Under the default ``charge_max`` policy the request is still billed the
+    pre-authorized ceiling (never MORE than it), with the raw token counts
+    preserved for dashboards. A zero rate remains a price (see
+    ``test_a_rate_of_zero_is_billed_as_free_not_as_missing``).
+    """
     model = _model(Pricing(prompt=bad_rate, completion=1.0))
 
     cost = await calculate_cost(_usage_response(), max_cost=1234, model_obj=model)
 
     assert isinstance(cost, MaxCostData)
-    assert cost.total_msats == 0
+    assert cost.total_msats == 1234
+    assert cost.reason == "missing_usage"
     assert (cost.input_tokens, cost.output_tokens) == (1000, 500)
 
 

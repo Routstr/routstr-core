@@ -41,7 +41,26 @@ class CostData(BaseModel):
 
 
 class MaxCostData(CostData):
-    pass
+    """Reservation-ceiling billing.
+
+    Two distinct meanings ride on this class:
+
+    - ``reason="max_cost"`` — pricing is usable but the response is empty or
+      the upstream reports a USD cost with zero tokens; the ceiling is the
+      agreed charge for a served-but-unmeasurable request.
+    - ``reason="missing_usage"`` — usage AND pricing were both unusable and
+      the ``missing_usage_policy`` setting chose the ceiling (or a refund).
+      ``total_msats == 0`` under this reason means "charge nothing and
+      release", per the ``refund`` policy.
+
+    Callers that need to distinguish these (dashboards, estimated markers)
+    read ``reason``; billing behavior only reads ``total_msats``.
+    """
+
+    reason: str = "max_cost"
+    # Integer because `_cost_field` only handles numeric fields; 1 marks a
+    # charge derived under missing_usage_policy rather than measured usage.
+    estimated_flag: int = 0
 
 
 class CostDataError(BaseModel):
@@ -69,6 +88,45 @@ def _empty_cost(cls: type[CostData] = CostData) -> CostData:
         cache_read_msats=0,
         cache_creation_msats=0,
     )
+
+
+def _missing_usage_max_cost(max_cost: int) -> MaxCostData:
+    """Apply ``missing_usage_policy`` when usage AND pricing are unusable.
+
+    The content was served, so the request cannot be free by accident of the
+    upstream omitting its usage trailer. ``estimate`` keeps legacy behavior
+    (charge 0, reservation released); ``charge_max`` bills the pre-authorized
+    ceiling; ``refund`` bills 0 explicitly. The zero-charge variants carry
+    ``reason="missing_usage"`` so callers can mark the charge as estimated
+    rather than measured.
+    """
+    policy = (settings.missing_usage_policy or "charge_max").strip().lower()
+    if policy == "charge_max" and max_cost > 0:
+        logger.warning(
+            "No usage data and no usable pricing — applying "
+            "missing_usage_policy=charge_max: billing the pre-authorized "
+            "reservation ceiling.",
+            extra={"max_cost_msats": max_cost},
+        )
+        return MaxCostData(
+            base_msats=0,
+            input_msats=0,
+            output_msats=0,
+            total_msats=max_cost,
+            total_usd=0.0,
+            reason="missing_usage",
+            estimated_flag=1,
+        )
+    if policy not in ("estimate", "charge_max", "refund"):
+        logger.warning(
+            "Unknown missing_usage_policy %r — treating as 'estimate'",
+            policy,
+        )
+    zero = _empty_cost(MaxCostData)
+    assert isinstance(zero, MaxCostData)
+    zero.reason = "missing_usage"
+    zero.estimated_flag = 1
+    return zero
 
 
 async def calculate_cost(
@@ -124,7 +182,7 @@ async def calculate_cost(
                 else None,
             },
         )
-        return _empty_cost(MaxCostData)
+        return _missing_usage_max_cost(max_cost)
 
     usage_data = response_data.get("usage") or {}
     if not isinstance(usage_data, dict):
@@ -253,11 +311,8 @@ async def calculate_cost(
     rates = (input_rate, output_rate, cache_read_rate, cache_creation_rate)
     if not all(is_usable_rate(rate) for rate in rates):
         logger.warning(
-            "No usable token pricing — releasing the reservation instead of "
-            "treating its ceiling as the charge. Token counts %s in the "
-            "upstream response but cannot be converted to money; the request "
-            "will appear in dashboards with raw counts and a zero charge.",
-            "are present" if (input_tokens > 0 or output_tokens > 0) else "are zero",
+            "No usable token pricing — applying missing_usage_policy instead of "
+            "treating the reservation ceiling as the charge or releasing for free.",
             extra={
                 "base_cost_msats": max_cost,
                 "model": response_data.get("model", "unknown"),
@@ -267,18 +322,14 @@ async def calculate_cost(
                 "output_rate": output_rate,
             },
         )
-        return MaxCostData(
-            base_msats=0,
-            input_msats=0,
-            output_msats=0,
-            total_msats=0,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_input_tokens=cache_read_tokens,
-            cache_creation_input_tokens=cache_creation_tokens,
-            cache_read_msats=0,
-            cache_creation_msats=0,
-        )
+        missing = _missing_usage_max_cost(max_cost)
+        # Preserve the raw token counts for dashboards even when no usable
+        # rate exists to convert them to money.
+        missing.input_tokens = input_tokens
+        missing.output_tokens = output_tokens
+        missing.cache_read_input_tokens = cache_read_tokens
+        missing.cache_creation_input_tokens = cache_creation_tokens
+        return missing
 
     return _calculate_from_tokens(
         input_tokens,
