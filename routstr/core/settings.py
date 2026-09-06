@@ -79,14 +79,6 @@ class Settings(BaseSettings):
     tolerance_percentage: float = Field(default=1.0, env="TOLERANCE_PERCENTAGE")
     # Minimum per-request charge in millisatoshis when model pricing is free/zero
     min_request_msat: int = Field(default=1, env="MIN_REQUEST_MSAT")
-    # Policy when an upstream response carries no usable usage AND no usable
-    # pricing (content was served, cost cannot be measured or derived):
-    #   estimate   — charge whatever a local token estimate yields (may be 0)
-    #   charge_max — keep the prepayment/reservation (user pre-authorized it)
-    #   refund     — release the reservation / refund the full prepayment
-    missing_usage_policy: str = Field(
-        default="charge_max", env="MISSING_USAGE_POLICY"
-    )
     reset_reserved_balance_on_startup: bool = Field(
         default=True, env="RESET_RESERVED_BALANCE_ON_STARTUP"
     )  # deactivate in horizontal scaling setups

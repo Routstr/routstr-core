@@ -187,8 +187,6 @@ async def test_multiline_data_payload_is_parsed_and_reframed() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_usage_refunds_instead_of_charging_authorized_max() -> None:
-    """No usage in the stream: ``missing_usage_policy`` (default charge_max)
-    bills the pre-authorized ceiling and refunds only the difference."""
     chunks = [
         b'data: {"type":"response.created","response":{"model":"gpt-5-mini"}}\r\n\r\n',
         b"data: [DONE]\r\n\r\n",
@@ -200,10 +198,9 @@ async def test_missing_usage_refunds_instead_of_charging_authorized_max() -> Non
 
     send_refund.assert_awaited_once()
     assert send_refund.await_args is not None
-    assert send_refund.await_args.args[0] == 10_000 - 9_000
+    assert send_refund.await_args.args[0] == 10_000
     assert response.headers["x-cashu"] == "cashuBrefundtoken0123456789"
-    assert response.headers["x-routstr-cost-msats"] == "9000"
-    assert response.headers["x-routstr-cost-estimated"] == "true"
+    assert response.headers["x-routstr-cost-msats"] == "0"
 
 
 @pytest.mark.asyncio
@@ -218,7 +215,7 @@ async def test_malformed_events_do_not_retain_whole_token() -> None:
     )
 
     assert send_refund.await_args is not None
-    assert send_refund.await_args.args[0] == 10_000 - 9_000
+    assert send_refund.await_args.args[0] == 10_000
     body = await _collect(response)
     assert b"\\n" not in body
     assert body.endswith(b"\n\n")

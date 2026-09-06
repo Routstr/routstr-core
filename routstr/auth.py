@@ -1191,13 +1191,27 @@ async def adjust_payment_for_tokens(
     calculated_cost = await calculate_cost(
         response_data, deducted_max_cost, model_obj, provider_fee
     )
-    if not isinstance(calculated_cost, CostDataError):
-        if not await _claim_reservation_for_charge(reservation, session):
-            # A prior charge or release already owns this reservation. Returning
-            # the calculated metadata is safe; the aggregate balances must not
-            # be modified a second time.
-            calculated_cost.charged_msats = 0
-            return calculated_cost.dict()
+    if isinstance(calculated_cost, CostDataError):
+        # Content was already served, so release instead of raising a 400.
+        logger.error(
+            "Cost calculation error during payment adjustment, releasing reservation",
+            extra={
+                "key_hash": key_log_hash,
+                "model": model,
+                "error_message": calculated_cost.message,
+                "error_code": calculated_cost.code,
+            },
+        )
+        calculated_cost = MaxCostData(
+            base_msats=0, input_msats=0, output_msats=0, total_msats=0
+        )
+
+    if not await _claim_reservation_for_charge(reservation, session):
+        # A prior charge or release already owns this reservation. Returning
+        # the calculated metadata is safe; the aggregate balances must not
+        # be modified a second time.
+        calculated_cost.charged_msats = 0
+        return calculated_cost.dict()
 
     match calculated_cost:
         case MaxCostData() as cost:
@@ -1522,121 +1536,6 @@ async def adjust_payment_for_tokens(
 
             return cost.dict()
 
-        case CostDataError() as error:
-            # Pricing derivation failed AFTER the upstream served the request.
-            # Raising here would hand the client a 400 for content it already
-            # received (streaming) while the provider eats the upstream cost.
-            # Apply missing_usage_policy instead: keep the pre-authorized
-            # ceiling (charge_max), or release without charging
-            # (estimate/refund) and let the response complete.
-            policy = (settings.missing_usage_policy or "charge_max").strip().lower()
-            logger.error(
-                "Cost calculation error during payment adjustment — applying "
-                "missing_usage_policy=%s instead of raising",
-                policy,
-                extra={
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "model": model,
-                    "error_message": error.message,
-                    "error_code": error.code,
-                },
-            )
-            if policy == "charge_max":
-                charged = await _charge_reservation_rows(
-                    session,
-                    billing_key_hash=billing_key.hashed_key,
-                    reserved_msats=deducted_max_cost,
-                    charge_msats=deducted_max_cost,
-                )
-                if charged:
-                    await session.commit()
-                    await _stop_reservation_heartbeat(reservation.release_id)
-                    await session.refresh(billing_key)
-                    await _accumulate_fee(deducted_max_cost)
-                    payments_logger.info(
-                        "FINALIZE",
-                        extra={
-                            "event": "finalize",
-                            "key_hash": key.hashed_key[:8] + "...",
-                            "billing_key_hash": billing_log_hash,
-                            "model": model,
-                            "cost_reserved": deducted_max_cost,
-                            "cost_charged": deducted_max_cost,
-                            "input_tokens": 0,
-                            "output_tokens": 0,
-                            "balance": billing_key.balance,
-                            "reserved_balance": billing_key.reserved_balance,
-                            "total_spent": billing_key.total_spent,
-                            "finalize_type": "missing_usage_policy",
-                        },
-                    )
-                    return {
-                        "base_msats": 0,
-                        "input_msats": 0,
-                        "output_msats": 0,
-                        "total_msats": deducted_max_cost,
-                        "total_usd": 0.0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_msats": 0,
-                        "cache_creation_msats": 0,
-                        "charged_msats": deducted_max_cost,
-                        "reason": "missing_usage",
-                        "estimated": True,
-                    }
-                logger.error(
-                    "Failed to charge reservation under missing_usage_policy=charge_max "
-                    "— releasing instead",
-                    extra={
-                        "key_hash": key_log_hash,
-                        "model": model,
-                        "error_message": error.message,
-                    },
-                )
-            else:
-                if policy in ("estimate", "refund"):
-                    logger.warning(
-                        "Releasing reservation without charging under "
-                        "missing_usage_policy=%s",
-                        policy,
-                        extra={
-                            "key_hash": key_log_hash,
-                            "model": model,
-                            "error_message": error.message,
-                            "error_code": error.code,
-                        },
-                    )
-                else:
-                    logger.warning(
-                        "Unknown missing_usage_policy %r — treating as 'estimate'",
-                        policy,
-                        extra={
-                            "key_hash": key_log_hash,
-                            "model": model,
-                            "error_message": error.message,
-                            "error_code": error.code,
-                        },
-                    )
-            await release_reservation_only()
-            return {
-                "base_msats": 0,
-                "input_msats": 0,
-                "output_msats": 0,
-                "total_msats": 0,
-                "total_usd": 0.0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_msats": 0,
-                "cache_creation_msats": 0,
-                "charged_msats": 0,
-                "reason": "missing_usage",
-                "estimated": True,
-                "error": {"message": error.message, "code": error.code},
-            }
     # All calculate_cost variants are handled above.
     raise AssertionError("Unreachable: unhandled calculate_cost result")
 
