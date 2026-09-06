@@ -211,6 +211,204 @@ async def test_discount_counts_legacy_token_id_prompt() -> None:
     assert cost == 50_000
 
 
+async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
+    """A large prompt moved from messages into tool schemas must reserve the
+    same cost — otherwise a caller undercharges by hiding weight from the
+    estimator."""
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.5
+    pricing.completion = 0.01
+    pricing.max_prompt_cost = 100.0
+    pricing.max_completion_cost = 100.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    big_text = "word " * 2_000
+    base = {"model": "test-model", "max_tokens": 10}
+    in_messages = {
+        **base,
+        "messages": [{"role": "user", "content": big_text}],
+    }
+    hiding_places = {
+        "tools": {
+            **base,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "function": {"name": "f", "description": big_text}}
+            ],
+        },
+        # Anthropic forwards a top-level system prompt; it is billed like any other.
+        "system": {
+            **base,
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": big_text,
+        },
+        # A key named like an image field must not win an image exclusion.
+        "image-named key": {
+            **base,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"function": {"parameters": {"data": big_text}}}],
+        },
+        # Nor may a caller-chosen "data:" prefix, in any field the body allows.
+        "data-prefixed content": {
+            **base,
+            "messages": [{"role": "user", "content": "data:" + big_text}],
+        },
+        "data-prefixed text block": {
+            **base,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "data:" + big_text}],
+                }
+            ],
+        },
+        "data-prefixed system": {
+            **base,
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "data:" + big_text,
+        },
+    }
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost_messages = await calculate_discounted_max_cost(
+            150_000, in_messages, model_obj
+        )
+        for where, body in hiding_places.items():
+            cost = await calculate_discounted_max_cost(150_000, body, model_obj)
+            # Same prompt weight → at least the same reservation, never the floor.
+            assert cost >= cost_messages, where
+            assert cost > 1000, where
+
+
+async def test_discounted_max_cost_counts_responses_input_images() -> None:
+    """A Responses ``input_image`` must add image tokens to the reservation.
+
+    Regression for the review finding that ``estimate_image_tokens_from_input``
+    was defined but never called: a Responses body carries ``input``, not
+    ``messages``, so its images were previously reserved at zero tokens.
+    """
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 100.0
+    pricing.max_completion_cost = 0.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    image = Image.new("RGB", (512, 512), "red")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+    no_image = {
+        "model": "test-model",
+        "input": [{"role": "user", "content": "hi"}],
+    }
+    with_image = {
+        "model": "test-model",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "hi"},
+                    {"type": "input_image", "image_url": data_url, "detail": "high"},
+                ],
+            }
+        ],
+    }
+
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost_no_image = await calculate_discounted_max_cost(100_000, no_image, model_obj)
+        cost_with_image = await calculate_discounted_max_cost(
+            100_000, with_image, model_obj
+        )
+
+    # The 512x512 high-detail image (85 + 170 = 255 tokens) is billed as prompt
+    # weight, so it reserves strictly more than the identical text-only body.
+    assert cost_with_image > cost_no_image
+
+
+async def test_estimate_input_image_tokens_remote_original_fetches() -> None:
+    """A remote ``original`` image is fetched and measured, not worst-cased.
+
+    Regression for the review finding that any non-data URL with
+    ``detail: \"original\"`` reserved the 36,000-token worst case without
+    trying to fetch — a 512x512 image reserved ~117x its real cost.
+    """
+    from io import BytesIO
+    from unittest.mock import patch as mock_patch
+
+    from PIL import Image
+
+    from routstr.payment.helpers import _estimate_input_image_tokens
+
+    image = Image.new("RGB", (512, 512), "red")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG")
+    image_bytes = buffer.getvalue()
+
+    with mock_patch(
+        "routstr.payment.helpers._fetch_image_from_url",
+        new=AsyncMock(return_value=image_bytes),
+    ):
+        # 512x512 original -> 16x16 = 256 patches -> ceil(256 * 1.2) = 308 tokens,
+        # far below the 36,000 worst case a blind fallback would reserve.
+        assert await _estimate_input_image_tokens(
+            {"type": "input_image", "image_url": "https://x.test/i.jpg", "detail": "original"}
+        ) == 308
+
+    # When the fetch fails, fall back to the original-detail worst case.
+    with mock_patch(
+        "routstr.payment.helpers._fetch_image_from_url",
+        new=AsyncMock(return_value=None),
+    ):
+        assert await _estimate_input_image_tokens(
+            {"type": "input_image", "image_url": "https://x.test/i.jpg", "detail": "original"}
+        ) == 36_000
+
+
+async def test_estimate_input_image_tokens_broken_original_data_url() -> None:
+    """A broken data URL with ``detail: \"original\"`` reserves the worst case.
+
+    Regression for the review finding that the ``except`` branch returned 85
+    (low-detail) regardless of the declared detail.
+    """
+    from routstr.payment.helpers import _estimate_input_image_tokens
+
+    # "!!!" is not valid base64, so decoding raises before any dimension read.
+    assert await _estimate_input_image_tokens(
+        {"type": "input_image", "image_url": "data:image/jpeg;base64,!!!", "detail": "original"}
+    ) == 36_000
+    # Non-original details fall back to the max-size tile math, not the 85 floor.
+    assert await _estimate_input_image_tokens(
+        {"type": "input_image", "image_url": "data:image/jpeg;base64,!!!", "detail": "high"}
+    ) == 85 + (170 * 4)
+
+
 async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
     """Body ``max_output_tokens`` (Responses API) is honored as a completion cap."""
     from routstr.payment.helpers import calculate_discounted_max_cost

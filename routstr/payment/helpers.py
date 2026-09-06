@@ -230,17 +230,24 @@ async def calculate_discounted_max_cost(
     # for work the reservation never covered.
     prompt_tokens = estimate_prompt_tokens(body)
 
+    # Images are billed as tokens by the upstream but carry no text for
+    # ``estimate_prompt_tokens`` to count, so they are estimated separately and
+    # added on both the chat (``messages``) and Responses (``input``) paths.
+    image_tokens = 0
     if isinstance(messages, list):
-        image_tokens = await estimate_image_tokens_in_messages(messages)
-        if image_tokens > 0:
-            logger.debug(
-                "Found images in request",
-                extra={
-                    "model": model,
-                    "image_tokens": image_tokens,
-                },
-            )
-            prompt_tokens += image_tokens
+        image_tokens += await estimate_image_tokens_in_messages(messages)
+    input_data = body.get("input")
+    if input_data is not None:
+        image_tokens += await estimate_image_tokens_from_input(input_data)
+    if image_tokens > 0:
+        logger.debug(
+            "Found images in request",
+            extra={
+                "model": model,
+                "image_tokens": image_tokens,
+            },
+        )
+        prompt_tokens += image_tokens
 
     if prompt_tokens > 0:
         estimated_prompt_delta_sats = (
@@ -629,34 +636,60 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
 async def _estimate_input_image_tokens(item: dict) -> int:
     """Estimate tokens for a Responses API ``input_image`` item.
 
-    Honors the item-level ``detail``. The dimensions of ``file_id``
-    references can't be fetched here, so they get conservative
-    estimates: the max-size tile math for high/auto and the 30,000-patch
-    worst case (36,000 tokens) for original, so we never under-reserve.
+    Honors the item-level ``detail``. Data-URL images are measured from their
+    decoded bytes; remote URLs are fetched and measured like the chat path.
+    Only ``file_id`` references (whose dimensions cannot be fetched here) and
+    unfetchable/broken images fall back to conservative estimates: the
+    max-size tile math for high/auto and the 30,000-patch worst case (36,000
+    tokens) for original, so we never under-reserve.
     """
     detail = item.get("detail") or "auto"
-    if image_url := item.get("image_url"):
-        if isinstance(image_url, dict):
-            image_url = image_url.get("url", "")
-        if isinstance(image_url, str) and image_url.startswith("data:image/"):
-            try:
-                _, base64_data = image_url.split(",", 1)
-                image_bytes = base64.b64decode(base64_data)
-                width, height = _get_image_dimensions(image_bytes)
-                return _calculate_image_tokens(width, height, detail)
-            except Exception as e:
-                logger.warning(
-                    "Failed to process base64 image", extra={"error": str(e)}
-                )
-                return 85
-        # Remote URLs and file_id both have unfetchable dimensions here; fall
-        # through to the conservative estimates below.
-    if item.get("file_id") or item.get("image_url"):
+    image_url = item.get("image_url")
+    if isinstance(image_url, dict):
+        image_url = image_url.get("url", "")
+
+    def _worst_case() -> int:
+        # Dimensions unknown: reserve the worst case for the declared detail so
+        # a broken/unreadable image still covers what the upstream could bill.
         if detail == "original":
             return _MAX_ORIGINAL_IMAGE_TOKENS
-        # We can't fetch an uploaded file's dimensions here; assume the
-        # largest vision image so we don't under-reserve.
         return _calculate_image_tokens(2048, 2048, detail)
+
+    if isinstance(image_url, str) and image_url:
+        if image_url.startswith("data:image/"):
+            image_bytes = None
+            try:
+                _, base64_data = image_url.split(",", 1)
+                image_bytes = base64.b64decode(base64_data, validate=True)
+            except Exception as e:
+                logger.warning(
+                    "Failed to decode base64 image", extra={"error": str(e)}
+                )
+            if image_bytes is not None:
+                try:
+                    img = Image.open(BytesIO(image_bytes))
+                    return _calculate_image_tokens(img.size[0], img.size[1], detail)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to read image dimensions", extra={"error": str(e)}
+                    )
+            # Undecodable / unreadable data URL: reserve the worst case.
+            return _worst_case()
+        # Remote URL: fetch and measure like the chat path so a small image
+        # does not reserve the original-detail worst case.
+        image_bytes = await _fetch_image_from_url(image_url)
+        if image_bytes:
+            try:
+                img = Image.open(BytesIO(image_bytes))
+                return _calculate_image_tokens(img.size[0], img.size[1], detail)
+            except Exception as e:
+                logger.warning(
+                    "Failed to read image dimensions", extra={"error": str(e)}
+                )
+        # Unfetchable or unreadable: fall through to the conservative estimate.
+
+    if item.get("file_id") or image_url:
+        return _worst_case()
     return 0
 
 
