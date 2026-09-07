@@ -1,15 +1,16 @@
 """add model metadata to model paths
 
-Revision ID: e5f6a7b8c9d0
-Revises: b4f7a1c9d2e3
-Create Date: 2026-08-30 00:00:00.000000
+Revision ID: d4597091cd76
+Revises: e5a6b7c8d9f0
+Create Date: 2026-09-07 22:17:55.426282
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "e5f6a7b8c9d0"
-down_revision = "b4f7a1c9d2e3"
+# revision identifiers, used by Alembic.
+revision = "d4597091cd76"
+down_revision = "e5a6b7c8d9f0"
 branch_labels = None
 depends_on = None
 
