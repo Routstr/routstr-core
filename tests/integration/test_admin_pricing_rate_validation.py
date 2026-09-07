@@ -410,12 +410,19 @@ async def test_malformed_auxiliary_rate_is_rejected(
         ("input_cache_write", float("-inf")),
         ("completion", -1.0),
     ):
+        # Send raw bytes rather than `json=`: httpx>=0.28 refuses to encode
+        # non-finite floats itself (allow_nan=False), but the point of this
+        # test is that the SERVER answers the bare NaN/Infinity literals
+        # with a 422, so the literals must still reach it.
+        body = json.dumps(
+            _payload(
+                provider_id, model_id="aux-rate", pricing=_pricing(**{field: bad})
+            )
+        ).encode("utf-8")
         resp = await integration_client.post(
             f"/admin/api/upstream-providers/{provider_id}/models",
-            headers=_admin_headers(),
-            json=_payload(
-                provider_id, model_id="aux-rate", pricing=_pricing(**{field: bad})
-            ),
+            headers={**_admin_headers(), "content-type": "application/json"},
+            content=body,
         )
 
         assert resp.status_code == 422, field

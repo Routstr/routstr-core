@@ -6,11 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
-    "fastapi[standard]>=0.115",
+    "fastapi[standard]>=0.141",
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
     "httpx[socks]>=0.25.2",
-    "h11>=0.14",
+    "h11>=0.16",
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
@@ -21,7 +21,7 @@ dependencies = [
     "mdurl==0.1.2",
     "pillow>=10",
     "openai>=1.98.0",
-    "litellm>=1.55.0",
+    "litellm>=1.84.0,<1.85",
 ]
 
 [dependency-groups]
@@ -87,3 +87,27 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 routstr = { workspace = true }
+
+# Security overrides (2026-09): cashu 0.20.x pins conservative upper bounds
+# (httpx<0.26, h11<0.15, fastapi<0.116, cryptography<44, setuptools<76,
+# wheel<0.42) that conflict with patched versions of these libraries.
+# routstr only imports cashu's wallet-side modules, which do not exercise
+# the fastapi/starlette/h11 server paths cashu's caps were set for.
+[tool.uv]
+override-dependencies = [
+    "httpx[socks]>=0.28.0,<1.0",   # litellm>=1.84 requires httpx>=0.28 (cashu caps <0.26)
+    "importlib-metadata>=8.0.0,<9.0",  # litellm>=1.84 requires >=8.0 (cashu caps <7.0)
+    "h11>=0.16.0",                 # CVE-2025-43859: chunked-encoding smuggling (critical)
+    "fastapi[standard]>=0.141",    # needed for starlette>=1.3.1 line (cashu caps <0.116)
+    "cryptography>=49.0.0",        # GHSA-jwv3-5hgf-82ww et al. (cashu caps <44)
+    "setuptools>=83.0.0",          # CVE-2026-59890, CVE-2025-47273 (cashu caps <76)
+    "wheel>=0.46.2",               # CVE-2026-24049 (cashu caps <0.42)
+]
+
+# Floors for transitive deps whose locked versions are still in-range for
+# their dependents but below the patched versions. Constraints (unlike
+# overrides) don't bypass any upstream pins — they only force the resolver
+# to take the fixed versions.
+constraint-dependencies = [
+    "starlette>=1.3.1",            # CVE-2026-54283, CVE-2026-48818, CVE-2026-48817, CVE-2026-48710, CVE-2025-62727, CVE-2025-54121
+]
