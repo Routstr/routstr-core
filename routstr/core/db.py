@@ -12,7 +12,7 @@ from typing import AsyncGenerator
 from alembic import command
 from alembic.config import Config
 from alembic.util.exc import CommandError
-from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_
+from sqlalchemy import Index, UniqueConstraint, case, delete, event, or_, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -300,9 +300,7 @@ async def release_stale_reservations(
             col(ApiKey.reserved_at) < cutoff
         )
     else:
-        legacy_query = legacy_query.where(
-            col(ApiKey.hashed_key) == key_hash
-        ).where(
+        legacy_query = legacy_query.where(col(ApiKey.hashed_key) == key_hash).where(
             or_(col(ApiKey.reserved_at).is_(None), col(ApiKey.reserved_at) < cutoff)
         )
 
@@ -555,6 +553,55 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
         index=True,
         description="Associated API key hash for wallet history",
     )
+
+
+REFUND_OPEN_STATUSES = ("pending", "ambiguous")
+
+_REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
+
+
+class Refund(SQLModel, table=True):  # type: ignore
+    """A durable claim on an API key's balance for a single payout.
+
+    The partial unique index is the double-refund guarantee: a key can have at
+    most one open claim, so a Cashu refund cannot start while a Lightning
+    refund is in flight, and neither survives a crash without a record.
+    """
+
+    __tablename__ = "refunds"
+    __table_args__ = (
+        Index(
+            "ux_refunds_open_per_key",
+            "api_key_hashed_key",
+            unique=True,
+            sqlite_where=text(_REFUND_OPEN_PREDICATE),
+            postgresql_where=text(_REFUND_OPEN_PREDICATE),
+        ),
+    )
+
+    id: str = Field(primary_key=True, default_factory=lambda: uuid.uuid4().hex)
+    api_key_hashed_key: str = Field(foreign_key="api_keys.hashed_key", index=True)
+    method: str = Field(description="Payout method: lightning or cashu")
+    destination: str | None = Field(
+        default=None, description="Lightning address or LNURL, NULL for cashu"
+    )
+    amount_msats: int = Field(description="Balance debited when the claim opened")
+    unit: str = Field(description="Mint unit the payout is denominated in")
+    mint_url: str = Field(description="Mint the payout is drawn from")
+    status: str = Field(
+        default="pending",
+        index=True,
+        description="pending, paid, failed, ambiguous, or stuck",
+    )
+    quote_id: str | None = Field(
+        default=None, description="Melt quote id, for reconciling an ambiguous payout"
+    )
+    token: str | None = Field(default=None, description="Issued cashu token")
+    claimed_at: int | None = Field(
+        default=None, description="Reconciler lease timestamp"
+    )
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+    updated_at: int = Field(default_factory=lambda: int(time.time()))
 
 
 async def store_cashu_transaction(

@@ -204,7 +204,7 @@ async def test_refund_with_lightning_address(
     await db_snapshot.capture()
 
     # Mock send_to_lnurl function directly
-    with patch("routstr.balance.send_to_lnurl") as mock_send_to_lnurl:
+    with patch("routstr.refund.send_to_lnurl") as mock_send_to_lnurl:
         mock_send_to_lnurl.return_value = {
             "amount_sent": balance,
             "unit": "msat",
@@ -508,7 +508,7 @@ async def test_mint_unavailability_handling(
 
     # Make the send_token method raise a typed mint connection exception.
     with patch(
-        "routstr.balance.send_token",
+        "routstr.refund.send_token",
         side_effect=MintConnectionError(raw_error),
     ):
         response = await authenticated_client.post("/v1/wallet/refund")
@@ -622,7 +622,7 @@ async def test_refund_with_expired_key(
     integration_client.headers["Authorization"] = f"Bearer {api_key}"
 
     # Mock the refund to LN address
-    with patch("routstr.balance.send_to_lnurl") as mock_send_to_lnurl:
+    with patch("routstr.refund.send_to_lnurl") as mock_send_to_lnurl:
         mock_send_to_lnurl.return_value = 500
 
         response = await integration_client.post("/v1/wallet/refund")

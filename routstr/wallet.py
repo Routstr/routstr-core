@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, TypedDict
+from typing import AsyncGenerator, Awaitable, Callable, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -1995,7 +1995,14 @@ async def periodic_routstr_fee_payout() -> None:
             )
 
 
-async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
+async def send_to_lnurl(
+    amount: int,
+    unit: str,
+    mint: str,
+    address: str,
+    *,
+    on_melt_quote: Callable[[str], Awaitable[None]] | None = None,
+) -> int:
     async with wallet_operation_guard():
         mint = await find_trusted_mint_with_funds(amount, unit, mint, force_reload=True)
         wallet = await get_wallet(mint, unit)
@@ -2003,7 +2010,14 @@ async def send_to_lnurl(amount: int, unit: str, mint: str, address: str) -> int:
         # Hand over unreserved proofs: raw_send_to_lnurl reserves only once the
         # destination, the invoice amount and the melt quote have all been
         # accepted, so a rejected refund cannot strand locked proofs.
-        return await raw_send_to_lnurl(wallet, available, address, unit, amount=amount)
+        return await raw_send_to_lnurl(
+            wallet,
+            available,
+            address,
+            unit,
+            amount=amount,
+            on_melt_quote=on_melt_quote,
+        )
 
 
 # class Payment:

@@ -31,7 +31,7 @@ class TestNetworkFailureScenarios:
                 AsyncMock(side_effect=ConnectError("Mint service unavailable")),
             ),
             patch(
-                "routstr.balance.send_token",
+                "routstr.refund.send_token",
                 AsyncMock(side_effect=ConnectError("Mint service unavailable")),
             ),
         ):
