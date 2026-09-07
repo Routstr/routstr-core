@@ -2,7 +2,6 @@ import asyncio
 import inspect
 import json
 from typing import Any
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -42,6 +41,7 @@ from .upstream.helpers import init_upstreams
 from .upstream.model_paths import (
     ModelPathSelector,
     decode_model_path,
+    is_openrouter_base_url,
     public_model_id,
     public_provider_url,
 )
@@ -558,7 +558,7 @@ async def _proxy(
             if (
                 is_ehbp
                 or not request_body_dict
-                or urlsplit(pinned[1].base_url).hostname != "openrouter.ai"
+                or not is_openrouter_base_url(pinned[1].base_url)
                 or _canonical_api_path(path)
                 not in {"chat/completions", "completions", "responses"}
             ):
@@ -848,17 +848,20 @@ async def _proxy(
                     )
                     raise
 
-                # Reactive recovery: some models reject one specific request
-                # param (e.g. newer Anthropic models deprecating `temperature`).
-                # When the upstream 400s naming such a param, strip it from the
-                # body and retry the SAME upstream. ``already_stripped`` bounds
-                # this to one retry per distinct param so it always terminates.
-                if response.status_code == 400 and not is_ehbp and selector is None:
+                # Same-provider recovery must not relax an explicit route.
+                if response.status_code == 400 and not is_ehbp:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),
                         already_stripped,
                     )
+                    if correction is not None and selector is not None:
+                        corrected_body = json.loads(correction.body)
+                        if any(
+                            corrected_body.get(field) != request_body_dict.get(field)
+                            for field in ("model", "provider")
+                        ):
+                            correction = None
                     if correction is not None:
                         request_body, bad_param = correction.body, correction.label
                         already_stripped.add(bad_param)

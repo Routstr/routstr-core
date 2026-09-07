@@ -186,15 +186,11 @@ def _make_http_client() -> httpx.AsyncClient:
 
 
 def is_openrouter_base_url(base_url: str | None) -> bool:
-    """True when ``base_url`` points at OpenRouter.
-
-    Deliberately separate from ``BaseUpstreamProvider._upstream_accepts_cache_control``:
-    that predicate also returns True for native Anthropic (correct for
-    cache-control, wrong for OpenRouter endpoint discovery). This one keys only
-    on the URL so a ``GenericUpstreamProvider`` aimed at OpenRouter is matched
-    while native Anthropic is not.
-    """
-    return "openrouter.ai" in (base_url or "")
+    """Match OpenRouter itself, not compatible providers or lookalike hosts."""
+    try:
+        return urlsplit(base_url or "").hostname == "openrouter.ai"
+    except ValueError:
+        return False
 
 
 def exposed_model_id(model: object) -> str:

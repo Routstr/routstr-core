@@ -535,3 +535,91 @@ async def test_model_fallback_list_is_rejected_when_pinned() -> None:
     response = await _run_proxy(request, [(MagicMock(), selected)])
     assert response.status_code == 400
     selected.forward_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", [None, "deepinfra/fp8"])
+@pytest.mark.parametrize("path", ["v1/chat/completions", "v1/responses"])
+@pytest.mark.parametrize("final_status", [200, 429])
+async def test_pinned_recovery_stays_on_selected_provider(
+    endpoint: str | None, path: str, final_status: int
+) -> None:
+    selected, fallback = _make_upstream(1), _make_upstream(2)
+    selected.base_url = "https://openrouter.ai/api/v1"
+    handler = (
+        "forward_responses_request" if path == "v1/responses" else "forward_request"
+    )
+    forward = AsyncMock(
+        side_effect=[
+            MagicMock(
+                status_code=400,
+                body=b'{"error":{"message":"temperature is deprecated"}}',
+            ),
+            MagicMock(status_code=final_status, body=b"{}"),
+        ]
+    )
+    setattr(selected, handler, forward)
+    setattr(fallback, handler, AsyncMock())
+    request = _make_request(
+        {
+            "authorization": "Bearer key",
+            "x-routstr-model-path": encode_model_path(
+                selected.base_url, 1, MODEL_ID, endpoint
+            ),
+        },
+        json.dumps(
+            {
+                "model": MODEL_ID,
+                "temperature": 0.7,
+                "provider": {"data_collection": "deny"},
+            }
+        ).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), selected), (MagicMock(), fallback)], path
+    )
+
+    assert response.status_code == final_status
+    assert forward.await_count == 2
+    before, after = [json.loads(call.args[3]) for call in forward.await_args_list]
+    assert "temperature" in before
+    assert "temperature" not in after
+    assert after["model"] == before["model"] == MODEL_ID
+    assert after["provider"] == before["provider"]
+    if endpoint:
+        assert after["provider"]["order"] == [endpoint]
+        assert after["provider"]["allow_fallbacks"] is False
+    getattr(fallback, handler).assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["model", "provider"])
+@pytest.mark.parametrize("endpoint", [None, "deepinfra/fp8"])
+async def test_pinned_recovery_preserves_routing_fields(
+    field: str, endpoint: str | None
+) -> None:
+    selected, fallback = _make_upstream(1, 400), _make_upstream(2)
+    selected.base_url = "https://openrouter.ai/api/v1"
+    selected.forward_request.return_value.body = json.dumps(
+        {"error": {"message": f"{field} is not supported"}}
+    ).encode()
+    request = _make_request(
+        {
+            "authorization": "Bearer key",
+            "x-routstr-model-path": encode_model_path(
+                selected.base_url, 1, MODEL_ID, endpoint
+            ),
+        },
+        json.dumps(
+            {"model": MODEL_ID, "provider": {"data_collection": "deny"}}
+        ).encode(),
+    )
+
+    response = await _run_proxy(
+        request, [(MagicMock(), selected), (MagicMock(), fallback)]
+    )
+
+    assert response.status_code == 400
+    selected.forward_request.assert_awaited_once()
+    fallback.forward_request.assert_not_awaited()
