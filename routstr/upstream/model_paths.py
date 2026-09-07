@@ -1,9 +1,6 @@
 """Model-path discovery service.
 
 Exposes every selectable upstream route a Routstr model is reachable through.
-This PR remains discovery-only: request-side routing will consume the opaque
-selectors in a follow-up.
-
 A path is a standard percent-encoded query string containing the configured
 upstream URL, provider ID, client-visible model ID and, for an exact OpenRouter
 endpoint, its machine-readable tag::
@@ -20,7 +17,7 @@ import random
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from sqlalchemy.dialects.sqlite import insert
@@ -130,6 +127,57 @@ def encode_model_path(
     if endpoint_tag:
         components.append(("endpoint", endpoint_tag))
     return urlencode(components)
+
+
+@dataclass(frozen=True)
+class ModelPathSelector:
+    """Decoded client-supplied route selector."""
+
+    base_url: str
+    provider_id: int
+    model_id: str
+    endpoint_tag: str | None = None
+
+
+def decode_model_path(path: str) -> ModelPathSelector | None:
+    """Inverse of ``encode_model_path``; ``None`` when the selector is malformed."""
+    try:
+        pairs = parse_qsl(
+            path,
+            keep_blank_values=True,
+            strict_parsing=True,
+            max_num_fields=4,
+            errors="strict",
+        )
+    except ValueError:
+        return None
+    params = dict(pairs)
+    if len(params) != len(pairs) or params.keys() - {
+        "url",
+        "provider-id",
+        "model-id",
+        "endpoint",
+    }:
+        return None
+    if any(not value.strip() for value in params.values()):
+        return None
+    base_url = params.get("url", "")
+    model_id = params.get("model-id", "")
+    raw_provider_id = params.get("provider-id", "")
+    if not base_url or not model_id or not raw_provider_id:
+        return None
+    try:
+        provider_id = int(raw_provider_id)
+    except ValueError:
+        return None
+    if provider_id <= 0:
+        return None
+    return ModelPathSelector(
+        base_url=base_url,
+        provider_id=provider_id,
+        model_id=model_id,
+        endpoint_tag=params.get("endpoint") or None,
+    )
 
 
 def _make_http_client() -> httpx.AsyncClient:

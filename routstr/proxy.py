@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import json
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -38,9 +39,17 @@ from .payment.models import Model
 from .upstream import BaseUpstreamProvider
 from .upstream.ehbp import forward_ehbp_request, forward_ehbp_x_cashu_request
 from .upstream.helpers import init_upstreams
+from .upstream.model_paths import (
+    ModelPathSelector,
+    decode_model_path,
+    public_model_id,
+    public_provider_url,
+)
 from .upstream.request_correction import correct_request, extract_error_message
 
 logger = get_logger(__name__)
+
+MODEL_PATH_HEADER = "x-routstr-model-path"
 proxy_router = APIRouter()
 
 _upstreams: list[BaseUpstreamProvider] = []
@@ -110,6 +119,25 @@ def get_candidates(
         if candidates := _provider_map.get(base_model_id):
             return candidates
 
+    return None
+
+
+def _model_ids_match(requested: str, selected: str) -> bool:
+    if requested.lower() == selected.lower():
+        return True
+    return public_model_id(requested).lower() == public_model_id(selected).lower()
+
+
+def _candidate_for_selector(
+    selector: ModelPathSelector,
+    candidates: list[tuple[Model, BaseUpstreamProvider]],
+) -> tuple[Model, BaseUpstreamProvider] | None:
+    for model_obj, upstream in candidates:
+        if (
+            upstream.db_id == selector.provider_id
+            and public_provider_url(upstream.base_url) == selector.base_url
+        ):
+            return model_obj, upstream
     return None
 
 
@@ -424,6 +452,13 @@ async def _proxy(
     # without model/cost/auth lookups. Do not prefix-match here: paths such as
     # /attestationjunk must continue through normal authentication.
     if request.method == "GET" and _is_tinfoil_attestation_path(path):
+        if MODEL_PATH_HEADER in headers:
+            return create_error_response(
+                "unsupported_request",
+                "Model paths do not apply to attestation",
+                400,
+                request=request,
+            )
         selected_upstreams = _select_unauthenticated_get_upstreams(path, _upstreams)
         if not selected_upstreams:
             return create_error_response(
@@ -464,12 +499,92 @@ async def _proxy(
             "upstream_error", "All upstreams failed", 502, request=request
         )
 
+    selector: ModelPathSelector | None = None
+    if MODEL_PATH_HEADER in headers:
+        selector = decode_model_path(headers[MODEL_PATH_HEADER])
+        if (
+            selector is None
+            or sum(
+                name.lower() == MODEL_PATH_HEADER for name, _ in request.headers.items()
+            )
+            != 1
+        ):
+            return create_error_response(
+                "invalid_request",
+                f"Malformed {MODEL_PATH_HEADER} header",
+                400,
+                request=request,
+            )
+        if not isinstance(model_id, str) or not _model_ids_match(
+            model_id, selector.model_id
+        ):
+            return create_error_response(
+                "invalid_request",
+                f"{MODEL_PATH_HEADER} selects model '{selector.model_id}' but the "
+                f"request asks for '{model_id}'",
+                400,
+                request=request,
+            )
+        if "models" in request_body_dict:
+            return create_error_response(
+                "invalid_request",
+                "Model paths cannot be combined with model fallbacks",
+                400,
+                request=request,
+            )
+        model_id = selector.model_id
+
     candidates = get_candidates(model_id)
 
     if not candidates:
         return create_error_response(
             "invalid_model", f"Model '{model_id}' not found", 400, request=request
         )
+
+    if selector is not None:
+        pinned = _candidate_for_selector(selector, candidates)
+        if pinned is None:
+            return create_error_response(
+                "invalid_model_path",
+                f"Model '{selector.model_id}' is not routable through provider "
+                f"{selector.provider_id}",
+                404,
+                request=request,
+            )
+        # Explicit routes must never enter cross-provider failover.
+        candidates = [pinned]
+
+        if selector.endpoint_tag:
+            if (
+                is_ehbp
+                or not request_body_dict
+                or urlsplit(pinned[1].base_url).hostname != "openrouter.ai"
+                or _canonical_api_path(path)
+                not in {"chat/completions", "completions", "responses"}
+            ):
+                return create_error_response(
+                    "unsupported_request",
+                    "Endpoint pinning requires an OpenRouter completion or Responses JSON request",
+                    400,
+                    request=request,
+                )
+            provider_options = request_body_dict.get("provider", {})
+            if not isinstance(provider_options, dict):
+                return create_error_response(
+                    "invalid_request",
+                    "provider must be an object",
+                    400,
+                    request=request,
+                )
+            request_body_dict = {
+                **request_body_dict,
+                "provider": {
+                    **provider_options,
+                    "order": [selector.endpoint_tag],
+                    "allow_fallbacks": False,
+                },
+            }
+            request_body = json.dumps(request_body_dict).encode()
 
     if is_ehbp:
         candidates = [
@@ -521,11 +636,21 @@ async def _proxy(
                     )
                 elif is_responses_api:
                     return await upstream.handle_x_cashu_responses(
-                        request, x_cashu, path, max_cost_for_model, model_obj
+                        request,
+                        x_cashu,
+                        path,
+                        max_cost_for_model,
+                        model_obj,
+                        request_body=request_body,
                     )
                 else:
                     return await upstream.handle_x_cashu(
-                        request, x_cashu, path, max_cost_for_model, model_obj
+                        request,
+                        x_cashu,
+                        path,
+                        max_cost_for_model,
+                        model_obj,
+                        request_body=request_body,
                     )
             except UpstreamError as e:
                 logger.warning(
@@ -728,7 +853,7 @@ async def _proxy(
                 # When the upstream 400s naming such a param, strip it from the
                 # body and retry the SAME upstream. ``already_stripped`` bounds
                 # this to one retry per distinct param so it always terminates.
-                if response.status_code == 400 and not is_ehbp:
+                if response.status_code == 400 and not is_ehbp and selector is None:
                     correction = correct_request(
                         request_body,
                         extract_error_message(response),

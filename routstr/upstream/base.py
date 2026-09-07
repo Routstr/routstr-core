@@ -533,6 +533,7 @@ class BaseUpstreamProvider:
             "refund-lnurl",
             "key-expiry-time",
             "x-cashu",
+            "x-routstr-model-path",
         ]:
             if headers.pop(header, None) is not None:
                 removed_headers.append(header)
@@ -4244,6 +4245,8 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
+        *,
+        request_body: bytes | None = None,
     ) -> Response | StreamingResponse:
         """Forward request paid with X-Cashu token to upstream service.
 
@@ -4263,7 +4266,8 @@ class BaseUpstreamProvider:
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
-        request_body = await request.body()
+        if request_body is None:
+            request_body = await request.body()
 
         if (
             path.endswith("messages/count_tokens")
@@ -4459,6 +4463,8 @@ class BaseUpstreamProvider:
         path: str,
         max_cost_for_model: int,
         model_obj: Model,
+        *,
+        request_body: bytes | None = None,
     ) -> Response | StreamingResponse:
         """Handle X-Cashu payment for Responses API requests.
 
@@ -4523,6 +4529,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
+                request_body=request_body,
             )
         except Exception as e:
             error_message = str(e)
@@ -4579,6 +4586,8 @@ class BaseUpstreamProvider:
         max_cost_for_model: int,
         model_obj: Model,
         mint: str | None = None,
+        *,
+        request_body: bytes | None = None,
     ) -> Response | StreamingResponse:
         """Forward Responses API request paid with X-Cashu token to upstream service.
 
@@ -4600,7 +4609,8 @@ class BaseUpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
-        request_body = await request.body()
+        if request_body is None:
+            request_body = await request.body()
         transformed_body = self.prepare_responses_request_body(request_body, model_obj)
 
         logger.debug(
@@ -5162,6 +5172,8 @@ class BaseUpstreamProvider:
         path: str,
         max_cost_for_model: int,
         model_obj: Model,
+        *,
+        request_body: bytes | None = None,
     ) -> Response | StreamingResponse:
         """Handle request with X-Cashu token payment, redeeming token and forwarding request.
 
@@ -5241,6 +5253,7 @@ class BaseUpstreamProvider:
                 max_cost_for_model,
                 model_obj,
                 mint,
+                request_body=request_body,
             )
         except Exception as e:
             error_message = str(e)
