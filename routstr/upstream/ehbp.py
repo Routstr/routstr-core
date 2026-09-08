@@ -81,7 +81,8 @@ def _is_ehbp_key_config_response(resp: TrailerResponse) -> bool:
         if k.lower() == "content-type":
             ct = v.lower()
             break
-    if "application/problem+json" not in ct:
+    media_type = ct.split(";", 1)[0].strip()
+    if media_type != "application/problem+json":
         return False
     try:
         body = json.loads(resp.body)
@@ -94,19 +95,18 @@ def _passthrough_key_config_response(resp: TrailerResponse) -> Response:
     """Return the enclave's key-config 422 with its original body and content
     type so the EHBP client's ``KeyConfigMismatchError`` detection fires.
 
-    Only EHBP protocol headers are forwarded; everything else (hop-by-hop,
-    upstream-internal) is filtered out.
+    Only the content type is forwarded. ``Ehbp-Response-Nonce`` must be
+    dropped: a nonce only carries meaning for an *encrypted* response body,
+    and the stock ``ehbp`` client (``shouldDecryptResponse``) checks for the
+    nonce *before* checking for a key-config mismatch — forwarding it would
+    send that client down the decrypt path on this plaintext error body, so
+    the re-attestation loop would never fire. Content-length is recomputed
+    from the body, and upstream-internal headers are filtered out.
     """
-    passthrough_headers: dict[str, str] = {
-        "content-type": "application/problem+json",
-    }
-    for k, v in resp.headers:
-        if k.lower() in ("ehbp-response-nonce", "content-length"):
-            passthrough_headers[k] = v
     return Response(
         content=resp.body,
         status_code=422,
-        headers=passthrough_headers,
+        headers={"content-type": "application/problem+json"},
         media_type="application/problem+json",
     )
 
