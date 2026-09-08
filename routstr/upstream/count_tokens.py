@@ -222,6 +222,12 @@ class MissingUsageEstimator:
                 return
         self._output_parts.extend(_generated_text(response_data))
 
+    def estimated_usage(self, model: str | None = None) -> dict[str, Any] | None:
+        """Local usage estimate, or None when the upstream generated no text."""
+        if not self.output_text:
+            return None
+        return self.response_data(model)["usage"]
+
     def billing_data(
         self,
         response_data: dict[str, Any] | None,

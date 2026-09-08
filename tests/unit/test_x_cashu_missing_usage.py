@@ -5,6 +5,7 @@ When nothing can be estimated the prepayment is refunded in full.
 """
 
 import json
+import logging
 import os
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -267,3 +268,36 @@ async def test_pricing_error_refunds_full_prepayment(
     assert result.status_code == 200
     assert result.headers["X-Cashu"] == "cashuBrefund"
     assert result.headers["X-Routstr-Cost-Msats"] == "0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+async def test_full_refund_is_logged_with_model_provider_and_body(
+    responses_api: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    payload = {
+        "model": "unpriced-model",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    base_logger = logging.getLogger("routstr.upstream.base")
+    base_logger.addHandler(caplog.handler)
+    try:
+        with patch(
+            "routstr.payment.cost_calculation._get_pricing_rates",
+            side_effect=ValueError("No pricing for model"),
+        ):
+            await _settle(_json(payload), responses_api=responses_api)
+    finally:
+        base_logger.removeHandler(caplog.handler)
+
+    record = next(
+        r
+        for r in caplog.records
+        if r.getMessage() == "Zero-cost settlement, refunding the full prepayment"
+    )
+    assert record.model == "unpriced-model"
+    assert record.provider_type == "base"
+    assert record.upstream_base_url == "http://test"
+    assert record.refund_amount == 10_000
+    assert record.unit == "msat"
+    assert "unpriced-model" in record.response_body_preview
