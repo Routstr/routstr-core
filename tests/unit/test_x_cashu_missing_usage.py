@@ -40,6 +40,7 @@ async def _settle(
     *,
     responses_api: bool = False,
     request_body: bytes | None = REQUEST_BODY,
+    unit: str = "msat",
 ) -> tuple[Any, AsyncMock, AsyncMock]:
     provider = BaseUpstreamProvider(base_url="http://test", api_key="test-key")
     get_cost = AsyncMock(side_effect=provider.get_x_cashu_cost)
@@ -56,7 +57,7 @@ async def _settle(
         result = await handler(
             response=response,
             amount=10_000,
-            unit="msat",
+            unit=unit,
             max_cost_for_model=9_000,
             mint=None,
             request_body=request_body,
@@ -113,7 +114,7 @@ async def test_non_streaming_chat_without_usage_bills_from_estimate() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_responses_without_usage_bills_from_estimate() -> None:
-    events = [
+    events: list[dict[str, Any]] = [
         {"type": "response.created", "response": {"model": "gpt-5-mini"}},
         {"type": "response.output_text.delta", "delta": "Why did the chicken"},
         {"type": "response.output_text.done", "text": "Why did the chicken"},
@@ -139,3 +140,130 @@ async def test_non_streaming_responses_without_usage_bills_from_estimate() -> No
     usage = _billed_usage(get_cost)
     assert usage is not None
     assert usage["output_tokens"] > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+async def test_empty_streaming_usage_uses_estimate(responses_api: bool) -> None:
+    payload: dict[str, Any] = {"model": "gpt-4o", "usage": {}}
+    if responses_api:
+        payload["output"] = [{"content": [{"type": "output_text", "text": "Hello"}]}]
+    else:
+        payload["choices"] = [{"delta": {"content": "Hello"}}]
+
+    _, get_cost, _ = await _settle(_sse([payload]), responses_api=responses_api)
+
+    usage = _billed_usage(get_cost)
+    assert usage is not None
+    assert usage.get("estimated") is True
+    assert usage["output_tokens"] > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_type", ["response.completed", "response.incomplete"])
+async def test_responses_terminal_output_is_not_billed_twice(
+    terminal_type: str,
+) -> None:
+    payload = {
+        "model": "gpt-4o",
+        "output": [{"content": [{"type": "output_text", "text": "Hello world"}]}],
+    }
+    events: list[dict[str, Any]] = [
+        {"type": "response.output_text.delta", "delta": "Hello world"},
+        {"type": terminal_type, "response": payload},
+    ]
+    _, streaming_cost, _ = await _settle(_sse(events), responses_api=True)
+    _, json_cost, _ = await _settle(_json(payload), responses_api=True)
+
+    stream_usage = _billed_usage(streaming_cost)
+    json_usage = _billed_usage(json_cost)
+    assert stream_usage is not None and json_usage is not None
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        assert stream_usage[field] == json_usage[field]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("input_shape", ["string", "message", "content_blocks"])
+async def test_responses_estimate_includes_input(
+    stream: bool, input_shape: str
+) -> None:
+    prompt = "Explain how payment reservations work. " * 100
+    response_input: Any = prompt
+    if input_shape == "message":
+        response_input = [{"role": "user", "content": prompt}]
+    elif input_shape == "content_blocks":
+        response_input = [
+            {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
+        ]
+    request_body = json.dumps(
+        {
+            "model": "gpt-4o",
+            "instructions": "Answer concisely.",
+            "input": response_input,
+        }
+    ).encode()
+    payload = {
+        "model": "gpt-4o",
+        "output": [{"content": [{"type": "output_text", "text": "Hello"}]}],
+    }
+    response = _sse([payload]) if stream else _json(payload)
+    _, get_cost, _ = await _settle(
+        response, responses_api=True, request_body=request_body
+    )
+
+    usage = _billed_usage(get_cost)
+    assert usage is not None
+    assert usage["input_tokens"] > 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("tokens", [0, 17])
+async def test_reported_usage_takes_precedence(
+    responses_api: bool, stream: bool, tokens: int
+) -> None:
+    payload: dict[str, Any] = {
+        "model": "gpt-4o",
+        "usage": {"input_tokens": tokens, "output_tokens": tokens},
+    }
+    if responses_api:
+        payload["output"] = [{"content": [{"type": "output_text", "text": "Hello"}]}]
+    else:
+        payload["choices"] = [{"message": {"content": "Hello"}}]
+
+    response = _sse([payload]) if stream else _json(payload)
+    _, get_cost, _ = await _settle(response, responses_api=responses_api)
+
+    usage = _billed_usage(get_cost)
+    assert usage is not None
+    assert usage["input_tokens"] == tokens
+    assert usage["output_tokens"] == tokens
+    assert "estimated" not in usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses_api", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("unit", ["sat", "msat"])
+async def test_pricing_error_refunds_full_prepayment(
+    responses_api: bool, stream: bool, unit: str
+) -> None:
+    payload = {
+        "model": "unpriced-model",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    response = _sse([payload]) if stream else _json(payload)
+    with patch(
+        "routstr.payment.cost_calculation._get_pricing_rates",
+        side_effect=ValueError("No pricing for model"),
+    ):
+        result, _, send_refund = await _settle(
+            response, responses_api=responses_api, unit=unit
+        )
+
+    send_refund.assert_awaited_once_with(10_000, unit, None, request_id=None)
+    assert result.status_code == 200
+    assert result.headers["X-Cashu"] == "cashuBrefund"
+    assert result.headers["X-Routstr-Cost-Msats"] == "0"

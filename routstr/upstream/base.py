@@ -3892,7 +3892,7 @@ class BaseUpstreamProvider:
                     continue
                 usage_estimator.observe(data_json)
 
-        if usage_data is None:
+        if not usage_data:
             usage_data = _estimated_usage(usage_estimator, model)
             if usage_data:
                 logger.warning(
@@ -4935,7 +4935,7 @@ class BaseUpstreamProvider:
             elif not model and payload.get("model"):
                 model = payload["model"]
 
-        if usage_data is None:
+        if not usage_data:
             usage_data = _estimated_usage(usage_estimator, model)
             logger.warning(
                 "No usage in streaming Responses API response, billing from local token estimate",
