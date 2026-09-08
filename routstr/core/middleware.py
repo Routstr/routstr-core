@@ -15,13 +15,11 @@ logger = get_logger(__name__)
 # Context variable to store request ID across async context
 request_id_context: ContextVar[str | None] = ContextVar("request_id")
 
-# Context variable to store the client app across async context
 client_app_context: ContextVar[str | None] = ContextVar("client_app")
 
 UNKNOWN_CLIENT_APP = "unknown"
 
-# Identity headers in priority order. X-Title and HTTP-Referer are the
-# OpenRouter convention; User-Agent covers SDKs and scripts that set neither.
+# Prefer OpenRouter app headers, then browser and SDK fallbacks.
 _CLIENT_APP_HEADERS: tuple[str, ...] = (
     "x-title",
     "http-referer",
@@ -29,8 +27,7 @@ _CLIENT_APP_HEADERS: tuple[str, ...] = (
     "user-agent",
 )
 
-# Header values are attacker-controlled: cap the length so one request can't
-# bloat every log line.
+# Limit untrusted header data repeated in every log record.
 _CLIENT_APP_MAX_LENGTH = 120
 
 

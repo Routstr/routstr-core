@@ -183,10 +183,9 @@ class RequestIdFilter(logging.Filter):
 
 
 class ClientAppFilter(logging.Filter):
-    """Filter to add the requesting client app to all log records."""
+    """Attach request-local app attribution to log records."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Add the client app to the log record if available."""
         # Import here to avoid circular imports
         from .middleware import UNKNOWN_CLIENT_APP, client_app_context
 

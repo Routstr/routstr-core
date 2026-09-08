@@ -93,7 +93,6 @@ def test_value_is_truncated_to_120_chars() -> None:
 
 
 def test_control_characters_are_stripped() -> None:
-    """A crafted header must not be able to forge log records."""
     headers = Headers({"user-agent": "evil-app\x1b[0m fake INFO line"})
     assert client_app_from_headers(headers) == "evil-app[0m fake INFO line"
 
@@ -178,7 +177,6 @@ def test_filter_defaults_to_unknown_outside_request_context() -> None:
 
 
 def test_handler_logs_carry_client_app(caplog: pytest.LogCaptureFixture) -> None:
-    """A log line emitted inside a handler still names the app that triggered it."""
     app = FastAPI()
     handler_logger = logging.getLogger("routstr.test.handler")
 
