@@ -40,13 +40,17 @@ class EhbpTimeoutError(UpstreamError):
     Distinct from a generic :class:`UpstreamError` so callers can map the
     failure to a ``504 Gateway Timeout`` with a stable ``UPSTREAM_TIMEOUT``
     code instead of a misleading ``500`` internal server error.
+
+    ``details`` carries optional structured, redaction-safe context and is
+    forwarded to the client by ``create_upstream_error_response``.
     """
 
-    def __init__(self, message: str, status_code: int = 504):
+    def __init__(self, message: str, details: dict[str, object] | None = None):
         super().__init__(
             message,
-            status_code=status_code,
+            status_code=504,
             code="UPSTREAM_TIMEOUT",
+            details=details,
         )
 
 

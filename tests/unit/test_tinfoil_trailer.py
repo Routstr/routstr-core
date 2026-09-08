@@ -195,4 +195,13 @@ def test_ehbp_timeout_error_metadata() -> None:
     exc = EhbpTimeoutError("boom")
     assert exc.status_code == 504
     assert exc.code == "UPSTREAM_TIMEOUT"
+    assert exc.details is None
     assert isinstance(exc, UpstreamError)
+
+
+def test_ehbp_timeout_error_forwards_details() -> None:
+    """``details`` must survive so the response builder can forward it."""
+    exc = EhbpTimeoutError("boom", details={"phase": "connect"})
+    assert exc.details == {"phase": "connect"}
+    assert exc.status_code == 504
+    assert exc.code == "UPSTREAM_TIMEOUT"
