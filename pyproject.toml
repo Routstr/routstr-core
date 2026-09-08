@@ -6,11 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
-    "fastapi[standard]>=0.115",
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
     "httpx[socks]>=0.25.2",
-    "h11>=0.14",
+    "h11>=0.16",
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
@@ -87,3 +87,25 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 routstr = { workspace = true }
+
+# Security overrides (2026-09): cashu 0.20.x pins conservative upper bounds
+# (h11<0.15, fastapi<0.116, cryptography<44, setuptools<76, wheel<0.42) that
+# conflict with the patched versions of these libraries. routstr only imports
+# cashu's wallet-side modules, which never exercise the fastapi/starlette/h11
+# server paths those caps were set for.
+[tool.uv]
+override-dependencies = [
+    "h11>=0.16.0",                 # CVE-2025-43859: chunked-encoding smuggling (critical)
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.141",  # gateway to the starlette>=1.3.1 line (cashu caps <0.116)
+    "cryptography>=49.0.0",        # GHSA-jwv3-5hgf-82ww et al. (cashu caps <44)
+    "setuptools>=83.0.0",          # CVE-2026-59890, CVE-2025-47273 (cashu caps <76)
+    "wheel>=0.46.2",               # CVE-2026-24049 (cashu caps <0.42)
+]
+
+# Floors for transitive deps whose locked versions are still in-range for their
+# dependents but below the patched versions. Constraints (unlike overrides)
+# don't bypass any upstream pin — they only force the resolver to take the
+# fixed versions.
+constraint-dependencies = [
+    "starlette>=1.3.1",            # CVE-2026-54283, CVE-2026-48818, CVE-2026-48817, CVE-2026-48710, CVE-2025-62727, CVE-2025-54121
+]
