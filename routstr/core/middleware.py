@@ -2,6 +2,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from typing import Callable
+from urllib.parse import urlsplit
 
 from fastapi import Request, Response
 from starlette.datastructures import Headers
@@ -39,6 +40,15 @@ def client_app_from_headers(headers: Headers) -> str:
         if raw is None:
             continue
         cleaned = "".join(ch for ch in raw if ch.isprintable()).strip()
+        if header in ("http-referer", "referer"):
+            try:
+                url = urlsplit(cleaned)
+                if url.scheme not in ("http", "https") or not url.hostname:
+                    continue
+            except ValueError:
+                continue
+            # Attribution needs the origin, not credentials or private page URLs.
+            cleaned = f"{url.scheme}://{url.netloc.rsplit('@', 1)[-1]}"
         if cleaned:
             return cleaned[:_CLIENT_APP_MAX_LENGTH]
     return UNKNOWN_CLIENT_APP
