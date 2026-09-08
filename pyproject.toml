@@ -9,7 +9,7 @@ dependencies = [
     "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
-    "httpx[socks]>=0.25.2",
+    "httpx[socks]>=0.28.1",
     "h11>=0.16",
     "greenlet>=3.2.1",
     "alembic>=1.13",
@@ -21,7 +21,7 @@ dependencies = [
     "mdurl==0.1.2",
     "pillow>=10",
     "openai>=1.98.0",
-    "litellm>=1.55.0",
+    "litellm>=1.84.0,<1.85",
 ]
 
 [dependency-groups]
@@ -88,11 +88,15 @@ disallow_untyped_decorators = true
 [tool.uv.sources]
 routstr = { workspace = true }
 
-# Security floors. cashu 0.20.x caps h11, fastapi, cryptography, setuptools
-# and wheel below their patched versions. routstr uses only cashu's wallet
-# modules, not its server paths, so the caps are safe to lift here.
+# Security floors. cashu 0.20.x caps httpx, h11, fastapi, cryptography,
+# setuptools and wheel below their patched versions. routstr uses only cashu's
+# wallet modules, not its server paths, so the caps are safe to lift here.
 [tool.uv]
 override-dependencies = [
+    # httpx 0.28 (required by litellm 1.84) removed the `proxies` kwarg cashu
+    # passes on every mint call; routstr/cashu_compat.py restores it for cashu.
+    "httpx[socks]>=0.28.1,<1.0",
+    "importlib-metadata>=8.0.0,<9.0",
     "h11>=0.16.0",
     "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "cryptography>=49.0.0",
