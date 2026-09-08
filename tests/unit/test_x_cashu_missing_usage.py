@@ -295,9 +295,10 @@ async def test_full_refund_is_logged_with_model_provider_and_body(
         for r in caplog.records
         if r.getMessage() == "Zero-cost settlement, refunding the full prepayment"
     )
-    assert record.model == "unpriced-model"
-    assert record.provider_type == "base"
-    assert record.upstream_base_url == "http://test"
-    assert record.refund_amount == 10_000
-    assert record.unit == "msat"
-    assert "unpriced-model" in record.response_body_preview
+    logged = record.__dict__
+    assert logged["model"] == "unpriced-model"
+    assert logged["provider_type"] == "base"
+    assert logged["upstream_base_url"] == "http://test"
+    assert logged["refund_amount"] == 10_000
+    assert logged["unit"] == "msat"
+    assert "unpriced-model" in logged["response_body_preview"]
