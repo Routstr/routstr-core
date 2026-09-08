@@ -1028,6 +1028,7 @@ async def test_x_cashu_key_config_422_refunds_and_sets_x_cashu_header() -> None:
     )
     # The redemption itself was recorded.
     store_mock.assert_awaited_once()
+    assert store_mock.await_args is not None
     assert store_mock.await_args.kwargs.get("typ") == "in"
     # Passthrough shape with the refund attached.
     assert response.status_code == 422
