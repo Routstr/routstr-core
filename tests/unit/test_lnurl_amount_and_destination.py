@@ -133,7 +133,7 @@ async def test_raw_send_to_lnurl_accepts_exact_invoice() -> None:
             wallet, proofs, "owner@ln.tld", "sat", amount=1000
         )
 
-    assert paid == EXPECTED_QUOTE_SAT * 1000
+    assert paid == 1000  # 1000 sat selected, no change returned
     wallet.select_to_send.assert_not_awaited()
     wallet.set_reserved_for_send.assert_awaited_once_with(proofs, reserved=True)
     wallet.melt.assert_awaited_once()
@@ -156,7 +156,7 @@ async def test_raw_send_to_lnurl_msat_unit_compares_in_wallet_unit() -> None:
             wallet, proofs, "owner@ln.tld", "msat", amount=1_000_000
         )
 
-    assert paid == 999_999
+    assert paid == 1_000_000  # 1_000_000 msat selected, no change
 
 
 @pytest.mark.asyncio
@@ -189,7 +189,7 @@ async def test_raw_send_to_lnurl_requotes_for_exact_input_fees_without_recursion
             on_melt_quote=checkpoint,
         )
 
-    assert paid == 1_475_000
+    assert paid == 1500  # 1500 sat selected, no change returned
     assert wallet.melt_quote.await_count == 2
     checkpoint.assert_awaited_once_with("q2")
     wallet.select_to_send.assert_not_called()
