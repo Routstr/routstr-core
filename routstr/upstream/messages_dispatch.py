@@ -32,6 +32,7 @@ from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..payment.models import Model
 from .rate_limit import classify_rate_limit
+from .reasoning_effort import adapt_messages_body_for_litellm
 
 logger = get_logger(__name__)
 
@@ -71,6 +72,8 @@ ALLOWED_MESSAGES_REQUEST_FIELDS: frozenset[str] = frozenset(
         "tools",
         "tool_choice",
         "metadata",
+        # OpenAI-shaped effort after thinking is lifted off Anthropic bodies.
+        "reasoning_effort",
     }
 )
 
@@ -131,9 +134,7 @@ def parse_sse_blocks(buffer: bytes) -> tuple[list[dict], bytes]:
     return events, buffer
 
 
-def events_from_chunk(
-    chunk: object, sse_buffer: bytes
-) -> tuple[list[dict], bytes]:
+def events_from_chunk(chunk: object, sse_buffer: bytes) -> tuple[list[dict], bytes]:
     """Normalize a stream chunk into one or more event dicts.
 
     ``litellm.anthropic.messages.acreate(stream=True)`` yields raw SSE
@@ -224,9 +225,7 @@ async def aggregate_anthropic_events_to_message(
                 raw_json = partial_json.pop(idx, None)
                 if raw_json is not None and idx < len(blocks):
                     try:
-                        blocks[idx]["input"] = (
-                            json.loads(raw_json) if raw_json else {}
-                        )
+                        blocks[idx]["input"] = json.loads(raw_json) if raw_json else {}
                     except json.JSONDecodeError:
                         blocks[idx]["input"] = raw_json
             elif etype == "message_delta":
@@ -468,9 +467,7 @@ async def dispatch_anthropic_messages(
     on bad input or upstream failure.
     """
     if not request_body:
-        raise UpstreamError(
-            "Missing request body for /v1/messages", status_code=400
-        )
+        raise UpstreamError("Missing request body for /v1/messages", status_code=400)
 
     try:
         body: dict = json.loads(request_body)
@@ -489,6 +486,8 @@ async def dispatch_anthropic_messages(
     client_stream = bool(body.pop("stream", False))
     upstream_stream = True
 
+    adapt_messages_body_for_litellm(body, model_obj)
+
     # Forward only allowlisted Anthropic Messages request fields. Any
     # other client-supplied key is dropped so it cannot leak into the
     # upstream request. See ALLOWED_MESSAGES_REQUEST_FIELDS.
@@ -498,9 +497,7 @@ async def dispatch_anthropic_messages(
             "Dropped non-forwardable fields before litellm dispatch",
             extra={"dropped_keys": dropped},
         )
-    body = {
-        k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS
-    }
+    body = {k: v for k, v in body.items() if k in ALLOWED_MESSAGES_REQUEST_FIELDS}
 
     # Convention: `model.id` is the canonical upstream model name;
     # `forwarded_model_id` is the public alias the internal API exposes

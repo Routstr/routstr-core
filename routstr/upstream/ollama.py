@@ -66,9 +66,7 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         """Strip 'ollama/' prefix for Ollama API compatibility."""
         return model_id.removeprefix("ollama/")
 
-    def get_request_base_url(
-        self, path: str, model_obj: Model | None = None
-    ) -> str:
+    def get_request_base_url(self, path: str, model_obj: Model | None = None) -> str:
         """Route proxy traffic through Ollama's OpenAI-compatible /v1 endpoint."""
         return f"{self.base_url.rstrip('/')}/v1"
 
@@ -185,7 +183,9 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             except Exception:
                 self._models_cache = models_with_fees
 
-            self._models_by_id = {m.forwarded_model_id or m.id: m for m in self._models_cache}
+            self._models_by_id = {
+                m.forwarded_model_id or m.id: m for m in self._models_cache
+            }
             logger.info(
                 f"Refreshed models cache for {self.base_url}",
                 extra={"model_count": len(models)},
@@ -224,26 +224,14 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
         Returns:
             Model with provider fee applied to pricing and max costs calculated
         """
-        from ..payment.models import Model, Pricing, _calculate_usd_max_costs
+        from ..payment.models import Pricing, _calculate_usd_max_costs
 
         adjusted_pricing = Pricing.parse_obj(
             {k: v * self.provider_fee for k, v in model.pricing.dict().items()}
         )
 
-        temp_model = Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=None,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
+        temp_model = model.copy(
+            update={"pricing": adjusted_pricing, "sats_pricing": None}
         )
 
         (
@@ -252,18 +240,4 @@ class OllamaUpstreamProvider(BaseUpstreamProvider):
             adjusted_pricing.max_cost,
         ) = _calculate_usd_max_costs(temp_model)
 
-        return Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=model.sats_pricing,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-        )
+        return model.copy(update={"pricing": adjusted_pricing})
