@@ -1191,13 +1191,27 @@ async def adjust_payment_for_tokens(
     calculated_cost = await calculate_cost(
         response_data, deducted_max_cost, model_obj, provider_fee
     )
-    if not isinstance(calculated_cost, CostDataError):
-        if not await _claim_reservation_for_charge(reservation, session):
-            # A prior charge or release already owns this reservation. Returning
-            # the calculated metadata is safe; the aggregate balances must not
-            # be modified a second time.
-            calculated_cost.charged_msats = 0
-            return calculated_cost.dict()
+    if isinstance(calculated_cost, CostDataError):
+        # Content was already served, so release instead of raising a 400.
+        logger.error(
+            "Cost calculation error during payment adjustment, releasing reservation",
+            extra={
+                "key_hash": key_log_hash,
+                "model": model,
+                "error_message": calculated_cost.message,
+                "error_code": calculated_cost.code,
+            },
+        )
+        calculated_cost = MaxCostData(
+            base_msats=0, input_msats=0, output_msats=0, total_msats=0
+        )
+
+    if not await _claim_reservation_for_charge(reservation, session):
+        # A prior charge or release already owns this reservation. Returning
+        # the calculated metadata is safe; the aggregate balances must not
+        # be modified a second time.
+        calculated_cost.charged_msats = 0
+        return calculated_cost.dict()
 
     match calculated_cost:
         case MaxCostData() as cost:
@@ -1522,28 +1536,6 @@ async def adjust_payment_for_tokens(
 
             return cost.dict()
 
-        case CostDataError() as error:
-            logger.error(
-                "Cost calculation error during payment adjustment - releasing reservation",
-                extra={
-                    "key_hash": key.hashed_key[:8] + "...",
-                    "model": model,
-                    "error_message": error.message,
-                    "error_code": error.code,
-                },
-            )
-            await release_reservation_only()
-
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "message": error.message,
-                        "type": "invalid_request_error",
-                        "code": error.code,
-                    }
-                },
-            )
     # All calculate_cost variants are handled above.
     raise AssertionError("Unreachable: unhandled calculate_cost result")
 

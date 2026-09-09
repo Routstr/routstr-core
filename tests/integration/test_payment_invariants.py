@@ -12,7 +12,6 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
 from sqlmodel import col, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -305,21 +304,20 @@ async def test_cost_error_releases_the_reservation_without_charging(
         "routstr.auth.calculate_cost",
         return_value=CostDataError(message="no pricing", code="pricing_error"),
     ):
-        with pytest.raises(HTTPException) as exc:
-            await adjust_payment_for_tokens(
-                key,
-                _response(),
-                integration_session,
-                reserved,
-                reservation_snapshot=reservation,
-            )
-    assert exc.value.status_code == 400
+        cost = await adjust_payment_for_tokens(
+            key,
+            _response(),
+            integration_session,
+            reserved,
+            reservation_snapshot=reservation,
+        )
+    assert cost["charged_msats"] == 0
 
     key = await integration_session.get(ApiKey, key_hash)
     assert key is not None
     assert key.balance == 10_000, "a pricing failure must not charge the user"
     assert key.total_spent == 0
-    assert key.reserved_balance == 0, "funds must not stay locked after a 400"
+    assert key.reserved_balance == 0, "funds must not stay locked"
     assert await _active_reservations(integration_session) == 0
 
 

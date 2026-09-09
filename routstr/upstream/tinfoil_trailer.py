@@ -20,11 +20,12 @@ from urllib.parse import urlsplit
 import h11
 
 from ..core import get_logger
+from ..core.exceptions import EhbpTimeoutError
 
 logger = get_logger(__name__)
 
 _READ_BUFSIZE = 65536
-_DEFAULT_TIMEOUT_SECONDS = 30.0
+_DEFAULT_TIMEOUT_SECONDS = 60.0
 _DEFAULT_CLOSE_TIMEOUT_SECONDS = 1.0
 _DEFAULT_MAX_RESPONSE_BYTES = 25 * 1024 * 1024
 _HOP_BY_HOP_HEADERS = {
@@ -100,10 +101,15 @@ async def forward_with_trailer(
     headers = _strip_hop_by_hop_headers(headers)
 
     ssl_ctx = ssl.create_default_context()
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(host, port, ssl=ssl_ctx),
-        timeout=timeout_seconds,
-    )
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=ssl_ctx),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise EhbpTimeoutError(
+            f"EHBP upstream {host} timed out after {timeout_seconds:g}s connecting"
+        ) from exc
 
     try:
         # Build HTTP/1.1 request
@@ -126,7 +132,13 @@ async def forward_with_trailer(
             request_data += body
 
         writer.write(request_data)
-        await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
+        try:
+            await asyncio.wait_for(writer.drain(), timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise EhbpTimeoutError(
+                f"EHBP upstream {host} timed out after "
+                f"{timeout_seconds:g}s sending request"
+            ) from exc
 
         # Parse response with h11
         conn = h11.Connection(h11.CLIENT)
@@ -140,10 +152,16 @@ async def forward_with_trailer(
             event = conn.next_event()
 
             if event is h11.NEED_DATA:
-                data = await asyncio.wait_for(
-                    reader.read(_READ_BUFSIZE),
-                    timeout=timeout_seconds,
-                )
+                try:
+                    data = await asyncio.wait_for(
+                        reader.read(_READ_BUFSIZE),
+                        timeout=timeout_seconds,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise EhbpTimeoutError(
+                        f"EHBP upstream {host} timed out after "
+                        f"{timeout_seconds:g}s waiting for response data"
+                    ) from exc
                 conn.receive_data(data if data else b"")
                 continue
 

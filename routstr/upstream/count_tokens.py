@@ -57,6 +57,37 @@ def _count_with_litellm(
     if not isinstance(messages, list):
         messages = []
 
+    if "input" in body:
+        response_input = body["input"]
+        if isinstance(response_input, str):
+            messages = [{"role": "user", "content": response_input}]
+        elif isinstance(response_input, list):
+            messages = []
+            for item in response_input:
+                if not isinstance(item, dict) or "role" not in item:
+                    raise ValueError(
+                        "Responses input requires fallback token estimation"
+                    )
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if not isinstance(part, dict) or part.get("type") not in (
+                            "input_text",
+                            "output_text",
+                            "text",
+                        ):
+                            raise ValueError(
+                                "Non-text Responses input requires fallback token estimation"
+                            )
+                        parts.append({"type": "text", "text": part.get("text", "")})
+                    content = parts
+                messages.append({"role": item["role"], "content": content})
+        else:
+            raise ValueError("Unsupported Responses input")
+        if body.get("instructions"):
+            messages.insert(0, {"role": "system", "content": body["instructions"]})
+
     prompt_token_ids = 0
     if include_legacy_prompt:
         prompt = body.get("prompt")
@@ -177,11 +208,25 @@ class MissingUsageEstimator:
     def observe(self, response_data: object) -> None:
         if isinstance(response_data, dict):
             event_type = response_data.get("type")
+            if event_type in ("response.completed", "response.incomplete"):
+                response = response_data.get("response")
+                if isinstance(response, dict) and isinstance(
+                    response.get("output"), list
+                ):
+                    # Terminal output is a snapshot, not another text delta.
+                    self._output_parts = _generated_text(response["output"])
+                    return
             if isinstance(event_type, str) and event_type.endswith(".done"):
                 # Responses API ``*.done`` events repeat text already streamed
                 # via ``*.delta`` events; counting both would double-bill.
                 return
         self._output_parts.extend(_generated_text(response_data))
+
+    def estimated_usage(self, model: str | None = None) -> dict[str, Any] | None:
+        """Local usage estimate, or None when the upstream generated no text."""
+        if not self.output_text:
+            return None
+        return self.response_data(model)["usage"]
 
     def billing_data(
         self,
