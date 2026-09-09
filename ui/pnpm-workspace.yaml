@@ -10,10 +10,10 @@ overrides:
   flatted: 3.4.2
   follow-redirects: 1.16.0
   form-data: 4.0.6
-  js-yaml: 4.3.1
+  js-yaml: 4.3.2
   minimatch@3: 3.1.4
   nanoid@3: 3.3.18
   picomatch@2: 2.3.2
   picomatch@4: 4.0.4
   postcss: 8.5.23
-  sharp: 0.35.0
+  sharp: 0.35.4
