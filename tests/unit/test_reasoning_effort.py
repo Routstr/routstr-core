@@ -60,22 +60,24 @@ SOL_REASONING = {
 
 
 def test_model_parses_openrouter_reasoning_object() -> None:
-    model = Model(
-        id="openai/gpt-5.6-sol",
-        name="GPT",
-        created=0,
-        description="",
-        context_length=1,
-        architecture={
-            "modality": "text",
-            "input_modalities": ["text"],
-            "output_modalities": ["text"],
-            "tokenizer": "x",
-            "instruct_type": None,
-        },
-        pricing={"prompt": 1e-6, "completion": 1e-6},
-        reasoning=SOL_REASONING,
-        extra_ignored_field="drop me",
+    model = Model.parse_obj(
+        {
+            "id": "openai/gpt-5.6-sol",
+            "name": "GPT",
+            "created": 0,
+            "description": "",
+            "context_length": 1,
+            "architecture": {
+                "modality": "text",
+                "input_modalities": ["text"],
+                "output_modalities": ["text"],
+                "tokenizer": "x",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": 1e-6, "completion": 1e-6},
+            "reasoning": SOL_REASONING,
+            "extra_ignored_field": "drop me",
+        }
     )
     assert model.reasoning is not None
     assert model.reasoning.supported_efforts == [
@@ -178,6 +180,7 @@ def test_prepare_request_body_rewrites_nested_effort() -> None:
         }
     ).encode()
     out = provider.prepare_request_body(body, model)
+    assert out is not None
     data = json.loads(out)
     assert data["reasoning"]["effort"] == "low"
     assert data["reasoning"]["exclude"] is False
