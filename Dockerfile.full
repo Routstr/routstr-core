@@ -1,4 +1,6 @@
 # Multi-stage Dockerfile for Routstr (includes UI build)
+ARG PYTHON_VERSION=3.14
+
 # Stage 1: Build the UI
 FROM node:23-alpine AS ui-builder
 WORKDIR /app/ui
@@ -16,13 +18,14 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm run build
 
 # Stage 2: Build the Routstr Node
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS runner
+FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS runner
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         build-essential \
         pkg-config \
+        libffi-dev \
         libsecp256k1-dev \
         autoconf \
         automake \

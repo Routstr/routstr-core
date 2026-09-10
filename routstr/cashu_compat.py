@@ -29,8 +29,10 @@ def _single_proxy(proxies: Any) -> str | None:
     """Collapse an httpx<0.28 ``proxies`` mapping into a single ``proxy`` URL.
 
     cashu only ever builds ``{}`` or ``{"all://": url}``, so a mapping with one
-    distinct URL is all we need to support; anything richer is unrepresentable
-    as httpx 0.28's scalar ``proxy=`` and is dropped rather than guessed at.
+    distinct URL is all we need to support. Anything richer is unrepresentable
+    as httpx 0.28's scalar ``proxy=``; we fail closed and raise rather than
+    return ``None``, because dropping the entry would silently send mint
+    traffic direct instead of through the configured Tor/SOCKS proxy.
     """
     if not proxies:
         return None
@@ -41,9 +43,14 @@ def _single_proxy(proxies: Any) -> str | None:
             value = proxies[_ALL_SCHEMES]
             return str(value) if value is not None else None
         distinct = {str(v) for v in proxies.values() if v is not None}
+        if not distinct:
+            return None
         if len(distinct) == 1:
             return distinct.pop()
-    return None
+    raise ValueError(
+        f"cannot represent proxies={proxies!r} as httpx 0.28 proxy=; "
+        "refusing to send proxied traffic direct"
+    )
 
 
 class _ProxiesCompatAsyncClient(httpx.AsyncClient):
@@ -55,6 +62,9 @@ class _ProxiesCompatAsyncClient(httpx.AsyncClient):
             proxy = _single_proxy(proxies)
             if proxy is not None and kwargs.get("proxy") is None:
                 kwargs["proxy"] = proxy
+            elif isinstance(proxies, dict) and not proxies:
+                # In httpx<0.28, proxies={} disabled environment proxy discovery.
+                kwargs.setdefault("trust_env", False)
         super().__init__(*args, **kwargs)
 
 

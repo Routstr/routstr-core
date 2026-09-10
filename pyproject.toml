@@ -8,7 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "aiosqlite>=0.20",
-    "sqlmodel>=0.0.24",
+    "sqlmodel>=0.0.42",  # Python 3.14 deferred-annotation support
     "httpx[socks]>=0.28.1",
     "h11>=0.16",
     "greenlet>=3.2.1",
@@ -17,11 +17,11 @@ dependencies = [
     "cashu>=0.20",
     "marshmallow>=3.13,<4.0",
     "websockets>=12.0",
-    "nostr>=0.0.2",
+    "nostr-sdk>=0.45.1,<0.46",
     "mdurl==0.1.2",
     "pillow>=10",
     "openai>=1.98.0",
-    "litellm>=1.84.0,<1.85",
+    "litellm>=1.93.0,<1.94",  # 1.93 is the first line supporting Python 3.14
 ]
 
 [dependency-groups]
@@ -92,8 +92,11 @@ routstr = { workspace = true }
 # setuptools and wheel below their patched versions. routstr uses only cashu's
 # wallet modules, not its server paths, so the caps are safe to lift here.
 [tool.uv]
+# coincurve 20's build config uses cmake.verbose, removed in
+# scikit-build-core 0.10. This keeps its source build working on Python 3.14.
+build-constraint-dependencies = ["scikit-build-core<0.10"]
 override-dependencies = [
-    # httpx 0.28 (required by litellm 1.84) removed the `proxies` kwarg cashu
+    # httpx 0.28 (required by litellm 1.93) removed the `proxies` kwarg cashu
     # passes on every mint call; routstr/cashu_compat.py restores it for cashu.
     "httpx[socks]>=0.28.1,<1.0",
     "importlib-metadata>=8.0.0,<9.0",
@@ -109,4 +112,7 @@ override-dependencies = [
 constraint-dependencies = [
     "starlette>=1.3.1",
     "httpcore>=1.0.9",             # 1.0.8 caps h11<0.15
+    # 1.76 is the first grpcio-tools release with CPython 3.14 wheels.
+    "grpcio>=1.76.0,<2.0.0",
+    "grpcio-tools>=1.76.0,<2.0.0",
 ]

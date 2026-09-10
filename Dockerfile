@@ -1,10 +1,12 @@
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+ARG PYTHON_VERSION=3.14
+FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         build-essential \
         pkg-config \
+        libffi-dev \
         libsecp256k1-dev \
         autoconf \
         automake \
