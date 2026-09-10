@@ -242,7 +242,13 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
         finally:
-            await close_upstream_http_client()
+            try:
+                await close_upstream_http_client()
+            except Exception as e:
+                logger.error(
+                    "Error closing upstream HTTP connection pools",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
 
 
 class _ImmutableStaticFiles(StaticFiles):

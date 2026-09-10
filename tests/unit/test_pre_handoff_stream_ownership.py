@@ -59,7 +59,9 @@ async def _forward(
     )
 
     with (
-        patch("routstr.upstream.base._acquire_upstream_client", return_value=client),
+        patch(
+            "routstr.upstream.base.acquire_upstream_http_client", return_value=client
+        ),
         patch.object(provider, "normalize_request_path", return_value="audio/speech"),
         patch.object(
             provider,
@@ -105,7 +107,9 @@ async def test_cancellation_before_stream_handoff_closes_response_once(
         await asyncio.Future()
 
     with (
-        patch("routstr.upstream.base._acquire_upstream_client", return_value=client),
+        patch(
+            "routstr.upstream.base.acquire_upstream_http_client", return_value=client
+        ),
         patch.object(provider, "normalize_request_path", return_value="audio/speech"),
         patch.object(
             provider,

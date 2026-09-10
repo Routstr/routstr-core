@@ -64,7 +64,7 @@ from .cache_breakpoints import (
     is_explicit_cache_model,
 )
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
-from .http_client import get_upstream_http_client
+from .http_client import acquire_upstream_http_client
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
 from .reasoning_effort import apply_reasoning_effort
@@ -73,14 +73,6 @@ if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
 
 logger = get_logger(__name__)
-
-
-def _acquire_upstream_client(url: str) -> httpx.AsyncClient:
-    """Return the pooled client for ``url``, mapping shutdown to a 503."""
-    try:
-        return get_upstream_http_client(url)
-    except RuntimeError as exc:
-        raise UpstreamError(str(exc), status_code=503) from exc
 
 
 async def _aclose_if_needed(resource: object | None) -> None:
@@ -3351,7 +3343,7 @@ class BaseUpstreamProvider:
         response_handoff = _ResponseHandoff()
 
         try:
-            client = _acquire_upstream_client(url)
+            client = acquire_upstream_http_client(url)
             if transformed_body is not None:
                 response = await client.send(
                     client.build_request(
@@ -3721,7 +3713,7 @@ class BaseUpstreamProvider:
         response_handoff = _ResponseHandoff()
 
         try:
-            client = _acquire_upstream_client(url)
+            client = acquire_upstream_http_client(url)
             if transformed_body is not None:
                 response = await client.send(
                     client.build_request(
@@ -3958,7 +3950,7 @@ class BaseUpstreamProvider:
 
         response: httpx.Response | None = None
         try:
-            client = _acquire_upstream_client(url)
+            client = acquire_upstream_http_client(url)
             response = await client.send(
                 client.build_request(
                     request.method,

@@ -8,8 +8,10 @@ import httpx
 import pytest
 
 import routstr.upstream.http_client as http_client_module
+from routstr.core.exceptions import UpstreamError
 from routstr.core.settings import settings
 from routstr.upstream.http_client import (
+    acquire_upstream_http_client,
     close_upstream_http_client,
     get_upstream_http_client,
     upstream_origin_key,
@@ -86,6 +88,7 @@ def test_upstream_origin_key_returns_http_origin(url: str, expected: str) -> Non
         "https://user:secret@example.com",
         "https://:secret@example.com",
         "https://@example.com",
+        "https://exa\u200bmple.com",
         None,
     ],
 )
@@ -93,6 +96,25 @@ def test_upstream_origin_key_rejects_invalid_urls(url: object) -> None:
     with pytest.raises(ValueError, match="absolute HTTP") as exc_info:
         upstream_origin_key(url)  # type: ignore[arg-type]
     assert "secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_acquire_maps_invalid_provider_url_to_502() -> None:
+    with pytest.raises(UpstreamError) as exc_info:
+        acquire_upstream_http_client("ftp://api.example.com")
+    assert exc_info.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_acquire_maps_shutdown_to_503() -> None:
+    with patch.object(
+        http_client_module,
+        "get_upstream_http_client",
+        side_effect=RuntimeError("Upstream HTTP client is shutting down"),
+    ):
+        with pytest.raises(UpstreamError) as exc_info:
+            acquire_upstream_http_client("https://api.example.com")
+    assert exc_info.value.status_code == 503
 
 
 @pytest.mark.asyncio

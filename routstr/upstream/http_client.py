@@ -2,7 +2,9 @@
 
 import asyncio
 import concurrent.futures
+import functools
 import ipaddress
+import ssl
 import threading
 import weakref
 from dataclasses import dataclass, field
@@ -12,6 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..core import get_logger
+from ..core.exceptions import UpstreamError
 from ..core.settings import settings
 
 logger = get_logger(__name__)
@@ -84,13 +87,16 @@ def upstream_origin_key(url: str) -> str:
     except ValueError:
         # HTTPX URL serialization applies the same IDNA normalization used for
         # requests, so Unicode and punycode spellings share one pool key.
-        normalized = httpx.URL(url).copy_with(
-            username=None,
-            password=None,
-            path="/",
-            query=None,
-            fragment=None,
-        )
+        try:
+            normalized = httpx.URL(url).copy_with(
+                username=None,
+                password=None,
+                path="/",
+                query=None,
+                fragment=None,
+            )
+        except httpx.InvalidURL as exc:
+            raise ValueError(error) from exc
         return str(normalized).rstrip("/")
 
     canonical_host = address.compressed
@@ -101,6 +107,13 @@ def upstream_origin_key(url: str) -> str:
     return f"{scheme}://{canonical_host}{port_suffix}"
 
 
+@functools.lru_cache(maxsize=1)
+def _shared_ssl_context() -> ssl.SSLContext:
+    # Loading the CA bundle costs tens of milliseconds; do it once per process
+    # instead of once per origin pool.
+    return httpx.create_ssl_context()
+
+
 def _build_client() -> httpx.AsyncClient:
     limits = httpx.Limits(
         max_connections=settings.upstream_max_connections,
@@ -109,6 +122,7 @@ def _build_client() -> httpx.AsyncClient:
     )
     client = httpx.AsyncClient(
         transport=httpx.AsyncHTTPTransport(
+            verify=_shared_ssl_context(),
             limits=limits,
             retries=settings.upstream_connect_retries,
         ),
@@ -382,6 +396,20 @@ def _schedule_close(
         _pending_closes.setdefault(execution_loop, {})[submission.completion] = (
             submission
         )
+
+
+def acquire_upstream_http_client(url: str) -> httpx.AsyncClient:
+    """Return the pooled client for ``url``, mapping failures to ``UpstreamError``.
+
+    Shutdown becomes a 503 so callers can fail over; a malformed provider URL
+    becomes a 502 instead of an unhandled 500.
+    """
+    try:
+        return get_upstream_http_client(url)
+    except RuntimeError as exc:
+        raise UpstreamError(str(exc), status_code=503) from exc
+    except ValueError as exc:
+        raise UpstreamError(str(exc), status_code=502) from exc
 
 
 def get_upstream_http_client(url: str) -> httpx.AsyncClient:

@@ -430,7 +430,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
                 if (
-                    response.status_code in [502, 429]
+                    response.status_code in [502, 503, 429]
                     and i < len(selected_upstreams) - 1
                 ):
                     logger.warning(
@@ -562,7 +562,7 @@ async def _proxy(
                 headers = upstream.prepare_headers(dict(request.headers))
                 response = await upstream.forward_get_request(request, path, headers)
 
-                if response.status_code in [502, 429] and i < len(candidates) - 1:
+                if response.status_code in [502, 503, 429] and i < len(candidates) - 1:
                     error_message = ""
                     try:
                         if hasattr(response, "body"):
@@ -601,9 +601,7 @@ async def _proxy(
 
     reservation_snapshot: ReservationSnapshot | None = None
     if is_ehbp or request_body_dict:
-        reservation_snapshot = await pay_for_request(
-            key, max_cost_for_model, session
-        )
+        reservation_snapshot = await pay_for_request(key, max_cost_for_model, session)
         # pay_for_request refreshes the key after committing the reservation.
         # End that read transaction before waiting on upstream response headers.
         await _finish_read_transaction(session)
@@ -748,8 +746,17 @@ async def _proxy(
                 break
 
             if response.status_code != 200:
-                # Check if we should retry (502 Upstream Error or 429 Rate Limit)
-                should_retry = response.status_code in [502, 429, 400, 401, 403, 404]
+                # Retry on 502/503 upstream errors, 429 rate limits, and client
+                # errors that may be provider-specific.
+                should_retry = response.status_code in [
+                    502,
+                    503,
+                    429,
+                    400,
+                    401,
+                    403,
+                    404,
+                ]
                 if should_retry and i < len(candidates) - 1:
                     error_message = ""
                     try:

@@ -739,7 +739,13 @@ async def pay_for_request(
         )
 
     try:
-        await _validate_reservation_snapshot(key, reservation, session)
+        # Identity checks only: this call just committed the reservation, so the
+        # stale-reservation sweeper may legitimately have released it already.
+        # Release is a terminal state that settlement handles; it is not a
+        # mismatch between the record and the request.
+        await _validate_reservation_snapshot(
+            key, reservation, session, require_active=False
+        )
     except BaseException:
         released = False
         try:

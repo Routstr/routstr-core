@@ -18,10 +18,13 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
+import routstr.upstream.gemini_messages as gemini_messages
+from routstr.core.exceptions import UpstreamError
 from routstr.upstream.gemini_messages import (
     DUMMY_THOUGHT_SIGNATURE,
     _openai_chunks_to_anthropic_events,
@@ -398,3 +401,33 @@ async def test_translator_handles_done_sentinel_and_blank_lines() -> None:
         e["delta"]["text"] for e in events if e["type"] == "content_block_delta"
     )
     assert text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_post_and_stream_maps_pool_timeout_to_503() -> None:
+    client = MagicMock()
+    client.timeout = httpx.Timeout(10.0)
+    client.build_request = MagicMock(return_value=MagicMock())
+    client.send = AsyncMock(side_effect=httpx.PoolTimeout("pool busy"))
+    with patch(
+        "routstr.upstream.gemini_messages.acquire_upstream_http_client",
+        return_value=client,
+    ):
+        with pytest.raises(UpstreamError) as exc_info:
+            await gemini_messages._post_and_stream(
+                "https://gemini.example", "key", {"model": "m"}, None
+            )
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_post_and_stream_surfaces_shutdown_as_503() -> None:
+    with patch(
+        "routstr.upstream.gemini_messages.acquire_upstream_http_client",
+        side_effect=UpstreamError("shutting down", status_code=503),
+    ):
+        with pytest.raises(UpstreamError) as exc_info:
+            await gemini_messages._post_and_stream(
+                "https://gemini.example", "key", {"model": "m"}, None
+            )
+    assert exc_info.value.status_code == 503

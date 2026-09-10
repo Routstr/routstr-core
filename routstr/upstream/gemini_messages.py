@@ -55,7 +55,7 @@ import httpx
 from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..payment.models import Model
-from .http_client import get_upstream_http_client
+from .http_client import acquire_upstream_http_client
 from .messages_dispatch import (
     ANTHROPIC_ONLY_FIELDS,
     aggregate_anthropic_events_to_message,
@@ -350,10 +350,10 @@ async def _post_and_stream(
 ) -> httpx.Response:
     """POST to upstream chat-completions and return a streaming response."""
     url = f"{base_url.rstrip('/')}/chat/completions"
-    client = get_upstream_http_client(url)
-    # HTTPX replaces rather than merges per-request timeout settings.
-    client_timeout = client.timeout
     try:
+        client = acquire_upstream_http_client(url)
+        # HTTPX replaces rather than merges per-request timeout settings.
+        client_timeout = client.timeout
         request = client.build_request(
             "POST",
             url,
@@ -371,6 +371,16 @@ async def _post_and_stream(
             ),
         )
         response = await client.send(request, stream=True)
+    except UpstreamError:
+        raise
+    except httpx.PoolTimeout as exc:
+        logger.error(
+            "Gemini messages dispatch pool exhausted",
+            extra={"error": str(exc), "url": url, **(log_extra or {})},
+        )
+        raise UpstreamError(
+            "Upstream connection pool is busy", status_code=503
+        ) from exc
     except Exception as exc:
         logger.error(
             "Gemini messages dispatch HTTP error",

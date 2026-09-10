@@ -222,6 +222,12 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
             finally:
                 self.release()
 
+            if sys.is_finalizing():
+                # logging.shutdown() already ran; a new listener thread would
+                # never drain, so write the record synchronously instead.
+                self._emit_synchronously(record)
+                return False
+
             try:
                 # Do not acquire the module lock while holding the handler lock.
                 if not self._reopen_locked():
@@ -229,6 +235,12 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
             except Exception:
                 self.handleError(record)
                 return False
+
+    def _emit_synchronously(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stderr.write(self.format(record) + "\n")
+        except Exception:
+            self.handleError(record)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -251,6 +263,12 @@ class QueuedDailyRotatingFileHandler(logging.Handler):
                     if remaining <= 0:
                         break
                     self._queue.all_tasks_done.wait(remaining)
+            pending = self._queue.unfinished_tasks
+            if pending:
+                sys.stderr.write(
+                    f"Logging listener for {self._filename} still has {pending} "
+                    f"record(s) queued after {self._drain_timeout_seconds}s flush\n"
+                )
             self._target.flush()
         finally:
             self.release()
