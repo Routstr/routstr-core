@@ -17,7 +17,6 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio.engine import create_async_engine
-from sqlalchemy.orm import aliased
 from sqlmodel import Field, Relationship, SQLModel, col, func, select, update
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -137,21 +136,6 @@ class ApiKey(SQLModel, table=True):  # type: ignore
     refund_currency: str | None = Field(
         default=None,
         description="Currency of the cashu-token",
-    )
-    parent_key_hash: str | None = Field(
-        default=None, foreign_key="api_keys.hashed_key", index=True
-    )
-    balance_limit: int | None = Field(
-        default=None,
-        description="Max spendable balance in msats for this key (mostly for child keys)",
-    )
-    balance_limit_reset: str | None = Field(
-        default=None,
-        description="Reset policy for balance limit (manual, daily, monthly, etc.)",
-    )
-    balance_limit_reset_date: int | None = Field(
-        default=None,
-        description="Unix timestamp of the last time the balance limit was reset",
     )
     validity_date: int | None = Field(
         default=None,
@@ -317,10 +301,7 @@ async def release_stale_reservations(
         )
     else:
         legacy_query = legacy_query.where(
-            or_(
-                col(ApiKey.hashed_key) == key_hash,
-                col(ApiKey.parent_key_hash) == key_hash,
-            )
+            col(ApiKey.hashed_key) == key_hash
         ).where(
             or_(col(ApiKey.reserved_at).is_(None), col(ApiKey.reserved_at) < cutoff)
         )
@@ -362,21 +343,15 @@ async def release_stale_reservations(
 
 
 async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> int:
-    """Delete dead parentless API keys; return the count removed.
+    """Delete dead API keys; return the count removed.
 
-    Dead = 0 balance/reservation/spend/requests, older than the grace period,
-    no parent, no children, no invoice that could still settle. Cashu rows are
+    Dead = 0 balance/reservation/spend/requests, older than the grace
+    period, no invoice that could still settle. Cashu rows are
     unlinked (not deleted) first to keep the audit trail.
     """
     now = int(time.time())
     cutoff = now - min_age_seconds
 
-    child = aliased(ApiKey)
-    has_children = (
-        select(child.hashed_key).where(
-            col(child.parent_key_hash) == col(ApiKey.hashed_key)
-        )
-    ).exists()
     # An expired invoice stays creditable for the grace window, and crediting it
     # after its target key is gone strands the payment at the mint.
     settleable_invoice = (
@@ -400,10 +375,8 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.reserved_balance) == 0)
         .where(col(ApiKey.total_spent) == 0)
         .where(col(ApiKey.total_requests) == 0)
-        .where(col(ApiKey.parent_key_hash).is_(None))
         .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~settleable_invoice)
-        .where(~has_children)
     )
 
     # Unlink transactions rather than cascade-deleting them, so the financial
@@ -542,14 +515,6 @@ class LightningInvoice(SQLModel, table=True):  # type: ignore
     )
     expires_at: int = Field(description="Unix timestamp when invoice expires")
     paid_at: int | None = Field(default=None, description="Unix timestamp when paid")
-    balance_limit: int | None = Field(
-        default=None,
-        description="Max spendable msats for the created key",
-    )
-    balance_limit_reset: str | None = Field(
-        default=None,
-        description="Reset policy for balance limit (daily, weekly, monthly)",
-    )
     validity_date: int | None = Field(
         default=None,
         description="Unix timestamp after which the created key expires",

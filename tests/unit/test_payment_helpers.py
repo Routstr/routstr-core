@@ -183,6 +183,32 @@ def test_estimate_prompt_tokens_counts_every_string_in_the_body() -> None:
     # value prefix can buy a discount, so both still count in full.
     assert estimate_prompt_tokens({"tools": [{"data": hidden}]}) >= 1_000
     assert estimate_prompt_tokens({"system": "data:" + hidden}) >= 1_000
+    assert estimate_prompt_tokens({"prompt": [[1, 2], [3, 4, 5]]}) >= 5
+
+
+async def test_discount_counts_legacy_token_id_prompt() -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.0
+    pricing.max_prompt_cost = 50.0
+    pricing.max_completion_cost = 0.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {"model": "test-model", "prompt": list(range(50_000)), "max_tokens": 0}
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+    ):
+        cost = await calculate_discounted_max_cost(50_000, body, model_obj)
+
+    assert cost == 50_000
 
 
 async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:

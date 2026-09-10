@@ -5,7 +5,7 @@ import random
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel as V2BaseModel
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, validator
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..core.db import ModelRow, UpstreamProviderRow, get_session
@@ -85,6 +85,30 @@ class TopProvider(BaseModel):
     is_moderated: bool | None = None
 
 
+class Reasoning(BaseModel):
+    """Per-model reasoning-effort metadata, matching OpenRouter's shape."""
+
+    mandatory: bool | None = None
+    default_enabled: bool | None = None
+    supported_efforts: list[str] | None = None
+    default_effort: str | None = None
+    supports_max_tokens: bool | None = None
+
+    class Config:
+        extra = "ignore"
+
+    def is_empty(self) -> bool:
+        return not any(
+            (
+                self.mandatory is not None,
+                self.default_enabled is not None,
+                self.supported_efforts,
+                self.default_effort,
+                self.supports_max_tokens is not None,
+            )
+        )
+
+
 class Model(BaseModel):
     id: str
     name: str
@@ -101,9 +125,42 @@ class Model(BaseModel):
     canonical_slug: str | None = None
     alias_ids: list[str] | None = None
     forwarded_model_id: str | None = None
+    reasoning: Reasoning | None = None
+
+    class Config:
+        extra = "ignore"
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+    @validator("reasoning", pre=True)
+    def _coerce_reasoning(cls, value: object) -> object:
+        if value is None or value is False:
+            return None
+        if isinstance(value, Reasoning):
+            return None if value.is_empty() else value
+        if not isinstance(value, dict) or not value:
+            return None
+        try:
+            parsed = Reasoning.parse_obj(value)
+        except Exception:
+            return None
+        return None if parsed.is_empty() else parsed
+
+    def dict(self, **kwargs: object) -> dict:
+        # Non-reasoning models omit the field entirely so the catalog stays
+        # additive: existing clients never see a new null key.
+        data = super().dict(**kwargs)  # type: ignore[arg-type]
+        reasoning = data.get("reasoning")
+        if not reasoning:
+            data.pop("reasoning", None)
+        elif isinstance(reasoning, dict):
+            cleaned = {k: v for k, v in reasoning.items() if v is not None}
+            if cleaned:
+                data["reasoning"] = cleaned
+            else:
+                data.pop("reasoning", None)
+        return data
 
 
 def litellm_cost_entry(model_id: str) -> dict | None:
@@ -241,9 +298,10 @@ async def async_fetch_openrouter_models(source_filter: str | None = None) -> lis
         return []
 
 
-def _row_to_model(
+def _build_model_from_row(
     row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
 ) -> Model:
+    """The deterministic USD view of a stored model row, before the sats conversion."""
     architecture = json.loads(row.architecture)
     pricing = json.loads(row.pricing)
     per_request_limits = (
@@ -300,6 +358,14 @@ def _row_to_model(
             parsed_pricing.max_completion_cost,
             parsed_pricing.max_cost,
         ) = _calculate_usd_max_costs(model)
+
+    return model
+
+
+def _row_to_model(
+    row: ModelRow, apply_provider_fee: bool = False, provider_fee: float = 1.01
+) -> Model:
+    model = _build_model_from_row(row, apply_provider_fee, provider_fee)
 
     try:
         sats_to_usd = sats_usd_price()
@@ -465,23 +531,7 @@ def _update_model_sats_pricing(model: Model, sats_to_usd: float) -> Model:
         if (sats.max_cost or 0.0) < min_req_sats:
             sats.max_cost = min_req_sats
 
-        return Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=model.pricing,
-            sats_pricing=sats,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-            alias_ids=model.alias_ids,
-            forwarded_model_id=model.forwarded_model_id,
-        )
+        return model.copy(update={"sats_pricing": sats})
     except Exception as e:
         logger.error(
             "Failed to update sats pricing for model",

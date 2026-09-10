@@ -1,8 +1,12 @@
+import asyncio
 import base64
+import ipaddress
 import json
 import math
+import socket
 from io import BytesIO
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import HTTPException, Response
@@ -14,9 +18,15 @@ from ..core import get_logger
 from ..core.exceptions import UpstreamError
 from ..core.redaction import redact_org_ids
 from ..core.settings import settings
-from ..wallet import deserialize_token_from_string
+from ..wallet import (
+    UntrustedSourceMintError,
+    classify_redemption_error,
+    deserialize_token_from_string,
+    is_trusted_source_mint,
+)
 
 logger = get_logger(__name__)
+
 
 def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> None:
     if x_cashu := headers.get("x-cashu", None):
@@ -66,6 +76,19 @@ def check_token_balance(headers: dict, body: dict, max_cost_for_model: int) -> N
         raise HTTPException(
             status_code=401,
             detail="Invalid authentication token format",
+        )
+
+    if not is_trusted_source_mint(token_obj.mint):
+        classified = classify_redemption_error(
+            UntrustedSourceMintError(f"Untrusted source mint: {token_obj.mint}")
+        )
+        assert classified is not None
+        error_type, status_code, message, error_code = classified
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": {"message": message, "type": error_type, "code": error_code}
+            },
         )
 
     amount_msat = (
@@ -287,16 +310,29 @@ def _sum_string_chars(node: Any) -> int:
     return 0
 
 
+def _count_prompt_token_ids(node: Any) -> int:
+    if isinstance(node, int) and not isinstance(node, bool):
+        return 1
+    if isinstance(node, list):
+        return sum(_count_prompt_token_ids(item) for item in node)
+    return 0
+
+
 def estimate_prompt_tokens(body: dict) -> int:
     """Conservatively estimate prompt tokens for the whole provider-bound body.
 
-    Unlike ``estimate_tokens`` (message text only), this walks every field, so
-    prompt weight hidden in tool schemas, tool-call arguments, ``system``, or
-    any field forwarded in future cannot escape the reservation estimate. It
-    over-estimates rather than under-estimates: the result only shrinks a
-    discount against a reservation that settlement later refunds.
+    Every string counts, as do token IDs in legacy ``prompt`` arrays, so no
+    forwarded field can hide prompt weight and shrink its reservation.
     """
-    return _sum_string_chars(body) // 3
+    return _sum_string_chars(body) // 3 + _count_prompt_token_ids(body.get("prompt"))
+
+
+IMAGE_FETCH_TIMEOUT_SECONDS = 10.0
+# Dimensions live in the header, so a prefix suffices and an endless body cannot
+# pin memory.
+IMAGE_FETCH_MAX_BYTES = 512 * 1024
+# Fetches are sequential, so an unbounded URL list is a request-time amplifier.
+IMAGE_FETCH_MAX_PER_REQUEST = 8
 
 
 def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
@@ -312,13 +348,81 @@ def _get_image_dimensions(image_data: bytes) -> tuple[int, int]:
         return (512, 512)
 
 
-async def _fetch_image_from_url(url: str) -> bytes | None:
-    """Fetch image from URL."""
+def _is_blocked_address(address: str) -> bool:
+    """Allow only globally reachable addresses (RFC 6890)."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.content
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        # An embedded v4 address would otherwise smuggle a rejected target past
+        # the v6 checks.
+        for embedded in (ip.ipv4_mapped, ip.sixtofour):
+            if embedded is not None:
+                return _is_blocked_address(str(embedded))
+    return not ip.is_global or ip.is_multicast
+
+
+async def _validated_fetch_target(url: str) -> tuple[str, str]:
+    """Return the URL to request and its ``Host`` header.
+
+    Cost estimation runs on the unauthenticated request body, so a caller can
+    otherwise aim the node at internal hosts. HTTP is rewritten to the resolved
+    address so the name cannot rebind between check and connect; HTTPS keeps its
+    hostname because certificate validation already binds the connection.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme: {parts.scheme or 'none'}")
+    host = parts.hostname
+    if not host:
+        raise ValueError("missing host")
+
+    default_port = 443 if parts.scheme == "https" else 80
+    port = parts.port or default_port
+    host_header = f"[{host}]" if ":" in host else host
+    if parts.port is not None:
+        host_header = f"{host_header}:{parts.port}"
+
+    infos = await asyncio.get_running_loop().getaddrinfo(
+        host, port, proto=socket.IPPROTO_TCP
+    )
+    if not infos:
+        raise ValueError("host did not resolve")
+    for info in infos:
+        if _is_blocked_address(str(info[4][0])):
+            raise ValueError("host resolves to a blocked address")
+
+    if parts.scheme == "https":
+        return url, host_header
+
+    family, _, _, _, sockaddr = infos[0]
+    address = str(sockaddr[0])
+    pinned = f"[{address}]" if family == socket.AF_INET6 else address
+    if parts.port is not None:
+        pinned = f"{pinned}:{parts.port}"
+    return urlunsplit((parts.scheme, pinned, parts.path, parts.query, "")), host_header
+
+
+async def _fetch_image_from_url(url: str) -> bytes | None:
+    """Fetch the leading bytes of an image, enough to read its dimensions."""
+    try:
+        target, host_header = await _validated_fetch_target(url)
+        async with httpx.AsyncClient(
+            timeout=IMAGE_FETCH_TIMEOUT_SECONDS, follow_redirects=False
+        ) as client:
+            async with client.stream(
+                "GET", target, headers={"Host": host_header}
+            ) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                downloaded = 0
+                async for chunk in response.aiter_bytes():
+                    chunks.append(chunk)
+                    downloaded += len(chunk)
+                    if downloaded >= IMAGE_FETCH_MAX_BYTES:
+                        break
+                return b"".join(chunks)[:IMAGE_FETCH_MAX_BYTES]
     except Exception as e:
         logger.warning(
             "Failed to fetch image from URL",
@@ -367,6 +471,7 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
     Supports both base64 encoded images and image URLs.
     """
     total_image_tokens = 0
+    fetches = 0
 
     for message in messages:
         if not isinstance(message, dict):
@@ -428,7 +533,14 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                         extra={"error": str(e)},
                     )
                     total_image_tokens += 85
+            elif fetches >= IMAGE_FETCH_MAX_PER_REQUEST:
+                logger.warning(
+                    "Skipping image URL fetch above per-request limit",
+                    extra={"url": url[:100], "limit": IMAGE_FETCH_MAX_PER_REQUEST},
+                )
+                total_image_tokens += 85
             else:
+                fetches += 1
                 image_bytes_or_none = await _fetch_image_from_url(url)
                 if image_bytes_or_none:
                     width, height = _get_image_dimensions(image_bytes_or_none)

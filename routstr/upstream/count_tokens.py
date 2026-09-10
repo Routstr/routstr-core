@@ -23,7 +23,11 @@ import litellm
 from fastapi.responses import Response
 
 from ..core import get_logger
-from ..payment.helpers import estimate_prompt_tokens, estimate_tokens
+from ..payment.helpers import (
+    _count_prompt_token_ids,
+    estimate_prompt_tokens,
+    estimate_tokens,
+)
 from ..payment.models import Model
 
 logger = get_logger(__name__)
@@ -46,10 +50,58 @@ def _model_name(model_obj: Model | None, body: dict[str, Any]) -> str:
     return body_model if isinstance(body_model, str) else ""
 
 
-def _count_with_litellm(model: str, body: dict[str, Any]) -> int:
+def _count_with_litellm(
+    model: str, body: dict[str, Any], include_legacy_prompt: bool = False
+) -> int:
     messages = body.get("messages")
     if not isinstance(messages, list):
         messages = []
+
+    if "input" in body:
+        response_input = body["input"]
+        if isinstance(response_input, str):
+            messages = [{"role": "user", "content": response_input}]
+        elif isinstance(response_input, list):
+            messages = []
+            for item in response_input:
+                if not isinstance(item, dict) or "role" not in item:
+                    raise ValueError(
+                        "Responses input requires fallback token estimation"
+                    )
+                content = item.get("content", "")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if not isinstance(part, dict) or part.get("type") not in (
+                            "input_text",
+                            "output_text",
+                            "text",
+                        ):
+                            raise ValueError(
+                                "Non-text Responses input requires fallback token estimation"
+                            )
+                        parts.append({"type": "text", "text": part.get("text", "")})
+                    content = parts
+                messages.append({"role": item["role"], "content": content})
+        else:
+            raise ValueError("Unsupported Responses input")
+        if body.get("instructions"):
+            messages.insert(0, {"role": "system", "content": body["instructions"]})
+
+    prompt_token_ids = 0
+    if include_legacy_prompt:
+        prompt = body.get("prompt")
+        if isinstance(prompt, str):
+            prompt_texts = [prompt]
+        elif isinstance(prompt, list):
+            prompt_texts = [item for item in prompt if isinstance(item, str)]
+        else:
+            prompt_texts = []
+        prompt_token_ids = _count_prompt_token_ids(prompt)
+        messages = [
+            *({"role": "user", "content": text} for text in prompt_texts if text),
+            *messages,
+        ]
 
     system = body.get("system")
     if isinstance(system, str) and system:
@@ -65,7 +117,7 @@ def _count_with_litellm(model: str, body: dict[str, Any]) -> int:
 
     tools = body.get("tools") if isinstance(body.get("tools"), list) else None
 
-    return int(
+    return prompt_token_ids + int(
         litellm.token_counter(
             model=model,
             messages=messages,
@@ -133,7 +185,9 @@ class MissingUsageEstimator:
         if self._input_tokens is not None:
             return self._input_tokens
         try:
-            self._input_tokens = _count_with_litellm(self.model_name, self.body)
+            self._input_tokens = _count_with_litellm(
+                self.model_name, self.body, include_legacy_prompt=True
+            )
         except Exception as exc:
             self._input_tokens = estimate_prompt_tokens(self.body)
             logger.debug(
@@ -154,11 +208,25 @@ class MissingUsageEstimator:
     def observe(self, response_data: object) -> None:
         if isinstance(response_data, dict):
             event_type = response_data.get("type")
+            if event_type in ("response.completed", "response.incomplete"):
+                response = response_data.get("response")
+                if isinstance(response, dict) and isinstance(
+                    response.get("output"), list
+                ):
+                    # Terminal output is a snapshot, not another text delta.
+                    self._output_parts = _generated_text(response["output"])
+                    return
             if isinstance(event_type, str) and event_type.endswith(".done"):
                 # Responses API ``*.done`` events repeat text already streamed
                 # via ``*.delta`` events; counting both would double-bill.
                 return
         self._output_parts.extend(_generated_text(response_data))
+
+    def estimated_usage(self, model: str | None = None) -> dict[str, Any] | None:
+        """Local usage estimate, or None when the upstream generated no text."""
+        if not self.output_text:
+            return None
+        return self.response_data(model)["usage"]
 
     def billing_data(
         self,

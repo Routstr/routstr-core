@@ -34,6 +34,26 @@ class UpstreamError(Exception):
         super().__init__(message)
 
 
+class EhbpTimeoutError(UpstreamError):
+    """Raised when an EHBP upstream times out waiting for a response.
+
+    Distinct from a generic :class:`UpstreamError` so callers can map the
+    failure to a ``504 Gateway Timeout`` with a stable ``UPSTREAM_TIMEOUT``
+    code instead of a misleading ``500`` internal server error.
+
+    ``details`` carries optional structured, redaction-safe context and is
+    forwarded to the client by ``create_upstream_error_response``.
+    """
+
+    def __init__(self, message: str, details: dict[str, object] | None = None):
+        super().__init__(
+            message,
+            status_code=504,
+            code="UPSTREAM_TIMEOUT",
+            details=details,
+        )
+
+
 async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle HTTP exceptions and include request ID in response."""
     request_id = getattr(request.state, "request_id", "unknown")

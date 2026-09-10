@@ -213,8 +213,6 @@ export function LightningPaymentWorkflow({
   const [isTopupping, setIsTopupping] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
 
-  const [balanceLimit, setBalanceLimit] = useState<string>('');
-  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
   const [validityDate, setValidityDate] = useState<string>('');
 
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
@@ -289,16 +287,12 @@ export function LightningPaymentWorkflow({
       const payload: {
         amount_sats: number;
         purpose: string;
-        balance_limit?: number;
-        balance_limit_reset?: string;
         validity_date?: number;
       } = {
         amount_sats: amount,
         purpose: 'create',
       };
 
-      if (balanceLimit) payload.balance_limit = parseInt(balanceLimit);
-      if (balanceLimitReset) payload.balance_limit_reset = balanceLimitReset;
       if (validityDate) {
         payload.validity_date = Math.floor(
           new Date(validityDate + 'T23:59:59').getTime() / 1000
@@ -331,12 +325,8 @@ export function LightningPaymentWorkflow({
             apiKey: status.api_key,
             balanceMsats: status.amount_sats * 1000,
             reservedMsats: 0,
-            isChild: false,
-            parentKey: null,
             totalRequests: 0,
             totalSpent: 0,
-            balanceLimit: null,
-            balanceLimitReset: null,
             validityDate: null,
           };
           onApiKeyCreated?.(status.api_key, walletInfo);
@@ -357,15 +347,7 @@ export function LightningPaymentWorkflow({
     } finally {
       setIsCreating(false);
     }
-  }, [
-    createAmount,
-    baseUrl,
-    pollInvoiceStatus,
-    onApiKeyCreated,
-    balanceLimit,
-    balanceLimitReset,
-    validityDate,
-  ]);
+  }, [createAmount, baseUrl, pollInvoiceStatus, onApiKeyCreated, validityDate]);
 
   const handleTopupInvoice = useCallback(async (): Promise<void> => {
     const amount = parseInt(topupAmount);
@@ -412,12 +394,8 @@ export function LightningPaymentWorkflow({
             apiKey: status.api_key,
             balanceMsats: status.amount_sats * 1000,
             reservedMsats: 0,
-            isChild: false,
-            parentKey: null,
             totalRequests: 0,
             totalSpent: 0,
-            balanceLimit: null,
-            balanceLimitReset: null,
             validityDate: null,
           };
           onApiKeyCreated?.(status.api_key, walletInfo);
@@ -473,12 +451,8 @@ export function LightningPaymentWorkflow({
           apiKey: status.api_key,
           balanceMsats: status.amount_sats * 1000,
           reservedMsats: 0,
-          isChild: false,
-          parentKey: null,
           totalRequests: 0,
           totalSpent: 0,
-          balanceLimit: null,
-          balanceLimitReset: null,
           validityDate: null,
         };
         onApiKeyCreated?.(status.api_key, walletInfo);
@@ -531,13 +505,8 @@ export function LightningPaymentWorkflow({
           />
           <div className='space-y-4'>
             <KeyOptions
-              balanceLimit={balanceLimit}
-              setBalanceLimit={setBalanceLimit}
               validityDate={validityDate}
               setValidityDate={setValidityDate}
-              balanceLimitReset={balanceLimitReset}
-              setBalanceLimitReset={setBalanceLimitReset}
-              showBalanceLimit={false}
             />
 
             <div className='space-y-3'>

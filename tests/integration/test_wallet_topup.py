@@ -337,16 +337,13 @@ async def test_topup_during_active_proxy_request(  # type: ignore[no-untyped-def
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_maximum_balance_limits(  # type: ignore[no-untyped-def]
+async def test_large_balance_topup_is_allowed(  # type: ignore[no-untyped-def]
     integration_client: AsyncClient,
     authenticated_client: AsyncClient,
     testmint_wallet: Any,
     integration_session,
 ) -> None:
-    """Test if there are any maximum balance limits"""
-
-    # Note: The current implementation doesn't enforce maximum balance limits
-    # This test verifies large balances are handled correctly
+    """Test that a large top-up is accepted and reflected in the balance."""
 
     # Get current balance
     response = await authenticated_client.get("/v1/wallet/")

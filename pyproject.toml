@@ -1,16 +1,16 @@
 [project]
 name = "routstr"
-version = "0.4.5"
+version = "0.4.7"
 description = "Payment proxy for your LLM endpoint using cashu and nostr."
 readme = "README.md"
 requires-python = ">=3.11"
 
 dependencies = [
-    "fastapi[standard]>=0.115",
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "aiosqlite>=0.20",
     "sqlmodel>=0.0.24",
     "httpx[socks]>=0.25.2",
-    "h11>=0.14",
+    "h11>=0.16",
     "greenlet>=3.2.1",
     "alembic>=1.13",
     "python-json-logger>=2.0.0",
@@ -87,3 +87,22 @@ disallow_untyped_decorators = true
 
 [tool.uv.sources]
 routstr = { workspace = true }
+
+# Security floors. cashu 0.20.x caps h11, fastapi, cryptography, setuptools
+# and wheel below their patched versions. routstr uses only cashu's wallet
+# modules, not its server paths, so the caps are safe to lift here.
+[tool.uv]
+override-dependencies = [
+    "h11>=0.16.0",
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
+    "cryptography>=49.0.0",
+    "setuptools>=83.0.0",
+    "wheel>=0.46.2",
+]
+
+# Transitive deps whose dependents allow the patched version but don't require
+# it. Constraints raise the floor without bypassing any upstream pin.
+constraint-dependencies = [
+    "starlette>=1.3.1",
+    "httpcore>=1.0.9",             # 1.0.8 caps h11<0.15
+]

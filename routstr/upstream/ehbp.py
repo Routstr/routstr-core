@@ -18,7 +18,6 @@ from ..auth import (
     _claim_reservation_for_charge,
     _stop_reservation_heartbeat,
     _validate_reservation_snapshot,
-    get_billing_key,
     get_reservation_snapshot,
     payments_logger,
     release_reservation,
@@ -32,7 +31,7 @@ from ..core.db import (
 from ..core.db import (
     store_cashu_transaction_with_retry as store_cashu_transaction,
 )
-from ..core.exceptions import UpstreamError
+from ..core.exceptions import EhbpTimeoutError, UpstreamError
 from ..core.settings import settings
 from ..payment.cost_calculation import (
     CostData,
@@ -41,8 +40,13 @@ from ..payment.cost_calculation import (
 )
 from ..payment.helpers import create_error_response
 from ..payment.models import Model
-from ..wallet import recieve_token, send_token
-from .tinfoil_trailer import forward_with_trailer
+from ..wallet import (
+    SPENT_TOKEN_CODES,
+    classify_redemption_error,
+    recieve_token,
+    send_token,
+)
+from .tinfoil_trailer import TrailerResponse, forward_with_trailer
 
 logger = get_logger(__name__)
 
@@ -56,6 +60,55 @@ _RESPONSE_USAGE_HEADER = "X-Tinfoil-Usage-Metrics"
 _TINFOIL_PROVIDER_TYPE = "tinfoil"
 _TINFOIL_ALLOWED_ENCLAVE_HOST_SUFFIX = ".tinfoil.sh"
 _TINFOIL_ALLOWED_ENCLAVE_HOSTS = frozenset({"tinfoil.sh"})
+
+
+_KEY_CONFIG_PROBLEM_TYPE = "urn:ietf:params:ehbp:error:key-config"
+
+
+def _is_ehbp_key_config_response(resp: TrailerResponse) -> bool:
+    """Check whether an upstream EHBP response is a key-config mismatch.
+
+    The enclave returns ``422 application/problem+json`` with
+    ``type=urn:ietf:params:ehbp:error:key-config`` when it cannot decrypt the
+    request body — meaning the client's HPKE key is stale (the enclave rotated
+    keys).  The proxy must pass this response through with its original
+    content type so EHBP clients can detect it and trigger re-attestation.
+    """
+    if resp.status_code != 422:
+        return False
+    ct = ""
+    for k, v in resp.headers:
+        if k.lower() == "content-type":
+            ct = v.lower()
+            break
+    media_type = ct.split(";", 1)[0].strip()
+    if media_type != "application/problem+json":
+        return False
+    try:
+        body = json.loads(resp.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("type") == _KEY_CONFIG_PROBLEM_TYPE
+
+
+def _passthrough_key_config_response(resp: TrailerResponse) -> Response:
+    """Return the enclave's key-config 422 with its original body and content
+    type so the EHBP client's ``KeyConfigMismatchError`` detection fires.
+
+    Only the content type is forwarded. ``Ehbp-Response-Nonce`` must be
+    dropped: a nonce only carries meaning for an *encrypted* response body,
+    and the stock ``ehbp`` client (``shouldDecryptResponse``) checks for the
+    nonce *before* checking for a key-config mismatch — forwarding it would
+    send that client down the decrypt path on this plaintext error body, so
+    the re-attestation loop would never fire. Content-length is recomputed
+    from the body, and upstream-internal headers are filtered out.
+    """
+    return Response(
+        content=resp.body,
+        status_code=422,
+        headers={"content-type": "application/problem+json"},
+        media_type="application/problem+json",
+    )
 
 
 def _normalize_upstream_model_id(model_id: str | None) -> str:
@@ -558,9 +611,8 @@ async def finalize_ehbp_actual_cost_payment(
     if not await _claim_reservation_for_charge(reservation, session):
         return 0
     reserved_cost_for_model = reservation.reserved_msats
-    billing_key = await get_billing_key(key, session)
     key_hash = key.hashed_key
-    billing_key_hash = billing_key.hashed_key
+    billing_key_hash = key_hash
     total_cost_msats = max(
         0, int(cost_info.get("total_msats", reserved_cost_for_model))
     )
@@ -569,7 +621,6 @@ async def finalize_ehbp_actual_cost_payment(
     charged = await _charge_reservation_rows(
         session,
         billing_key_hash=billing_key_hash,
-        key_hash=key_hash,
         reserved_msats=reserved_cost_for_model,
         charge_msats=total_cost_msats,
     )
@@ -589,9 +640,7 @@ async def finalize_ehbp_actual_cost_payment(
 
     await session.commit()
     await _stop_reservation_heartbeat(reservation.release_id)
-    await session.refresh(billing_key)
-    if billing_key.hashed_key != key.hashed_key:
-        await session.refresh(key)
+    await session.refresh(key)
 
     if total_cost_msats > 0 and ROUTSTR_FEE_PERCENT > 0:
         fee_msats = math.ceil(total_cost_msats * ROUTSTR_FEE_PERCENT / 100)
@@ -608,15 +657,15 @@ async def finalize_ehbp_actual_cost_payment(
         extra={
             "event": "finalize",
             "key_hash": key.hashed_key[:8] + "...",
-            "billing_key_hash": billing_key.hashed_key[:8] + "...",
+            "billing_key_hash": key.hashed_key[:8] + "...",
             "model": model_id,
             "cost_reserved": reserved_cost_for_model,
             "cost_charged": total_cost_msats,
             "input_tokens": cost_info.get("input_tokens", 0),
             "output_tokens": cost_info.get("output_tokens", 0),
-            "balance": billing_key.balance,
-            "reserved_balance": billing_key.reserved_balance,
-            "total_spent": billing_key.total_spent,
+            "balance": key.balance,
+            "reserved_balance": key.reserved_balance,
+            "total_spent": key.total_spent,
             "finalize_type": "ehbp_usage",
             "finalized_at": now,
         },
@@ -753,6 +802,25 @@ async def forward_ehbp_request(
                     "body_preview": body_preview,
                 },
             )
+            # Key-config mismatch (stale client HPKE key): return the
+            # enclave's 422 problem+json directly so the SDK's
+            # KeyConfigMismatchError detection fires and triggers
+            # re-attestation.  Wrapping it as application/json would
+            # destroy the signal and cause permanent failure.
+            if _is_ehbp_key_config_response(resp):
+                logger.warning(
+                    "EHBP upstream %s returned key-config mismatch for model=%s, "
+                    "passing through for client re-attestation",
+                    provider_type,
+                    model_obj.id,
+                    extra={
+                        "provider": provider_type,
+                        "model": model_obj.id,
+                        "path": path,
+                    },
+                )
+                return _passthrough_key_config_response(resp)
+
             raise UpstreamError(
                 f"EHBP upstream {provider_type} returned {resp.status_code} "
                 f"for model {model_obj.id}: {body_preview[:200] or '<empty>'}",
@@ -979,6 +1047,29 @@ async def forward_ehbp_x_cashu_request(
             )
 
             if resp.status_code != 200:
+                # Key-config mismatch (stale client HPKE key): refund the
+                # full token and pass the enclave's 422 problem+json through
+                # so the SDK's KeyConfigMismatchError detection fires.
+                if _is_ehbp_key_config_response(resp):
+                    logger.warning(
+                        "EHBP upstream %s returned key-config mismatch for "
+                        "model=%s, refunding and passing through",
+                        provider_type,
+                        model_obj.id,
+                        extra={
+                            "provider": provider_type,
+                            "model": model_obj.id,
+                            "path": path,
+                            "refunded_amount": amount,
+                        },
+                    )
+                    refund_token = await send_cashu_refund(
+                        amount, unit, mint, request_id
+                    )
+                    passthrough = _passthrough_key_config_response(resp)
+                    passthrough.headers["X-Cashu"] = refund_token
+                    return passthrough
+
                 refund_token = await send_cashu_refund(amount, unit, mint, request_id)
                 error_response = Response(
                     content=json.dumps(
@@ -1083,6 +1174,46 @@ async def forward_ehbp_x_cashu_request(
         except Exception:
             raise
 
+    except EhbpTimeoutError as e:
+        logger.warning(
+            "EHBP X-Cashu upstream timed out",
+            extra={
+                "error": str(e),
+                "path": path,
+                "method": request.method,
+                "redeemed": redeemed,
+            },
+        )
+
+        if redeemed and amount > 0:
+            try:
+                refund_token = await send_cashu_refund(amount, unit, mint, request_id)
+                error_response = create_error_response(
+                    "upstream_timeout",
+                    str(e),
+                    504,
+                    request=request,
+                    code="UPSTREAM_TIMEOUT",
+                )
+                error_response.headers["X-Cashu"] = refund_token
+                return error_response
+            except Exception as refund_error:
+                logger.error(
+                    "Failed to refund EHBP X-Cashu token after timeout",
+                    extra={
+                        "error": str(refund_error),
+                        "original_error": str(e),
+                    },
+                )
+
+        return create_error_response(
+            "upstream_timeout",
+            str(e),
+            504,
+            request=request,
+            code="UPSTREAM_TIMEOUT",
+        )
+
     except Exception as e:
         error_message = str(e)
         logger.error(
@@ -1115,6 +1246,30 @@ async def forward_ehbp_x_cashu_request(
                         "original_error": error_message,
                     },
                 )
+
+        if not redeemed:
+            classified = classify_redemption_error(e)
+            if classified is not None:
+                error_type, status_code, message, error_code = classified
+                # Never re-offer a spent/consumed token.
+                echo_token = None if error_code in SPENT_TOKEN_CODES else x_cashu_token
+                return create_error_response(
+                    error_type,
+                    message,
+                    status_code,
+                    request=request,
+                    token=echo_token,
+                    code=error_code,
+                )
+            # Raw exception text may contain the attacker-supplied mint URL.
+            return create_error_response(
+                "api_error",
+                "Internal error during token redemption",
+                500,
+                request=request,
+                token=x_cashu_token,
+                code="internal_error",
+            )
 
         if "already spent" in error_message.lower():
             return create_error_response(

@@ -67,6 +67,7 @@ from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .http_client import get_upstream_http_client
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
+from .reasoning_effort import apply_reasoning_effort
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
@@ -346,6 +347,35 @@ def _inject_cost_response_headers(
         headers["X-Routstr-Cost-Usd"] = str(total_usd)
 
 
+def _apply_estimated_usage(
+    response_json: dict[str, Any],
+    request_body: bytes | None,
+    model_obj: Model | None,
+    amount: int,
+    unit: str,
+    api: str,
+) -> None:
+    """Bill a buffered response from a local estimate when usage is missing."""
+    if response_json.get("usage"):
+        return
+    estimator = MissingUsageEstimator(request_body, model_obj)
+    estimator.observe(response_json)
+    estimated = estimator.estimated_usage(response_json.get("model"))
+    if not estimated:
+        return
+    logger.warning(
+        "No usage in non-streaming response, billing from local token estimate",
+        extra={
+            "api": api,
+            "model": response_json.get("model", "unknown"),
+            "amount": amount,
+            "unit": unit,
+            "estimated_usage": estimated,
+        },
+    )
+    response_json["usage"] = estimated
+
+
 def _parse_sse_events(content: str) -> list[tuple[list[str], str]]:
     """Split a buffered SSE body into ``(field_lines, data)`` pairs.
 
@@ -438,6 +468,35 @@ def _is_json_content_type(content_type: str | None) -> bool:
     if main in ("application/json", "text/json"):
         return True
     return main.startswith("application/") and main.endswith("+json")
+
+
+def _is_sse_body(content_type: str | None, content_str: str) -> bool:
+    if content_type:
+        main = content_type.split(";", 1)[0].strip().lower()
+        if main == "text/event-stream":
+            return True
+        if _is_json_content_type(content_type):
+            return False
+
+    for line in content_str.lstrip("\ufeff").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.startswith(("data:", "event:", "id:", "retry:", ":"))
+    return False
+
+
+def _openai_completion_path(path: str) -> str | None:
+    canonical = "/" + path.rstrip("/")
+    if canonical.endswith("/chat/completions"):
+        return "chat/completions"
+    return "completions" if canonical.endswith("/completions") else None
+
+
+def _x_cashu_path_has_settlement_handler(path: str) -> bool:
+    canonical = path.rstrip("/")
+    return _openai_completion_path(canonical) is not None or canonical.endswith(
+        ("embeddings", "messages", "messages/count_tokens")
+    )
 
 
 class TopupData(BaseModel):
@@ -625,6 +684,34 @@ class BaseUpstreamProvider:
             response_json["provider"] = existing_str
             return
         response_json["provider"] = f"{provider_type}:{existing_str}"
+
+    def _log_full_refund(
+        self,
+        *,
+        route: str,
+        model: str | None,
+        content_str: str,
+        amount: int,
+        unit: str,
+    ) -> None:
+        """Record a settlement that serves content but charges nothing.
+
+        The client keeps both the response and the whole prepayment, so the
+        model, the serving upstream and a redacted body preview are logged to
+        keep the unbilled request auditable.
+        """
+        logger.warning(
+            "Zero-cost settlement, refunding the full prepayment",
+            extra={
+                "route": route,
+                "model": model or "unknown",
+                "provider_type": self.provider_type,
+                "upstream_base_url": self.base_url,
+                "refund_amount": amount,
+                "unit": unit,
+                "response_body_preview": redact_org_ids(content_str.strip()[:500]),
+            },
+        )
 
     def inject_cost_metadata(
         self,
@@ -816,8 +903,7 @@ class BaseUpstreamProvider:
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
 
-                # Ensure proper Responses API structure
-                # Add any Responses-specific transformations here
+                apply_reasoning_effort(data, model_obj)
 
                 return json.dumps(data).encode()
         except Exception as e:
@@ -845,17 +931,20 @@ class BaseUpstreamProvider:
         return "openrouter.ai" in (self.base_url or "")
 
     def prepare_request_body(
-        self, body: bytes | None, model_obj: Model
+        self,
+        body: bytes | None,
+        model_obj: Model,
+        include_stream_usage: bool = False,
     ) -> bytes | None:
         """Transform request body for provider-specific requirements.
 
-        Automatically transforms model names and, for streaming chat
-        completions, opts the upstream into emitting per-chunk ``usage``
-        so cost tracking can read real token counts instead of falling
-        back to ``MaxCostData``.
+        Automatically transforms model names and opts streaming OpenAI
+        completion endpoints into emitting per-chunk ``usage`` so cost
+        tracking can read real token counts.
 
         Args:
             body: Original request body bytes
+            include_stream_usage: Opt a streaming completion into usage chunks
 
         Returns:
             Transformed request body bytes
@@ -898,14 +987,8 @@ class BaseUpstreamProvider:
         # OpenAI-compatible streaming responses omit ``usage`` unless the
         # request sets ``stream_options.include_usage = true``. Without it
         # we can't reconcile token counts at end of stream and must use
-        # the local request/response estimator. Discriminate
-        # chat-completions-shaped requests by the ``messages`` field so we
-        # don't poke unrelated endpoints.
-        if (
-            data.get("stream") is True
-            and "messages" in data
-            and isinstance(data.get("messages"), list)
-        ):
+        # the local request/response estimator.
+        if data.get("stream") is True and include_stream_usage:
             existing = data.get("stream_options")
             merged = dict(existing) if isinstance(existing, dict) else {}
             if merged.get("include_usage") is not True:
@@ -933,6 +1016,9 @@ class BaseUpstreamProvider:
         ):
             if inject_anthropic_cache_breakpoints(data):
                 changed = True
+
+        if apply_reasoning_effort(data, model_obj):
+            changed = True
 
         if changed:
             return json.dumps(data).encode()
@@ -1212,6 +1298,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        legacy_completion: bool = False,
     ) -> StreamingResponse:
         """Handle streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1295,6 +1382,7 @@ class BaseUpstreamProvider:
             nonlocal usage_finalized, last_model_seen
             usage_chunk_data: dict | None = None
             done_seen: bool = False
+            stream_id: str | None = None
 
             def _process_event(
                 raw_event: bytes, final: bool = False
@@ -1317,7 +1405,7 @@ class BaseUpstreamProvider:
                 * ``[DONE]`` is swallowed so it can be re-emitted exactly once at
                   end of stream.
                 """
-                nonlocal last_model_seen, usage_chunk_data, done_seen
+                nonlocal last_model_seen, usage_chunk_data, done_seen, stream_id
 
                 event = raw_event.strip(b"\r\n")
                 if not event:
@@ -1370,9 +1458,12 @@ class BaseUpstreamProvider:
                         or not isinstance(obj["id"], str)
                         or obj["id"] == "existing-id"
                     ):
-                        if not hasattr(self, "_current_stream_id"):
-                            self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
-                        obj["id"] = self._current_stream_id
+                        if stream_id is None:
+                            id_prefix = "cmpl" if legacy_completion else "chatcmpl"
+                            stream_id = f"{id_prefix}-{uuid.uuid4()}"
+                        obj["id"] = stream_id
+                    else:
+                        stream_id = obj["id"]
                     if isinstance(obj.get("usage"), dict):
                         # Capture usage for end-of-stream cost reconciliation.
                         # Some models (e.g. Gemini thinking models over the
@@ -1484,11 +1575,14 @@ class BaseUpstreamProvider:
                             raise
 
                         if usage_chunk_data is None:
-                            if not hasattr(self, "_current_stream_id"):
-                                self._current_stream_id = f"chatcmpl-{uuid.uuid4()}"
+                            if stream_id is None:
+                                id_prefix = "cmpl" if legacy_completion else "chatcmpl"
+                                stream_id = f"{id_prefix}-{uuid.uuid4()}"
                             usage_chunk_data = {
-                                "id": self._current_stream_id,
-                                "object": "chat.completion.chunk",
+                                "id": stream_id,
+                                "object": "text_completion"
+                                if legacy_completion
+                                else "chat.completion.chunk",
                                 "model": last_model_seen or "unknown",
                                 "choices": [],
                                 "usage": {
@@ -1553,6 +1647,7 @@ class BaseUpstreamProvider:
         model_obj: Model | None = None,
         reservation_snapshot: ReservationSnapshot | None = None,
         request_body: bytes | None = None,
+        legacy_completion: bool = False,
     ) -> Response:
         """Handle non-streaming chat completion responses with token usage tracking and cost adjustment.
 
@@ -1592,9 +1687,11 @@ class BaseUpstreamProvider:
             if requested_model:
                 response_json["model"] = requested_model
             if "id" not in response_json or not isinstance(response_json["id"], str):
-                response_json["id"] = f"chatcmpl-{uuid.uuid4()}"
+                prefix = "cmpl" if legacy_completion else "chatcmpl"
+                response_json["id"] = f"{prefix}-{uuid.uuid4()}"
 
-            if not isinstance(response_json.get("usage"), dict):
+            usage = response_json.get("usage")
+            if not isinstance(usage, dict) or not usage:
                 usage_estimator = MissingUsageEstimator(request_body, model_obj)
                 usage_estimator.observe(response_json)
                 response_json["usage"] = usage_estimator.openai_response_data(
@@ -3203,6 +3300,7 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse from upstream with cost tracking
         """
+        completion_path = _openai_completion_path(path)
         path = self.normalize_request_path(path, model_obj)
 
         if (
@@ -3231,7 +3329,11 @@ class BaseUpstreamProvider:
             (model_obj.forwarded_model_id or model_obj.id) if model_obj else None
         )
 
-        transformed_body = self.prepare_request_body(request_body, model_obj)
+        transformed_body = self.prepare_request_body(
+            request_body,
+            model_obj,
+            include_stream_usage=completion_path is not None,
+        )
 
         logger.debug(
             "Forwarding request to upstream",
@@ -3326,7 +3428,7 @@ class BaseUpstreamProvider:
                 return mapped_error
 
             if (
-                path.endswith("chat/completions")
+                completion_path is not None
                 or path.endswith("embeddings")
                 or path.endswith("messages")
                 or path.endswith("messages/count_tokens")
@@ -3390,7 +3492,7 @@ class BaseUpstreamProvider:
                         finally:
                             await response_handoff.close()
 
-                if path.endswith("chat/completions"):
+                if completion_path is not None:
                     client_wants_streaming = False
                     if request_body:
                         try:
@@ -3433,6 +3535,7 @@ class BaseUpstreamProvider:
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
+                            legacy_completion=completion_path == "completions",
                         )
                         response_handoff.handoff()
                         return result
@@ -3449,6 +3552,7 @@ class BaseUpstreamProvider:
                             model_obj=model_obj,
                             reservation_snapshot=reservation_snapshot,
                             request_body=request_body,
+                            legacy_completion=completion_path == "completions",
                         )
                     finally:
                         await response_handoff.close()
@@ -3986,23 +4090,17 @@ class BaseUpstreamProvider:
                 )
                 return cost
             case CostDataError() as error:
+                # Content was already served, so refund instead of raising.
                 logger.error(
-                    "Cost calculation error",
+                    "Cost calculation error, refunding the prepayment",
                     extra={
                         "model": model,
                         "error_message": error.message,
                         "error_code": error.code,
                     },
                 )
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": {
-                            "message": error.message,
-                            "type": "invalid_request_error",
-                            "code": error.code,
-                        }
-                    },
+                return MaxCostData(
+                    base_msats=0, input_msats=0, output_msats=0, total_msats=0
                 )
         return None
 
@@ -4085,6 +4183,7 @@ class BaseUpstreamProvider:
         mint: str | None = None,
         request_id: str | None = None,
         model_obj: Model | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Handle streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -4116,6 +4215,7 @@ class BaseUpstreamProvider:
         usage_data = None
         model = None
         cost_data: CostData | MaxCostData | None = None
+        usage_estimator = MissingUsageEstimator(request_body, model_obj)
 
         lines = content_str.strip().split("\n")
         for line in lines:
@@ -4143,86 +4243,107 @@ class BaseUpstreamProvider:
                             usage_data = merged
                 except json.JSONDecodeError:
                     continue
+                usage_estimator.observe(data_json)
 
-        if usage_data and model:
-            logger.debug(
-                "Found usage data in streaming response",
+        if not usage_data:
+            usage_data = usage_estimator.estimated_usage(model)
+            if usage_data:
+                logger.warning(
+                    "No usage in streaming response, billing from local token estimate",
+                    extra={
+                        "model": model,
+                        "amount": amount,
+                        "unit": unit,
+                        "estimated_usage": usage_data,
+                    },
+                )
+
+        logger.debug(
+            "Calculating cost for streaming response",
+            extra={
+                "model": model,
+                "usage_data": usage_data,
+                "amount": amount,
+                "unit": unit,
+            },
+        )
+
+        response_data = {"usage": usage_data, "model": model or "unknown"}
+        try:
+            cost_data = await self.get_x_cashu_cost(
+                response_data, max_cost_for_model, model_obj
+            )
+            if cost_data is not None and cost_data.total_msats == 0:
+                self._log_full_refund(
+                    route="chat.streaming",
+                    model=model,
+                    content_str=content_str,
+                    amount=amount,
+                    unit=unit,
+                )
+            if cost_data:
+                if unit == "msat":
+                    refund_amount = amount - cost_data.total_msats
+                elif unit == "sat":
+                    refund_amount = amount - (cost_data.total_msats + 999) // 1000
+                else:
+                    raise ValueError(f"Invalid unit: {unit}")
+
+                if refund_amount > 0:
+                    logger.debug(
+                        "Processing refund for streaming response",
+                        extra={
+                            "original_amount": amount,
+                            "cost_msats": cost_data.total_msats,
+                            "refund_amount": refund_amount,
+                            "unit": unit,
+                            "model": model,
+                        },
+                    )
+
+                    refund_token = await self.send_refund(
+                        refund_amount,
+                        unit,
+                        mint,
+                        request_id=request_id,
+                    )
+                    response_headers["X-Cashu"] = refund_token
+
+                    logger.info(
+                        "Refund processed for streaming response",
+                        extra={
+                            "refund_amount": refund_amount,
+                            "unit": unit,
+                            "refund_token_preview": refund_token[:20] + "..."
+                            if len(refund_token) > 20
+                            else refund_token,
+                        },
+                    )
+                else:
+                    logger.debug(
+                        "No refund needed for streaming response",
+                        extra={
+                            "amount": amount,
+                            "cost_msats": cost_data.total_msats,
+                            "model": model,
+                        },
+                    )
+
+                # Inject cost breakdown headers so the SDK's
+                # extractUsageFromResponseHeaders can populate
+                # inputMsats/outputMsats/totalMsats for x-cashu requests.
+                _inject_cost_response_headers(response_headers, cost_data)
+        except Exception as e:
+            logger.error(
+                "Error calculating cost for streaming response",
                 extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
                     "model": model,
-                    "usage_data": usage_data,
                     "amount": amount,
                     "unit": unit,
                 },
             )
-
-            response_data = {"usage": usage_data, "model": model}
-            try:
-                cost_data = await self.get_x_cashu_cost(
-                    response_data, max_cost_for_model, model_obj
-                )
-                if cost_data:
-                    if unit == "msat":
-                        refund_amount = amount - cost_data.total_msats
-                    elif unit == "sat":
-                        refund_amount = amount - (cost_data.total_msats + 999) // 1000
-                    else:
-                        raise ValueError(f"Invalid unit: {unit}")
-
-                    if refund_amount > 0:
-                        logger.debug(
-                            "Processing refund for streaming response",
-                            extra={
-                                "original_amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "model": model,
-                            },
-                        )
-
-                        refund_token = await self.send_refund(
-                            refund_amount,
-                            unit,
-                            mint,
-                            request_id=request_id,
-                        )
-                        response_headers["X-Cashu"] = refund_token
-
-                        logger.info(
-                            "Refund processed for streaming response",
-                            extra={
-                                "refund_amount": refund_amount,
-                                "unit": unit,
-                                "refund_token_preview": refund_token[:20] + "..."
-                                if len(refund_token) > 20
-                                else refund_token,
-                            },
-                        )
-                    else:
-                        logger.debug(
-                            "No refund needed for streaming response",
-                            extra={
-                                "amount": amount,
-                                "cost_msats": cost_data.total_msats,
-                                "model": model,
-                            },
-                        )
-
-                    # Inject cost breakdown headers so the SDK's
-                    # extractUsageFromResponseHeaders can populate
-                    # inputMsats/outputMsats/totalMsats for x-cashu requests.
-                    _inject_cost_response_headers(response_headers, cost_data)
-            except Exception as e:
-                logger.error(
-                    "Error calculating cost for streaming response",
-                    extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "model": model,
-                        "amount": amount,
-                        "unit": unit,
-                    },
-                )
 
         for i, line in enumerate(lines):
             if line.startswith("data: "):
@@ -4230,10 +4351,9 @@ class BaseUpstreamProvider:
                     data_json = json.loads(line[6:])
                     if not isinstance(data_json, dict):
                         continue
-                    changed = False
-                    if "provider" not in data_json:
-                        self._apply_provider_field(data_json)
-                        changed = True
+                    provider_before = data_json.get("provider")
+                    self._apply_provider_field(data_json)
+                    changed = data_json.get("provider") != provider_before
                     if cost_data and "usage" in data_json and data_json["usage"]:
                         _inject_cost_into_usage(data_json, cost_data)
                         changed = True
@@ -4263,6 +4383,7 @@ class BaseUpstreamProvider:
         mint: str | None = None,
         request_id: str | None = None,
         model_obj: Model | None = None,
+        request_body: bytes | None = None,
     ) -> Response:
         """Handle non-streaming response for X-Cashu payment, calculating refund if needed.
 
@@ -4284,9 +4405,20 @@ class BaseUpstreamProvider:
         try:
             response_json = json.loads(content_str)
             self._apply_provider_field(response_json)
+            _apply_estimated_usage(
+                response_json, request_body, model_obj, amount, unit, "chat"
+            )
             cost_data = await self.get_x_cashu_cost(
                 response_json, max_cost_for_model, model_obj
             )
+            if cost_data is not None and cost_data.total_msats == 0:
+                self._log_full_refund(
+                    route="chat",
+                    model=response_json.get("model"),
+                    content_str=content_str,
+                    amount=amount,
+                    unit=unit,
+                )
 
             if cost_data and "usage" in response_json:
                 # Inject cost breakdown into both the response body (so the
@@ -4418,6 +4550,7 @@ class BaseUpstreamProvider:
         mint: str | None = None,
         request_id: str | None = None,
         model_obj: Model | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse | Response:
         """Handle chat completion response for X-Cashu payment, detecting streaming vs non-streaming.
 
@@ -4440,7 +4573,9 @@ class BaseUpstreamProvider:
             content_str = (
                 content.decode("utf-8") if isinstance(content, bytes) else content
             )
-            is_streaming = content_str.startswith("data:") or "data:" in content_str
+            is_streaming = _is_sse_body(
+                response.headers.get("content-type"), content_str
+            )
 
             logger.debug(
                 "Chat completion response analysis",
@@ -4462,6 +4597,7 @@ class BaseUpstreamProvider:
                     mint,
                     request_id=request_id,
                     model_obj=model_obj,
+                    request_body=request_body,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_response(
@@ -4473,6 +4609,7 @@ class BaseUpstreamProvider:
                     mint,
                     request_id=request_id,
                     model_obj=model_obj,
+                    request_body=request_body,
                 )
 
         except Exception as e:
@@ -4516,6 +4653,7 @@ class BaseUpstreamProvider:
         Returns:
             Response or StreamingResponse with refund if applicable
         """
+        completion_path = _openai_completion_path(path)
         if path.startswith("v1/"):
             path = path.replace("v1/", "")
 
@@ -4525,7 +4663,15 @@ class BaseUpstreamProvider:
             path.endswith("messages/count_tokens")
             and not self.supports_anthropic_messages
         ):
-            return count_tokens_locally(request_body, model_obj)
+            result = count_tokens_locally(request_body, model_obj)
+            refund_token = await self.send_refund(
+                amount,
+                unit,
+                mint,
+                request_id=getattr(request.state, "request_id", None),
+            )
+            result.headers["X-Cashu"] = refund_token
+            return result
 
         if (
             path.endswith("messages")
@@ -4544,7 +4690,11 @@ class BaseUpstreamProvider:
 
         url = f"{self.base_url}/{path}"
 
-        transformed_body = self.prepare_request_body(request_body, model_obj)
+        transformed_body = self.prepare_request_body(
+            request_body,
+            model_obj,
+            include_stream_usage=completion_path is not None,
+        )
 
         logger.debug(
             "Forwarding request to upstream",
@@ -4639,12 +4789,7 @@ class BaseUpstreamProvider:
                 await _close_upstream_exchange(response, client)
                 return error_response
 
-            if (
-                path.endswith("chat/completions")
-                or path.endswith("embeddings")
-                or path.endswith("messages")
-                or path.endswith("messages/count_tokens")
-            ):
+            if _x_cashu_path_has_settlement_handler(path):
                 logger.debug(
                     "Processing completion/embeddings/messages response",
                     extra={"path": path, "amount": amount, "unit": unit},
@@ -4658,6 +4803,7 @@ class BaseUpstreamProvider:
                     mint,
                     request_id=getattr(request.state, "request_id", None),
                     model_obj=model_obj,
+                    request_body=request_body,
                 )
                 if isinstance(result, StreamingResponse) and not response.is_closed:
                     return _attach_upstream_stream_owner(result, response, client)
@@ -4946,6 +5092,7 @@ class BaseUpstreamProvider:
                     mint,
                     request_id=getattr(request.state, "request_id", None),
                     model_obj=model_obj,
+                    request_body=request_body,
                 )
                 if isinstance(result, StreamingResponse) and not response.is_closed:
                     return _attach_upstream_stream_owner(result, response, client)
@@ -4996,6 +5143,7 @@ class BaseUpstreamProvider:
         mint: str | None = None,
         request_id: str | None = None,
         model_obj: Model | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse | Response:
         """Handle Responses API completion response for X-Cashu payment.
 
@@ -5019,7 +5167,9 @@ class BaseUpstreamProvider:
             content_str = (
                 content.decode("utf-8") if isinstance(content, bytes) else content
             )
-            is_streaming = content_str.startswith("data:") or "data:" in content_str
+            is_streaming = _is_sse_body(
+                response.headers.get("content-type"), content_str
+            )
 
             logger.debug(
                 "Responses API completion response analysis",
@@ -5041,6 +5191,7 @@ class BaseUpstreamProvider:
                     mint,
                     request_id=request_id,
                     model_obj=model_obj,
+                    request_body=request_body,
                 )
             else:
                 return await self.handle_x_cashu_non_streaming_responses_response(
@@ -5052,6 +5203,7 @@ class BaseUpstreamProvider:
                     mint,
                     request_id=request_id,
                     model_obj=model_obj,
+                    request_body=request_body,
                 )
 
         except Exception as e:
@@ -5080,6 +5232,7 @@ class BaseUpstreamProvider:
         mint: str | None = None,
         request_id: str | None = None,
         model_obj: Model | None = None,
+        request_body: bytes | None = None,
     ) -> StreamingResponse:
         """Handle streaming Responses API response for X-Cashu payment.
 
@@ -5106,6 +5259,7 @@ class BaseUpstreamProvider:
         model: str | None = None
         reasoning_tokens = 0
         cost_data: CostData | MaxCostData | None = None
+        usage_estimator = MissingUsageEstimator(request_body, model_obj)
 
         for _fields, data in events:
             if data.strip() == "[DONE]":
@@ -5116,6 +5270,7 @@ class BaseUpstreamProvider:
                 continue
             if not isinstance(data_json, dict):
                 continue
+            usage_estimator.observe(data_json)
             # Canonical Responses API events carry model and usage nested under
             # "response" (response.completed/incomplete); older shapes put them
             # at the top level.
@@ -5131,19 +5286,18 @@ class BaseUpstreamProvider:
             elif not model and payload.get("model"):
                 model = payload["model"]
 
-        if usage_data is None:
-            # No request body is available at this X-Cashu settlement seam, so
-            # an auditable input/output estimate cannot be built. Refund the
-            # token rather than treating the authorization ceiling as usage.
-            logger.warning(
-                "No usage in streaming Responses API response — refunding instead of charging the authorized max",
-                extra={
-                    "model": model,
-                    "amount": amount,
-                    "unit": unit,
-                    "max_cost_msats": max_cost_for_model,
-                },
-            )
+        if not usage_data:
+            usage_data = usage_estimator.estimated_usage(model)
+            if usage_data:
+                logger.warning(
+                    "No usage in streaming Responses API response, billing from local token estimate",
+                    extra={
+                        "model": model,
+                        "amount": amount,
+                        "unit": unit,
+                        "estimated_usage": usage_data,
+                    },
+                )
         else:
             logger.debug(
                 "Found usage data in streaming Responses API response",
@@ -5161,6 +5315,14 @@ class BaseUpstreamProvider:
             cost_data = await self.get_x_cashu_cost(
                 response_data, max_cost_for_model, model_obj
             )
+            if cost_data is not None and cost_data.total_msats == 0:
+                self._log_full_refund(
+                    route="responses.streaming",
+                    model=model,
+                    content_str=content_str,
+                    amount=amount,
+                    unit=unit,
+                )
             if cost_data:
                 if unit == "msat":
                     refund_amount = amount - cost_data.total_msats
@@ -5235,10 +5397,9 @@ class BaseUpstreamProvider:
                 continue
             if not isinstance(data_json, dict):
                 continue
-            changed = False
-            if "provider" not in data_json:
-                self._apply_provider_field(data_json)
-                changed = True
+            provider_before = data_json.get("provider")
+            self._apply_provider_field(data_json)
+            changed = data_json.get("provider") != provider_before
             payload = _responses_usage_payload(data_json)
             if cost_data and isinstance(payload.get("usage"), dict):
                 _inject_cost_into_usage(payload, cost_data)
@@ -5267,6 +5428,7 @@ class BaseUpstreamProvider:
         mint: str | None = None,
         request_id: str | None = None,
         model_obj: Model | None = None,
+        request_body: bytes | None = None,
     ) -> Response:
         """Handle non-streaming Responses API response for X-Cashu payment."""
         logger.debug(
@@ -5277,9 +5439,20 @@ class BaseUpstreamProvider:
         try:
             response_json = json.loads(content_str)
             self._apply_provider_field(response_json)
+            _apply_estimated_usage(
+                response_json, request_body, model_obj, amount, unit, "responses"
+            )
             cost_data = await self.get_x_cashu_cost(
                 response_json, max_cost_for_model, model_obj
             )
+            if cost_data is not None and cost_data.total_msats == 0:
+                self._log_full_refund(
+                    route="responses",
+                    model=response_json.get("model"),
+                    content_str=content_str,
+                    amount=amount,
+                    unit=unit,
+                )
 
             if cost_data and "usage" in response_json:
                 _inject_cost_into_usage(response_json, cost_data)
@@ -5430,6 +5603,21 @@ class BaseUpstreamProvider:
             },
         )
 
+        # Reject before redemption so the client keeps its token.
+        if not _x_cashu_path_has_settlement_handler(path):
+            logger.warning(
+                "Rejecting X-Cashu request for unsupported endpoint",
+                extra={"path": path, "method": request.method},
+            )
+            return create_error_response(
+                "invalid_request_error",
+                "X-Cashu payment is not supported on this endpoint; use bearer "
+                "(deposit) authentication instead. The token was not redeemed.",
+                400,
+                request=request,
+                code="x_cashu_unsupported_endpoint",
+            )
+
         redeemed = False
         try:
             headers = dict(request.headers)
@@ -5535,22 +5723,8 @@ class BaseUpstreamProvider:
             {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
         )
 
-        temp_model = Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=None,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-            alias_ids=model.alias_ids,
-            forwarded_model_id=model.forwarded_model_id,
+        temp_model = model.copy(
+            update={"pricing": adjusted_pricing, "sats_pricing": None}
         )
 
         (
@@ -5559,23 +5733,7 @@ class BaseUpstreamProvider:
             adjusted_pricing.max_cost,
         ) = _calculate_usd_max_costs(temp_model)
 
-        return Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=model.sats_pricing,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-            alias_ids=model.alias_ids,
-            forwarded_model_id=model.forwarded_model_id,
-        )
+        return model.copy(update={"pricing": adjusted_pricing})
 
     async def fetch_models(self) -> list[Model]:
         """Fetch available models from upstream API and update cache.

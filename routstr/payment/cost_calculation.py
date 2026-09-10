@@ -1,7 +1,7 @@
 import math
 from typing import TYPE_CHECKING
 
-from pydantic.v1 import BaseModel
+from pydantic.v1 import BaseModel, Field
 
 from ..core import get_logger
 from ..core.settings import settings
@@ -37,6 +37,7 @@ class CostData(BaseModel):
     cache_creation_msats: int = 0
     # Actual debit after finalization; None means settlement has not run yet.
     charged_msats: int | None = None
+    upstream_usd: float = Field(default=0.0, exclude=True)
 
 
 class MaxCostData(CostData):
@@ -491,6 +492,7 @@ def _calculate_from_usd_cost(
     """Calculate cost from USD figures, deriving input/output split from tokens."""
     if provider_fee is None:
         provider_fee = _resolve_provider_fee(response_data.get("model", ""))
+    reported_usd = usd_cost
     usd_cost = usd_cost * provider_fee
     input_usd = input_usd * provider_fee
     output_usd = output_usd * provider_fee
@@ -576,6 +578,7 @@ def _calculate_from_usd_cost(
         cache_creation_input_tokens=cache_creation_tokens,
         cache_read_msats=cache_read_msats,
         cache_creation_msats=cache_creation_msats,
+        upstream_usd=reported_usd,
     )
 
 

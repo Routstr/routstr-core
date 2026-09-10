@@ -229,6 +229,15 @@ def test_missing_usage_estimator_openai_dialect() -> None:
     }
 
 
+def test_missing_usage_estimator_counts_legacy_token_prompt() -> None:
+    model = _make_model()
+    request_body = _body({"model": model.id, "prompt": [[1, 2], [3, 4, 5]]})
+
+    usage = MissingUsageEstimator(request_body, model).openai_response_data()["usage"]
+
+    assert usage["prompt_tokens"] >= 5
+
+
 def test_missing_usage_estimator_does_not_count_response_metadata() -> None:
     estimator = MissingUsageEstimator(b"{}", None)
     estimator.observe(
@@ -263,3 +272,39 @@ def test_uses_forwarded_model_id_when_present() -> None:
 
     assert captured["model"] == "claude-3-5-sonnet-20241022"
     assert _read_payload(response)["input_tokens"] == 7
+
+
+def test_responses_instructions_are_counted_as_system_text() -> None:
+    body = {"model": "gpt-4o", "input": "Hi", "instructions": "Be concise."}
+    with patch.object(
+        count_tokens_module.litellm, "token_counter", return_value=12
+    ) as counter:
+        usage = MissingUsageEstimator(_body(body), None).response_data()["usage"]
+
+    assert usage["input_tokens"] == 12
+    counter.assert_called_once_with(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Hi"},
+        ],
+        tools=None,
+    )
+
+
+def test_responses_tool_results_use_fallback_instead_of_empty_messages() -> None:
+    body = {
+        "model": "gpt-4o",
+        "input": [
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "result " * 100,
+            }
+        ],
+    }
+    with patch.object(count_tokens_module.litellm, "token_counter") as counter:
+        usage = MissingUsageEstimator(_body(body), None).response_data()["usage"]
+
+    counter.assert_not_called()
+    assert usage["input_tokens"] > 100

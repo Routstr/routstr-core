@@ -418,7 +418,7 @@ POST /v1/wallet/create
 
 ### Get Key Information
 
-Get current balance, consumption data, and child keys for an API key.
+Get current balance and consumption data for an API key.
 
 ```http
 GET /v1/balance/info
@@ -432,23 +432,9 @@ Authorization: Bearer sk-...
   "api_key": "sk-abc...",
   "balance": 8500000,
   "reserved": 0,
-  "is_child": false,
-  "parent_key": null,
   "total_requests": 42,
   "total_spent": 1500000,
-  "balance_limit": null,
-  "balance_limit_reset": null,
-  "validity_date": null,
-  "child_keys": [
-    {
-      "api_key": "sk-child1...",
-      "total_requests": 10,
-      "total_spent": 500000,
-      "balance_limit": 1000000,
-      "balance_limit_reset": "daily",
-      "validity_date": 1738000000
-    }
-  ]
+  "validity_date": null
 }
 ```
 
@@ -525,42 +511,6 @@ Authorization: Bearer sk-...
   "cashu_token": "cashuAeyJ0...",
   "amount": 5000,
   "mint": "https://mint.example.com"
-}
-```
-
-### Create Child Key
-
-Creates one or more child API keys that share the parent's balance. Each child key creation costs a fixed amount (configurable).
-
-```http
-POST /v1/balance/child-key
-Authorization: Bearer sk-...
-```
-
-**Request Body:**
-
-```json
-{
-  "count": 1
-}
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `count` | integer | Yes | - | Number of child keys to create (1-50) |
-
-**Response:**
-
-```json
-{
-  "api_keys": ["sk-abc...", "sk-def..."],
-  "count": 2,
-  "cost_msats": 2000,
-  "cost_sats": 2,
-  "parent_balance": 98000,
-  "parent_balance_sats": 98
 }
 ```
 

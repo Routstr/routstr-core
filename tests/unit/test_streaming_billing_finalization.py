@@ -82,47 +82,42 @@ async def test_release_only_owns_its_concurrent_reservation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_updates_parent_and_child_atomically() -> None:
+async def test_release_clears_reservation_aggregates_atomically() -> None:
     engine = await _engine()
-    parent = ApiKey(hashed_key="parent", balance=1_000)
-    child = ApiKey(hashed_key="child", parent_key_hash="parent", balance=0)
+    key = ApiKey(hashed_key="key", balance=1_000)
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        session.add_all([parent, child])
+        session.add(key)
         await session.commit()
-        await pay_for_request(child, 500, session)
-        snapshot = await get_reservation_snapshot(child, session)
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
 
         assert await release_reservation(snapshot, session, 500) is True
-        await session.refresh(parent)
-        await session.refresh(child)
-        assert (parent.reserved_balance, child.reserved_balance) == (0, 0)
-        assert (parent.reserved_at, child.reserved_at) == (None, None)
+        await session.refresh(key)
+        assert (key.reserved_balance, key.reserved_at) == (0, None)
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_release_repairs_partial_parent_child_corruption() -> None:
-    """A child aggregate that no longer holds the reservation must not leave
+async def test_release_repairs_partial_aggregate_corruption() -> None:
+    """An aggregate that no longer holds the reservation must not leave
     the durable row active forever: the release rolls the subtraction back and
     terminalizes the reservation without touching aggregates."""
     engine = await _engine()
-    parent = ApiKey(hashed_key="parent", balance=1_000)
-    child = ApiKey(hashed_key="child", parent_key_hash="parent", balance=0)
+    key = ApiKey(hashed_key="key", balance=1_000)
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        session.add_all([parent, child])
+        session.add(key)
         await session.commit()
-        await pay_for_request(child, 500, session)
-        snapshot = await get_reservation_snapshot(child, session)
-        child.reserved_balance = 100
-        session.add(child)
+        await pay_for_request(key, 500, session)
+        snapshot = await get_reservation_snapshot(key, session)
+        key.reserved_balance = 100
+        session.add(key)
         await session.commit()
 
         assert await release_reservation(snapshot, session, 500) is True
-        await session.refresh(parent)
-        await session.refresh(child)
+        await session.refresh(key)
         record = await session.get(ReservationRelease, snapshot.release_id)
         # Aggregates untouched — legacy cleanup reconciles them when stale.
-        assert (parent.reserved_balance, child.reserved_balance) == (500, 100)
+        assert key.reserved_balance == 100
         assert record is not None and record.status == "released"
     await engine.dispose()
 

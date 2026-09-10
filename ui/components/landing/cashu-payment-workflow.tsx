@@ -53,8 +53,6 @@ export function CashuPaymentWorkflow({
   const [isCreatingKey, setIsCreatingKey] = useState(false);
   const [isTopupLoading, setIsTopupLoading] = useState(false);
   const [hasInteractedTopup, setHasInteractedTopup] = useState(false);
-  const [balanceLimit, setBalanceLimit] = useState<string>('');
-  const [balanceLimitReset, setBalanceLimitReset] = useState<string>('');
   const [validityDate, setValidityDate] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
 
@@ -90,15 +88,10 @@ export function CashuPaymentWorkflow({
     try {
       const requestPayload: {
         initial_balance_token: string;
-        balance_limit?: number;
-        balance_limit_reset?: string;
         validity_date?: number;
       } = {
         initial_balance_token: initialToken.trim(),
       };
-      if (balanceLimit) requestPayload.balance_limit = Number(balanceLimit);
-      if (balanceLimitReset)
-        requestPayload.balance_limit_reset = balanceLimitReset;
       if (validityDate) {
         requestPayload.validity_date = Math.floor(
           new Date(validityDate + 'T23:59:59').getTime() / 1000
@@ -116,24 +109,16 @@ export function CashuPaymentWorkflow({
       const payload = (await response.json()) as {
         api_key: string;
         balance: number;
-        is_child: boolean;
-        parent_key: string | null;
         total_requests: number;
         total_spent: number;
-        balance_limit: number | null;
-        balance_limit_reset: string | null;
         validity_date: number | null;
       };
       const snapshot: WalletSnapshot = {
         apiKey: payload.api_key,
         balanceMsats: payload.balance ?? 0,
         reservedMsats: 0,
-        isChild: payload.is_child ?? false,
-        parentKey: payload.parent_key ?? null,
         totalRequests: payload.total_requests ?? 0,
         totalSpent: payload.total_spent ?? 0,
-        balanceLimit: payload.balance_limit ?? null,
-        balanceLimitReset: payload.balance_limit_reset ?? null,
         validityDate: payload.validity_date ?? null,
       };
 
@@ -149,14 +134,7 @@ export function CashuPaymentWorkflow({
     } finally {
       setIsCreatingKey(false);
     }
-  }, [
-    initialToken,
-    baseUrl,
-    onApiKeyCreated,
-    balanceLimit,
-    balanceLimitReset,
-    validityDate,
-  ]);
+  }, [initialToken, baseUrl, onApiKeyCreated, validityDate]);
 
   const handleSyncBalance = useCallback(async (): Promise<void> => {
     if (!activeApiKey) {
@@ -252,13 +230,8 @@ export function CashuPaymentWorkflow({
           />
           <div className='space-y-4'>
             <KeyOptions
-              balanceLimit={balanceLimit}
-              setBalanceLimit={setBalanceLimit}
               validityDate={validityDate}
               setValidityDate={setValidityDate}
-              balanceLimitReset={balanceLimitReset}
-              setBalanceLimitReset={setBalanceLimitReset}
-              showBalanceLimit={false}
             />
 
             <div className='flex flex-wrap items-center gap-3'>
@@ -272,7 +245,8 @@ export function CashuPaymentWorkflow({
               <span className='text-muted-foreground text-[0.7rem] leading-relaxed'>
                 Redeems instantly and returns <code>sk-</code> key.
                 <br />
-                Optional limits can be set above for enhanced security.
+                Set an optional validity date above to expire the key
+                automatically.
               </span>
             </div>
           </div>

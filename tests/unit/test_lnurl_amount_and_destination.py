@@ -347,21 +347,21 @@ async def test_send_to_lnurl_does_not_reserve_before_lnurl_validation() -> None:
     assert raw_send.await_args.kwargs["amount"] == 1000
 
 
-def test_select_melt_proofs_stops_at_minimal_cover_when_over_budget() -> None:
+def test_select_melt_proofs_ignores_fees_for_unneeded_wallet_proofs() -> None:
     from routstr.payment.lnurl import _select_melt_proofs
 
     wallet = MagicMock()
     wallet.get_fees_for_proofs = MagicMock(side_effect=lambda selected: len(selected))
-    proofs = [MagicMock(amount=600, reserved=False) for _ in range(3)]
+    proofs = [MagicMock(amount=2048, reserved=False) for _ in range(1100)]
 
     selected, shortfall = _select_melt_proofs(
         wallet,
         proofs,
-        quote_amount=1000,
-        fee_reserve=0,
-        gross_budget=1000,
+        quote_amount=1061,
+        fee_reserve=1,
+        gross_budget=1061,
     )
 
     assert selected is None
     assert shortfall == 2
-    assert wallet.get_fees_for_proofs.call_count == 2
+    assert wallet.get_fees_for_proofs.call_count == 1
