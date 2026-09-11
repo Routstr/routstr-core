@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.14"]
 
     steps:
       - name: Checkout code
@@ -25,22 +25,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --dev
+          uv sync --python ${{ matrix.python-version }} --dev
 
       - name: Run linting with ruff
         run: |
-          uv run ruff check .
+          uv run --python ${{ matrix.python-version }} ruff check .
 
       - name: Run type checking with mypy
         run: |
-          uv run mypy .
+          uv run --python ${{ matrix.python-version }} mypy .
 
       - name: Run tests with pytest
         env:
           UPSTREAM_BASE_URL: "http://test"
           UPSTREAM_API_KEY: "test"
         run: |
-          uv run pytest --verbose --tb=short
+          uv run --python ${{ matrix.python-version }} pytest --verbose --tb=short
 
       - name: Upload test results
         if: always()
