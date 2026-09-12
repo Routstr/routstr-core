@@ -291,12 +291,6 @@ async def test_discount_cannot_be_dodged_by_hiding_prompt_in_tools() -> None:
 
 
 async def test_discounted_max_cost_counts_responses_input_images() -> None:
-    """A Responses ``input_image`` must add image tokens to the reservation.
-
-    Regression for the review finding that ``estimate_image_tokens_from_input``
-    was defined but never called: a Responses body carries ``input``, not
-    ``messages``, so its images were previously reserved at zero tokens.
-    """
     import base64
     from io import BytesIO
 
@@ -342,7 +336,9 @@ async def test_discounted_max_cost_counts_responses_input_images() -> None:
         patch.object(settings, "tolerance_percentage", 0),
         patch.object(settings, "min_request_msat", 1000),
     ):
-        cost_no_image = await calculate_discounted_max_cost(100_000, no_image, model_obj)
+        cost_no_image = await calculate_discounted_max_cost(
+            100_000, no_image, model_obj
+        )
         cost_with_image = await calculate_discounted_max_cost(
             100_000, with_image, model_obj
         )
@@ -352,61 +348,165 @@ async def test_discounted_max_cost_counts_responses_input_images() -> None:
     assert cost_with_image > cost_no_image
 
 
-async def test_estimate_input_image_tokens_remote_original_fetches() -> None:
-    """A remote ``original`` image is fetched and measured, not worst-cased.
+def _responses_image(url: str, detail: str | None = "original") -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": url, "detail": detail}],
+        }
+    ]
 
-    Regression for the review finding that any non-data URL with
-    ``detail: \"original\"`` reserved the 36,000-token worst case without
-    trying to fetch — a 512x512 image reserved ~117x its real cost.
-    """
+
+async def _responses_image_tokens(input_data: list[dict[str, Any]]) -> int:
+    from routstr.payment.helpers import estimate_image_tokens_in_messages
+    from routstr.payment.responses_input import responses_input_to_messages
+
+    messages = responses_input_to_messages(input_data)
+    assert messages is not None
+    return await estimate_image_tokens_in_messages(messages)
+
+
+async def test_remote_original_image_is_fetched_not_worst_cased() -> None:
     from io import BytesIO
-    from unittest.mock import patch as mock_patch
 
     from PIL import Image
-
-    from routstr.payment.helpers import _estimate_input_image_tokens
 
     image = Image.new("RGB", (512, 512), "red")
     buffer = BytesIO()
     image.save(buffer, format="JPEG")
     image_bytes = buffer.getvalue()
 
-    with mock_patch(
+    with patch(
         "routstr.payment.helpers._fetch_image_from_url",
         new=AsyncMock(return_value=image_bytes),
     ):
-        # 512x512 original -> 16x16 = 256 patches -> ceil(256 * 1.2) = 308 tokens,
-        # far below the 36,000 worst case a blind fallback would reserve.
-        assert await _estimate_input_image_tokens(
-            {"type": "input_image", "image_url": "https://x.test/i.jpg", "detail": "original"}
-        ) == 308
+        # 256 patches * 1.2
+        assert (
+            await _responses_image_tokens(_responses_image("https://x.test/i.jpg"))
+            == 308
+        )
 
-    # When the fetch fails, fall back to the original-detail worst case.
-    with mock_patch(
+    with patch(
         "routstr.payment.helpers._fetch_image_from_url",
         new=AsyncMock(return_value=None),
     ):
-        assert await _estimate_input_image_tokens(
-            {"type": "input_image", "image_url": "https://x.test/i.jpg", "detail": "original"}
-        ) == 36_000
+        assert (
+            await _responses_image_tokens(_responses_image("https://x.test/i.jpg"))
+            == 36_000
+        )
 
 
-async def test_estimate_input_image_tokens_broken_original_data_url() -> None:
-    """A broken data URL with ``detail: \"original\"`` reserves the worst case.
+async def test_broken_data_url_reserves_declared_detail_worst_case() -> None:
+    from routstr.payment.helpers import estimate_image_tokens_in_messages
 
-    Regression for the review finding that the ``except`` branch returned 85
-    (low-detail) regardless of the declared detail.
-    """
-    from routstr.payment.helpers import _estimate_input_image_tokens
+    broken = "data:image/jpeg;base64,!!!"
+    assert await _responses_image_tokens(_responses_image(broken)) == 36_000
+    assert await _responses_image_tokens(_responses_image(broken, "high")) == 85 + (
+        170 * 4
+    )
 
-    # "!!!" is not valid base64, so decoding raises before any dimension read.
-    assert await _estimate_input_image_tokens(
-        {"type": "input_image", "image_url": "data:image/jpeg;base64,!!!", "detail": "original"}
-    ) == 36_000
-    # Non-original details fall back to the max-size tile math, not the 85 floor.
-    assert await _estimate_input_image_tokens(
-        {"type": "input_image", "image_url": "data:image/jpeg;base64,!!!", "detail": "high"}
-    ) == 85 + (170 * 4)
+    chat = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": broken, "detail": "original"},
+                }
+            ],
+        }
+    ]
+    assert await estimate_image_tokens_in_messages(chat) == 36_000
+
+
+async def test_chat_original_image_fetch_failure_reserves_worst_case() -> None:
+    from routstr.payment.helpers import estimate_image_tokens_in_messages
+
+    chat = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://x.test/i.jpg", "detail": "original"},
+                }
+            ],
+        }
+    ]
+    with patch(
+        "routstr.payment.helpers._fetch_image_from_url",
+        new=AsyncMock(return_value=None),
+    ):
+        assert await estimate_image_tokens_in_messages(chat) == 36_000
+
+
+async def test_responses_images_share_per_request_fetch_cap() -> None:
+    from routstr.payment.helpers import IMAGE_FETCH_MAX_PER_REQUEST
+
+    input_data = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_image",
+                    "image_url": f"https://x.test/{i}.jpg",
+                    "detail": "original",
+                }
+                for i in range(IMAGE_FETCH_MAX_PER_REQUEST + 1)
+            ],
+        }
+    ]
+    fetch = AsyncMock(return_value=None)
+    with patch("routstr.payment.helpers._fetch_image_from_url", new=fetch):
+        tokens = await _responses_image_tokens(input_data)
+
+    assert fetch.await_count == IMAGE_FETCH_MAX_PER_REQUEST
+    assert tokens == 36_000 * (IMAGE_FETCH_MAX_PER_REQUEST + 1)
+
+
+async def test_responses_transform_failure_falls_back_to_worst_case() -> None:
+    from routstr.payment.helpers import calculate_discounted_max_cost
+
+    pricing = Mock()
+    pricing.prompt = 0.001
+    pricing.completion = 0.001
+    pricing.max_prompt_cost = 100.0
+    pricing.max_completion_cost = 0.0
+
+    model_obj = Mock()
+    model_obj.sats_pricing = pricing
+    model_obj.top_provider = None
+    model_obj.context_length = None
+
+    body = {
+        "model": "test-model",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "https://x.test/a.jpg"},
+                    {"type": "input_image", "image_url": "https://x.test/b.jpg"},
+                ],
+            }
+        ],
+    }
+    fetch = AsyncMock(return_value=None)
+    with (
+        patch.object(settings, "fixed_pricing", False),
+        patch.object(settings, "tolerance_percentage", 0),
+        patch.object(settings, "min_request_msat", 1000),
+        patch("routstr.payment.helpers._fetch_image_from_url", new=fetch),
+        patch(
+            "routstr.payment.responses_input.LiteLLMCompletionResponsesConfig."
+            "transform_responses_api_input_to_messages",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        cost = await calculate_discounted_max_cost(100_000, body, model_obj)
+
+    fetch.assert_not_awaited()
+    # 2 * 36,000 tokens * 0.001 sats = 72 sats reserved
+    assert 72_000 <= cost < 100_000
 
 
 async def test_discounted_max_cost_body_max_output_tokens_fallback() -> None:
@@ -535,22 +635,28 @@ async def test_discounted_max_cost_invalid_completion_cap_ignored() -> None:
         assert cost == 80_000
 
 
-async def test_estimate_image_tokens_from_input_detail_and_file_id() -> None:
+def _responses_file_image(detail: str | None) -> list[dict[str, Any]]:
+    part: dict[str, Any] = {"type": "input_image", "file_id": "file-1"}
+    if detail is not None:
+        part["detail"] = detail
+    return [{"role": "user", "content": [part]}]
+
+
+async def test_responses_input_detail_and_file_id() -> None:
     import base64
     from io import BytesIO
 
     from PIL import Image
 
-    from routstr.payment.helpers import estimate_image_tokens_from_input
-
     # file_id: dimensions can't be fetched, so use a conservative max-size
     # estimate (4 tiles for auto/high) and honor the detail sibling for low.
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "file_id": "file-1"}]
-    ) == 85 + (170 * 4)
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "file_id": "file-1", "detail": "low"}]
-    ) == 85
+    fetch = AsyncMock(return_value=None)
+    with patch("routstr.payment.helpers._fetch_image_from_url", new=fetch):
+        assert await _responses_image_tokens(_responses_file_image(None)) == 85 + (
+            170 * 4
+        )
+        assert await _responses_image_tokens(_responses_file_image("low")) == 85
+    fetch.assert_not_awaited()
 
     # image_url honors the sibling detail instead of always defaulting to auto.
     image = Image.new("RGB", (512, 512), "red")
@@ -558,12 +664,10 @@ async def test_estimate_image_tokens_from_input_detail_and_file_id() -> None:
     image.save(buffer, format="JPEG")
     data_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
 
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "image_url": data_url, "detail": "low"}]
-    ) == 85
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "image_url": data_url, "detail": "high"}]
-    ) == 85 + 170  # 512x512 = 1 tile
+    assert await _responses_image_tokens(_responses_image(data_url, "low")) == 85
+    assert (
+        await _responses_image_tokens(_responses_image(data_url, "high")) == 85 + 170
+    )  # 512x512 = 1 tile
 
 
 def test_calculate_image_tokens_original_detail() -> None:
@@ -579,13 +683,11 @@ def test_calculate_image_tokens_original_detail() -> None:
     assert _calculate_image_tokens(10_000, 10_000, "original") == 36_000
 
 
-async def test_estimate_image_tokens_from_input_original_detail() -> None:
+async def test_responses_input_original_detail() -> None:
     import base64
     from io import BytesIO
 
     from PIL import Image
-
-    from routstr.payment.helpers import estimate_image_tokens_from_input
 
     image = Image.new("RGB", (2048, 2048), "red")
     buffer = BytesIO()
@@ -594,19 +696,75 @@ async def test_estimate_image_tokens_from_input_original_detail() -> None:
 
     # image_url: billed at the decoded original resolution (4,096 patches),
     # not the 765-token tile cap.
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "image_url": data_url, "detail": "original"}]
-    ) == 4_916
+    assert await _responses_image_tokens(_responses_image(data_url)) == 4_916
 
     # file_id: dimensions unknown, so use the 30,000-patch worst case.
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "file_id": "file-1", "detail": "original"}]
-    ) == 36_000
+    assert await _responses_image_tokens(_responses_file_image("original")) == 36_000
 
     # Explicit null detail behaves like the auto default (tiled math).
-    assert await estimate_image_tokens_from_input(
-        [{"type": "input_image", "file_id": "file-1", "detail": None}]
-    ) == 85 + (170 * 4)
+    assert await _responses_image_tokens(_responses_image(data_url, None)) == 85 + (
+        170 * 4
+    )
+
+
+def test_responses_input_to_messages_shapes() -> None:
+    from routstr.payment.responses_input import (
+        FILE_ID_URL_PREFIX,
+        count_input_images,
+        responses_input_to_messages,
+    )
+
+    input_data = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "hi"},
+                {"type": "input_image", "file_id": "file-1", "detail": "original"},
+            ],
+        },
+        {"type": "function_call_output", "call_id": "c1", "output": "out"},
+    ]
+    messages = responses_input_to_messages(input_data)
+    assert messages is not None
+    assert messages[0]["role"] == "user"
+    parts = messages[0]["content"]
+    assert parts[0] == {"type": "text", "text": "hi"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[1]["image_url"] == {
+        "url": f"{FILE_ID_URL_PREFIX}file-1",
+        "detail": "original",
+    }
+    assert messages[1]["role"] == "tool"
+
+    # dict-form image_url: litellm nests it verbatim, so it is flattened first.
+    nested = responses_input_to_messages(
+        [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": {
+                            "url": "https://x.test/a.jpg",
+                            "detail": "original",
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    assert nested is not None
+    assert nested[0]["content"][0]["image_url"] == {
+        "url": "https://x.test/a.jpg",
+        "detail": "original",
+    }
+
+    assert responses_input_to_messages("plain") == [
+        {"role": "user", "content": "plain"}
+    ]
+    assert responses_input_to_messages(None) == []
+    assert count_input_images(input_data) == 1
 
 
 async def test_estimate_image_tokens_in_messages_original_detail() -> None:
@@ -637,8 +795,6 @@ async def test_estimate_image_tokens_in_messages_original_detail() -> None:
     # 640x640 -> 20x20 = 400 patches -> ceil(400 * 1.2) = 480 tokens.
     assert await estimate_image_tokens_in_messages(messages) == 480
 
-    # input_image parts inside messages honor their sibling detail and
-    # file_id through the Responses estimator as well.
     messages = [
         {
             "role": "user",

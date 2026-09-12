@@ -24,6 +24,12 @@ from ..wallet import (
     deserialize_token_from_string,
     is_trusted_source_mint,
 )
+from .responses_input import (
+    FILE_ID_URL_PREFIX,
+    count_input_images,
+    input_image_part_to_image_url,
+    responses_input_to_messages,
+)
 
 logger = get_logger(__name__)
 
@@ -237,8 +243,12 @@ async def calculate_discounted_max_cost(
     if isinstance(messages, list):
         image_tokens += await estimate_image_tokens_in_messages(messages)
     input_data = body.get("input")
-    if input_data is not None:
-        image_tokens += await estimate_image_tokens_from_input(input_data)
+    if isinstance(input_data, list):
+        converted = responses_input_to_messages(input_data)
+        if converted is None:
+            image_tokens += count_input_images(input_data) * _MAX_ORIGINAL_IMAGE_TOKENS
+        else:
+            image_tokens += await estimate_image_tokens_in_messages(converted)
     if image_tokens > 0:
         logger.debug(
             "Found images in request",
@@ -553,17 +563,9 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                 continue
 
             content_type = content_item.get("type")
-            if content_type not in ("image_url", "input_image"):
-                continue
-
-            # Responses-style ``input_image`` parts carry their detail and
-            # file_id as siblings of the image reference; route them through
-            # the input_image estimator so original detail / file_id are
-            # honored on the chat path too.
             if content_type == "input_image":
-                total_image_tokens += await _estimate_input_image_tokens(
-                    content_item
-                )
+                content_item = input_image_part_to_image_url(content_item)
+            elif content_type != "image_url":
                 continue
 
             image_url_data = content_item.get("image_url")
@@ -575,7 +577,7 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                 detail = "auto"
             elif isinstance(image_url_data, dict):
                 url = image_url_data.get("url", "")
-                detail = image_url_data.get("detail", "auto")
+                detail = image_url_data.get("detail") or "auto"
             else:
                 continue
 
@@ -583,143 +585,65 @@ async def estimate_image_tokens_in_messages(messages: list) -> int:
                 continue
 
             if url.startswith("data:image/"):
-                try:
-                    header, base64_data = url.split(",", 1)
-                    image_bytes = base64.b64decode(base64_data)
-                    width, height = _get_image_dimensions(image_bytes)
-                    tokens = _calculate_image_tokens(width, height, detail)
-                    total_image_tokens += tokens
-                    logger.debug(
-                        "Calculated tokens for base64 image",
-                        extra={
-                            "width": width,
-                            "height": height,
-                            "detail": detail,
-                            "tokens": tokens,
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to process base64 image",
-                        extra={"error": str(e)},
-                    )
-                    total_image_tokens += 85
+                total_image_tokens += _data_url_image_tokens(url, detail)
+            elif url.startswith(FILE_ID_URL_PREFIX):
+                total_image_tokens += _worst_case_image_tokens(detail)
             elif fetches >= IMAGE_FETCH_MAX_PER_REQUEST:
                 logger.warning(
                     "Skipping image URL fetch above per-request limit",
                     extra={"url": url[:100], "limit": IMAGE_FETCH_MAX_PER_REQUEST},
                 )
-                total_image_tokens += 85
+                total_image_tokens += _worst_case_image_tokens(detail)
             else:
                 fetches += 1
                 image_bytes_or_none = await _fetch_image_from_url(url)
-                if image_bytes_or_none:
-                    width, height = _get_image_dimensions(image_bytes_or_none)
-                    tokens = _calculate_image_tokens(width, height, detail)
-                    total_image_tokens += tokens
-                    logger.debug(
-                        "Calculated tokens for URL image",
-                        extra={
-                            "url": url[:100],
-                            "width": width,
-                            "height": height,
-                            "detail": detail,
-                            "tokens": tokens,
-                        },
-                    )
-                else:
-                    total_image_tokens += 85
+                total_image_tokens += _image_bytes_tokens(
+                    image_bytes_or_none, detail, source=url[:100]
+                )
 
     return total_image_tokens
 
 
-async def _estimate_input_image_tokens(item: dict) -> int:
-    """Estimate tokens for a Responses API ``input_image`` item.
-
-    Honors the item-level ``detail``. Data-URL images are measured from their
-    decoded bytes; remote URLs are fetched and measured like the chat path.
-    Only ``file_id`` references (whose dimensions cannot be fetched here) and
-    unfetchable/broken images fall back to conservative estimates: the
-    max-size tile math for high/auto and the 30,000-patch worst case (36,000
-    tokens) for original, so we never under-reserve.
-    """
-    detail = item.get("detail") or "auto"
-    image_url = item.get("image_url")
-    if isinstance(image_url, dict):
-        image_url = image_url.get("url", "")
-
-    def _worst_case() -> int:
-        # Dimensions unknown: reserve the worst case for the declared detail so
-        # a broken/unreadable image still covers what the upstream could bill.
-        if detail == "original":
-            return _MAX_ORIGINAL_IMAGE_TOKENS
-        return _calculate_image_tokens(2048, 2048, detail)
-
-    if isinstance(image_url, str) and image_url:
-        if image_url.startswith("data:image/"):
-            image_bytes = None
-            try:
-                _, base64_data = image_url.split(",", 1)
-                image_bytes = base64.b64decode(base64_data, validate=True)
-            except Exception as e:
-                logger.warning(
-                    "Failed to decode base64 image", extra={"error": str(e)}
-                )
-            if image_bytes is not None:
-                try:
-                    img = Image.open(BytesIO(image_bytes))
-                    return _calculate_image_tokens(img.size[0], img.size[1], detail)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to read image dimensions", extra={"error": str(e)}
-                    )
-            # Undecodable / unreadable data URL: reserve the worst case.
-            return _worst_case()
-        # Remote URL: fetch and measure like the chat path so a small image
-        # does not reserve the original-detail worst case.
-        image_bytes = await _fetch_image_from_url(image_url)
-        if image_bytes:
-            try:
-                img = Image.open(BytesIO(image_bytes))
-                return _calculate_image_tokens(img.size[0], img.size[1], detail)
-            except Exception as e:
-                logger.warning(
-                    "Failed to read image dimensions", extra={"error": str(e)}
-                )
-        # Unfetchable or unreadable: fall through to the conservative estimate.
-
-    if item.get("file_id") or image_url:
-        return _worst_case()
-    return 0
+def _worst_case_image_tokens(detail: str) -> int:
+    """Dimensions unknown: reserve the most ``detail`` can bill."""
+    if detail == "original":
+        return _MAX_ORIGINAL_IMAGE_TOKENS
+    return _calculate_image_tokens(2048, 2048, detail)
 
 
-async def estimate_image_tokens_from_input(input_data: Any) -> int:
-    """Estimate total tokens for images embedded in a Responses API ``input``.
+def _data_url_image_tokens(url: str, detail: str) -> int:
+    try:
+        _, base64_data = url.split(",", 1)
+        image_bytes = base64.b64decode(base64_data, validate=True)
+    except Exception as e:
+        logger.warning("Failed to decode base64 image", extra={"error": str(e)})
+        return _worst_case_image_tokens(detail)
+    return _image_bytes_tokens(image_bytes, detail, source="data-url")
 
-    Recognizes ``input_image`` items at the top level of the input list and
-    inside ``message`` content parts.
-    """
-    if not isinstance(input_data, list):
-        return 0
 
-    total_image_tokens = 0
-    for item in input_data:
-        if not isinstance(item, dict):
-            continue
-
-        if item.get("type") == "input_image":
-            total_image_tokens += await _estimate_input_image_tokens(item)
-            continue
-
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "input_image":
-                total_image_tokens += await _estimate_input_image_tokens(part)
-
-    return total_image_tokens
+def _image_bytes_tokens(image_bytes: bytes | None, detail: str, source: str) -> int:
+    if not image_bytes:
+        return _worst_case_image_tokens(detail)
+    try:
+        width, height = Image.open(BytesIO(image_bytes)).size
+    except Exception as e:
+        logger.warning(
+            "Failed to read image dimensions",
+            extra={"error": str(e), "source": source},
+        )
+        return _worst_case_image_tokens(detail)
+    tokens = _calculate_image_tokens(width, height, detail)
+    logger.debug(
+        "Calculated image tokens",
+        extra={
+            "source": source,
+            "width": width,
+            "height": height,
+            "detail": detail,
+            "tokens": tokens,
+        },
+    )
+    return tokens
 
 
 def create_error_response(
