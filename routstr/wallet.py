@@ -20,6 +20,7 @@ from cashu.wallet.wallet import Wallet as _CashuWallet
 from pydantic_core import PydanticUndefined
 from sqlmodel import col, select, update
 
+from .cashu_compat import install_cashu_httpx_shim
 from .core import db, get_logger
 from .core.db import store_cashu_transaction_with_retry as store_cashu_transaction
 from .core.settings import settings
@@ -35,6 +36,10 @@ from .mint import (
     run_mint_operation,
 )
 from .payment.lnurl import raw_send_to_lnurl
+
+# cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
+# docstring. Installed at import so no mint call can run before the patch.
+install_cashu_httpx_shim()
 
 # Backwards-compatible aliases for callers/tests that imported the former
 # wallet-local policy. Production modules use the public routstr.mint API.

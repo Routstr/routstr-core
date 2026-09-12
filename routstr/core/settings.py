@@ -295,7 +295,7 @@ def derive_npub_from_nsec(nsec: str) -> str | None:
     boot.
     """
     try:
-        from nostr.key import PublicKey  # type: ignore
+        from nostr_sdk import PublicKey
 
         from ..nostr.listing import nsec_to_keypair
     except ImportError:
@@ -307,7 +307,7 @@ def derive_npub_from_nsec(nsec: str) -> str | None:
     _privkey_hex, pubkey_hex = keypair
 
     try:
-        return PublicKey(bytes.fromhex(pubkey_hex)).bech32()
+        return PublicKey.parse(pubkey_hex).to_bech32()
     except (ValueError, AttributeError):
         return None
 
