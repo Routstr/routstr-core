@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import math
 import re
 import secrets
 import time
@@ -244,10 +245,8 @@ async def _request_mint_with_fallback(
             )
             continue
     if all_rate_limited:
-        retry_after = max(
-            (mint_cooldown_remaining(mint) for mint in candidates), default=0.0
-        )
-        raise MintCooldownError("all configured mints", retry_after)
+        slowest = max(candidates, key=mint_cooldown_remaining)
+        raise MintCooldownError(slowest, mint_cooldown_remaining(slowest))
     raise MintConnectionError(f"All mints failed for request_mint: {tried}")
 
 
@@ -279,6 +278,7 @@ def _invoice_error(
     *,
     structured: bool,
     legacy_message: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
     """Build either the legacy string detail or the v2 typed envelope."""
     detail: str | dict[str, dict[str, str]]
@@ -286,7 +286,18 @@ def _invoice_error(
         detail = {"error": {"message": message, "type": error_type, "code": code}}
     else:
         detail = legacy_message or message
-    return HTTPException(status_code=status_code, detail=detail)
+    return HTTPException(status_code=status_code, detail=detail, headers=headers)
+
+
+def _mint_retry_after(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, MintCooldownError):
+            return math.ceil(current.retry_after_seconds)
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _invoice_creation_error(error: Exception, *, structured: bool) -> HTTPException:
@@ -296,12 +307,14 @@ def _invoice_creation_error(error: Exception, *, structured: bool) -> HTTPExcept
             status_code=500, detail="Failed to create Lightning invoice"
         )
     if is_mint_rate_limited(error):
+        retry_after = _mint_retry_after(error)
         return _invoice_error(
             503,
             "Cashu mint rate-limited; retry after cooldown",
             "mint_rate_limited",
             "lightning_mint_rate_limited",
             structured=True,
+            headers={"Retry-After": str(retry_after)} if retry_after else None,
         )
     if is_mint_connection_error(error):
         return _invoice_error(

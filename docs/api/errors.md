@@ -36,8 +36,8 @@ HTTP response, `error` is available at the top level and mirrored under
 | Unexpected invoice creation failure | 500 | `api_error` | `invoice_creation_failed` |
 
 Request validation failures, including non-positive or excessive amounts, use
-FastAPI's standard 422 validation response. Only the 503 mint failures are retryable. Use backoff and honor any mint
-cooldown. The compatibility endpoints `/lightning/*` and
+FastAPI's standard 422 validation response. Only the 503 mint failures are retryable. Use backoff and honor the
+`Retry-After` header when present. The compatibility endpoints `/lightning/*` and
 `/v1/balance/lightning/*` retain their original string `detail` errors and
 legacy status behavior.
 

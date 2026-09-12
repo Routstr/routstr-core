@@ -11,6 +11,7 @@ from httpx import AsyncClient
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from routstr.core.db import ApiKey
+from routstr.mint import MintCooldownError
 from routstr.wallet import MintConnectionError
 
 RIP08_PATH = "/lightning/invoice"
@@ -315,6 +316,22 @@ async def test_create_invoice_maps_mint_failures(
 
     assert resp.status_code == status
     assert resp.json()["detail"]["error"]["code"] == code
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_v2_create_invoice_rate_limited_sets_retry_after(
+    integration_client: AsyncClient,
+) -> None:
+    with patch(
+        "routstr.lightning.generate_lightning_invoice",
+        side_effect=MintCooldownError("https://mint.example.com", 12.4),
+    ):
+        resp = await integration_client.post(V2_PATH, json={"amount_sats": 100})
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "13"
+    assert resp.json()["detail"]["error"]["code"] == "lightning_mint_rate_limited"
 
 
 @pytest.mark.integration
