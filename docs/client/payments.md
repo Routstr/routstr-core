@@ -15,9 +15,11 @@ To start making requests, you must create a "Balance" (represented by an API Key
 **Ideal for**: Users connecting from a standard Lightning wallet (Strike, Cash App, WoS).
 
 1. **Request Invoice**:
-    `POST /lightning/invoice` with `{"amount_sats": 5000, "purpose": "create"}`.
+    `POST /v2/lightning/invoice` with `{"amount_sats": 5000, "purpose": "create"}`.
 2. **Pay Invoice**: User scans and pays the QR code/bolt11 string.
-3. **Receive Key**: Routstr detects the payment and issues a new API Key (`sk-...`) pre-loaded with 5,000 sats (5,000,000 msats).
+3. **Receive Key**: Poll `GET /v2/lightning/invoice/{invoice_id}/status`. Routstr detects the payment and returns a new API Key (`sk-...`) pre-loaded with 5,000 sats (5,000,000 msats).
+
+If the invoice ID is lost, recover its status with `POST /v2/lightning/recover` and `{"bolt11": "..."}`.
 
 ### Method B: Cashu Token Import
 
@@ -53,10 +55,10 @@ If your balance runs low, you don't need a new key. You can top up the existing 
 
 ### Via Lightning
 
-`POST /lightning/invoice` with `Authorization: Bearer sk-...` header and body `{"amount_sats": 1000, "purpose": "topup"}`.
+`POST /v2/lightning/invoice` with `Authorization: Bearer sk-...` header and body `{"amount_sats": 1000, "purpose": "topup"}`.
 *Once paid, the funds are added to your existing key.*
 
-> Legacy: the endpoint is also exposed at `/v1/balance/lightning/invoice`, and accepts an `api_key` field in the body as a fallback for older clients. New integrations should use the RIP-08 path with the `Authorization` header.
+The v2 endpoints return typed errors with stable `type` and `code` fields. The compatibility endpoints `/lightning/*` and `/v1/balance/lightning/*` remain available with their original status codes and string `detail` errors. The deprecated `api_key` request field is still accepted as a fallback, but new integrations should use v2 with the `Authorization` header.
 
 ### Via Cashu
 
