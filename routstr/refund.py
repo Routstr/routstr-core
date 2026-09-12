@@ -1,12 +1,8 @@
-"""Durable, mutually exclusive refund claims for API key balances.
-
-A claim debits the balance and records the payout in one transaction, so a key
-can never have two payouts in flight and no crash can leave a debited balance
-without a record of why.
-"""
+"""Refund claims: one open payout per API key, recorded before it is paid."""
 
 import asyncio
 import time
+from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -47,14 +43,12 @@ def amount_in_unit(amount_msats: int, unit: str) -> int:
 
 
 def refund_mint(key: ApiKey) -> str:
-    """Persisted mint preferences must not outlive the trusted-mint config."""
     if key.refund_mint_url and key.refund_mint_url in settings.cashu_mints:
         return key.refund_mint_url
     return settings.primary_mint
 
 
 async def validate_lightning_destination(destination: str) -> None:
-    """Resolve the destination before claiming, so a bad address never debits."""
     try:
         await get_lnurl_data(destination)
     except LNURLError as e:
@@ -70,12 +64,7 @@ async def open_claim(
     method: str,
     destination: str | None,
 ) -> Refund:
-    """Debit the balance to zero and record the claim in one transaction.
-
-    The claim starts leased (``claimed_at``) to the request that opened it, so
-    the reconciler leaves it alone until ``refund_claim_timeout_seconds`` have
-    passed; a payout still in flight is never released underneath itself.
-    """
+    """Zero the balance and insert the claim in one transaction."""
     unit = refund_unit(key)
     refund = Refund(
         api_key_hashed_key=key.hashed_key,
@@ -118,29 +107,40 @@ async def open_claim(
     return refund
 
 
-async def _close(session: AsyncSession, refund: Refund, **values: object) -> bool:
-    result = await session.exec(  # type: ignore[call-overload]
+async def _close(
+    session: AsyncSession,
+    refund: Refund,
+    *,
+    require_no_quote: bool = False,
+    **values: object,
+) -> bool:
+    stmt = (
         update(Refund)
         .where(col(Refund.id) == refund.id)
         .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
-        .values(claimed_at=None, updated_at=int(time.time()), **values)
+    )
+    if require_no_quote:
+        # A quote recorded since the row was read means a melt may be in flight.
+        stmt = stmt.where(col(Refund.quote_id).is_(None))
+    result = await session.exec(  # type: ignore[call-overload]
+        stmt.values(claimed_at=None, updated_at=int(time.time()), **values)
     )
     return bool(result.rowcount)
 
 
 async def record_quote(refund: Refund, quote_id: str) -> None:
-    """Persist the melt quote before the melt is dispatched.
-
-    Once the quote is on disk the reconciler can ask the mint what became of
-    it, so a crash after this point can never be mistaken for "never sent".
-    Raises if the claim is no longer open, which aborts the payout.
-    """
+    """Store the melt quote before the melt is sent; raises if the claim closed."""
     async with create_session() as session:
         result = await session.exec(  # type: ignore[call-overload]
             update(Refund)
             .where(col(Refund.id) == refund.id)
             .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
-            .values(quote_id=quote_id, updated_at=int(time.time()))
+            # Renew the lease so the reconciler leaves the payout alone.
+            .values(
+                quote_id=quote_id,
+                claimed_at=int(time.time()),
+                updated_at=int(time.time()),
+            )
         )
         await session.commit()
     if not result.rowcount:
@@ -156,7 +156,7 @@ async def settle(
     token: str | None = None,
     mint_url: str | None = None,
 ) -> bool:
-    values: dict[str, object] = {"status": "paid"}
+    values: dict[str, Any] = {"status": "paid"}
     if quote_id is not None:
         values["quote_id"] = quote_id
     if token is not None:
@@ -173,12 +173,14 @@ async def settle(
     return settled
 
 
-async def release(session: AsyncSession, refund: Refund) -> bool:
-    """Close the claim and return the debited balance in the same transaction."""
-    if not await _close(session, refund, status="failed"):
-        # Nothing changed; commit rather than roll back so the session stays
-        # usable (an async rollback after an ORM-enabled UPDATE expires the
-        # identity map and later loads fail outside the greenlet).
+async def release(
+    session: AsyncSession, refund: Refund, *, require_no_quote: bool = False
+) -> bool:
+    """Mark the claim failed and restore the balance."""
+    if not await _close(
+        session, refund, require_no_quote=require_no_quote, status="failed"
+    ):
+        # Commit, not rollback: rollback after an ORM UPDATE breaks later loads.
         await session.commit()
         return False
     await session.exec(  # type: ignore[call-overload]
@@ -199,18 +201,12 @@ async def release(session: AsyncSession, refund: Refund) -> bool:
 
 
 async def hold(session: AsyncSession, refund: Refund, quote_id: str | None) -> None:
-    """Keep the debit and the claim open until reconciliation resolves it."""
     await _close(session, refund, status="ambiguous", quote_id=quote_id)
     await session.commit()
 
 
 async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
-    """Most recent paid Lightning refund, for idempotent re-requests.
-
-    Cashu payouts are deliberately excluded: their token lives in
-    ``cashu_transactions`` whose ``collected``/``swept`` flags decide whether
-    it may still be handed out.
-    """
+    """Latest paid Lightning refund. Cashu is served from cashu_transactions."""
     result = await session.exec(
         select(Refund)
         .where(Refund.api_key_hashed_key == key.hashed_key)
@@ -235,7 +231,6 @@ def describe(refund: Refund) -> dict[str, str]:
 
 
 async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
-    """Pay out an open claim, closing it on every outcome the mint makes known."""
     amount = amount_in_unit(refund.amount_msats, refund.unit)
     quote_id: str | None = None
 
@@ -338,11 +333,9 @@ async def _lease(refund_id: str, now: int, lease_cutoff: int) -> bool:
         return bool(result.rowcount)
 
 
-async def _reconcile(refund: Refund) -> None:
+async def _reconcile(refund: Refund, now: int) -> None:
     if refund.method != "lightning":
-        # A cashu payout leaves no quote to query: the token either reached the
-        # client or was lost with the process. Close the claim as ``stuck`` so
-        # the balance stays withheld and the operator is told exactly once.
+        # No quote to query for cashu; withhold the balance and alert once.
         async with create_session() as session:
             if await _close(session, refund, status="stuck"):
                 await session.commit()
@@ -357,9 +350,13 @@ async def _reconcile(refund: Refund) -> None:
         return
 
     if refund.quote_id is None:
-        # No melt quote exists, so the mint was never asked to pay.
+        # Never sent, unless a quote appeared since the row was read.
         async with create_session() as session:
-            await release(session, refund)
+            if not await release(session, refund, require_no_quote=True):
+                logger.info(
+                    "refund gained a melt quote during reconciliation; left open",
+                    extra={"refund_id": refund.id},
+                )
         return
 
     status = await check_bolt11_payment_status(
@@ -369,6 +366,13 @@ async def _reconcile(refund: Refund) -> None:
         async with create_session() as session:
             await settle(session, refund)
     elif status == "unpaid":
+        # A fresh melt can report unpaid briefly; trust it only after a timeout.
+        if refund.updated_at > now - settings.refund_claim_timeout_seconds:
+            logger.info(
+                "refund unpaid at the mint but too recent to release; waiting",
+                extra={"refund_id": refund.id, "updated_at": refund.updated_at},
+            )
+            return
         async with create_session() as session:
             await release(session, refund)
     else:
@@ -379,11 +383,7 @@ async def _reconcile(refund: Refund) -> None:
 
 
 async def reconcile_once() -> None:
-    """Resolve open claims whose lease has lapsed.
-
-    A fresh claim is leased to the request paying it out; ``hold`` drops that
-    lease so an ambiguous outcome is queried on the next pass.
-    """
+    """Resolve open claims whose lease has lapsed."""
     now = int(time.time())
     lease_cutoff = now - settings.refund_claim_timeout_seconds
     async with create_session() as session:
@@ -403,7 +403,7 @@ async def reconcile_once() -> None:
         if not await _lease(refund.id, now, lease_cutoff):
             continue
         try:
-            await _reconcile(refund)
+            await _reconcile(refund, now)
         except Exception as e:
             logger.error(
                 "refund reconciliation failed",

@@ -57,6 +57,7 @@ async def _age_claim(session: AsyncSession, refund_id: str, seconds: int) -> Non
     row = await _load_refund(session, refund_id)
     row.claimed_at = int(time.time()) - seconds
     row.created_at = int(time.time()) - seconds
+    row.updated_at = int(time.time()) - seconds
     session.add(row)
     await session.commit()
 
@@ -314,6 +315,7 @@ async def test_reconcile_ambiguous_claims(
     expected_balance: int,
 ) -> None:
     claim = await _open_ambiguous(integration_session, "quote-123")
+    await _age_claim(integration_session, claim.id, 600)
     with patch(
         "routstr.refund.check_bolt11_payment_status",
         AsyncMock(return_value=mint_status),
@@ -330,13 +332,67 @@ async def test_reconcile_ambiguous_claims(
 async def test_reconcile_credits_balance_once_across_passes(
     integration_session: AsyncSession, patched_db_engine: None, short_timeout: None
 ) -> None:
-    await _open_ambiguous(integration_session, "quote-123")
+    claim = await _open_ambiguous(integration_session, "quote-123")
+    await _age_claim(integration_session, claim.id, 600)
     with patch(
         "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="unpaid")
     ):
         await refund.reconcile_once()
         await refund.reconcile_once()
     assert (await _load_key(integration_session)).balance == BALANCE_MSATS
+
+
+@pytest.mark.asyncio
+async def test_reconcile_waits_before_trusting_recent_unpaid(
+    integration_session: AsyncSession, patched_db_engine: None, short_timeout: None
+) -> None:
+    """A just-dispatched melt can report unpaid before it turns pending, so an
+    unpaid quote is only final once the claim has been quiet for a timeout."""
+    claim = await _open_ambiguous(integration_session, "quote-123")
+    with patch(
+        "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="unpaid")
+    ):
+        await refund.reconcile_once()
+    row = await _load_refund(integration_session, claim.id)
+    assert row.status == "ambiguous"
+    assert (await _load_key(integration_session)).balance == 0
+
+    await _age_claim(integration_session, claim.id, 600)
+    with patch(
+        "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="unpaid")
+    ):
+        await refund.reconcile_once()
+    row = await _load_refund(integration_session, claim.id)
+    assert row.status == "failed"
+    assert (await _load_key(integration_session)).balance == BALANCE_MSATS
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_claim_that_gained_quote_mid_pass(
+    integration_session: AsyncSession, patched_db_engine: None, short_timeout: None
+) -> None:
+    """The payout records its quote between the reconciler's read and its
+    release: the stale ``quote_id is None`` must not restore the balance."""
+    key = await _seed_key(integration_session)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    await _age_claim(integration_session, claim.id, 600)
+
+    real_lease = refund._lease
+
+    async def lease_then_quote(refund_id: str, now: int, cutoff: int) -> bool:
+        leased = await real_lease(refund_id, now, cutoff)
+        await refund.record_quote(claim, "late-quote")
+        return leased
+
+    with patch("routstr.refund._lease", lease_then_quote):
+        await refund.reconcile_once()
+
+    row = await _load_refund(integration_session, claim.id)
+    assert row.status == "pending"
+    assert row.quote_id == "late-quote"
+    assert (await _load_key(integration_session)).balance == 0
 
 
 @pytest.mark.asyncio

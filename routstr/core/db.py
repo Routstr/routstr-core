@@ -367,6 +367,12 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         )
     ).exists()
 
+    has_refund_claim = (
+        select(Refund.id).where(
+            col(Refund.api_key_hashed_key) == col(ApiKey.hashed_key)
+        )
+    ).exists()
+
     eligible_hashes = (
         select(ApiKey.hashed_key)
         .where(col(ApiKey.balance) == 0)
@@ -375,6 +381,8 @@ async def prune_dead_api_keys(session: AsyncSession, min_age_seconds: int) -> in
         .where(col(ApiKey.total_requests) == 0)
         .where((col(ApiKey.created_at).is_(None)) | (col(ApiKey.created_at) < cutoff))
         .where(~settleable_invoice)
+        # refunds holds a non-null FK to the key.
+        .where(~has_refund_claim)
     )
 
     # Unlink transactions rather than cascade-deleting them, so the financial
@@ -561,12 +569,7 @@ _REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
 
 
 class Refund(SQLModel, table=True):  # type: ignore
-    """A durable claim on an API key's balance for a single payout.
-
-    The partial unique index is the double-refund guarantee: a key can have at
-    most one open claim, so a Cashu refund cannot start while a Lightning
-    refund is in flight, and neither survives a crash without a record.
-    """
+    """One payout claim; the partial unique index allows one open claim per key."""
 
     __tablename__ = "refunds"
     __table_args__ = (
