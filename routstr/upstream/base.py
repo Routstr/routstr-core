@@ -64,6 +64,7 @@ from .cache_breakpoints import (
 from .count_tokens import MissingUsageEstimator, count_tokens_locally
 from .litellm_routing import detect_litellm_prefix
 from .rate_limit import UPSTREAM_RATE_LIMIT, classify_rate_limit
+from .reasoning_effort import apply_reasoning_effort
 
 if typing.TYPE_CHECKING:
     from .ehbp import ConfidentialInferenceProfile, EHBPForwardingTarget
@@ -710,8 +711,7 @@ class BaseUpstreamProvider:
                     transformed_model = self.transform_model_name(original_model)
                     data["input"]["model"] = transformed_model
 
-                # Ensure proper Responses API structure
-                # Add any Responses-specific transformations here
+                apply_reasoning_effort(data, model_obj)
 
                 return json.dumps(data).encode()
         except Exception as e:
@@ -824,6 +824,9 @@ class BaseUpstreamProvider:
         ):
             if inject_anthropic_cache_breakpoints(data):
                 changed = True
+
+        if apply_reasoning_effort(data, model_obj):
+            changed = True
 
         if changed:
             return json.dumps(data).encode()
@@ -5422,22 +5425,8 @@ class BaseUpstreamProvider:
             {k: v * self.provider_fee for k, v in base_pricing.dict().items()}
         )
 
-        temp_model = Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=None,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-            alias_ids=model.alias_ids,
-            forwarded_model_id=model.forwarded_model_id,
+        temp_model = model.copy(
+            update={"pricing": adjusted_pricing, "sats_pricing": None}
         )
 
         (
@@ -5446,23 +5435,7 @@ class BaseUpstreamProvider:
             adjusted_pricing.max_cost,
         ) = _calculate_usd_max_costs(temp_model)
 
-        return Model(
-            id=model.id,
-            name=model.name,
-            created=model.created,
-            description=model.description,
-            context_length=model.context_length,
-            architecture=model.architecture,
-            pricing=adjusted_pricing,
-            sats_pricing=model.sats_pricing,
-            per_request_limits=model.per_request_limits,
-            top_provider=model.top_provider,
-            enabled=model.enabled,
-            upstream_provider_id=model.upstream_provider_id,
-            canonical_slug=model.canonical_slug,
-            alias_ids=model.alias_ids,
-            forwarded_model_id=model.forwarded_model_id,
-        )
+        return model.copy(update={"pricing": adjusted_pricing})
 
     async def fetch_models(self) -> list[Model]:
         """Fetch available models from upstream API and update cache.

@@ -300,7 +300,7 @@ Project metadata and dependencies:
 name = "routstr"
 version = "0.2.2"
 dependencies = [
-    "fastapi[standard]>=0.115",
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.141",
     "sqlmodel>=0.0.24",
     "cashu",
     # ...

@@ -7,7 +7,7 @@ from openai import OpenAI
 client = OpenAI(
     api_key=os.environ.get("TOKEN"),
     base_url=os.environ.get("ONION_URL", "http://roustrjfsdgfiueghsklchg.onion/v1"),
-    http_client=httpx.Client(proxies="socks5://localhost:9050"),
+    http_client=httpx.Client(proxy="socks5://localhost:9050"),
 )
 
 print(

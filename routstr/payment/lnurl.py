@@ -8,11 +8,16 @@ import httpx
 from cashu.core.base import MeltQuoteState
 from cashu.wallet.wallet import Proof, Wallet
 
+from ..cashu_compat import install_cashu_httpx_shim
 from ..mint import (
     is_mint_rate_limited,
     is_mint_transport_error,
     run_mint_operation,
 )
+
+# cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28; see the module
+# docstring. Installed at import so no mint call can run before the patch.
+install_cashu_httpx_shim()
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore

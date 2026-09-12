@@ -17,6 +17,7 @@ from ..auth import (
     periodic_stale_reservation_sweep,
 )
 from ..balance import balance_router, deprecated_wallet_router
+from ..cashu_compat import install_cashu_httpx_shim
 from ..lightning import lightning_router, periodic_invoice_watcher
 from ..nostr import (
     announce_provider,
@@ -71,6 +72,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     invoice_watcher_task = None
 
     try:
+        # cashu 0.20.x passes the `proxies` kwarg httpx removed in 0.28.
+        # routstr.wallet and routstr.payment.lnurl also install this at import;
+        # repeating it here keeps startup correct for any future module that
+        # reaches cashu's mint client without going through those two.
+        install_cashu_httpx_shim()
+
         # Apply litellm-wide settings (drop_params, chat-completions URL,
         # debug logging) before any upstream provider dispatches a request.
         configure_litellm()

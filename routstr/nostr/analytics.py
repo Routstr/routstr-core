@@ -12,13 +12,11 @@ import json
 import time
 from typing import Any
 
-from nostr.event import Event
-from nostr.key import PrivateKey
-
 from ..core import get_logger
 from ..core.log_manager import log_manager
 from ..core.settings import settings
 from .listing import nsec_to_keypair, publish_to_relay
+from .sdk import create_signed_event
 
 logger = get_logger(__name__)
 
@@ -42,18 +40,6 @@ WINDOW_DEFINITIONS: tuple[tuple[str, int, int], ...] = (
     ("3m", 90 * 24, 24 * 60),
     ("1y", 365 * 24, 7 * 24 * 60),
 )
-
-
-def _event_to_dict(ev: Event) -> dict[str, Any]:
-    return {
-        "id": ev.id,
-        "pubkey": ev.public_key,
-        "created_at": ev.created_at,
-        "kind": int(ev.kind) if not isinstance(ev.kind, int) else ev.kind,
-        "tags": ev.tags,
-        "content": ev.content,
-        "sig": ev.signature,
-    }
 
 
 def _resolve_provider_id(public_key_hex: str) -> str:
@@ -293,21 +279,18 @@ def create_stats_snapshot_event(
     *,
     d_tag: str,
 ) -> dict[str, Any]:
-    private_key = PrivateKey(bytes.fromhex(private_key_hex))
     tags = [
         ["d", d_tag],
         ["provider", provider_id],
         ["schema", ANALYTICS_SCHEMA],
     ]
 
-    event = Event(
-        public_key=private_key.public_key.hex(),
-        content=payload_json,
+    return create_signed_event(
+        private_key_hex,
         kind=ANALYTICS_KIND,
+        content=payload_json,
         tags=tags,
     )
-    private_key.sign_event(event)
-    return _event_to_dict(event)
 
 
 def _fingerprint_payload(payload: dict[str, Any]) -> str:

@@ -8,18 +8,12 @@ import asyncio
 import json
 import os
 import random
-import ssl
 import time
 from typing import Any, cast
 
-from nostr.event import Event
-from nostr.filter import Filter, Filters
-from nostr.key import PrivateKey
-from nostr.message_type import ClientMessageType
-from nostr.relay_manager import RelayManager
-
 from ..core import get_logger
 from ..core.settings import settings
+from .sdk import create_signed_event, fetch_events, parse_keypair, send_event
 
 logger = get_logger(__name__)
 
@@ -33,18 +27,6 @@ def get_app_version() -> str | None:
         return None
 
 
-def _event_to_dict(ev: Event) -> dict[str, Any]:
-    return {
-        "id": ev.id,
-        "pubkey": ev.public_key,
-        "created_at": ev.created_at,
-        "kind": int(ev.kind) if not isinstance(ev.kind, int) else ev.kind,
-        "tags": ev.tags,
-        "content": ev.content,
-        "sig": ev.signature,
-    }
-
-
 def nsec_to_keypair(nsec: str) -> tuple[str, str] | None:
     """
     Convert a Nostr private key (nsec) to a keypair (privkey_hex, pubkey_hex).
@@ -56,16 +38,10 @@ def nsec_to_keypair(nsec: str) -> tuple[str, str] | None:
         Tuple of (private_key_hex, public_key_hex) or None if invalid
     """
     try:
-        if nsec.startswith("nsec"):
-            pk = PrivateKey.from_nsec(nsec)
-            return (pk.hex(), pk.public_key.hex())
-
-        if len(nsec) == 64:
-            pk = PrivateKey(bytes.fromhex(nsec))
-            return (pk.hex(), pk.public_key.hex())
-
-        logger.error(f"Invalid private key format/length: {len(nsec)}")
-        return None
+        if not (nsec.startswith("nsec") or len(nsec) == 64):
+            logger.error(f"Invalid private key format/length: {len(nsec)}")
+            return None
+        return parse_keypair(nsec)
     except Exception as e:
         logger.error(f"Failed to convert nsec to keypair: {e}")
         return None
@@ -93,8 +69,6 @@ def create_listing_event(
     Returns:
         Complete signed nostr event as a dict ready for publishing
     """
-    pk = PrivateKey(bytes.fromhex(private_key_hex))
-
     tags = [["d", provider_id]]
     for url in endpoint_urls:
         tags.append(["u", url])
@@ -107,9 +81,12 @@ def create_listing_event(
 
     content = json.dumps(metadata, separators=(",", ":")) if metadata else ""
 
-    ev = Event(pk.public_key.hex(), content, kind=38421, tags=tags)
-    pk.sign_event(ev)
-    return _event_to_dict(ev)
+    return create_signed_event(
+        private_key_hex,
+        kind=38421,
+        content=content,
+        tags=tags,
+    )
 
 
 def _get_tag_values(event: dict[str, Any], key: str) -> list[str]:
@@ -177,75 +154,25 @@ async def query_listing_events(
     succeeded without transport-level errors.
     """
 
-    def _sync_query() -> tuple[list[dict[str, Any]], bool]:
-        rm = RelayManager()
-        rm.add_relay(relay_url)
-        events_out: list[dict[str, Any]] = []
-        ok = True
-        try:
-            rm.open_connections({"cert_reqs": ssl.CERT_NONE})
-            time.sleep(1.0)
+    try:
+        events_out = await fetch_events(
+            relay_url,
+            kind=38421,
+            author=pubkey,
+            limit=10,
+            timeout=timeout,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to query relay {relay_url}: {type(e).__name__}")
+        return [], False
 
-            flt = Filter(kinds=[38421], authors=[pubkey], limit=10)
-            filters = Filters([flt])
-            sub_id = f"routstr_listing_{int(time.time())}"
-            rm.add_subscription(sub_id, filters)
-            req: list[Any] = [ClientMessageType.REQUEST, sub_id]
-            req.extend(filters.to_json_array())
-            rm.publish_message(json.dumps(req))
-
-            start = time.time()
-            last_event_ts = start
-            while time.time() - start < timeout:
-                drained = False
-                while rm.message_pool.has_events():
-                    drained = True
-                    ev_msg = rm.message_pool.get_event()
-                    ev = ev_msg.event
-                    ev_dict = _event_to_dict(ev)
-                    if provider_id is not None:
-                        tags = ev_dict.get("tags", [])
-                        if not any(
-                            isinstance(t, list)
-                            and len(t) >= 2
-                            and t[0] == "d"
-                            and t[1] == provider_id
-                            for t in tags
-                        ):
-                            continue
-                    events_out.append(ev_dict)
-                    logger.debug(
-                        f"Found listing event: {ev_dict.get('id', '')[:6]}...{ev_dict.get('id', '')[-6:]}"
-                    )
-                if drained:
-                    last_event_ts = time.time()
-
-                while rm.message_pool.has_notices():
-                    notice = rm.message_pool.get_notice()
-                    try:
-                        content = getattr(notice, "content", notice)
-                        s = str(content)
-                        if len(s) > 200:
-                            s = s[:200] + "..."
-                        logger.debug(f"Relay notice: {s}")
-                    except Exception:
-                        pass
-
-                if time.time() - last_event_ts > 2.5:
-                    break
-
-                time.sleep(0.1)
-        except Exception as e:
-            ok = False
-            logger.debug(f"Failed to query relay {relay_url}: {type(e).__name__}")
-        finally:
-            try:
-                rm.close_connections()
-            except Exception:
-                pass
-        return events_out, ok
-
-    return await asyncio.to_thread(_sync_query)
+    if provider_id is not None:
+        events_out = [
+            event
+            for event in events_out
+            if _get_single_tag_value(event, "d") == provider_id
+        ]
+    return events_out, True
 
 
 def discover_onion_url_from_tor(base_dir: str = "/var/lib/tor") -> str | None:
@@ -333,27 +260,13 @@ async def publish_to_relay(
     Publish a listing event to a nostr relay via nostr library.
     """
 
-    def _sync_publish() -> bool:
-        rm = RelayManager()
-        rm.add_relay(relay_url)
-        try:
-            rm.open_connections({"cert_reqs": ssl.CERT_NONE})
-            time.sleep(1.0)
-            # Publish the event as-is via publish_message to preserve signature
-            rm.publish_message(json.dumps(["EVENT", event]))
-            logger.debug(f"Sent listing event {event.get('id', '')} to {relay_url}")
-            time.sleep(1.0)
-            return True
-        except Exception as e:
-            logger.debug(f"Failed to publish to {relay_url}: {type(e).__name__}")
-            return False
-        finally:
-            try:
-                rm.close_connections()
-            except Exception:
-                pass
-
-    return await asyncio.to_thread(_sync_publish)
+    try:
+        await send_event(relay_url, event, timeout=timeout)
+        logger.debug(f"Sent listing event {event.get('id', '')} to {relay_url}")
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to publish to {relay_url}: {type(e).__name__}")
+        return False
 
 
 async def announce_provider() -> None:
