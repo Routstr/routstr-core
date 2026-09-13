@@ -72,6 +72,24 @@ def test_unknown_paths_are_not_forwarded() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "moderations",
+        "rerank",
+        "audio/speech",
+        "audio/transcriptions",
+        "audio/translations",
+        "images/generations",
+        "images/edits",
+        "images/variations",
+    ],
+)
+def test_unbilled_endpoints_are_not_forwarded_by_default(path: str) -> None:
+    assert _forwarding_allowed(path, "POST") is False
+    assert _forwarding_allowed(f"v1/{path}", "POST") is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
         "modelsdump",  # "models" must not match a longer segment
         "attestationadmin",
         "providers-secret",
@@ -121,9 +139,6 @@ def test_known_prefix_does_not_carry_an_unknown_endpoint(path: str) -> None:
         ("v1/responses", "POST"),
         ("v1/messages", "POST"),
         ("v1/embeddings", "POST"),
-        ("moderations", "POST"),
-        ("audio/transcriptions", "POST"),
-        ("images/generations", "POST"),
         ("models", "GET"),
         ("attestation", "GET"),
         ("tee/attestation", "GET"),
