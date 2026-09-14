@@ -26,6 +26,20 @@ If you want to run a node, resell API access, or monetize hardware.
 
 ---
 
+## 👥 For Teams (Remote Nodes)
+
+If you want one shared Routstr endpoint for a whole team, with per-member identities and per-member usage tracking.
+
+- **[Overview](teams/index.md)**: What a remote node is, and when to use one.
+- **[Deploy on Cloudron](teams/deploy-cloudron.md)**: The packaged, supported deployment.
+- **[Deploy with Docker](teams/deploy-docker.md)**: Run it on any host behind your own TLS.
+- **[Team Members](teams/team-members.md)**: Bootstrap the first admin and invite people.
+- **[Connecting Clients](teams/clients.md)**: Wire up Claude Code, Pi, OpenCode, and API keys.
+- **[Usage and Model Policy](teams/usage-and-policy.md)**: Per-member spend and model allowlists.
+- **[Security Model](teams/security.md)**: Auth rules and endpoint scoping.
+
+---
+
 ## 🔌 API Reference
 
 - **[Overview](api/overview.md)**: Base URL, headers, and standards.

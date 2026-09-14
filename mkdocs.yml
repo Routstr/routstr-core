@@ -91,6 +91,15 @@ nav:
       - Advanced Pricing: provider/advanced-pricing.md
       - Discovery: provider/discovery.md
       - Tor Support: provider/tor.md
+  - Teams (Remote):
+      - Overview: teams/index.md
+      - Deploy on Cloudron: teams/deploy-cloudron.md
+      - Deploy with Docker: teams/deploy-docker.md
+      - Team Members: teams/team-members.md
+      - Connecting Clients: teams/clients.md
+      - Usage and Model Policy: teams/usage-and-policy.md
+      - Security Model: teams/security.md
+      - Troubleshooting: teams/troubleshooting.md
   - API Reference:
       - Overview: api/overview.md
       - Authentication: api/authentication.md
