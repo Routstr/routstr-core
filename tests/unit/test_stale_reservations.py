@@ -200,10 +200,8 @@ async def test_reset_all_reserved_balances_clears_reserved_at(
 
 def _refund_patches(refund_token: str = "cashuArefund"):  # type: ignore[no-untyped-def]
     return (
-        patch("routstr.balance.send_token", AsyncMock(return_value=refund_token)),
-        patch("routstr.balance.store_cashu_transaction", AsyncMock()),
-        patch("routstr.balance._refund_cache_get", AsyncMock(return_value=None)),
-        patch("routstr.balance._refund_cache_set", AsyncMock()),
+        patch("routstr.refund.send_token", AsyncMock(return_value=refund_token)),
+        patch("routstr.refund.store_cashu_transaction", AsyncMock()),
     )
 
 
@@ -224,8 +222,8 @@ async def test_refund_self_heals_stale_reservation(session: AsyncSession) -> Non
         reserved_at=int(time.time()) - 10_000,
     )
 
-    p1, p2, p3, p4 = _refund_patches()
-    with p1, p2, p3, p4:
+    p1, p2 = _refund_patches()
+    with p1, p2:
         result = await refund_wallet_endpoint(
             authorization="Bearer sk-stalerefund",
             x_cashu=None,
@@ -253,8 +251,8 @@ async def test_refund_self_heals_legacy_null_reserved_at(session: AsyncSession) 
         reserved_at=None,
     )
 
-    p1, p2, p3, p4 = _refund_patches()
-    with p1, p2, p3, p4:
+    p1, p2 = _refund_patches()
+    with p1, p2:
         result = await refund_wallet_endpoint(
             authorization="Bearer sk-legacyrefund",
             x_cashu=None,
@@ -280,8 +278,8 @@ async def test_refund_rejects_recent_reservation(session: AsyncSession) -> None:
         reserved_at=int(time.time()),
     )
 
-    p1, p2, p3, p4 = _refund_patches()
-    with p1, p2, p3, p4:
+    p1, p2 = _refund_patches()
+    with p1, p2:
         with pytest.raises(HTTPException) as exc_info:
             await refund_wallet_endpoint(
                 authorization="Bearer sk-activerefund",
@@ -302,8 +300,8 @@ async def test_refund_without_reservation_still_works(session: AsyncSession) -> 
         reserved_balance=0,
     )
 
-    p1, p2, p3, p4 = _refund_patches()
-    with p1, p2, p3, p4:
+    p1, p2 = _refund_patches()
+    with p1, p2:
         result = await refund_wallet_endpoint(
             authorization="Bearer sk-plainrefund",
             x_cashu=None,
