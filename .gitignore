@@ -11,6 +11,9 @@ dist/
 *.egg
 .mypy_cache/**
 
+# MkDocs build output
+site/
+
 # Development 
 .notes
 .*keys.db

@@ -252,10 +252,22 @@ def _path_entry(
 # --------------------------------------------------------------------------- #
 
 
-def test_is_openrouter_base_url() -> None:
-    assert mp.is_openrouter_base_url("https://openrouter.ai/api/v1") is True
-    assert mp.is_openrouter_base_url("https://api.anthropic.com") is False
-    assert mp.is_openrouter_base_url(None) is False
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://openrouter.ai/api/v1", True),
+        ("https://OPENROUTER.AI/api/v1", True),
+        ("https://api.anthropic.com", False),
+        ("https://openrouter.ai.evil.test/api/v1", False),
+        ("https://evil.test/openrouter.ai", False),
+        ("https://openrouter.ai@evil.test/api/v1", False),
+        ("https://[invalid", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_openrouter_base_url(url: str | None, expected: bool) -> None:
+    assert mp.is_openrouter_base_url(url) is expected
 
 
 def test_native_anthropic_not_openrouter() -> None:
