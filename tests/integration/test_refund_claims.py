@@ -581,3 +581,38 @@ async def test_endpoint_refund_while_ambiguous_returns_409(
     assert exc_info.value.status_code == 409
     send.assert_not_awaited()
     assert (await _load_key(integration_session)).balance == 2_000_000
+
+
+@pytest.mark.asyncio
+async def test_cashu_token_survives_failed_ledger_write(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    """The token is issued once the mint signs it; a failed cashu_transactions
+    insert must neither fail the request nor release the balance, and a retry
+    must replay the token from the claim row."""
+    await _seed_key(integration_session)
+    with (
+        patch("routstr.refund.send_token", AsyncMock(return_value="cashuAtoken")),
+        patch("routstr.refund.token_mint_url", lambda token, mint: mint),
+        patch(
+            "routstr.refund.store_cashu_transaction",
+            AsyncMock(side_effect=RuntimeError("db down")),
+        ),
+    ):
+        first = await refund_wallet_endpoint(
+            authorization=f"Bearer sk-{KEY_HASH}",
+            x_cashu=None,
+            session=integration_session,
+        )
+    assert isinstance(first, dict)
+    assert (first["token"], first["status"]) == ("cashuAtoken", "paid")
+    assert (await _load_key(integration_session)).balance == 0
+
+    second = await refund_wallet_endpoint(
+        authorization=f"Bearer sk-{KEY_HASH}",
+        x_cashu=None,
+        session=integration_session,
+    )
+    assert isinstance(second, dict)
+    assert second["refund_id"] == first["refund_id"]
+    assert second["token"] == "cashuAtoken"

@@ -358,10 +358,15 @@ async def refund_wallet_endpoint(
     destination = requested or key.refund_address
 
     if key.total_balance <= 0:
-        if paid := await refund.latest_terminal(session, key):
+        paid = await refund.latest_terminal(session, key)
+        if paid and paid.method == "lightning":
             return refund.describe(paid)
+        # cashu_transactions tracks collection and sweeping, so it takes
+        # precedence; the claim row covers a token whose ledger write failed.
         if persisted := await _get_persisted_api_key_refund(key, session):
             return persisted
+        if paid:
+            return refund.describe(paid)
 
     if key.reserved_balance > 0:
         # Release only durable reservations old enough to be stale. A newer

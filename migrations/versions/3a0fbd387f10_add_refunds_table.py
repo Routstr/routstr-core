@@ -1,8 +1,8 @@
 """add refunds table
 
-Revision ID: f3a1c7b9e2d4
-Revises: e5a6b7c8d9f0
-Create Date: 2026-09-07
+Revision ID: 3a0fbd387f10
+Revises: a3f1b6c204de
+Create Date: 2026-09-16
 
 """
 
@@ -10,8 +10,8 @@ import sqlalchemy as sa
 import sqlmodel
 from alembic import op
 
-revision = "f3a1c7b9e2d4"
-down_revision = "e5a6b7c8d9f0"
+revision = "3a0fbd387f10"
+down_revision = "a3f1b6c204de"
 branch_labels = None
 depends_on = None
 

@@ -206,13 +206,17 @@ async def hold(session: AsyncSession, refund: Refund, quote_id: str | None) -> N
 
 
 async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
-    """Latest paid Lightning refund. Cashu is served from cashu_transactions."""
+    """Latest paid refund of either method.
+
+    Cashu tokens are normally served from cashu_transactions, which tracks
+    collection and sweeping; the claim row is the fallback when that ledger
+    write failed after the token was already issued.
+    """
     result = await session.exec(
         select(Refund)
         .where(Refund.api_key_hashed_key == key.hashed_key)
         .where(Refund.status == "paid")
-        .where(Refund.method == "lightning")
-        .order_by(col(Refund.created_at).desc())
+        .order_by(col(Refund.created_at).desc(), col(Refund.updated_at).desc())
     )
     return result.first()
 
@@ -230,8 +234,7 @@ def describe(refund: Refund) -> dict[str, str]:
     return body
 
 
-async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
-    amount = amount_in_unit(refund.amount_msats, refund.unit)
+async def _pay_lightning(session: AsyncSession, refund: Refund) -> None:
     quote_id: str | None = None
 
     async def capture_quote(quote: str) -> None:
@@ -240,31 +243,13 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
         await record_quote(refund, quote)
 
     try:
-        if refund.method == "lightning":
-            await send_to_lnurl(
-                amount,
-                refund.unit,
-                refund.mint_url,
-                str(refund.destination),
-                on_melt_quote=capture_quote,
-            )
-            await settle(session, refund, quote_id=quote_id)
-        else:
-            token = await send_token(amount, refund.unit, refund.mint_url)
-            mint_url = token_mint_url(token, refund.mint_url)
-            await settle(session, refund, token=token, mint_url=mint_url)
-            await store_cashu_transaction(
-                token=token,
-                amount=amount,
-                unit=refund.unit,
-                mint_url=mint_url,
-                typ="out",
-                collected=False,
-                source="apikey",
-                api_key_hashed_key=refund.api_key_hashed_key,
-            )
-            refund.token = token
-            refund.mint_url = mint_url
+        await send_to_lnurl(
+            amount_in_unit(refund.amount_msats, refund.unit),
+            refund.unit,
+            refund.mint_url,
+            str(refund.destination),
+            on_melt_quote=capture_quote,
+        )
     except MeltOutcomeAmbiguousError as e:
         await hold(session, refund, quote_id)
         logger.error(
@@ -276,6 +261,53 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
                 "quote_id": quote_id,
             },
         )
+        raise
+    await settle(session, refund, quote_id=quote_id)
+
+
+async def _pay_cashu(session: AsyncSession, refund: Refund) -> None:
+    amount = amount_in_unit(refund.amount_msats, refund.unit)
+    token = await send_token(amount, refund.unit, refund.mint_url)
+    mint_url = token_mint_url(token, refund.mint_url)
+    await settle(session, refund, token=token, mint_url=mint_url)
+    refund.token = token
+    refund.mint_url = mint_url
+
+
+async def _record_cashu_payout(refund: Refund) -> None:
+    """Ledger write for an issued token; the claim row already holds the token,
+    so a failure here must not fail the request or release the balance."""
+    try:
+        await store_cashu_transaction(
+            token=str(refund.token),
+            amount=amount_in_unit(refund.amount_msats, refund.unit),
+            unit=refund.unit,
+            mint_url=refund.mint_url,
+            typ="out",
+            collected=False,
+            source="apikey",
+            api_key_hashed_key=refund.api_key_hashed_key,
+        )
+    except Exception as e:
+        logger.error(
+            "refund token issued but cashu transaction was not recorded",
+            extra={
+                "refund_id": refund.id,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "key_hash": refund.api_key_hashed_key[:8],
+            },
+        )
+
+
+async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
+    try:
+        if refund.method == "lightning":
+            await _pay_lightning(session, refund)
+        else:
+            await _pay_cashu(session, refund)
+    except MeltOutcomeAmbiguousError:
+        # Already held by _pay_lightning; releasing here would pay out twice.
         raise HTTPException(
             status_code=502,
             detail=(
@@ -302,6 +334,9 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
         if is_mint_connection_error(e):
             raise HTTPException(status_code=503, detail="Mint service unavailable")
         raise HTTPException(status_code=500, detail="Refund failed")
+
+    if refund.method == "cashu":
+        await _record_cashu_payout(refund)
 
     refund.status = "paid"
     refund.claimed_at = None
