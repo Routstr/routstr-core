@@ -552,8 +552,8 @@ async def _validate_bearer_key_locked(
 
 async def pay_for_request(
     key: ApiKey, cost_per_request: int, session: AsyncSession
-) -> int:
-    """Process payment for a request."""
+) -> ReservationSnapshot:
+    """Reserve funds and return the durable identity for this request."""
     # Ensure cost_per_request is at least the minimum allowed request cost
     cost_per_request = max(cost_per_request, settings.min_request_msat)
 
@@ -738,6 +738,53 @@ async def pay_for_request(
             extra={"reservation_id": reservation.release_id},
         )
 
+    try:
+        # Identity checks only: this call just committed the reservation, so the
+        # stale-reservation sweeper may legitimately have released it already.
+        # Release is a terminal state that settlement handles; it is not a
+        # mismatch between the record and the request.
+        await _validate_reservation_snapshot(
+            key, reservation, session, require_active=False
+        )
+    except BaseException:
+        released = False
+        try:
+            released = await _transition_reservation_to_released(
+                reservation,
+                session,
+                decrement_requests=True,
+                idempotent_success=True,
+            )
+        except BaseException:
+            try:
+                await session.rollback()
+            except BaseException:
+                pass
+
+        if not released:
+            try:
+                async with create_session() as cleanup_session:
+                    released = await _transition_reservation_to_released(
+                        reservation,
+                        cleanup_session,
+                        decrement_requests=True,
+                        idempotent_success=True,
+                    )
+            except BaseException:
+                logger.exception(
+                    "Failed to release invalid billing reservation",
+                    extra={"reservation_id": reservation.release_id},
+                )
+
+        if not released:
+            logger.error(
+                "Invalid billing reservation could not be released",
+                extra={"reservation_id": reservation.release_id},
+            )
+            await _stop_reservation_heartbeat(reservation.release_id)
+            _clear_current_reservation(reservation)
+        raise
+
     logger.info(
         "Payment processed successfully",
         extra={
@@ -762,7 +809,7 @@ async def pay_for_request(
         },
     )
 
-    return cost_per_request
+    return reservation
 
 
 async def revert_pay_for_request(
@@ -1104,7 +1151,7 @@ async def _charge_reservation_rows(
     return True
 
 
-async def adjust_payment_for_tokens(
+async def _adjust_payment_for_tokens(
     key: ApiKey,
     response_data: dict,
     session: AsyncSession,
@@ -1538,6 +1585,45 @@ async def adjust_payment_for_tokens(
 
     # All calculate_cost variants are handled above.
     raise AssertionError("Unreachable: unhandled calculate_cost result")
+
+
+async def adjust_payment_for_tokens(
+    key: ApiKey,
+    response_data: dict,
+    session: AsyncSession,
+    deducted_max_cost: int,
+    model_obj: "Model | None" = None,
+    provider_fee: float | None = None,
+    reservation_snapshot: ReservationSnapshot | None = None,
+) -> dict:
+    """Settle payment while exposing latency for every import path."""
+    started = time.perf_counter()
+    key_log_hash = key.hashed_key[:8] + "..."
+    succeeded = False
+    try:
+        result = await _adjust_payment_for_tokens(
+            key,
+            response_data,
+            session,
+            deducted_max_cost,
+            model_obj,
+            provider_fee,
+            reservation_snapshot,
+        )
+        succeeded = True
+        return result
+    finally:
+        logger.info(
+            "Payment settlement finished",
+            extra={
+                "key_hash": key_log_hash,
+                "model": response_data.get("model", "unknown"),
+                "settlement_duration_ms": round(
+                    (time.perf_counter() - started) * 1000, 2
+                ),
+                "settlement_succeeded": succeeded,
+            },
+        )
 
 
 async def periodic_dead_key_prune() -> None:

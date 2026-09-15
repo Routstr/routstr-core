@@ -953,10 +953,9 @@ async def test_bearer_key_config_422_releases_reservation_and_passes_through() -
         ),
         patch.object(proxy_module, "check_token_balance", MagicMock()),
         patch.object(proxy_module, "get_bearer_token_key", AsyncMock(return_value=key)),
-        patch.object(proxy_module, "pay_for_request", AsyncMock(return_value=1_000)),
         patch.object(
             proxy_module,
-            "get_reservation_snapshot",
+            "pay_for_request",
             AsyncMock(return_value=reservation_snapshot),
         ),
         patch.object(proxy_module, "revert_pay_for_request", revert_mock),

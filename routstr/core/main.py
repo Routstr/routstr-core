@@ -30,6 +30,7 @@ from ..payment.price import update_prices_periodically
 from ..proxy import initialize_upstreams, proxy_router, refresh_model_maps_periodically
 from ..upstream.auto_topup import periodic_auto_topup
 from ..upstream.deepseek_v4_pricing_shim import register_deepseek_v4_pricing
+from ..upstream.http_client import close_upstream_http_client
 from ..upstream.litellm_routing import configure_litellm
 from ..wallet import periodic_payout, periodic_refund_sweep, periodic_routstr_fee_payout
 from .admin import admin_router
@@ -247,6 +248,14 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
                 "Error stopping background tasks",
                 extra={"error": str(e), "error_type": type(e).__name__},
             )
+        finally:
+            try:
+                await close_upstream_http_client()
+            except Exception as e:
+                logger.error(
+                    "Error closing upstream HTTP connection pools",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
 
 
 class _ImmutableStaticFiles(StaticFiles):
