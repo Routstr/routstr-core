@@ -28,6 +28,7 @@ os.environ.setdefault("UPSTREAM_BASE_URL", "http://test")
 os.environ.setdefault("UPSTREAM_API_KEY", "test")
 
 from routstr.core.db import ModelRow, UpstreamProviderRow  # noqa: E402
+from routstr.payment import price as price_module  # noqa: E402
 from routstr.payment.models import models_router  # noqa: E402
 from routstr.upstream import model_paths as mp  # noqa: E402
 from routstr.upstream.base import BaseUpstreamProvider  # noqa: E402
@@ -200,6 +201,75 @@ async def patched_session(
     monkeypatch.setattr(mp, "create_session", _factory)
     yield engine
     await engine.dispose()
+
+
+# 1 sat = $0.00005, the quote the path pricing converts with in these tests.
+_QUOTE = 5.0e-5
+_DEFAULT_FEE = 1.01
+
+
+@pytest.fixture
+def sats_quote(monkeypatch: pytest.MonkeyPatch) -> float:
+    monkeypatch.setattr(price_module, "sats_usd_price", lambda: _QUOTE)
+    return _QUOTE
+
+
+def _priced_endpoints_response() -> httpx.Response:
+    """Two endpoints for one model, priced and sized differently."""
+    return httpx.Response(
+        200,
+        json={
+            "data": {
+                "id": "anthropic/claude-opus-4.6",
+                "name": "Claude Opus 4.6",
+                "description": "Anthropic's most capable model",
+                "architecture": {
+                    "input_modalities": ["text", "image"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "Claude",
+                    "instruct_type": None,
+                },
+                "endpoints": [
+                    {
+                        "provider_name": "Anthropic",
+                        "tag": "anthropic",
+                        "context_length": 200_000,
+                        "pricing": {
+                            "prompt": "0.000005",
+                            "completion": "0.000025",
+                        },
+                    },
+                    {
+                        "provider_name": "Google",
+                        "tag": "google-vertex/us",
+                        "context_length": 128_000,
+                        "pricing": {
+                            "prompt": "0.000003",
+                            "completion": "0.000015",
+                        },
+                    },
+                ],
+            }
+        },
+    )
+
+
+def _models_by_endpoint(payload: dict, model_id: str) -> dict[str, dict]:
+    entry = next(item for item in payload["data"] if item["id"] == model_id)
+    return {
+        path["endpoint"]["tag"]: path["model"]
+        for path in entry["paths"]
+        if path["endpoint"] is not None
+    }
+
+
+async def _set_provider_fee(engine: AsyncEngine, provider_id: int, fee: float) -> None:
+    async with AsyncSession(engine) as session:
+        provider = await session.get(UpstreamProviderRow, provider_id)
+        assert provider is not None
+        provider.provider_fee = fee
+        session.add(provider)
+        await session.commit()
 
 
 def _paths_of(payload: dict, model_id: str) -> set[str]:
@@ -809,74 +879,144 @@ async def test_openrouter_provider_adds_endpoint_paths(
 
 @pytest.mark.asyncio
 async def test_openrouter_paths_include_endpoint_specific_model_prices(
-    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch, sats_quote: float
 ) -> None:
     provider = _FakeOpenRouterProvider(
         models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
         db_id=2,
     )
-    endpoint_response = httpx.Response(
-        200,
-        json={
-            "data": {
-                "id": "anthropic/claude-opus-4.6",
-                "name": "Claude Opus 4.6",
-                "description": "Anthropic's most capable model",
-                "architecture": {
-                    "input_modalities": ["text", "image"],
-                    "output_modalities": ["text"],
-                    "tokenizer": "Claude",
-                    "instruct_type": None,
-                },
-                "endpoints": [
-                    {
-                        "provider_name": "Anthropic",
-                        "tag": "anthropic",
-                        "context_length": 200_000,
-                        "pricing": {
-                            "prompt": "0.000005",
-                            "completion": "0.000025",
-                        },
-                    },
-                    {
-                        "provider_name": "Google",
-                        "tag": "google-vertex/us",
-                        "context_length": 128_000,
-                        "pricing": {
-                            "prompt": "0.000003",
-                            "completion": "0.000015",
-                        },
-                    },
-                ],
-            }
-        },
-    )
-    _mock_transport(monkeypatch, lambda request: endpoint_response)
+    _mock_transport(monkeypatch, lambda request: _priced_endpoints_response())
 
     await mp.refresh_model_paths([provider])
 
     payload = await mp.get_all_model_paths()
     assert payload["data"][0]["id"] == "claude-opus-4.6"
-    paths_by_endpoint = {
-        item["endpoint"]["tag"]: item
-        for item in payload["data"][0]["paths"]
-        if item["endpoint"] is not None
-    }
+    models = _models_by_endpoint(payload, "claude-opus-4.6")
 
-    anthropic = paths_by_endpoint["anthropic"]["model"]
-    google = paths_by_endpoint["google-vertex/us"]["model"]
+    anthropic = models["anthropic"]
+    google = models["google-vertex/us"]
     assert anthropic["description"] == "Anthropic's most capable model"
     assert google["description"] == "Anthropic's most capable model"
+    assert anthropic["pricing"]["prompt"] == pytest.approx(0.000005 * _DEFAULT_FEE)
+    assert anthropic["pricing"]["completion"] == pytest.approx(0.000025 * _DEFAULT_FEE)
+    assert google["pricing"]["prompt"] == pytest.approx(0.000003 * _DEFAULT_FEE)
+    assert google["pricing"]["completion"] == pytest.approx(0.000015 * _DEFAULT_FEE)
+    assert anthropic["context_length"] == 200_000
+    assert google["context_length"] == 128_000
+
+
+@pytest.mark.asyncio
+async def test_endpoint_paths_are_priced_in_sats_from_their_own_rates(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch, sats_quote: float
+) -> None:
+    provider = _FakeOpenRouterProvider(
+        models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
+        db_id=2,
+    )
+    _mock_transport(monkeypatch, lambda request: _priced_endpoints_response())
+
+    await mp.refresh_model_paths([provider])
+
+    models = _models_by_endpoint(await mp.get_all_model_paths(), "claude-opus-4.6")
+    anthropic = models["anthropic"]["sats_pricing"]
+    google = models["google-vertex/us"]["sats_pricing"]
+
+    assert anthropic["prompt"] == pytest.approx(0.000005 * _DEFAULT_FEE / sats_quote)
+    assert anthropic["completion"] == pytest.approx(
+        0.000025 * _DEFAULT_FEE / sats_quote
+    )
+    assert google["prompt"] == pytest.approx(0.000003 * _DEFAULT_FEE / sats_quote)
+    assert google["completion"] == pytest.approx(0.000015 * _DEFAULT_FEE / sats_quote)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_max_costs_use_that_endpoint_context_length(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch, sats_quote: float
+) -> None:
+    provider = _FakeOpenRouterProvider(
+        models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
+        db_id=2,
+    )
+    _mock_transport(monkeypatch, lambda request: _priced_endpoints_response())
+
+    await mp.refresh_model_paths([provider])
+
+    models = _models_by_endpoint(await mp.get_all_model_paths(), "claude-opus-4.6")
+    # Max cost is the context window billed at the dearer of the two rates.
+    assert models["anthropic"]["sats_pricing"]["max_cost"] == pytest.approx(
+        200_000 * 0.000025 * _DEFAULT_FEE / sats_quote
+    )
+    assert models["google-vertex/us"]["sats_pricing"]["max_cost"] == pytest.approx(
+        128_000 * 0.000015 * _DEFAULT_FEE / sats_quote
+    )
+
+
+@pytest.mark.asyncio
+async def test_path_pricing_uses_the_provider_fee_of_its_own_provider(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch, sats_quote: float
+) -> None:
+    await _set_provider_fee(patched_session, 2, 1.5)
+    provider = _FakeOpenRouterProvider(
+        models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
+        db_id=2,
+    )
+    _mock_transport(monkeypatch, lambda request: _priced_endpoints_response())
+
+    await mp.refresh_model_paths([provider])
+
+    models = _models_by_endpoint(await mp.get_all_model_paths(), "claude-opus-4.6")
+    anthropic = models["anthropic"]
+    assert anthropic["pricing"]["prompt"] == pytest.approx(0.000005 * 1.5)
+    assert anthropic["sats_pricing"]["prompt"] == pytest.approx(
+        0.000005 * 1.5 / sats_quote
+    )
+
+
+@pytest.mark.asyncio
+async def test_paths_keep_upstream_pricing_when_the_quote_is_unavailable(
+    patched_session: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _no_quote() -> float:
+        raise ValueError("SATS price not initialized")
+
+    monkeypatch.setattr(price_module, "sats_usd_price", _no_quote)
+    provider = _FakeOpenRouterProvider(
+        models=[_model("claude-opus-4.6", canonical_slug="anthropic/claude-opus-4.6")],
+        db_id=2,
+    )
+    _mock_transport(monkeypatch, lambda request: _priced_endpoints_response())
+
+    await mp.refresh_model_paths([provider])
+
+    models = _models_by_endpoint(await mp.get_all_model_paths(), "claude-opus-4.6")
+    anthropic = models["anthropic"]
+    assert "sats_pricing" not in anthropic
     assert anthropic["pricing"] == {
         "prompt": "0.000005",
         "completion": "0.000025",
     }
-    assert google["pricing"] == {
-        "prompt": "0.000003",
-        "completion": "0.000015",
-    }
-    assert anthropic["context_length"] == 200_000
-    assert google["context_length"] == 128_000
+
+
+@pytest.mark.asyncio
+async def test_already_priced_metadata_is_not_priced_again(
+    patched_session: AsyncEngine, sats_quote: float
+) -> None:
+    model = _model("claude-opus-4.6")
+    model.pricing = {"prompt": 0.000001, "completion": 0.000002}
+    model.sats_pricing = {"prompt": 0.02, "completion": 0.04}
+    provider = _FakeProvider(
+        provider_type="anthropic",
+        base_url="https://api.anthropic.com/v1",
+        models=[model],
+        db_id=1,
+    )
+
+    await mp.refresh_model_paths([provider])
+
+    payload = await mp.get_all_model_paths()
+    priced = payload["data"][0]["paths"][0]["model"]
+    assert priced["sats_pricing"] == {"prompt": 0.02, "completion": 0.04}
+    assert priced["pricing"] == {"prompt": 0.000001, "completion": 0.000002}
 
 
 @pytest.mark.asyncio
