@@ -431,9 +431,10 @@ class ModelRow(SQLModel, table=True):  # type: ignore
 class ModelPathRow(SQLModel, table=True):  # type: ignore
     """Upstream provider path a model is reachable through.
 
-    Discovery/visibility data only. ``model_id`` is intentionally NOT globally
-    unique: it is the client-visible ``/v1/models`` id (``forwarded_model_id or
-    id``) grouped across every provider that exposes the model. A single model
+    Discovery data plus provider-specific model metadata. ``model_id`` is
+    intentionally NOT globally unique: it is the client-visible ``/v1/models``
+    id (``forwarded_model_id or id``) grouped across every provider that exposes
+    the model. A single model
     can therefore have several rows — one per direct provider path plus one per
     OpenRouter sub-provider endpoint.
     """
@@ -469,6 +470,10 @@ class ModelPathRow(SQLModel, table=True):  # type: ignore
     )
     endpoint_name: str | None = Field(
         default=None, description="Human-readable endpoint display name"
+    )
+    model_metadata: str = Field(
+        default="{}",
+        description="JSON model metadata specific to this provider path",
     )
     upstream_provider_id: int = Field(
         index=True,
