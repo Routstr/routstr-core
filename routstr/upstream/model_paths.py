@@ -776,7 +776,72 @@ async def refresh_model_paths_periodically(
             break
 
 
-def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
+def _price_in_sats(model: dict[str, Any], provider_fee: float) -> None:
+    """Run a path's USD rates through the ``/v1/models`` pricing pipeline.
+
+    Metadata copied from the provider model cache is already priced. OpenRouter
+    endpoint metadata is not: it carries that endpoint's own USD rates, which
+    still need the cache backfill, the provider fee and the sats conversion.
+    """
+    pricing = model.get("pricing")
+    if model.get("sats_pricing") or not isinstance(pricing, dict):
+        return
+
+    from ..payment.models import (
+        Architecture,
+        Model,
+        Pricing,
+        TopProvider,
+        _calculate_usd_max_costs,
+        _update_model_sats_pricing,
+        backfill_cache_pricing,
+    )
+    from ..payment.price import sats_usd_price
+
+    try:
+        model_id = model.get("forwarded_model_id") or model["id"]
+        usd = backfill_cache_pricing(model_id, Pricing.parse_obj(pricing))
+        usd = Pricing.parse_obj({k: v * provider_fee for k, v in usd.dict().items()})
+        priced = Model(
+            id=model_id,
+            name=model.get("name") or model_id,
+            created=0,
+            description="",
+            context_length=model.get("context_length") or 0,
+            architecture=Architecture(
+                modality="text",
+                input_modalities=[],
+                output_modalities=[],
+                tokenizer="",
+                instruct_type=None,
+            ),
+            pricing=usd,
+            top_provider=TopProvider(
+                context_length=model.get("context_length"),
+                max_completion_tokens=model.get("max_completion_tokens"),
+            ),
+        )
+        (
+            usd.max_prompt_cost,
+            usd.max_completion_cost,
+            usd.max_cost,
+        ) = _calculate_usd_max_costs(priced)
+        priced = _update_model_sats_pricing(priced, sats_usd_price())
+    except Exception as exc:
+        # An endpoint with rates we cannot price is still a usable route, so it
+        # is served with its raw upstream pricing rather than dropped.
+        logger.warning(
+            "Could not calculate sats pricing for model path",
+            extra={"model_id": model.get("id"), "error": str(exc)},
+        )
+        return
+
+    if priced.sats_pricing:
+        model["pricing"] = usd.dict()
+        model["sats_pricing"] = priced.sats_pricing.dict()
+
+
+def _serialize_path(row: ModelPathRow, provider_fee: float) -> dict[str, Any]:
     endpoint = None
     if row.endpoint_tag or row.endpoint_name:
         endpoint = {"tag": row.endpoint_tag, "name": row.endpoint_name}
@@ -787,6 +852,7 @@ def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
     if not isinstance(model, dict):
         model = {}
     model.setdefault("id", row.model_id)
+    _price_in_sats(model, provider_fee)
     return {
         "path": row.path,
         "provider": {
@@ -797,6 +863,11 @@ def _serialize_path(row: ModelPathRow) -> dict[str, Any]:
         "endpoint": endpoint,
         "model": model,
     }
+
+
+async def _provider_fees(session: "AsyncSession") -> dict[int, float]:
+    rows = (await session.exec(select(UpstreamProviderRow))).all()
+    return {row.id: row.provider_fee for row in rows if row.id is not None}
 
 
 async def get_all_model_paths() -> dict:
@@ -811,6 +882,7 @@ async def get_all_model_paths() -> dict:
                 )
             )
         ).all()
+        fees = await _provider_fees(session)
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     seen_paths: dict[str, set[str]] = {}
@@ -820,7 +892,9 @@ async def get_all_model_paths() -> dict:
         if row.path in seen_paths.setdefault(row.model_id, set()):
             continue
         seen_paths[row.model_id].add(row.path)
-        grouped.setdefault(row.model_id, []).append(_serialize_path(row))
+        grouped.setdefault(row.model_id, []).append(
+            _serialize_path(row, fees.get(row.upstream_provider_id, 1.01))
+        )
     data = [
         {
             "id": grouped_model_id,
@@ -854,6 +928,7 @@ async def get_paths_for_model(model_id: str) -> dict:
             unprefixed_id = public_model_id(model_id)
             if unprefixed_id != model_id:
                 rows = await load_rows(session, unprefixed_id)
+        fees = await _provider_fees(session)
 
     seen: set[str] = set()
     paths: list[dict] = []
@@ -863,5 +938,5 @@ async def get_paths_for_model(model_id: str) -> dict:
         if row.path in seen:
             continue
         seen.add(row.path)
-        paths.append(_serialize_path(row))
+        paths.append(_serialize_path(row, fees.get(row.upstream_provider_id, 1.01)))
     return {"data": paths, "updated_at": updated_at or None}
