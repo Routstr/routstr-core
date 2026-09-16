@@ -367,6 +367,10 @@ async def refund_wallet_endpoint(
             return persisted
         if paid:
             return refund.describe(paid)
+        # Balance reads zero because a prior refund already debited it and is
+        # still settling; surface that as 409 rather than "no balance".
+        if await refund.latest_open(session, key):
+            raise refund.refund_in_progress_error()
 
     if key.reserved_balance > 0:
         # Release only durable reservations old enough to be stale. A newer

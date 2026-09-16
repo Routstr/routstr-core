@@ -584,6 +584,32 @@ async def test_endpoint_refund_while_ambiguous_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_endpoint_zero_balance_with_open_claim_returns_409(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    """A prior refund debited the balance and is still settling: the retry must
+    report refund_in_progress (409), not "no balance to refund" (400)."""
+    await _open_ambiguous(integration_session, "quote-123")
+    assert (await _load_key(integration_session)).balance == 0
+
+    send = AsyncMock()
+    with (
+        patch("routstr.refund.get_lnurl_data", AsyncMock()),
+        patch("routstr.refund.send_to_lnurl", send),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                authorization=f"Bearer sk-{KEY_HASH}",
+                x_cashu=None,
+                session=integration_session,
+            )
+    assert exc_info.value.status_code == 409
+    assert isinstance(exc_info.value.detail, dict)
+    assert exc_info.value.detail["error"]["code"] == "refund_in_progress"
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cashu_token_survives_failed_ledger_write(
     integration_session: AsyncSession, patched_db_engine: None
 ) -> None:

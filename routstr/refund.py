@@ -94,16 +94,7 @@ async def open_claim(
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "message": "A refund for this key is already in progress.",
-                    "type": "invalid_request_error",
-                    "code": "refund_in_progress",
-                }
-            },
-        )
+        raise refund_in_progress_error()
     return refund
 
 
@@ -203,6 +194,35 @@ async def release(
 async def hold(session: AsyncSession, refund: Refund, quote_id: str | None) -> None:
     await _close(session, refund, status="ambiguous", quote_id=quote_id)
     await session.commit()
+
+
+def refund_in_progress_error() -> HTTPException:
+    """The 409 raised when a key already has an in-flight refund claim."""
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "message": "A refund for this key is already in progress.",
+                "type": "invalid_request_error",
+                "code": "refund_in_progress",
+            }
+        },
+    )
+
+
+async def latest_open(session: AsyncSession, key: ApiKey) -> Refund | None:
+    """Latest non-terminal (in-flight) claim for the key, if any.
+
+    An open claim means a prior refund already debited the balance and is still
+    settling, so the balance reads as zero even though a refund is under way.
+    """
+    result = await session.exec(
+        select(Refund)
+        .where(Refund.api_key_hashed_key == key.hashed_key)
+        .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
+        .order_by(col(Refund.created_at).desc(), col(Refund.updated_at).desc())
+    )
+    return result.first()
 
 
 async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
