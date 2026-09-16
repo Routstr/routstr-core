@@ -488,7 +488,7 @@ Authorization: Bearer sk-...
 
 ### Refund Balance
 
-Pay out the remaining balance and close the key. The payout goes to a Lightning address when one is given (in the request or stored on the key), otherwise a Cashu token is returned.
+Pay out the current balance. The key remains valid at zero balance and can be topped up again. The payout goes to a Lightning address when one is given (in the request or stored on the key), otherwise a Cashu token is returned.
 
 ```http
 POST /v1/balance/refund
@@ -510,7 +510,7 @@ Content-Type: application/json
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `lightning_address` | string | No | Key's stored refund address | Lightning address or LNURL to pay. Overrides the stored address for this request. Resolved before any balance is debited. |
+| `lightning_address` | string | No | Key's stored refund address | Lightning address or LNURL to pay. Overrides the stored address for this request. Resolved only for a request that can open a new claim, before any balance is debited. |
 
 **Response (Lightning):**
 
@@ -534,14 +534,16 @@ Content-Type: application/json
 }
 ```
 
-The amount field is `sats` or `msats` depending on the key's refund currency.
+The amount field is `sats` or `msats` depending on the key's refund currency. It reports the gross balance debited by the claim. For Lightning refunds, mint and input fees can reduce the amount actually delivered to the recipient.
 
 **Behaviour:**
 
 - The balance is debited and a refund claim is recorded before the payout is attempted. A key has at most one open claim at a time.
 - If the payout fails cleanly, the claim is closed and the balance is restored. Retry the request.
+- Once a melt quote has been recorded the mint may already have paid it, so any later failure returns `502` and withholds the balance rather than restoring it.
 - If the Lightning payment is dispatched but the mint cannot confirm the outcome, the request returns `502`, the balance stays withheld, and a background reconciler asks the mint until it answers. The balance is restored if the mint reports the payment unpaid.
-- Calling again on a zero-balance key returns the last paid Lightning refund, or the previously issued Cashu token while it remains uncollected.
+- An unresolved claim is reported before any replay: a request on a key with an open claim returns `409` with that claim's `refund_id` and `status`.
+- Calling again on a zero-balance key with no open claim returns the last paid Lightning refund, or the Cashu token issued by the last paid claim while it remains uncollected.
 
 **Errors:**
 
@@ -551,7 +553,8 @@ The amount field is `sats` or `msats` depending on the key's refund currency.
 | `400` | Ongoing requests are still reserving balance on this key |
 | `401` | Unknown key |
 | `409` | Balance changed concurrently. Retry. |
-| `409` | `refund_in_progress`: another refund claim for this key is still open |
+| `409` | `refund_in_progress`: another refund claim for this key is still open. The body carries its `refund_id` and `status` |
+| `409` | `refund_unresolved`: a claim for this key is `stuck` and needs operator reconciliation |
 | `410` | Previously issued Cashu refund token has been swept |
 | `502` | Payment dispatched, outcome unconfirmed. Balance withheld pending reconciliation. Do not retry. |
 | `503` | Mint unavailable. Balance restored. Retry later. |

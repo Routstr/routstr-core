@@ -13,9 +13,33 @@ API key to check whether it settled.
 """
 
 import argparse
+import ipaddress
 import sys
+from urllib.parse import urlparse
 
 import httpx
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def check_url(url: str) -> str:
+    """Reject a URL that would put the token and the API key on the wire."""
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        return url
+    if parsed.scheme == "http" and _is_loopback(parsed.hostname or ""):
+        return url
+    raise SystemExit(
+        f"Refusing to send a cashu token and bearer key to {url!r}: "
+        "use https, or http only for a loopback host."
+    )
 
 
 def create_balance(client: httpx.Client, token: str) -> str:
@@ -45,7 +69,7 @@ def main() -> None:
     parser.add_argument("--url", default="http://localhost:8000", help="routstr URL")
     args = parser.parse_args()
 
-    with httpx.Client(base_url=args.url, timeout=120.0) as client:
+    with httpx.Client(base_url=check_url(args.url), timeout=120.0) as client:
         api_key = (
             args.token
             if args.token.startswith("sk-")

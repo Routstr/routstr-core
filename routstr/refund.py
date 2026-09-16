@@ -4,9 +4,10 @@ import asyncio
 import time
 from typing import Any
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import col, select, update
+from sqlmodel import col, func, select, update
 
 from .core.db import (
     REFUND_OPEN_STATUSES,
@@ -55,6 +56,10 @@ async def validate_lightning_destination(destination: str) -> None:
         raise HTTPException(
             status_code=400, detail=f"Invalid lightning destination: {e}"
         )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=400, detail=f"Lightning destination unreachable: {e}"
+        )
 
 
 async def open_claim(
@@ -66,6 +71,14 @@ async def open_claim(
 ) -> Refund:
     """Zero the balance and insert the claim in one transaction."""
     unit = refund_unit(key)
+    # created_at has second resolution; step past the previous claim so the
+    # newest claim for a key always sorts first.
+    latest = await session.exec(
+        select(func.max(col(Refund.created_at))).where(
+            Refund.api_key_hashed_key == key.hashed_key
+        )
+    )
+    created_at = max(int(time.time()), (latest.one() or 0) + 1)
     refund = Refund(
         api_key_hashed_key=key.hashed_key,
         method=method,
@@ -74,6 +87,8 @@ async def open_claim(
         unit=unit,
         mint_url=refund_mint(key),
         claimed_at=int(time.time()),
+        created_at=created_at,
+        updated_at=created_at,
     )
     debit = (
         update(ApiKey)
@@ -119,8 +134,11 @@ async def _close(
     return bool(result.rowcount)
 
 
-async def record_quote(refund: Refund, quote_id: str) -> None:
-    """Store the melt quote before the melt is sent; raises if the claim closed."""
+async def record_quote(refund: Refund, quote_id: str, mint_url: str) -> None:
+    """Store the quote and its mint before the melt is sent; raises if the claim closed.
+
+    Mint fallback can issue the quote on a different mint than the claim's.
+    """
     async with create_session() as session:
         result = await session.exec(  # type: ignore[call-overload]
             update(Refund)
@@ -129,6 +147,7 @@ async def record_quote(refund: Refund, quote_id: str) -> None:
             # Renew the lease so the reconciler leaves the payout alone.
             .values(
                 quote_id=quote_id,
+                mint_url=mint_url,
                 claimed_at=int(time.time()),
                 updated_at=int(time.time()),
             )
@@ -137,6 +156,7 @@ async def record_quote(refund: Refund, quote_id: str) -> None:
     if not result.rowcount:
         raise LNURLError("Refund claim closed before the melt was dispatched")
     refund.quote_id = quote_id
+    refund.mint_url = mint_url
 
 
 async def settle(
@@ -196,18 +216,34 @@ async def hold(session: AsyncSession, refund: Refund, quote_id: str | None) -> N
     await session.commit()
 
 
-def refund_in_progress_error() -> HTTPException:
-    """The 409 raised when a key already has an in-flight refund claim."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "message": "A refund for this key is already in progress.",
-                "type": "invalid_request_error",
-                "code": "refund_in_progress",
-            }
-        },
+def refund_in_progress_error(refund: Refund | None = None) -> HTTPException:
+    """The 409 raised when a key already has an unresolved refund claim."""
+    stuck = refund is not None and refund.status == "stuck"
+    error: dict[str, str] = {
+        "message": (
+            "A refund for this key is unresolved and requires operator reconciliation."
+            if stuck
+            else "A refund for this key is already in progress."
+        ),
+        "type": "invalid_request_error",
+        "code": "refund_unresolved" if stuck else "refund_in_progress",
+    }
+    if refund is not None:
+        error["refund_id"] = refund.id
+        error["status"] = refund.status
+    return HTTPException(status_code=409, detail={"error": error})
+
+
+async def _latest_with_status(
+    session: AsyncSession, key: ApiKey, statuses: tuple[str, ...]
+) -> Refund | None:
+    result = await session.exec(
+        select(Refund)
+        .where(Refund.api_key_hashed_key == key.hashed_key)
+        .where(col(Refund.status).in_(statuses))
+        .order_by(col(Refund.created_at).desc(), col(Refund.updated_at).desc())
     )
+    return result.first()
 
 
 async def latest_open(session: AsyncSession, key: ApiKey) -> Refund | None:
@@ -216,13 +252,12 @@ async def latest_open(session: AsyncSession, key: ApiKey) -> Refund | None:
     An open claim means a prior refund already debited the balance and is still
     settling, so the balance reads as zero even though a refund is under way.
     """
-    result = await session.exec(
-        select(Refund)
-        .where(Refund.api_key_hashed_key == key.hashed_key)
-        .where(col(Refund.status).in_(REFUND_OPEN_STATUSES))
-        .order_by(col(Refund.created_at).desc(), col(Refund.updated_at).desc())
-    )
-    return result.first()
+    return await _latest_with_status(session, key, REFUND_OPEN_STATUSES)
+
+
+async def latest_stuck(session: AsyncSession, key: ApiKey) -> Refund | None:
+    """Latest claim the reconciler gave up on; needs operator recovery."""
+    return await _latest_with_status(session, key, ("stuck",))
 
 
 async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
@@ -232,13 +267,7 @@ async def latest_terminal(session: AsyncSession, key: ApiKey) -> Refund | None:
     collection and sweeping; the claim row is the fallback when that ledger
     write failed after the token was already issued.
     """
-    result = await session.exec(
-        select(Refund)
-        .where(Refund.api_key_hashed_key == key.hashed_key)
-        .where(Refund.status == "paid")
-        .order_by(col(Refund.created_at).desc(), col(Refund.updated_at).desc())
-    )
-    return result.first()
+    return await _latest_with_status(session, key, ("paid",))
 
 
 def describe(refund: Refund) -> dict[str, str]:
@@ -255,12 +284,8 @@ def describe(refund: Refund) -> dict[str, str]:
 
 
 async def _pay_lightning(session: AsyncSession, refund: Refund) -> None:
-    quote_id: str | None = None
-
-    async def capture_quote(quote: str) -> None:
-        nonlocal quote_id
-        quote_id = quote
-        await record_quote(refund, quote)
+    async def capture_quote(quote: str, mint_url: str) -> None:
+        await record_quote(refund, quote, mint_url)
 
     try:
         await send_to_lnurl(
@@ -271,18 +296,18 @@ async def _pay_lightning(session: AsyncSession, refund: Refund) -> None:
             on_melt_quote=capture_quote,
         )
     except MeltOutcomeAmbiguousError as e:
-        await hold(session, refund, quote_id)
+        await hold(session, refund, refund.quote_id)
         logger.error(
             "refund outcome ambiguous; balance withheld pending reconciliation",
             extra={
                 "refund_id": refund.id,
                 "error": str(e),
                 "key_hash": refund.api_key_hashed_key[:8],
-                "quote_id": quote_id,
+                "quote_id": refund.quote_id,
             },
         )
         raise
-    await settle(session, refund, quote_id=quote_id)
+    await settle(session, refund, quote_id=refund.quote_id)
 
 
 async def _pay_cashu(session: AsyncSession, refund: Refund) -> None:
@@ -320,6 +345,39 @@ async def _record_cashu_payout(refund: Refund) -> None:
         )
 
 
+def unresolved_refund_error() -> HTTPException:
+    return HTTPException(
+        status_code=502,
+        detail=(
+            "Refund was dispatched but its outcome is unconfirmed; the "
+            "balance is withheld until reconciliation completes"
+        ),
+    )
+
+
+async def _abort(session: AsyncSession, refund: Refund) -> None:
+    """Fail the claim, or withhold it once a melt quote exists.
+
+    A recorded quote means the mint may already have paid, so the balance
+    must not be restored.
+    """
+    if refund.quote_id is None:
+        await release(session, refund)
+        return
+    await hold(session, refund, refund.quote_id)
+    logger.error(
+        "refund failed after its melt quote was recorded; balance withheld "
+        "pending reconciliation",
+        extra={
+            "refund_id": refund.id,
+            "key_hash": refund.api_key_hashed_key[:8],
+            "quote_id": refund.quote_id,
+            "mint_url": refund.mint_url,
+        },
+    )
+    raise unresolved_refund_error()
+
+
 async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
     try:
         if refund.method == "lightning":
@@ -328,18 +386,12 @@ async def execute(session: AsyncSession, refund: Refund) -> dict[str, str]:
             await _pay_cashu(session, refund)
     except MeltOutcomeAmbiguousError:
         # Already held by _pay_lightning; releasing here would pay out twice.
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Refund was dispatched but its outcome is unconfirmed; the "
-                "balance is withheld until reconciliation completes"
-            ),
-        )
+        raise unresolved_refund_error()
     except HTTPException:
-        await release(session, refund)
+        await _abort(session, refund)
         raise
     except Exception as e:
-        await release(session, refund)
+        await _abort(session, refund)
         logger.error(
             "refund payout failed",
             extra={

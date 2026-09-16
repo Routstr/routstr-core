@@ -241,17 +241,16 @@ async def _lookup_key_no_create(
 
 
 async def _get_persisted_api_key_refund(
-    key: ApiKey, session: AsyncSession
+    key: ApiKey, session: AsyncSession, token: str | None = None
 ) -> dict[str, str] | None:
-    result = await session.exec(
-        select(CashuTransaction)
-        .where(
-            CashuTransaction.api_key_hashed_key == key.hashed_key,
-            CashuTransaction.type == "out",
-            CashuTransaction.source == "apikey",
-        )
-        .order_by(col(CashuTransaction.created_at).desc())
+    query = select(CashuTransaction).where(
+        CashuTransaction.api_key_hashed_key == key.hashed_key,
+        CashuTransaction.type == "out",
+        CashuTransaction.source == "apikey",
     )
+    if token is not None:
+        query = query.where(CashuTransaction.token == token)
+    result = await session.exec(query.order_by(col(CashuTransaction.created_at).desc()))
     refund = result.first()
     if refund is None:
         return None
@@ -352,25 +351,28 @@ async def refund_wallet_endpoint(
             },
         )
 
-    requested = refund_request.lightning_address if refund_request else None
-    if requested:
-        await refund.validate_lightning_destination(requested)
-    destination = requested or key.refund_address
+    # Check for an open claim before any replay or destination lookup.
+    if open_claim := await refund.latest_open(session, key):
+        raise refund.refund_in_progress_error(open_claim)
 
     if key.total_balance <= 0:
         paid = await refund.latest_terminal(session, key)
         if paid and paid.method == "lightning":
             return refund.describe(paid)
-        # cashu_transactions tracks collection and sweeping, so it takes
-        # precedence; the claim row covers a token whose ledger write failed.
+        if paid and paid.token:
+            # Match the ledger row to this claim's token, not the latest one.
+            if persisted := await _get_persisted_api_key_refund(
+                key, session, paid.token
+            ):
+                return persisted
+            return refund.describe(paid)
+        # Legacy payouts predate the claim row, so fall back to the ledger.
         if persisted := await _get_persisted_api_key_refund(key, session):
             return persisted
         if paid:
             return refund.describe(paid)
-        # Balance reads zero because a prior refund already debited it and is
-        # still settling; surface that as 409 rather than "no balance".
-        if await refund.latest_open(session, key):
-            raise refund.refund_in_progress_error()
+        if stuck := await refund.latest_stuck(session, key):
+            raise refund.refund_in_progress_error(stuck)
 
     if key.reserved_balance > 0:
         # Release only durable reservations old enough to be stale. A newer
@@ -402,6 +404,11 @@ async def refund_wallet_endpoint(
         raise HTTPException(status_code=400, detail="Balance too small to refund")
     elif remaining_balance <= 0:
         raise HTTPException(status_code=400, detail="No balance to refund")
+
+    requested = refund_request.lightning_address if refund_request else None
+    if requested:
+        await refund.validate_lightning_destination(requested)
+    destination = requested or key.refund_address
 
     claim = await refund.open_claim(
         session,

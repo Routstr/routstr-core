@@ -37,6 +37,10 @@ def _exec_result(tx: CashuTransaction | None) -> MagicMock:
 def _update_result(rowcount: int) -> MagicMock:
     result = MagicMock()
     result.rowcount = rowcount
+    # Claim and ledger lookups share this stubbed session; an empty row set
+    # means the key has no prior refund to replay, report, or order after.
+    result.first.return_value = None
+    result.one.return_value = None
     return result
 
 
@@ -276,6 +280,7 @@ async def test_apikey_refund_returns_persisted_token_after_cache_loss() -> None:
     session.rollback = AsyncMock()
 
     with (
+        patch("routstr.refund.latest_open", AsyncMock(return_value=None)),
         patch("routstr.refund.latest_terminal", AsyncMock(return_value=None)),
         patch("routstr.refund.send_token", AsyncMock()) as mock_send_token,
     ):
@@ -314,7 +319,10 @@ async def test_apikey_refund_rejects_persisted_token_after_sweep() -> None:
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
-    with patch("routstr.refund.latest_terminal", AsyncMock(return_value=None)):
+    with (
+        patch("routstr.refund.latest_open", AsyncMock(return_value=None)),
+        patch("routstr.refund.latest_terminal", AsyncMock(return_value=None)),
+    ):
         with pytest.raises(HTTPException) as exc_info:
             await refund_wallet_endpoint(
                 authorization="Bearer sk-testhash",
@@ -494,10 +502,8 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
     # First exec call = debit (succeeds), second = restore
     session = MagicMock()
     session.get = AsyncMock(return_value=key)
-    # debit, then the claim close and the balance restore
-    session.exec = AsyncMock(
-        side_effect=[_update_result(1), _update_result(1), _update_result(1)]
-    )
+    # claim lookup, claim ordering, debit, claim close, balance restore
+    session.exec = AsyncMock(side_effect=[_update_result(1)] * 5)
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
@@ -519,8 +525,8 @@ async def test_apikey_refund_restores_balance_on_mint_failure() -> None:
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Mint service unavailable"
     assert "raw mint outage detail" not in exc_info.value.detail
-    # debit, claim close, balance restore
-    assert session.exec.await_count == 3
+    # claim lookup, claim ordering, debit, claim close, balance restore
+    assert session.exec.await_count == 5
 
 
 @pytest.mark.asyncio
@@ -533,10 +539,8 @@ async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
 
     session = MagicMock()
     session.get = AsyncMock(return_value=key)
-    # debit, then the claim close and the balance restore
-    session.exec = AsyncMock(
-        side_effect=[_update_result(1), _update_result(1), _update_result(1)]
-    )
+    # claim lookup, claim ordering, debit, claim close, balance restore
+    session.exec = AsyncMock(side_effect=[_update_result(1)] * 5)
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
@@ -557,7 +561,7 @@ async def test_apikey_refund_generic_failure_is_sanitized_500() -> None:
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Refund failed"
     assert raw_error not in exc_info.value.detail
-    assert session.exec.await_count == 3
+    assert session.exec.await_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +882,7 @@ async def test_apikey_refund_ambiguous_melt_does_not_restore_balance() -> None:
 
     session = MagicMock()
     session.get = AsyncMock(return_value=key)
-    session.exec = AsyncMock(return_value=MagicMock(rowcount=1))
+    session.exec = AsyncMock(return_value=_update_result(1))
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 
@@ -909,7 +913,7 @@ async def test_apikey_refund_clean_failure_still_restores_balance() -> None:
 
     session = MagicMock()
     session.get = AsyncMock(return_value=key)
-    session.exec = AsyncMock(return_value=MagicMock(rowcount=1))
+    session.exec = AsyncMock(return_value=_update_result(1))
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
 

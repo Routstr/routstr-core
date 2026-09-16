@@ -9,13 +9,21 @@ import time
 from typing import Any, Awaitable, Callable
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlmodel import select
 
 from routstr import refund
 from routstr.balance import RefundRequest, refund_wallet_endpoint
-from routstr.core.db import ApiKey, AsyncSession, Refund
+from routstr.core.db import (
+    ApiKey,
+    AsyncSession,
+    CashuTransaction,
+    Refund,
+    store_cashu_transaction_with_retry,
+    total_user_liability,
+)
 from routstr.payment.lnurl import LNURLError, MeltOutcomeAmbiguousError
 
 KEY_HASH = "refundclaimkey"
@@ -170,6 +178,8 @@ async def test_release_after_settle_is_a_noop(
 
 def _lnurl_stub(
     outcome: BaseException | None = None,
+    *,
+    quoted: bool = True,
 ) -> Callable[..., Awaitable[int]]:
     async def send(
         amount: int,
@@ -177,10 +187,10 @@ def _lnurl_stub(
         mint: str,
         address: str,
         *,
-        on_melt_quote: Callable[[str], Awaitable[None]] | None = None,
+        on_melt_quote: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> int:
-        if on_melt_quote is not None:
-            await on_melt_quote("quote-123")
+        if quoted and on_melt_quote is not None:
+            await on_melt_quote("quote-123", mint)
         if outcome is not None:
             raise outcome
         return amount
@@ -199,7 +209,7 @@ async def test_execute_persists_quote_before_melt_and_settles(
     seen: list[str | None] = []
 
     async def send(*args: Any, on_melt_quote: Any = None, **kwargs: Any) -> int:
-        await on_melt_quote("quote-123")
+        await on_melt_quote("quote-123", claim.mint_url)
         row = await _load_refund(integration_session, claim.id)
         seen.append(row.quote_id)
         return 5000
@@ -247,7 +257,10 @@ async def test_execute_clean_failure_restores_balance(
     claim = await refund.open_claim(
         integration_session, key, method="lightning", destination=ADDRESS
     )
-    with patch("routstr.refund.send_to_lnurl", _lnurl_stub(LNURLError("limits"))):
+    with patch(
+        "routstr.refund.send_to_lnurl",
+        _lnurl_stub(LNURLError("limits"), quoted=False),
+    ):
         with pytest.raises(HTTPException) as exc_info:
             await refund.execute(integration_session, claim)
 
@@ -255,6 +268,52 @@ async def test_execute_clean_failure_restores_balance(
     row = await _load_refund(integration_session, claim.id)
     assert row.status == "failed"
     assert (await _load_key(integration_session)).balance == BALANCE_MSATS
+
+
+@pytest.mark.asyncio
+async def test_execute_failure_after_quote_withholds_balance(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    """The mint may have paid the quote, so a later local failure must not restore."""
+    key = await _seed_key(integration_session)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    with patch("routstr.refund.send_to_lnurl", _lnurl_stub(RuntimeError("local"))):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund.execute(integration_session, claim)
+
+    assert exc_info.value.status_code == 502
+    row = await _load_refund(integration_session, claim.id)
+    assert (row.status, row.quote_id) == ("ambiguous", "quote-123")
+    assert (await _load_key(integration_session)).balance == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_records_mint_that_issued_the_quote(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    """Mint fallback must leave reconciliation pointed at the issuing mint."""
+    key = await _seed_key(integration_session)
+    claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    fallback_mint = "https://fallback.mint.example"
+
+    async def send(*args: Any, on_melt_quote: Any = None, **kwargs: Any) -> int:
+        await on_melt_quote("quote-fallback", fallback_mint)
+        raise MeltOutcomeAmbiguousError("unknown")
+
+    with patch("routstr.refund.send_to_lnurl", send):
+        with pytest.raises(MeltOutcomeAmbiguousError):
+            await refund._pay_lightning(integration_session, claim)
+
+    row = await _load_refund(integration_session, claim.id)
+    assert (row.mint_url, row.quote_id, row.status) == (
+        fallback_mint,
+        "quote-fallback",
+        "ambiguous",
+    )
 
 
 @pytest.mark.asyncio
@@ -272,7 +331,7 @@ async def test_execute_aborts_melt_when_claim_was_released(
         nonlocal melted
         async with AsyncSession(integration_engine, expire_on_commit=False) as other:
             await refund.release(other, await _load_refund(other, claim.id))
-        await on_melt_quote("quote-123")
+        await on_melt_quote("quote-123", claim.mint_url)
         melted = True
         return 5000
 
@@ -383,7 +442,7 @@ async def test_reconcile_keeps_claim_that_gained_quote_mid_pass(
 
     async def lease_then_quote(refund_id: str, now: int, cutoff: int) -> bool:
         leased = await real_lease(refund_id, now, cutoff)
-        await refund.record_quote(claim, "late-quote")
+        await refund.record_quote(claim, "late-quote", claim.mint_url)
         return leased
 
     with patch("routstr.refund._lease", lease_then_quote):
@@ -438,7 +497,7 @@ async def test_reconcile_queries_mint_for_crashed_claim_with_quote(
     claim = await refund.open_claim(
         integration_session, key, method="lightning", destination=ADDRESS
     )
-    await refund.record_quote(claim, "quote-crash")
+    await refund.record_quote(claim, "quote-crash", claim.mint_url)
     await _age_claim(integration_session, claim.id, 600)
     with patch(
         "routstr.refund.check_bolt11_payment_status", AsyncMock(return_value="paid")
@@ -642,3 +701,185 @@ async def test_cashu_token_survives_failed_ledger_write(
     assert isinstance(second, dict)
     assert second["refund_id"] == first["refund_id"]
     assert second["token"] == "cashuAtoken"
+
+
+async def _topup(session: AsyncSession, amount: int = BALANCE_MSATS) -> None:
+    key = await _load_key(session)
+    key.balance = amount
+    session.add(key)
+    await session.commit()
+
+
+async def _refund_cashu(
+    session: AsyncSession, token: str, *, ledger: bool
+) -> dict[str, str]:
+    store = (
+        AsyncMock(side_effect=RuntimeError("db down"))
+        if not ledger
+        else store_cashu_transaction_with_retry
+    )
+    with (
+        patch("routstr.refund.send_token", AsyncMock(return_value=token)),
+        patch("routstr.refund.token_mint_url", lambda t, mint: mint),
+        patch("routstr.refund.store_cashu_transaction", store),
+    ):
+        body = await refund_wallet_endpoint(
+            authorization=f"Bearer sk-{KEY_HASH}",
+            x_cashu=None,
+            session=session,
+        )
+    assert isinstance(body, dict)
+    return body
+
+
+@pytest.mark.asyncio
+async def test_replay_prefers_the_token_of_the_newest_paid_claim(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    """An older ledger row must not answer for a newer claim whose write failed."""
+    await _seed_key(integration_session)
+    await _refund_cashu(integration_session, "cashuAold", ledger=True)
+    await _topup(integration_session)
+    newest = await _refund_cashu(integration_session, "cashuAnew", ledger=False)
+
+    replay = await refund_wallet_endpoint(
+        authorization=f"Bearer sk-{KEY_HASH}",
+        x_cashu=None,
+        session=integration_session,
+    )
+    assert isinstance(replay, dict)
+    assert replay["token"] == "cashuAnew"
+    assert replay["refund_id"] == newest["refund_id"]
+
+
+@pytest.mark.asyncio
+async def test_swept_older_ledger_row_does_not_reject_the_newest_claim(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    await _seed_key(integration_session)
+    await _refund_cashu(integration_session, "cashuAold", ledger=True)
+    await _topup(integration_session)
+    await _refund_cashu(integration_session, "cashuAnew", ledger=False)
+
+    result = await integration_session.exec(
+        select(CashuTransaction).where(CashuTransaction.token == "cashuAold")
+    )
+    old_tx = result.one()
+    old_tx.swept = True
+    integration_session.add(old_tx)
+    await integration_session.commit()
+
+    replay = await refund_wallet_endpoint(
+        authorization=f"Bearer sk-{KEY_HASH}",
+        x_cashu=None,
+        session=integration_session,
+    )
+    assert isinstance(replay, dict)
+    assert replay["token"] == "cashuAnew"
+
+
+@pytest.mark.asyncio
+async def test_open_claim_is_reported_over_an_older_paid_claim(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    """A paid claim from a previous cycle must not be replayed as the outcome
+    of the claim that is still settling."""
+    await _seed_key(integration_session, address=ADDRESS)
+    with patch("routstr.refund.send_to_lnurl", _lnurl_stub()):
+        paid = await refund_wallet_endpoint(
+            authorization=f"Bearer sk-{KEY_HASH}",
+            x_cashu=None,
+            session=integration_session,
+        )
+    assert isinstance(paid, dict)
+    await _topup(integration_session)
+    key = await _load_key(integration_session)
+    open_claim = await refund.open_claim(
+        integration_session, key, method="lightning", destination=ADDRESS
+    )
+    await refund.hold(integration_session, open_claim, "quote-open")
+
+    validate = AsyncMock()
+    with patch("routstr.refund.get_lnurl_data", validate):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund_wallet_endpoint(
+                refund_request=RefundRequest(lightning_address=ADDRESS),
+                authorization=f"Bearer sk-{KEY_HASH}",
+                x_cashu=None,
+                session=integration_session,
+            )
+
+    assert exc_info.value.status_code == 409
+    assert isinstance(exc_info.value.detail, dict)
+    error = exc_info.value.detail["error"]
+    assert (error["refund_id"], error["status"]) == (open_claim.id, "ambiguous")
+    # A drained key must not be able to drive outbound destination lookups.
+    validate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stuck_claim_is_reported_instead_of_no_balance(
+    integration_session: AsyncSession, patched_db_engine: None
+) -> None:
+    key = await _seed_key(integration_session)
+    claim = await refund.open_claim(
+        integration_session, key, method="cashu", destination=None
+    )
+    await refund._close(integration_session, claim, status="stuck")
+    await integration_session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await refund_wallet_endpoint(
+            authorization=f"Bearer sk-{KEY_HASH}",
+            x_cashu=None,
+            session=integration_session,
+        )
+    assert exc_info.value.status_code == 409
+    assert isinstance(exc_info.value.detail, dict)
+    error = exc_info.value.detail["error"]
+    assert (error["code"], error["refund_id"]) == ("refund_unresolved", claim.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "counted"),
+    [
+        ("pending", True),
+        ("ambiguous", True),
+        ("stuck", True),
+        ("paid", False),
+        ("failed", False),
+    ],
+)
+async def test_liability_covers_claims_until_they_resolve(
+    integration_session: AsyncSession,
+    patched_db_engine: None,
+    status: str,
+    counted: bool,
+) -> None:
+    """Money in flight is still owed to the customer; an owner payout that read
+    only key balances could spend its backing."""
+    key = await _seed_key(integration_session)
+    before = await total_user_liability(integration_session)
+    assert before == BALANCE_MSATS
+
+    claim = await refund.open_claim(
+        integration_session, key, method="cashu", destination=None
+    )
+    assert await total_user_liability(integration_session) == BALANCE_MSATS
+
+    await refund._close(integration_session, claim, status=status)
+    await integration_session.commit()
+    expected = BALANCE_MSATS if counted else 0
+    assert await total_user_liability(integration_session) == expected
+
+
+@pytest.mark.asyncio
+async def test_unreachable_destination_is_a_client_error() -> None:
+    with patch(
+        "routstr.refund.get_lnurl_data",
+        AsyncMock(side_effect=httpx.ConnectError("All connection attempts failed")),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await refund.validate_lightning_destination(ADDRESS)
+    assert exc_info.value.status_code == 400

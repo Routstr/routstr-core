@@ -570,6 +570,9 @@ class CashuTransaction(SQLModel, table=True):  # type: ignore
 
 REFUND_OPEN_STATUSES = ("pending", "ambiguous")
 
+# Debited from the key but neither paid out nor restored, so still owed.
+REFUND_UNRESOLVED_STATUSES = ("pending", "ambiguous", "stuck")
+
 _REFUND_OPEN_PREDICATE = "status IN ('pending', 'ambiguous')"
 
 
@@ -1003,8 +1006,18 @@ async def complete_routstr_fee_payout(
 
 
 async def total_user_liability(db_session: AsyncSession) -> int:
-    """Return all outstanding API-key balances in millisatoshis."""
-    result = await db_session.exec(select(func.sum(ApiKey.balance)))
+    """Return all outstanding user funds in millisatoshis.
+
+    Key balances and unresolved refunds are summed in one statement so a
+    claim opened between two reads cannot be missed by both.
+    """
+    key_balances = select(func.coalesce(func.sum(ApiKey.balance), 0)).scalar_subquery()
+    unresolved_refunds = (
+        select(func.coalesce(func.sum(Refund.amount_msats), 0))
+        .where(col(Refund.status).in_(REFUND_UNRESOLVED_STATUSES))
+        .scalar_subquery()
+    )
+    result = await db_session.exec(select(key_balances + unresolved_refunds))
     return int(result.one() or 0)
 
 
