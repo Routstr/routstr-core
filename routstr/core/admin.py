@@ -1,6 +1,8 @@
 import json
 import re
 import secrets
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,11 +14,13 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from ..payment.models import (
     REQUIRED_PRICING_FIELDS,
+    Model,
+    _build_model_from_row,
     _row_to_model,
     list_models,
 )
 from ..payment.rates import BILLABLE_PRICING_FIELDS, coerce_rate
-from ..proxy import refresh_model_maps, reinitialize_upstreams
+from ..proxy import get_candidates, refresh_model_maps, reinitialize_upstreams
 from ..wallet import fetch_all_balances, send_token, token_mint_url
 from . import vault
 from .db import (
@@ -1244,6 +1248,256 @@ async def get_provider_models(provider_id: str) -> dict[str, object]:
             "db_models": [json_compliant(m.dict()) for m in db_models],
             "remote_models": [json_compliant(m.dict()) for m in filtered_remote_models],
         }
+
+
+def _served_model_for_provider(model_id: str, provider_pk: int) -> Model | None:
+    """The model this provider serves for ``model_id``, or ``None``.
+
+    ``get_candidates`` returns every provider's candidate for the alias (a
+    model id can be served by more than one configured provider); narrow to
+    the one this report is about.
+    """
+    for model, _upstream in get_candidates(model_id) or []:
+        if model.upstream_provider_id == provider_pk:
+            return model
+    return None
+
+
+@dataclass
+class _ModelEvaluation:
+    """One enabled model row's facts, built once and shared by every row.
+
+    ``configured`` is the fee-applied USD view built fresh from the row, or
+    ``None`` when the stored row could not be parsed (``build_error`` then
+    carries the exception). ``served`` is this provider's live candidate for
+    the model, or ``None`` when it is not being served at all — e.g. an
+    unusable stored price holds it back from the served map even though the
+    row itself is enabled.
+    """
+
+    model_id: str
+    configured: Model | None
+    build_error: str | None
+    served: Model | None
+
+
+def _evaluate_model_row(
+    row: ModelRow, provider: UpstreamProviderRow, provider_pk: int
+) -> _ModelEvaluation:
+    try:
+        configured: Model | None = _build_model_from_row(
+            row, apply_provider_fee=True, provider_fee=provider.provider_fee
+        )
+        build_error = None
+    except Exception as exc:
+        configured = None
+        build_error = f"{type(exc).__name__}: {exc}"
+
+    served = _served_model_for_provider(row.id, provider_pk)
+    return _ModelEvaluation(
+        model_id=row.id, configured=configured, build_error=build_error, served=served
+    )
+
+
+def _report_row(
+    row_id: str, status: str, title: str, detail: str, evidence: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "id": row_id,
+        "status": status,
+        "title": title,
+        "detail": detail,
+        "evidence": evidence,
+    }
+
+
+def _aggregate_row(
+    row_id: str,
+    title: str,
+    checked: int,
+    flagged: Sequence[object],
+    *,
+    fail_status: str,
+    empty_detail: str,
+    ok_detail: str,
+    flagged_detail: str,
+) -> dict[str, object]:
+    """The ok/fail(-or-warn) shape every pricing row shares: examine
+    ``checked`` items, flag some of them as a problem, report the count.
+    """
+    evidence: dict[str, object] = {"checked": checked, "flagged": list(flagged)}
+    if checked == 0:
+        return _report_row(row_id, "ok", title, empty_detail, evidence)
+    if flagged:
+        return _report_row(row_id, fail_status, title, flagged_detail, evidence)
+    return _report_row(row_id, "ok", title, ok_detail, evidence)
+
+
+def _report_row_served_matches_configured(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    mismatched: list[dict[str, object]] = []
+    for ev in evaluations:
+        if ev.configured is None:
+            mismatched.append(
+                {
+                    "model_id": ev.model_id,
+                    "configured": None,
+                    "served": None,
+                    "error": ev.build_error,
+                }
+            )
+            continue
+
+        served_pricing = ev.served.pricing.dict() if ev.served else None
+        if served_pricing != ev.configured.pricing.dict():
+            mismatched.append(
+                {
+                    "model_id": ev.model_id,
+                    "configured": ev.configured.pricing.dict(),
+                    "served": served_pricing,
+                }
+            )
+
+    checked = len(evaluations)
+    return _aggregate_row(
+        "pricing.served_matches_configured",
+        "Served price matches configured price",
+        checked,
+        mismatched,
+        fail_status="fail",
+        empty_detail="No enabled models to check.",
+        ok_detail=f"All {checked} enabled models are served at the configured price.",
+        flagged_detail=(
+            f"{len(mismatched)} of {checked} enabled models have a served price "
+            "that disagrees with the configured price."
+        ),
+    )
+
+
+def _report_row_sats_pricing_present(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    checked = 0
+    missing: list[str] = []
+    for ev in evaluations:
+        if ev.served is None:
+            continue
+        checked += 1
+        if ev.served.sats_pricing is None:
+            missing.append(ev.model_id)
+
+    return _aggregate_row(
+        "pricing.sats_pricing_present",
+        "Sats pricing computed for served models",
+        checked,
+        missing,
+        fail_status="fail",
+        empty_detail="No served models to check.",
+        ok_detail=f"All {checked} served models have a computed sats price.",
+        flagged_detail=f"{len(missing)} of {checked} served models have no computed sats price.",
+    )
+
+
+def _report_row_enabled_models_served(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    missing = [ev.model_id for ev in evaluations if ev.served is None]
+    checked = len(evaluations)
+    return _aggregate_row(
+        "pricing.enabled_models_served",
+        "Enabled models are served",
+        checked,
+        missing,
+        fail_status="fail",
+        empty_detail="No enabled models to check.",
+        ok_detail=f"All {checked} enabled models are being served.",
+        flagged_detail=f"{len(missing)} of {checked} enabled models are not being served.",
+    )
+
+
+def _report_row_cache_rate(
+    evaluations: list[_ModelEvaluation],
+) -> dict[str, object]:
+    checked = 0
+    unknown: list[dict[str, object]] = []
+    for ev in evaluations:
+        # Scoped to served models only, like every sibling row: a model the
+        # routing algorithm withholds from the served map (e.g. an unusable
+        # stored price) has no cache-billing behaviour to certify here —
+        # ``pricing.enabled_models_served`` already flags it as unserved.
+        if ev.served is None or ev.configured is None:
+            continue
+        checked += 1
+
+        pricing = ev.configured.pricing
+        missing_rates = []
+        if (pricing.input_cache_read or 0.0) <= 0.0:
+            missing_rates.append("input_cache_read")
+        if (pricing.input_cache_write or 0.0) <= 0.0:
+            missing_rates.append("input_cache_write")
+        if missing_rates:
+            unknown.append({"model_id": ev.model_id, "missing_rates": missing_rates})
+
+    return _aggregate_row(
+        "pricing.cache_rate",
+        "Cache rate known for served models",
+        checked,
+        unknown,
+        fail_status="warn",
+        empty_detail="No served models to check.",
+        ok_detail=(
+            f"All {checked} served models have known cache-read and cache-write rates."
+        ),
+        flagged_detail=(
+            f"{len(unknown)} of {checked} served models are missing a cache-read or "
+            "cache-write rate."
+        ),
+    )
+
+
+@admin_router.get(
+    "/api/upstream-providers/{provider_id}/report",
+    dependencies=[Depends(require_admin_api)],
+)
+async def get_upstream_provider_report(provider_id: str) -> dict[str, object]:
+    """Certification report for one configured upstream provider.
+
+    The four pricing rows (``pricing.served_matches_configured``,
+    ``pricing.sats_pricing_present``, ``pricing.enabled_models_served``,
+    ``pricing.cache_rate``) are computed from the DB row plus the in-process
+    served map; none of them make a network call, so the ``GET`` never spends
+    and never blocks on an upstream. Each enabled row is evaluated once and
+    the result shared across all four rows, rather than every row re-walking
+    the served map and re-parsing the stored pricing on its own.
+    """
+    async with create_session() as session:
+        provider = await _get_upstream_provider_by_ref(session, provider_id)
+        provider_pk = _provider_pk(provider)
+        result = await session.exec(
+            select(ModelRow).where(
+                ModelRow.upstream_provider_id == provider_pk,
+                ModelRow.enabled,
+            )
+        )
+        enabled_rows = list(result.all())
+
+    evaluations = [
+        _evaluate_model_row(row, provider, provider_pk) for row in enabled_rows
+    ]
+
+    rows = [
+        _report_row_served_matches_configured(evaluations),
+        _report_row_sats_pricing_present(evaluations),
+        _report_row_enabled_models_served(evaluations),
+        _report_row_cache_rate(evaluations),
+    ]
+
+    return {
+        "provider_id": provider.id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rows": rows,
+    }
 
 
 class CreateAccountRequest(BaseModel):
