@@ -163,15 +163,15 @@ async def test_raw_send_to_lnurl_msat_unit_compares_in_wallet_unit() -> None:
 async def test_raw_send_to_lnurl_requotes_for_exact_input_fees_without_recursion() -> (
     None
 ):
-    proofs = [MagicMock(amount=1, reserved=False) for _ in range(1500)]
+    proofs = [MagicMock(amount=1, reserved=False) for _ in range(500)]
     wallet = MagicMock(url="https://mint.test")
     wallet.get_fees_for_proofs = MagicMock(
         side_effect=lambda selected: math.ceil(len(selected) / 100)
     )
     wallet.melt_quote = AsyncMock(
         side_effect=[
-            MagicMock(fee_reserve=10, quote="q1", amount=1500),
-            MagicMock(fee_reserve=10, quote="q2", amount=1475),
+            MagicMock(fee_reserve=10, quote="q1", amount=500),
+            MagicMock(fee_reserve=10, quote="q2", amount=485),
         ]
     )
     wallet.melt = AsyncMock(return_value=MagicMock(state=MeltQuoteState.paid))
@@ -185,17 +185,17 @@ async def test_raw_send_to_lnurl_requotes_for_exact_input_fees_without_recursion
             proofs,
             "owner@ln.tld",
             "sat",
-            amount=1500,
+            amount=500,
             on_melt_quote=checkpoint,
         )
 
-    assert paid == 1_475_000
+    assert paid == 485_000
     assert wallet.melt_quote.await_count == 2
     checkpoint.assert_awaited_once_with("q2")
     wallet.select_to_send.assert_not_called()
     selected = wallet.melt.await_args.kwargs["proofs"]
-    assert sum(proof.amount for proof in selected) == 1500
-    assert 1475 + 10 + wallet.get_fees_for_proofs(selected) == 1500
+    assert sum(proof.amount for proof in selected) == 500
+    assert 485 + 10 + wallet.get_fees_for_proofs(selected) == 500
 
 
 @pytest.mark.asyncio
@@ -365,3 +365,63 @@ def test_select_melt_proofs_ignores_fees_for_unneeded_wallet_proofs() -> None:
     assert selected is None
     assert shortfall == 2
     assert wallet.get_fees_for_proofs.call_count == 1
+
+
+def test_select_melt_proofs_respects_mint_input_limit() -> None:
+    from cashu.core.settings import settings as cashu_settings
+
+    from routstr.payment.lnurl import _select_melt_proofs
+
+    limit = cashu_settings.mint_max_request_length
+    wallet = MagicMock()
+    wallet.get_fees_for_proofs = MagicMock(return_value=0)
+    proofs = [MagicMock(amount=1, reserved=False) for _ in range(limit + 563)]
+
+    selected, shortfall = _select_melt_proofs(
+        wallet,
+        proofs,
+        quote_amount=limit + 563,
+        fee_reserve=0,
+        gross_budget=limit + 563,
+    )
+
+    assert selected is None
+    assert shortfall == 563
+
+
+@pytest.mark.asyncio
+async def test_raw_send_to_lnurl_pays_what_the_input_limit_allows() -> None:
+    from cashu.core.settings import settings as cashu_settings
+
+    limit = cashu_settings.mint_max_request_length
+    proofs = [MagicMock(amount=1, reserved=False) for _ in range(limit + 563)]
+    wallet = MagicMock(url="https://mint.test")
+    wallet.get_fees_for_proofs = MagicMock(return_value=0)
+    wallet.melt = AsyncMock(return_value=MagicMock(state=MeltQuoteState.paid))
+    wallet.set_reserved_for_send = AsyncMock()
+
+    requested: list[int] = []
+
+    async def invoice(_callback: str, amount_msat: int) -> tuple[str, dict]:
+        requested.append(amount_msat)
+        return "lnbc1...", {}
+
+    async def melt_quote(invoice: str) -> MagicMock:
+        return MagicMock(fee_reserve=0, quote="q", amount=requested[-1] // 1000)
+
+    wallet.melt_quote = AsyncMock(side_effect=melt_quote)
+
+    with (
+        patch(
+            "routstr.payment.lnurl.get_lnurl_data", AsyncMock(return_value=LNURL_DATA)
+        ),
+        patch(
+            "routstr.payment.lnurl.get_lnurl_invoice", AsyncMock(side_effect=invoice)
+        ),
+    ):
+        paid = await raw_send_to_lnurl(
+            wallet, proofs, "owner@ln.tld", "sat", amount=limit + 563
+        )
+
+    assert paid == limit * 1000
+    assert len(wallet.melt.await_args.kwargs["proofs"]) == limit

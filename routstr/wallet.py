@@ -550,8 +550,6 @@ async def _recieve_token_locked(
     mint_url = resolve_trusted_source_mint(token_obj.mint)
     if mint_url is None:
         raise UntrustedSourceMintError(f"Untrusted source mint: {token_obj.mint}")
-    if len(token_obj.keysets) > 1:
-        raise ValueError("Multiple keysets per token currently not supported")
     if destination_unit is not None and token_obj.unit != destination_unit:
         raise ValueError(
             "Cashu token unit does not match the API key liability unit: "

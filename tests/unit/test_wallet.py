@@ -845,18 +845,41 @@ async def test_recieve_token_untrusted_mint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recieve_token_rejects_multiple_keysets() -> None:
-    """Multi-keyset tokens are rejected before touching any wallet."""
+async def test_recieve_token_accepts_multiple_keysets() -> None:
+    """TokenV4 groups proofs per keyset, and the node itself emits such tokens
+    after a mint rotates keysets, so redemption must span keysets."""
+    mock_wallet = Mock()
+    mock_wallet.split = AsyncMock()
+    # Cashu sums input_fee_ppk per proof's own keyset.
+    mock_wallet.get_fees_for_proofs = Mock(return_value=2)
+    mock_wallet.load_mint_keysets = AsyncMock()
+    mock_wallet.activate_keyset = AsyncMock()
+    mock_wallet._expand_short_keyset_ids = AsyncMock()
+
     from routstr.core.settings import settings
 
-    with patch("routstr.wallet.deserialize_token_from_string") as mock_deserialize:
-        mock_token = Mock()
-        mock_token.mint = settings.primary_mint
-        mock_token.keysets = ["keyset1", "keyset2"]
-        mock_deserialize.return_value = mock_token
+    with patch.object(settings, "cashu_mints", ["http://mint:3338"]):
+        with patch("routstr.wallet.deserialize_token_from_string") as mock_deserialize:
+            mock_token = Mock()
+            mock_token.keysets = ["keyset1", "keyset2"]
+            mock_token.mint = "http://mint:3338"
+            mock_token.unit = "sat"
+            mock_token.amount = 1000
+            mock_token.proofs = [
+                {"amount": 600, "id": "keyset1"},
+                {"amount": 400, "id": "keyset2"},
+            ]
+            mock_deserialize.return_value = mock_token
 
-        with pytest.raises(ValueError, match="Multiple keysets"):
-            await recieve_token("cashuAmultikeyset")
+            with patch(
+                "routstr.wallet.get_wallet",
+                AsyncMock(return_value=mock_wallet),
+            ):
+                amount, unit, mint = await recieve_token("cashuAmultikeyset")
+
+    assert (amount, unit, mint) == (998, "sat", "http://mint:3338")
+    mock_wallet.get_fees_for_proofs.assert_called_once_with(mock_token.proofs)
+    mock_wallet.split.assert_awaited_once()
 
 
 @pytest.mark.asyncio
