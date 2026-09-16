@@ -269,94 +269,93 @@ async def publish_to_relay(
         return False
 
 
-async def announce_provider() -> None:
-    """
-    Background task to announce this Routstr provider to Nostr relays.
-    Checks for existing announcements and creates new ones if needed.
-    """
-    # Check for NSEC in environment (use NSEC only)
-    nsec = settings.nsec
-    if not nsec:
-        logger.info("Nostr private key not found (NSEC), skipping listing announcement")
-        return
+# Re-announce cadence once a provider is listed.
+ANNOUNCEMENT_INTERVAL_SECONDS = 24 * 60 * 60
+# Poll cadence while there is nothing to announce (no NSEC, no endpoint, ...).
+DISABLED_POLL_SECONDS = 60
+# How often the long re-announce sleep re-checks the configured NSEC, so a
+# newly saved identity is announced promptly instead of up to 24h later.
+IDENTITY_POLL_SECONDS = 30
 
-    # Convert NSEC to keypair
-    keypair = nsec_to_keypair(nsec)
-    if not keypair:
-        logger.error("Failed to parse NSEC, skipping listing announcement")
-        return
+DEFAULT_RELAY_URLS = [
+    "wss://relay.nostr.band",
+    "wss://relay.damus.io",
+    "wss://relay.routstr.com",
+    "wss://nos.lol",
+]
 
-    private_key_hex, public_key_hex = keypair
-    logger.info(f"Using Nostr pubkey: {public_key_hex}")
 
-    # Resolve settings and determine if we can publish BEFORE touching relays
-    try:
-        base_url: str | None = settings.http_url
-        onion_url: str | None = settings.onion_url
-        provider_name = settings.name or "Routstr Proxy"
-        provider_about = settings.description or "Privacy-preserving AI proxy via Nostr"
-        cashu_mints = [m.strip() for m in settings.cashu_mints if m.strip()]
-    except Exception:
-        base_url = settings.http_url or None
-        onion_url = settings.onion_url or None
-        provider_name = settings.name or "Routstr Proxy"
-        provider_about = settings.description or "Privacy-preserving AI proxy via Nostr"
-        cashu_mints = [m.strip() for m in settings.cashu_mints if m.strip()]
+def _resolve_endpoint_urls() -> list[str]:
+    """Endpoints to advertise: a public HTTP URL and/or an onion URL."""
+    endpoint_urls: list[str] = []
+
+    base_url = (settings.http_url or "").strip()
+    if base_url and base_url != "http://localhost:8000":
+        endpoint_urls.append(base_url)
+
+    onion_url = (settings.onion_url or "").strip()
     if not onion_url:
         discovered = discover_onion_url_from_tor()
         if discovered:
             onion_url = discovered
             logger.info(f"Discovered onion URL via Tor volume: {onion_url}")
-    mint_urls = cashu_mints if cashu_mints else None
 
-    endpoint_urls: list[str] = []
-    if base_url and base_url.strip() and base_url.strip() != "http://localhost:8000":
-        endpoint_urls.append(base_url.strip())
-    if onion_url and onion_url.strip():
-        ou = onion_url.strip()
-        if ou.endswith(".onion") and not (
-            ou.startswith("http://") or ou.startswith("https://")
+    if onion_url:
+        if onion_url.endswith(".onion") and not (
+            onion_url.startswith("http://") or onion_url.startswith("https://")
         ):
-            ou = f"http://{ou}"
-        endpoint_urls.append(ou)
+            onion_url = f"http://{onion_url}"
+        endpoint_urls.append(onion_url)
 
-    if not endpoint_urls:
-        logger.warning(
-            "No valid endpoints configured (HTTP_URL/ONION_URL). Skipping listing publish."
-        )
-        return
+    return endpoint_urls
 
-    # Only now configure relays and determine provider_id (may query relays)
+
+def _resolve_relay_urls() -> list[str]:
     relay_urls = [u.strip() for u in getattr(settings, "relays", []) if u.strip()]
-    if not relay_urls:
-        relay_urls = [
-            "wss://relay.nostr.band",
-            "wss://relay.damus.io",
-            "wss://relay.routstr.com",
-            "wss://nos.lol",
-        ]
+    return relay_urls or list(DEFAULT_RELAY_URLS)
 
-    provider_id = await _determine_provider_id(public_key_hex, relay_urls)
-    logger.info(f"Using provider_id: {provider_id}")
 
-    # Build metadata
-    metadata = {
-        "name": provider_name,
-        "about": provider_about,
-    }
+def _resolve_mint_urls() -> list[str] | None:
+    mints = [m.strip() for m in (settings.cashu_mints or []) if m.strip()]
+    return mints or None
 
-    # Create the candidate event that we would publish
-    version_str = get_app_version()
-    candidate_event = create_listing_event(
-        private_key_hex=private_key_hex,
-        provider_id=provider_id,
-        endpoint_urls=endpoint_urls,
-        mint_urls=mint_urls,
-        version=version_str,
-        metadata=metadata,
-    )
 
-    # Backoff configuration and state (sensible defaults)
+async def _sleep_until_next_announcement(
+    seconds: float, parsed_nsec: str | None
+) -> None:
+    """Sleep up to ``seconds``, returning early if the configured NSEC changes.
+
+    Without the early wake, a node runner who replaces the NSEC in the admin UI
+    would wait out the whole re-announce interval before the new identity (and,
+    with it, the new ``d`` tag and npub) is announced.
+    """
+    remaining = float(seconds)
+    while remaining > 0:
+        if (settings.nsec or "").strip() != (parsed_nsec or ""):
+            return
+        chunk = min(float(IDENTITY_POLL_SECONDS), remaining)
+        await asyncio.sleep(chunk)
+        remaining -= chunk
+
+
+async def announce_provider() -> None:
+    """Background task announcing this Routstr provider to Nostr relays.
+
+    Started unconditionally at boot: while the node has no NSEC the task idles
+    and re-checks, so an identity configured later through the admin UI is
+    picked up (and announced) without a restart. The identity, endpoints, mints
+    and relays are all re-read every iteration, mirroring
+    ``publish_usage_analytics``.
+    """
+    parsed_nsec: str | None = None
+    private_key_hex: str | None = None
+    public_key_hex: str | None = None
+    provider_id: str | None = None
+    warned_missing_nsec = False
+
+    # Backoff state is deliberately long-lived: it has to survive an idle poll,
+    # a full re-announce cycle and an identity change, otherwise a failing relay
+    # would be retried at full rate on every pass.
     backoff_base = 5.0
     backoff_max = 900.0
     backoff_jitter_ratio = 0.2
@@ -381,67 +380,74 @@ async def announce_provider() -> None:
             f"Backoff: {relay} delay={delay:.1f}s jitter={jitter:.1f}s next={int(scheduled)}"
         )
 
-    # Fetch existing events for this provider_id
-    existing_events: list[dict[str, Any]] = []
-    for relay_url in relay_urls:
-        if _should_skip(relay_url):
-            logger.debug(f"Skipping {relay_url} due to backoff")
-            continue
-        events, ok = await query_listing_events(relay_url, public_key_hex, provider_id)
-        if ok:
-            _register_success(relay_url)
-            existing_events.extend(events)
-        else:
-            _register_failure(relay_url)
-
-    # Decide whether to publish: publish if none exist or any differ from candidate
-    found_any = len(existing_events) > 0
-    all_match = found_any and all(
-        events_semantically_equal(ev, candidate_event) for ev in existing_events
-    )
-
-    if not all_match:
-        logger.debug(
-            "No matching listing announcement found or differences detected; publishing update"
-        )
-        success_count = 0
-        for relay_url in relay_urls:
-            if _should_skip(relay_url):
-                logger.debug(f"Skipping publish to {relay_url} due to backoff")
-                continue
-            if await publish_to_relay(relay_url, candidate_event):
-                _register_success(relay_url)
-                success_count += 1
-            else:
-                _register_failure(relay_url)
-        logger.info(
-            f"Published listing announcement to {success_count}/{len(relay_urls)} relays"
-        )
-    else:
-        logger.debug(
-            "Matching listing announcement already present; skipping publish on startup"
-        )
-
-    # Re-announce periodically (every 24 hours)
-    announcement_interval = 24 * 60 * 60
-
     while True:
         try:
-            await asyncio.sleep(announcement_interval)
+            nsec = (settings.nsec or "").strip()
 
-            # Build fresh candidate event for comparison
-            version_str = get_app_version()
+            if not nsec:
+                if not warned_missing_nsec:
+                    logger.info(
+                        "Nostr private key not configured (NSEC); waiting for one "
+                        "to be set before announcing this provider"
+                    )
+                    warned_missing_nsec = True
+                parsed_nsec = None
+                await asyncio.sleep(DISABLED_POLL_SECONDS)
+                continue
+
+            # Re-derive the identity whenever the configured NSEC changes, so a
+            # key saved (or replaced) through the admin UI takes effect live.
+            if nsec != parsed_nsec:
+                keypair = nsec_to_keypair(nsec)
+                if not keypair:
+                    logger.error(
+                        "Invalid NSEC; waiting for a valid one before announcing"
+                    )
+                    parsed_nsec = None
+                    await asyncio.sleep(DISABLED_POLL_SECONDS)
+                    continue
+                private_key_hex, public_key_hex = keypair
+                parsed_nsec = nsec
+                provider_id = None
+                warned_missing_nsec = False
+                logger.info(f"Using Nostr pubkey: {public_key_hex}")
+
+            if private_key_hex is None or public_key_hex is None:
+                await asyncio.sleep(DISABLED_POLL_SECONDS)
+                continue
+
+            endpoint_urls = _resolve_endpoint_urls()
+            if not endpoint_urls:
+                logger.warning(
+                    "No valid endpoints configured (HTTP_URL/ONION_URL). "
+                    "Skipping listing publish until one is set."
+                )
+                await asyncio.sleep(DISABLED_POLL_SECONDS)
+                continue
+
+            relay_urls = _resolve_relay_urls()
+
+            if provider_id is None:
+                provider_id = await _determine_provider_id(public_key_hex, relay_urls)
+                logger.info(f"Using provider_id: {provider_id}")
+
+            metadata = {
+                "name": settings.name or "Routstr Proxy",
+                "about": settings.description
+                or "Privacy-preserving AI proxy via Nostr",
+            }
+
             candidate_event = create_listing_event(
                 private_key_hex=private_key_hex,
                 provider_id=provider_id,
                 endpoint_urls=endpoint_urls,
-                mint_urls=mint_urls,
-                version=version_str,
+                mint_urls=_resolve_mint_urls(),
+                version=get_app_version(),
                 metadata=metadata,
             )
 
             # Fetch existing events for this provider_id
-            existing_events = []
+            existing_events: list[dict[str, Any]] = []
             for relay_url in relay_urls:
                 if _should_skip(relay_url):
                     logger.debug(f"Skipping {relay_url} due to backoff")
@@ -462,26 +468,36 @@ async def announce_provider() -> None:
 
             if all_match:
                 logger.debug(
-                    "Matching listing announcement already present; skipping periodic re-announce"
+                    "Matching listing announcement already present; skipping publish"
                 )
-                continue
+            else:
+                logger.debug(
+                    "No matching listing announcement found or differences "
+                    "detected; publishing update"
+                )
+                success_count = 0
+                for relay_url in relay_urls:
+                    if _should_skip(relay_url):
+                        logger.debug(f"Skipping publish to {relay_url} due to backoff")
+                        continue
+                    if await publish_to_relay(relay_url, candidate_event):
+                        _register_success(relay_url)
+                        success_count += 1
+                    else:
+                        _register_failure(relay_url)
+                logger.info(
+                    "Published listing announcement to "
+                    f"{success_count}/{len(relay_urls)} relays"
+                )
 
-            logger.debug(
-                f"Re-announcing provider due to differences or absence: {candidate_event['id']}"
+            # Re-announce periodically; wakes early if the NSEC changes.
+            await _sleep_until_next_announcement(
+                ANNOUNCEMENT_INTERVAL_SECONDS, parsed_nsec
             )
-            for relay_url in relay_urls:
-                if _should_skip(relay_url):
-                    logger.debug(f"Skipping publish to {relay_url} due to backoff")
-                    continue
-                ok = await publish_to_relay(relay_url, candidate_event)
-                if ok:
-                    _register_success(relay_url)
-                else:
-                    _register_failure(relay_url)
 
         except asyncio.CancelledError:
             logger.info("Listing announcement task cancelled")
             break
         except Exception as e:
             logger.debug(f"Error in listing announcement loop: {type(e).__name__}")
-            # Continue running despite errors
+            await asyncio.sleep(DISABLED_POLL_SECONDS)
