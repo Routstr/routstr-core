@@ -260,7 +260,13 @@ During local PPQ testing, PPQ responses included this CORS exposure header:
 Access-Control-Expose-Headers: Ehbp-Response-Nonce, X-Private-Usage-Metrics, X-Encrypted-Usage-Metrics, X-Tinfoil-Usage-Metrics
 ```
 
-However, the actual tested non-streaming response did not include any of these usage headers, even when `X-Tinfoil-Request-Usage-Metrics: true` was sent.
+However, when this was tested against PPQ's `/private/` endpoint
+(`private/gpt-oss-120b`) on 2026-06-21, the non-streaming response did not
+include any of these usage headers, even when
+`X-Tinfoil-Request-Usage-Metrics: true` was sent. That observation does *not*
+hold for the direct Tinfoil enclave upstream that Routstr ships: see
+[Usage metrics header format](#usage-metrics-header-format) below, where the
+response header and the streaming trailer are both verified present.
 
 The decrypted body did include normal OpenAI usage, but only the decrypting Tinfoil client can see that body.
 
@@ -483,6 +489,14 @@ already in Tinfoil's prefix cache and is billed at the model's
 no cached rate). `cost_usd` is Tinfoil's own computed request cost and is
 currently parsed for observability only — Routstr bills from token counts.
 
+Note that the header/trailer value is not always a single occurrence: for
+streaming responses the trailer is emitted twice, so a client that reads the
+trailer directly may see the same `prompt=...,completion=...,...` string twice
+in one field, comma-joined. Parsers must be tolerant of the duplicate rather
+than assuming exactly one occurrence. `parse_tinfoil_usage_metrics()` is
+unaffected: it assigns each `key=value` part as it walks the comma-separated
+value, and both occurrences carry identical numbers.
+
 The `model` field carries the actual model name served by the enclave.
 Routstr uses this to:
 
@@ -509,4 +523,6 @@ back to the requested model's pricing.
   finalizers for bearer and X-Cashu requests. This provides actual-cost billing
   today, at the cost of full time-to-last-byte latency for streaming responses.
 - Whether Tinfoil's `/v1/responses` endpoint also returns usage metrics
-  headers or trailers.
+  headers or trailers. Verified: yes — `/v1/responses` returns
+  `X-Tinfoil-Usage-Metrics` as a plaintext response header, with the same field
+  set as `/v1/chat/completions` (including `cost_usd`).
