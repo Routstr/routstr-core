@@ -395,9 +395,7 @@ def _inject_cost_response_headers(headers: dict[str, str], cost_info: dict) -> N
         headers["X-Routstr-Computed-Cost-Msats"] = str(cost_info["computed_msats"])
     headers["X-Routstr-Input-Cost-Msats"] = str(cost_info["input_msats"])
     headers["X-Routstr-Output-Cost-Msats"] = str(cost_info["output_msats"])
-    headers["X-Routstr-Cache-Read-Msats"] = str(
-        cost_info.get("cache_read_msats", 0)
-    )
+    headers["X-Routstr-Cache-Read-Msats"] = str(cost_info.get("cache_read_msats", 0))
     headers["X-Routstr-Cache-Creation-Msats"] = str(
         cost_info.get("cache_creation_msats", 0)
     )
@@ -675,6 +673,16 @@ async def finalize_ehbp_actual_cost_payment(
             "cost_charged": total_cost_msats,
             "input_tokens": cost_info.get("input_tokens", 0),
             "output_tokens": cost_info.get("output_tokens", 0),
+            # Cache splits are only knowable when the enclave reports
+            # ``cached_prompt_tokens``; absent that they are a measured zero on
+            # the token counts the provider did report (not an unknown), so the
+            # event key set stays stable for usage-analytics consumers.
+            "cache_read_input_tokens": cost_info.get("cache_read_input_tokens", 0),
+            "cache_creation_input_tokens": cost_info.get(
+                "cache_creation_input_tokens", 0
+            ),
+            "cache_read_msats": cost_info.get("cache_read_msats", 0),
+            "cache_creation_msats": cost_info.get("cache_creation_msats", 0),
             "balance": key.balance,
             "reserved_balance": key.reserved_balance,
             "total_spent": key.total_spent,

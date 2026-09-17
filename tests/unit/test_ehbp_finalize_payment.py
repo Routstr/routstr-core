@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator
+import logging
+from contextlib import contextmanager
+from typing import Any, AsyncGenerator, Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -104,6 +106,110 @@ async def test_finalize_actual_cost_payment_updates_balance_and_releases_reserve
     assert updated.reserved_balance == 0
     assert updated.reserved_at is None
     assert updated.total_spent == 1_200
+
+
+@contextmanager
+def _capture_payments_logs() -> Iterator[list[logging.LogRecord]]:
+    """Collect ``routstr.payments`` records for the duration of the block.
+
+    ``setup_logging()`` sets ``propagate=False`` on the ``routstr`` logger, so
+    pytest's ``caplog`` (attached at the root) never sees these records; a
+    handler on the payments logger itself does.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _RecordingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    payments_logger = logging.getLogger("routstr.payments")
+    handler = _RecordingHandler(level=logging.INFO)
+    previous_level = payments_logger.level
+    payments_logger.addHandler(handler)
+    payments_logger.setLevel(logging.INFO)
+    try:
+        yield records
+    finally:
+        payments_logger.removeHandler(handler)
+        payments_logger.setLevel(previous_level)
+
+
+@pytest.mark.asyncio
+async def test_finalize_actual_cost_payment_logs_cache_tokens(
+    session: AsyncSession,
+) -> None:
+    """The FINALIZE event carries the cache splits, not just input/output."""
+    key = ApiKey(hashed_key="ehbp-cache-logging", balance=10_000)
+    session.add(key)
+    await session.commit()
+    await pay_for_request(key, 3_000, session)
+    reservation = await get_reservation_snapshot(key, session)
+
+    with _capture_payments_logs() as records:
+        charged = await finalize_ehbp_actual_cost_payment(
+            key,
+            session,
+            reserved_cost_for_model=3_000,
+            model_id="tinfoil/glm-5-2",
+            cost_info={
+                "total_msats": 1_200,
+                "input_tokens": 5,
+                "output_tokens": 20,
+                "input_msats": 500,
+                "output_msats": 700,
+                "cache_read_input_tokens": 64,
+                "cache_creation_input_tokens": 0,
+                "cache_read_msats": 12,
+                "cache_creation_msats": 0,
+            },
+            reservation_snapshot=reservation,
+        )
+
+    assert charged == 1_200
+    finalize_records = [
+        record for record in records if record.getMessage() == "FINALIZE"
+    ]
+    assert len(finalize_records) == 1
+    record = finalize_records[0]
+    assert record.finalize_type == "ehbp_usage"
+    assert record.input_tokens == 5
+    assert record.output_tokens == 20
+    assert record.cache_read_input_tokens == 64
+    assert record.cache_creation_input_tokens == 0
+    assert record.cache_read_msats == 12
+    assert record.cache_creation_msats == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_actual_cost_payment_logs_zero_cache_when_absent(
+    session: AsyncSession,
+) -> None:
+    """Providers that report no cache split still emit a stable key set."""
+    key = ApiKey(hashed_key="ehbp-no-cache-logging", balance=10_000)
+    session.add(key)
+    await session.commit()
+    await pay_for_request(key, 3_000, session)
+    reservation = await get_reservation_snapshot(key, session)
+
+    with _capture_payments_logs() as records:
+        await finalize_ehbp_actual_cost_payment(
+            key,
+            session,
+            reserved_cost_for_model=3_000,
+            model_id="tinfoil/glm-5-2",
+            cost_info={
+                "total_msats": 1_200,
+                "input_tokens": 10,
+                "output_tokens": 20,
+            },
+            reservation_snapshot=reservation,
+        )
+
+    record = next(record for record in records if record.getMessage() == "FINALIZE")
+    assert record.cache_read_input_tokens == 0
+    assert record.cache_creation_input_tokens == 0
+    assert record.cache_read_msats == 0
+    assert record.cache_creation_msats == 0
 
 
 @pytest.mark.asyncio
