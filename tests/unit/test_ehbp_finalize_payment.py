@@ -171,13 +171,14 @@ async def test_finalize_actual_cost_payment_logs_cache_tokens(
     ]
     assert len(finalize_records) == 1
     record = finalize_records[0]
-    assert record.finalize_type == "ehbp_usage"
-    assert record.input_tokens == 5
-    assert record.output_tokens == 20
-    assert record.cache_read_input_tokens == 64
-    assert record.cache_creation_input_tokens == 0
-    assert record.cache_read_msats == 12
-    assert record.cache_creation_msats == 0
+    # finalize_type/input_tokens/... are attached via logging's extra= payload.
+    assert record.finalize_type == "ehbp_usage"  # type: ignore[attr-defined]
+    assert record.input_tokens == 5  # type: ignore[attr-defined]
+    assert record.output_tokens == 20  # type: ignore[attr-defined]
+    assert record.cache_read_input_tokens == 64  # type: ignore[attr-defined]
+    assert record.cache_creation_input_tokens == 0  # type: ignore[attr-defined]
+    assert record.cache_read_msats == 12  # type: ignore[attr-defined]
+    assert record.cache_creation_msats == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -206,10 +207,10 @@ async def test_finalize_actual_cost_payment_logs_zero_cache_when_absent(
         )
 
     record = next(record for record in records if record.getMessage() == "FINALIZE")
-    assert record.cache_read_input_tokens == 0
-    assert record.cache_creation_input_tokens == 0
-    assert record.cache_read_msats == 0
-    assert record.cache_creation_msats == 0
+    assert record.cache_read_input_tokens == 0  # type: ignore[attr-defined]
+    assert record.cache_creation_input_tokens == 0  # type: ignore[attr-defined]
+    assert record.cache_read_msats == 0  # type: ignore[attr-defined]
+    assert record.cache_creation_msats == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
