@@ -1587,13 +1587,19 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
             if unit == "sat"
             else _sats_to_msats(settings.min_payout_sat)
         )
+        max_amount = (
+            settings.max_payout_sat
+            if unit == "sat"
+            else _sats_to_msats(settings.max_payout_sat)
+        )
         if available_balance > min_amount:
+            payout_amount = min(available_balance, max_amount)
             amount_received = await raw_send_to_lnurl(
                 wallet,
                 proofs,
                 settings.receive_ln_address,
                 unit,
-                amount=available_balance,
+                amount=payout_amount,
             )
             logger.info(
                 "Payout sent successfully",
@@ -1601,6 +1607,7 @@ async def _payout_mint_and_unit(mint_url: str, unit: str) -> None:
                     "mint_url": mint_url,
                     "unit": unit,
                     "balance": available_balance,
+                    "amount": payout_amount,
                     "amount_received": amount_received,
                 },
             )
